@@ -368,11 +368,10 @@ function quickCheck(databasePath: string): boolean {
   }
 }
 
-/** An update's recovery copy is the whole database plus every agent asset. The newest one protects the install
- * that just ran; once the app started and the install journal was cleared, a second one only protects the
- * install before that. Pending installation journals retain their recovery protection. */
-const RECOVERY_COPIES_AT_CAPTURE = 2;
-const RECOVERY_COPIES_AFTER_VERIFIED_START = 1;
+/** An update's recovery copy is the whole database plus every agent asset. A pending installation journal keeps its copies;
+ * once the app started and the journal was cleared, no copy protects anything (nothing restores from one), so none stays. */
+const RECOVERY_COPIES_AT_CAPTURE = 1;
+const RECOVERY_COPIES_AFTER_VERIFIED_START = 0;
 
 function pruneOldRecoveryCopies(root: string, keepPath: string | null, keepTotal = RECOVERY_COPIES_AT_CAPTURE): void {
   try {

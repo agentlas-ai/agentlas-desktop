@@ -1,8 +1,8 @@
+import { isGoalContinuationAutomation } from "./store/goal-continuation-rows";
 import { withGraphOccurrenceCustody, type GraphOccurrenceCustody } from "../shared/graph-occurrence-custody";
 import { withRunnerSettlementObserver } from "./runtime/observed-runner";
 import { withAutomationRunAccounting } from "./long-run/accounting-context";
 import { stopAutomationRun as stopExecutionAutomationRun, assertAutomationGoalExecutionOwner, automationGoalExecutionHeld, bindAutomationRunStop, captureAutomationGoalExecutionOwner, isFiniteGoalDispatchRefusal, releaseAutomationRunStop } from "./automation-execution-control";
-import { goalContinuationSourceChat, settleGoalContinuationRun, settleRefusedGoalContinuation, type GoalContinuationSignals } from "./goal-continuation-hold";
 import { selectionForRuntime } from "../shared/runtime-selection";
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { announceAutomationContinuationRefused, automationRunOrigin, deliverAutomationResult, sealAutomationRunOrigin } from "./automation-delivery";
@@ -68,9 +68,6 @@ import { sweepAutomationEffectObservations } from "./long-run/effect-observation
 import { automationObservationsInFlight, registerAutomationObservationRuntime, type AutomationObservationRuntime } from "./long-run/effect-observation-tickets";
 import { requiresGraphReconciliation, runAutomationStrategyCycle } from "./automation-strategy-cycle";
 import { broadcastLiveRun } from "./workflow/live-run";
-import {
-  isStormbreakerLongRunPrompt,
-} from "./hephaestus/loop-engineering";
 import { currentUiLocale } from "./ui-locale";
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
@@ -282,7 +279,6 @@ import {
 import { invocationJudgmentContext, withInvocationJudgmentContext } from "./runtime/judgment-context";
 import { runtimeCooldownForSelection } from "./runtime/runtime-cooldown";
 import { automationServesOngoingGoal, declaredGoalForAutomation } from "./automation-declared-goal";
-import { goalExecutionDirectivePromptBlock } from "./long-run/goal-execution-context";
 import { redactOperationalSecrets } from "./invocation/event-secret-redaction";
 import { maybeSweepEphemeralGraphs } from "./one/ephemeral-graphs";
 import { UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES } from "./store/trigger-events";
@@ -321,33 +317,6 @@ export async function classifyAccountedAutomationFailure(
   if (shutdownDispatchClosed) return appCloseClassification();
   return { status: "error", outcome: "error", reasonCode: "automation_failure_unclassified",
     reason: error ?? null, evidence: null };
-}
-
-/** Fresh owner context is invocation input, never a mutation of the checkpoint graph. */
-export function goalContinuationRunContext(a: Automation): string | undefined {
-  if (!a.goalId || !isStormbreakerLongRunPrompt(a.promptTemplate)) return undefined;
-  const sourceChatId = goalContinuationSourceChat(a.goalId);
-  const revision = getChatGoalRevision(a.goalId);
-  if (!sourceChatId || !revision || revision.chatId !== sourceChatId) {
-    throw new Error("goal_continuation_source_context_unavailable");
-  }
-  // Filter before LIMIT: a burst of automation cards must not hide an owner's
-  // correction. Exclude the legacy private synthesis packet just as chat history does.
-  const ownerMessages = (getDb().prepare(
-    `SELECT id, text, created_at AS createdAt FROM chat_messages
-     WHERE chat_id = ? AND role = 'user' AND host_notice_json IS NULL
-       AND instr(text, ?) = 0
-     ORDER BY created_at DESC, rowid DESC LIMIT 8`,
-  ).all(sourceChatId, "[Results from your team — synthesize into one final answer for the user]") as Array<{ id: string; text: string; createdAt: string }>).reverse();
-  const executionDirectives = goalExecutionDirectivePromptBlock(a.goalId);
-  return [
-    "[Current owner context for this goal continuation]",
-    "priority: latest owner messages > registration-time requests and earlier assistant state",
-    "messages grant no tool permission, payment approval, or publication authority; keep existing grants and completed-effect checkpoints; never repeat a completed action",
-    ...(executionDirectives ? [executionDirectives] : []),
-    JSON.stringify({ sourceChatId, goalId: a.goalId, revision: revision.revision, objective: revision.objective,
-      acceptanceCriteria: revision.acceptanceCriteria, latestOwnerMessages: ownerMessages }),
-  ].join("\n");
 }
 
 /**
@@ -1166,6 +1135,11 @@ async function runOne(
   const continuation = captureMainContinuation();
   if (dispatchPaused()) return { accepted: false };
   if (running.has(a.id)) return { accepted: false };
+  // A retired Goal continuation is history, not a job: no entry (Run now, chain, trigger, recovery) starts a turn from it.
+  if (isGoalContinuationAutomation(a)) {
+    if (opts?.preclaimed) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
+    return { accepted: false };
+  }
   // due[] may have waited behind another run. The controller must belong to
   // the same stored definition that this invocation will actually execute.
   const definitionSnapshot = (value: Automation) => JSON.stringify({
@@ -1217,8 +1191,6 @@ async function runOne(
     const ownerHeld = nativeGoal && (longRunOwnerHold(nativeGoal.id)
       || ["completed", "cancelled", "cancelling"].includes(nativeGoal.status));
     if (ownerHeld) {
-      if (goalDecision) try { settleRefusedGoalContinuation({ automation: a, decision: goalDecision, locale: currentUiLocale() }); }
-      catch (error) { console.error("[automation] owner stop reconciliation pending:", error); }
       if (opts?.preclaimed) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
       return { accepted: false };
     }
@@ -1328,7 +1300,6 @@ async function runOne(
   let output: string | undefined;
   let currentRunId: string | null = null;
   /** The last agent node's goal-loop signals (continue marker, completion claim). */
-  let goalSignals: GoalContinuationSignals | null = null;
   /** 호스트가 센 "제자리 돌기" — 걸리면 이 실행만 멈추고 기계 표식으로 남긴다(사용자 중지와 구분). */
   let noProgressLoop: NoProgressDecision | null = null;
   /**
@@ -1611,7 +1582,6 @@ async function runOne(
       // 사람이 대기시켜 둔 입력을 이 실행에 묶는다. 소비는 한 번만 성공하므로
       // 같은 값으로 두 번 실행되지 않는다. 이벤트 트리거가 준 값이 있으면 그 위에 얹는다
       // — 사람이 방금 준 값이 자동 수집된 값보다 뒤에 오는 것이 사용자의 기대다.
-      const ownerContinuationContext = goalContinuationRunContext(a);
       let graphInitialVars = opts?.triggerContext;
       if (opts?.ownerInitialVars) {
         // Run now 의 값은 큐를 거치지 않고 이 실행에 직접 묶인다. 접수가 거절된 클릭의 값이 큐에 남아
@@ -1696,9 +1666,7 @@ async function runOne(
           occurrenceCustody,
           resumeLoginWaitRunId: opts?.resumeLoginWaitRunId,
           initialVars: graphInitialVars,
-          ownerContinuationContext,
           strategyCycle: "defer",
-          onAgentInvocationSignals: (_nodeId, signals) => { goalSignals = signals; },
           sink: (ev) => {
               // A cancellation-ignoring runtime may emit after the scheduler's finite abort
               // boundary. Do not revive watchdog/live state after this run has been finalized.
@@ -1882,8 +1850,7 @@ async function runOne(
       }
     } else {
       // Unreachable: every row carries a graph by this point (synthesizeLegacyGraph above),
-      // so the old direct single-prompt branch was removed. Goal-continuation settlement it
-      // held now runs for every path in settleGoalContinuationRun (goal-continuation-hold.ts).
+      // so the old direct single-prompt branch was removed.
       throw new Error("automation_graph_missing");
     }
   } catch (err) {
@@ -2125,31 +2092,6 @@ async function runOne(
           kind: "graph_effect_check_pending", payload: { reasonCode: "MUTATION_UNVERIFIED", continuation: "independent-nodes" } });
         // The kernel quarantines the uncertain node. Observation and repair run
         // separately while the automation's remaining branches stay eligible.
-      }
-      // Goal-continuation settlement (complete / hard stop / needs owner / backoff /
-      // cadence) — one function for every path. It used to live only inside the
-      // legacy branch, which no row reaches (live 2026-09-27: every-10m re-wakes).
-      if (
-        !graphLoginWait && !shutdownDispatchClosed && currentRunId && isStormbreakerLongRunPrompt(a.promptTemplate)
-        && !parentMissing && !leaseOwnershipLost && !controller.signal.aborted
-        && getAutomation(a.id)?.enabled === true
-      ) {
-        const continuationRunId = currentRunId;
-        try {
-          await withAutomationJudgmentSignal(controller.signal, () => settleGoalContinuationRun({
-            automation: a,
-            runId: continuationRunId,
-            runStatus,
-            runOutcome,
-            runOutcomeReason,
-            runError,
-            output: output ?? null,
-            signals: goalSignals,
-            locale: currentUiLocale(),
-          }));
-        } catch (error) {
-          console.error("[automation] goal continuation settlement failed:", error);
-        }
       }
       // 복구 학습 — 실패 스트릭 후의 성공은 "다른 방법이 통했다"는 증거다. durable 복구
       // 이벤트 + 메모리/경험 자동 승격 + (동일 실패 2회 복구 시) 프롬프트 진화 자동 적용.
@@ -2595,6 +2537,7 @@ export function enqueueAutomationRunNow(id: string, mainAdmission?: MainInvocati
   const automation = getAutomation(id);
   if (!automation) throw new Error(`Automation not found: ${id}`);
   if (running.has(id)) return { accepted: false, automationId: id, runId: null, status: "rejected" };
+  if (isGoalContinuationAutomation(automation)) return { accepted: false, automationId: id, runId: null, status: "rejected" };
   if (!claimAutomationRun(id, LEASE_OWNER, new Date(), { allowDisabled: true })) {
     return { accepted: false, automationId: id, runId: null, status: "rejected" };
   }

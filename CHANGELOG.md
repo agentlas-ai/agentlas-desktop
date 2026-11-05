@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.127 — 2026-11-06
+
+- Updates and migrations no longer write a full copy of the database, and copies that earlier versions left behind are removed once this version has opened the store.
+- The store stops growing with a record nothing reads: memory source versions are no longer written, and the ones already stored are removed.
+- A Goal that ends on the model's own judgment is shown as "not enough evidence" instead of "verified", the next check names the real wait, the checkpoint packet sends the newest evidence instead of the oldest, a refused wait shows a plain sentence instead of a code, and a closed Goal's continuation row can no longer start a run.
+- A Work hand-off from One can carry what "finished" means (up to eight checkable items). A Work result whose review is given up, never started or ends unknown is now reported to the owner in one plain line instead of vanishing, and a review reply that ends with [quiet] is dropped only when it is a short progress line.
+- Science: a finished turn reaches One without anyone asking for the snapshot, a follow-up turn started right behind another is still settled, a start that never reached Science is told apart from one that may still be running, stop and steer ids are valid, and the literature tools obey a stopped turn. The Science package is pinned at a build whose literature search refuses private redirect targets and reads only the first MiB of a landing page.
+- Connecting a connector that is not installed now asks for approval first (an "Always allow" answer counts as approval), and five dead ends in tool calls and tool selection are closed.
+- Finance: a card that misses its guide is refused once per turn with the exact layout and then drawn as sent, the model reads a price history as date and close with the figures computed by the app, the dashboard feed is cached section by section so one failing source no longer refetches all of them, and a provider request no longer holds a slot while it waits.
+- Three screens no longer show a machine code, and a conversation replays only its newest three automation deliveries.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.126 — 2026-11-05
 
 - Reach: a replay now reads static text on macOS, so work that only shows in a display (the Calculator) can be proven satisfied, and a replay no longer fails a presence check on a kind of element its screen cannot show.

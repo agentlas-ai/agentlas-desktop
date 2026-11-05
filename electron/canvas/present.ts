@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { canvasFit, canvasLayout, type CanvasBlock, type CanvasChart, type CanvasInput, type CanvasLine, type CanvasView } from '../../shared/canvas';
 import type { HarnessCallContext } from '../harness/capability-ports';
 import type { CanvasSeriesRead } from './turn-state';
@@ -13,6 +14,8 @@ export interface CanvasBuildOptions {
   layouts: readonly string[] | undefined;
   /** Set when a card should follow a guide: the warning text when there is none. The card is drawn as sent either way. */
   noGuideMessage?: string;
+  /** True once this turn's card was refused for its layout or guide: this one is drawn as sent, the rule in the warnings. */
+  refusedBefore?: boolean;
   /** Prefix of the card's warnings (the domain id of the guide, `canvas` without one). */
   warningPrefix: string;
   /** The series the turn read: a guide card with no chart is given one drawn from these. */
@@ -24,7 +27,7 @@ export interface CanvasBuildOptions {
 /**
  * The one implementation of "check this card against a guide, read its chart series, build the view". finance.present and ui.canvas both
  * call it. The blocks follow one of the guide's layouts in order (one may be left out, none added) and take its widths; a card that is not
- * the guide's as sent is fitted to it when it can be (what is left out is named in the warnings) and drawn as sent otherwise, the layout in the warnings.
+ * the guide's as sent is fitted to it when it can be (what is left out is named in the warnings) refused once otherwise with the layout to send, and a second card in the turn is drawn as sent, the layout in the warnings.
  * A chart's series are never the model's: each one is read through the domain's adapter, or named as unavailable.
  */
 export async function buildCanvasCard(input: Omit<CanvasInput, 'guide'>, o: CanvasBuildOptions): Promise<{ view: CanvasView; warnings: string[] }> {
@@ -32,7 +35,9 @@ export async function buildCanvasCard(input: Omit<CanvasInput, 'guide'>, o: Canv
   // Never a dead end: a card the guide cannot govern is drawn as sent and the guide's rule rides in the warnings. A refusal here was
   // read as "answer without a card" (Codex run 9: 11 of 20 card-less answers were a refused card that was never sent again).
   const unguided: string[] = [];
-  if (!guide && o.noGuideMessage) unguided.push(`${o.warningPrefix}_card_without_guide: ${o.noGuideMessage}`);
+  // The first card of a turn that misses its guide is refused once with exactly what to send (the resend is what makes a question type
+  // look the same every time); the second is drawn as sent. A refusal with an "answer without a card" exit was taken every time.
+  if (!guide && o.noGuideMessage) { if (!o.refusedBefore) throw new z.ZodError([{ code: 'custom', path: ['guide'], message: `${o.noGuideMessage} Then call again; a second card this turn is drawn as sent.` }]); unguided.push(`${o.warningPrefix}_card_without_guide: ${o.noGuideMessage}`); }
   let layout = canvasLayout(o.layouts, args.blocks.map(block => block.type));
   // Not the guide's card as sent (extra blocks, another order): the host draws the guide's card from what was sent rather than
   // refusing it, since a refused card was often not sent again (Codex,: 18 answers ended without a card). What the
@@ -52,6 +57,7 @@ export async function buildCanvasCard(input: Omit<CanvasInput, 'guide'>, o: Canv
     }
     if (fit) { fitted = fit.dropped.map(i => blocks[i].type); args.blocks = fit.order.map(i => blocks[i]); layout = fit.slots; }
   }
+  if (layout === null && !o.refusedBefore) throw new z.ZodError([{ code: 'custom', path: ['blocks'], message: `${o.first && o.named && o.named !== o.first ? `This answer's guide is ${o.first}, the one this turn read first; a guide read later is a related lookup. ` : ''}The ${guide} card is ${o.layouts!.join(' or ')} (type:width, in this order; one block may be left out when its data could not be read, never the chart). These blocks are ${args.blocks.map(block => block.type).join(' ')}. Call again with the guide's blocks; a second card this turn is drawn as sent.` }]);
   if (layout === null) {
     unguided.push(`${o.warningPrefix}_card_not_guide_layout: ${o.first && o.named && o.named !== o.first ? `this answer's guide is ${o.first}, the one this turn read first. ` : ''}The ${guide} card is ${o.layouts!.join(' or ')} (type:width, in this order); this one was drawn as sent (${args.blocks.map(block => block.type).join(' ')}). Next time send the guide's blocks.`);
     layout = undefined;

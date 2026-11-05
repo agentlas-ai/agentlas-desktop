@@ -1,3 +1,4 @@
+import { isAutoMessageGoalId } from "../../shared/auto-goal";
 import { generatedVideoAccountKey } from "./generated-video-receipts";
 import { createHostVideoCustody } from "./host-video-custody";
 import { goalObligationContinuationPrompt, releaseGoalObligationContinuation, abandonGoalObligationContinuation } from "../long-run/goal-obligation-context";
@@ -872,6 +873,9 @@ function returnUncertainOwnerText(intentId: string, expectedChatId?: string): In
   }).immediate();
 }
 const VERIFICATION_TRANSIENT_RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 480_000] as const;
+/** Transient verifier failures retried before the last one is handed to the caller, which parks the Goal where the owner
+ *  sees why (about half an hour of retries). Without a bound the run sat in `verifying`, which no sweep selects. */
+const VERIFICATION_TRANSIENT_MAX_ATTEMPTS = 6;
 const ONE_TASK_KIND_MEDIA_TYPE_RE = /^[a-z0-9][a-z0-9.+-]{0,63}\/[a-z0-9][a-z0-9.+-]{0,127}$/;
 const ONE_TASK_KIND_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const ONE_TASK_KIND_PARTICIPANT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
@@ -1362,6 +1366,7 @@ export async function retryTransientGoalVerification<T>(input: {
       return await input.verify();
     } catch (error) {
       if (!isTransientGoalVerificationError(error) || input.signal.aborted) throw error;
+      if (transientAttempts + 1 >= VERIFICATION_TRANSIENT_MAX_ATTEMPTS) throw error;
       const delayMs = VERIFICATION_TRANSIENT_RETRY_DELAYS_MS[
         Math.min(transientAttempts, VERIFICATION_TRANSIENT_RETRY_DELAYS_MS.length - 1)
       ]!;
@@ -3301,7 +3306,7 @@ export class InvocationService {
       setChatGoalBinding(chat.id, null);
       chat.goalId = null;
       boundGoal = null;
-    } else if (!backgroundObservation && chat.goalId?.startsWith("goal:auto-message:") && !boundGoal) {
+    } else if (!backgroundObservation && isAutoMessageGoalId(chat.goalId) && !boundGoal) {
       completeChatGoalContract(chat.goalId, "cancelled");
       setChatGoalBinding(chat.id, null);
       chat.goalId = null;
@@ -5790,7 +5795,7 @@ export class InvocationService {
               // a partial revision binding must still fail closed.
               if (revision
                 ? revision.chatId !== chat.id || revisionBinding?.revision !== revision.revision
-                : revisionBinding !== null || current.goalId.startsWith("goal:auto-message:")) return refuse("revision_binding_mismatch");
+                : revisionBinding !== null || isAutoMessageGoalId(current.goalId)) return refuse("revision_binding_mismatch");
               if (legacyLifecycle && (getLegacyGoalLifecycleSnapshot(current.goalId)?.payloadJson !== legacyLifecycle.snapshot.payloadJson
                 || JSON.stringify(runReq.runtimeSelection) !== JSON.stringify(legacyRuntime))) return refuse("legacy_lifecycle_changed");
               if (legacyLifecycle?.verdict === "ongoing" && !lifetime.ownsActiveRoot()) return refuse("legacy_root_not_owned");
@@ -5804,7 +5809,7 @@ export class InvocationService {
               // An explicit Goal defined without a contract row (chats:defineGoal) is not a Goal that "just changed
               // state": refusing it repeated forever, for every owner message (production 2026-10-24, X Marketing room).
               // Write its contract from its own ledger row first; an automatic Goal always has one from its admission.
-              if (!current.goalId.startsWith("goal:auto-message:")) ensureExplicitGoalContract(getDb(), current.goalId);
+              if (!isAutoMessageGoalId(current.goalId)) ensureExplicitGoalContract(getDb(), current.goalId);
               const contractChanged = getDb().prepare(`UPDATE chat_goal_contracts
                 SET status = 'active', completed_at = NULL, updated_at = ?
                 WHERE goal_id = ? AND chat_id = ? AND status IN ('active', 'blocked')`)
@@ -6575,8 +6580,10 @@ export class InvocationService {
                 && !["completed", "cycle_completed"].includes(verification?.disposition ?? "")
                 && !(verification?.verdicts ?? []).some((criterion) => criterion.verdict === "failed")
                 && closeGoalOnModelJudgment(completionClaim.goalId!, verification ? `verification_${verification.disposition}` : "verification_unavailable");
-              settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId,
-                verified: modelJudgmentClosed || (!controller.signal.aborted && ["completed", "cycle_completed"].includes(verification?.disposition ?? "")) });
+              // A Goal closed on the model's own judgment is closed, not verified: the result keeps the unverified mark.
+              const verifierPassed = !controller.signal.aborted && ["completed", "cycle_completed"].includes(verification?.disposition ?? "");
+              settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: verifierPassed,
+                ...(modelJudgmentClosed && !verifierPassed ? { verificationScope: "goal" as const, verificationState: "inconclusive" as const } : {}) });
               if (modelJudgmentClosed) {
                 if (getChat(chat.id)?.goalId === completionClaim.goalId) setChatGoalBinding(chat.id, null);
                 return;
@@ -6591,9 +6598,15 @@ export class InvocationService {
                 // Do not announce an absent receipt or an assumed 30-minute time.
                 if (result.goalEpisodeYield) return;
                 const wait = latestGoalWaitSubscription(verifiedGoalId);
-                const message = pickLocale(runReq) === "ko"
-                  ? "이번 회차를 확인했습니다. 지속 목표는 유지되며, 앱 실행 중 30분 뒤 현재 상태를 확인해 이어갑니다. 중지하면 더 이상 재개하지 않습니다."
-                  : "This cycle is verified. The ongoing Goal stays open and will check current state again in 30 minutes while the app is running. Stop prevents further continuation.";
+                const ko = pickLocale(runReq) === "ko";
+                const nextAt = wait?.state === "pending" && wait.nextCheckAt ? new Date(wait.nextCheckAt) : null;
+                const due = nextAt && Number.isFinite(nextAt.getTime()) ? nextAt : null;
+                const when = due && due.getTime() > Date.now() + 60_000
+                  ? due.toLocaleString(ko ? "ko-KR" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" })
+                  : null;
+                const message = ko
+                  ? `이번 회차를 확인했습니다. 지속 목표는 유지되며, 앱 실행 중 ${when ? `${when}에` : due ? "곧" : "다음 확인 시각에"} 현재 상태를 확인해 이어갑니다. 중지하면 더 이상 재개하지 않습니다.`
+                  : `This cycle is verified. The ongoing Goal stays open and will check current state again ${when ? `at ${when}` : due ? "shortly" : "at its next check"} while the app is running. Stop prevents further continuation.`;
                 appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId, status: "cycle-verified" } });
                 tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: { waitId: wait?.waitId,
                   goalId: verifiedGoalId, nextCheckAt: wait?.nextCheckAt, lifecycle: "ongoing", executionAvailability: "app-running" } });
@@ -6617,7 +6630,8 @@ export class InvocationService {
               const modelJudgmentClosed = modelDeclaredCompletion && !controller.signal.aborted
                 && getChat(chat.id)?.goalId === completionClaim.goalId
                 && closeGoalOnModelJudgment(completionClaim.goalId!, "verification_failed_to_run");
-              settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: modelJudgmentClosed });
+              settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: false,
+                ...(modelJudgmentClosed ? { verificationScope: "goal" as const, verificationState: "inconclusive" as const } : {}) });
               console.warn("[long-run] terminal verification failed:", error);
               if (modelJudgmentClosed) {
                 if (getChat(chat.id)?.goalId === completionClaim.goalId) setChatGoalBinding(chat.id, null);

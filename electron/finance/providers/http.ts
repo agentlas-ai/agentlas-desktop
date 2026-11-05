@@ -2,8 +2,8 @@ import { isVerifiedIsharesUrl } from './ishares-catalog';
 /** Fixed public/provider endpoints only. Never accepts a renderer-chosen host or follows redirects. */
 const LIMIT = 8 * 1024 * 1024;
 let active = 0;
-/** At most two provider requests run at once. Others wait their turn (a monitor, the dashboard feeds and a chat can all ask together); only a wait of a minute without a free slot is reported as busy. */
-const MAX_ACTIVE = 2, MAX_WAIT_MS = 60_000;
+/** At most four provider requests run at once. Others wait their turn (a monitor, the dashboard feeds and a chat can all ask together); only a wait of a minute without a free slot is reported as busy. */
+const MAX_ACTIVE = 4, MAX_WAIT_MS = 60_000;
 const waiting: Array<() => void> = [];
 async function acquireSlot(): Promise<void> {
   if (active < MAX_ACTIVE && !waiting.length) { active++; return; }
@@ -46,14 +46,16 @@ export function isFinanceSourceUrlAllowed(url: URL): boolean {
 export async function fetchFinanceText(url: URL, fetcher: typeof fetch = fetch): Promise<string> {
   if (!isFinanceSourceUrlAllowed(url)) throw new Error('finance_source_url_rejected');
   if (Date.now() < (blockedUntil.get(url.hostname) || 0)) throw new Error('finance_source_rate_limited');
-  await acquireSlot();
-  // Reserve slots synchronously. SEC stays well below its documented ten requests/second.
+  // Reserve the host's next start synchronously, wait for it, then take a slot: a slot is never held while sleeping. SEC stays well
+  // below its documented ten requests/second. GDELT is already one at a time (free-sources.ts) and answers in 10-22 s, so it takes no
+  // shared slot that SEC, FRED or Treasury reads would wait behind.
   const start = Math.max(Date.now(), nextHostRequest.get(url.hostname) || 0);
   nextHostRequest.set(url.hostname, start + (url.hostname.includes('sec.gov') ? 250 : 500));
-  // GDELT routinely takes 10-22 s to answer; other hosts keep the 20 s budget.
-  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), url.hostname === 'api.gdeltproject.org' ? 35000 : 20000);
+  await new Promise<void>(resolve => setTimeout(resolve, Math.max(0, start - Date.now())));
+  const shared = url.hostname !== 'api.gdeltproject.org';
+  if (shared) await acquireSlot();
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), shared ? 20000 : 35000);
   try {
-    await new Promise<void>(resolve => setTimeout(resolve, Math.max(0, start - Date.now())));
     const response = await fetcher(url, { redirect: 'error', signal: controller.signal, headers: { Accept: 'application/json, text/csv, application/xml, text/xml;q=0.9', 'User-Agent': 'Agentlas Finance (https://agentlas.cloud)' } });
     if (response.status === 429 || response.status === 503) {
       // GDELT's rule is one request per five seconds and it sends no Retry-After; a minute's block would fail every news read in the turn.
@@ -68,7 +70,7 @@ export async function fetchFinanceText(url: URL, fetcher: typeof fetch = fetch):
     try { for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength; if (size > LIMIT) throw new Error('finance_source_too_large'); chunks.push(part.value); } }
     finally { await reader.cancel().catch(() => undefined); }
     return Buffer.concat(chunks).toString('utf8');
-  } finally { clearTimeout(timer); releaseSlot(); }
+  } finally { clearTimeout(timer); if (shared) releaseSlot(); }
 }
 export async function fetchFinanceJson(url: URL, fetcher: typeof fetch = fetch): Promise<unknown> {
   const text = await fetchFinanceText(url, fetcher);

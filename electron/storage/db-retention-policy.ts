@@ -24,6 +24,7 @@ export type DbRetentionAction =
   | { type: "delete-settled"; days: number; abandonedDays: number }
   | { type: "compact-payload"; days: number; /** Rows without a clock: old when this many entries behind their journal head. */ behindHeadEntries?: number }
   | { type: "keep-newest-per-key"; keepRows: number; days?: number }
+  | { type: "delete-all" }
   | { type: "vacuum"; minFreeBytes: number; minFreeRatio: number };
 
 export interface DbRetentionRule {
@@ -157,6 +158,16 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
       + "memory_runtime.py reads the head the same way. parentId is written and never followed.",
     evidence: "17,184 rows of 163 namespaces, 122 KB each, 2,148 of the 2,550 MB memory.sqlite. Only 163 are heads. Rule: the head and the newest two "
       + "rows per namespace stay; the writer now prunes inside its own transaction, the job removes the backlog and the terminal engine's rows.",
+  },
+  {
+    id: "memory_source_versions",
+    table: "memory_source_versions",
+    kinds: [],
+    observedMb: 145,
+    action: { type: "delete-all" },
+    writer: "none any more: memory/source-catalogue.ts and agentlas_cloud/memory_sources.py stopped writing it (an insert per catalogue change)",
+    readers: "none: no SELECT in TypeScript or Python; the catalogue row is the current source",
+    evidence: "An agent journal moved its catalogue range on every append, so each journal row added a version row: insert-only history nothing reads.",
   },
   {
     id: "run_events.indexes",

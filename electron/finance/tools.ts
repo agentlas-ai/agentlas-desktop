@@ -20,7 +20,8 @@ import { buildCanvasCard } from '../canvas/present';
 import { presentCanvasCard } from './canvas-present';
 import { registerCanvasDomain, type CanvasSeriesRequest } from '../canvas/registry';
 import { CANVAS_PORTS } from './canvas-ports';
-import { canvasGuideReadInTurn, canvasSeriesReadInTurn, canvasTurnKey, type CanvasSeriesRead } from '../canvas/turn-state';
+import { financeQueryModelView } from './model-view';
+import { canvasGuideReadInTurn, canvasRefusedInTurn, canvasSeriesReadInTurn, canvasTurnKey, type CanvasSeriesRead } from '../canvas/turn-state';
 import { FINANCE_GUIDES_REVISION, FINANCE_GUIDE_TOPICS, financeGuide, financeGuideMenu } from '../../shared/finance-guides';
 
 type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; /** Absolute paths of files this call wrote: host-only, handed to the run's outputs (harness/run-produced-files.ts), never in the result. */ produced?: readonly string[]; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
@@ -395,9 +396,15 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
         // The check, the fit, the chart fill and the series reads are the canvas's (electron/canvas/present.ts), the same for ui.canvas.
         // A card follows a method guide: with none named and none read in this turn there is no layout to hold it to.
         const reads = seriesReadInTurn.get(turnKey(ctx));
-        data = await buildCanvasCard(args, { guide, named, first, layouts: guide ? financeGuide(guide)?.layouts : undefined, warningPrefix: 'finance', reads,
+        const key = turnKey(ctx), refusedBefore = canvasRefusedInTurn.has(key);
+        try {
+        data = await buildCanvasCard(args, { guide, named, first, layouts: guide ? financeGuide(guide)?.layouts : undefined, warningPrefix: 'finance', reads, refusedBefore,
           noGuideMessage: `Call finance.guide with the topic that fits this answer first, or pass guide; its card says which blocks to use. Topics: ${FINANCE_GUIDE_TOPICS.join(', ')}.`,
           readSeries: (series, period) => readFinanceSeries(finance, scope, series, period, ctx.signal), signal: ctx.signal });
+        } catch (error) {
+          if (error instanceof z.ZodError && ctx.runId) { canvasRefusedInTurn.add(key); if (canvasRefusedInTurn.size > 200) canvasRefusedInTurn.delete(canvasRefusedInTurn.values().next().value!); }
+          throw error;
+        }
         break;
       }
     }
@@ -417,7 +424,9 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     }
     // The card is the whole effect of a proposal: without it nothing reached the owner.
     if(action==='portfolio.propose'&&nativeUi?.status!=='presented')return { status: 'unavailable', reason: 'finance_ui_not_presented', next: 'No review card could be shown, so nothing was proposed. The owner can add holdings from the Finance screen (photo or manual entry).' };
-    return { status: 'ok', financeReceipt, ...(nativeUi?{nativeUi}:{}), ...(produced?{produced}:{}), data };
+    // The model's copy of a query result is the part an answer is built from; the receipt and the card above kept all of it.
+    const modelData=action==='query'&&data&&typeof data==='object'&&'rows'in data?financeQueryModelView(data as import('../../shared/finance').FinanceDataResult):data;
+    return { status: 'ok', financeReceipt, ...(nativeUi?{nativeUi}:{}), ...(produced?{produced}:{}), data: modelData };
   } catch (error) {
     // A card refused for its layout says exactly what to send again: a refused card was often not sent again (Codex).
     const cardLayout = action === 'present' && error instanceof z.ZodError ? error.issues.find(issue => issue.path.join('.') === 'blocks' || issue.path.join('.') === 'guide')?.message : undefined;

@@ -70,6 +70,8 @@ export interface AutoSelectedMcpTool {
   required: boolean;
   /** Exact value-free observation from the invocation's owned prepared binding. */
   connectionOutcome?: import("../one/one-original-mcp-credential").OneMcpScopedOutcome;
+  /** A row kept from an earlier turn of the conversation that was not ready then: listed, never asked for again by the key sheet. */
+  carriedFromEarlierTurn?: true;
   state:
     | "ready"
     | "missing-key"
@@ -154,6 +156,8 @@ export interface AutoSelectedMcpContext {
   needsNote?: string;
   /** Hub plugins left off this run's shelf; the prompt names only this count (harness_search finds them). */
   hubNotOffered?: number;
+  /** Tools this run chose but did not attach (10-tool limit, key not saved for a routed plugin tool), named to the model. */
+  notAttached?: Array<{ id: string; why: string }>;
   /**
    * Why nothing was decided, and whether that cost anything.
    *
@@ -856,6 +860,8 @@ export async function autoSelectMcpTools(input: {
   const localCandidates: McpNeedCandidate[] = MCP_TOOL_CATALOG.filter((entry) => {
     if (pinnedReasons.has(entry.id) || blockedByHostBinding(entry.id)) return false;
     if (entry.id === "lazyweb") return false;
+    // workspace-preview exists only with Main's owner-full grant for this run (mcp-config.ts); a judge pick could never attach it.
+    if (entry.id === "workspace-preview") return false;
     // A tool of a plugin this domain does not list stays out of the menu; a restricted domain offers its plugins' tools and the browser.
     if (!toolIdInMenu(toolMenu, entry.id, menuPlugins)) return false;
     // Codex/Claude/Antigravity already expose a native web-search tool. Keep
@@ -997,6 +1003,7 @@ export async function autoSelectMcpTools(input: {
 
   // ── Routed plugins: skills inlined for this turn, the plugin's own tools attached with them.
   const routedPlugins: RoutedPluginSelection[] = [];
+  const quietKeyedIds = new Set<string>();
   const routePlugin = (slug: string, source: RoutedPluginSelection["source"], reason: string, workflow?: string): void => {
     const plugin = pluginBySlug.get(slug);
     if (!plugin || routedPlugins.some((routed) => routed.slug === slug)) return;
@@ -1004,8 +1011,9 @@ export async function autoSelectMcpTools(input: {
     for (const toolId of plugin.toolIds) {
       const entry = MCP_TOOL_CATALOG.find((candidate) => candidate.id === toolId);
       if (!entry || blockedByHostBinding(toolId)) continue;
-      // A tool that needs a key may prompt only when the judge itself chose its plugin.
-      if (source !== "judge" && entry.envRequirements.some((requirement) => requirement.required)) continue;
+      // A tool that needs a key may prompt only when the judge itself chose its plugin; routed another way it is still attached
+      // when its key is already there, and left out quietly (named to the model) when it is not.
+      if (source !== "judge" && entry.envRequirements.some((requirement) => requirement.required)) quietKeyedIds.add(toolId);
       neededIds.add(toolId);
     }
   };
@@ -1149,7 +1157,13 @@ export async function autoSelectMcpTools(input: {
     if (neededIds.has(id)) return 2;
     return 3;
   };
-  const picked = MCP_TOOL_CATALOG.filter((entry) => {
+  // A judge pick that a live host channel supersedes (playwright → agentlas-browser) attaches that channel, never nothing.
+  for (const id of [...neededIds]) {
+    const peer = supersededByLivePeer({ toolId: id, pinned: pinnedReasons.has(id), liveServerIds });
+    if (peer && !blockedByHostBinding(peer) && MCP_TOOL_CATALOG.some((entry) => entry.id === peer)) neededIds.add(peer);
+  }
+  const notAttached: Array<{ id: string; why: string }> = [];
+  const pickedAll = MCP_TOOL_CATALOG.filter((entry) => {
     if (!pinnedReasons.has(entry.id) && !neededIds.has(entry.id)) return false;
     if (blockedByHostBinding(entry.id)) return false;
     // An explicit pin is a settings-level decision and outranks this rule.
@@ -1168,8 +1182,9 @@ export async function autoSelectMcpTools(input: {
     }
     return true;
   })
-    .sort((a, b) => pickRank(a.id) - pickRank(b.id))
-    .filter((entry, index) => index < 10 || hostBindingPins.has(entry.id) || explicitlyAssignedIds.has(entry.id) || baselineIds.has(entry.id));
+    .sort((a, b) => pickRank(a.id) - pickRank(b.id));
+  const picked = pickedAll.filter((entry, index) => index < 10 || hostBindingPins.has(entry.id) || explicitlyAssignedIds.has(entry.id) || baselineIds.has(entry.id));
+  for (const entry of pickedAll) if (!picked.includes(entry)) notAttached.push({ id: entry.id, why: "over this run's 10-tool limit" });
 
   const resolved = await Promise.allSettled(picked.map(async (entry): Promise<AutoSelectedMcpTool> => {
     // `required` is a host binding, never a selection outcome — so it follows the mode the
@@ -1199,6 +1214,10 @@ export async function autoSelectMcpTools(input: {
         ? "disabled" : scoped.outcome ? "probe-failed" : !scoped.available ? "host-failure" : scoped.connected ? "ready" : "probe-failed";
       return { ...base, installed: state === "ready", missingEnv: [], state,
         ...(scoped.outcome ? { connectionOutcome: scoped.outcome } : {}) };
+    }
+    // An installed row the owner switched off stays off: asking for its key first opened a sheet whose answer could not turn it on.
+    if (existingServer && (!existingServer.enabled || existingServer.configurationValid === false)) {
+      return { ...base, installed: false, missingEnv: [], state: "disabled" };
     }
     const hasOAuth = existingServer && existingServer.transport !== "stdio"
       ? await serverHasOAuth(existingServer, deps) : false;
@@ -1279,13 +1298,17 @@ export async function autoSelectMcpTools(input: {
   // bound to this automation by hand. Nothing else may ever reach "missing-key": that state
   // is what opens the pre-launch key sheet and stalls the run. A convenience pin that turns
   // out to need a key is dropped silently — the run continues without it.
+  const judgeNamed = new Set(needs.needed);
   const mayRequestCredentials = (toolId: string): boolean =>
-    neededIds.has(toolId) ||
+    (neededIds.has(toolId) && !(quietKeyedIds.has(toolId) && !judgeNamed.has(toolId))) ||
     (input.toolMode === "browser" && toolId === "agentlas-browser") ||
     (input.toolMode === "computer-use" && toolId === "cua-driver");
   for (let index = result.length - 1; index >= 0; index -= 1) {
     const tool = result[index];
-    if (tool.state === "missing-key" && !mayRequestCredentials(tool.id)) result.splice(index, 1);
+    if (tool.state === "missing-key" && !mayRequestCredentials(tool.id)) {
+      if (quietKeyedIds.has(tool.id)) notAttached.push({ id: tool.id, why: "its key is not saved yet" });
+      result.splice(index, 1);
+    }
   }
 
   // Custom servers participate in the same task judgment as catalog entries.
@@ -1457,6 +1480,7 @@ export async function autoSelectMcpTools(input: {
     selectionSource,
     needsOutcome: { decided: needs.decided, candidateCount: needsCandidateCount, reason: needs.reason },
     ...(needsNote ? { needsNote } : {}),
+    ...(notAttached.length > 0 ? { notAttached } : {}),
     ...(cappedHub > 0 ? { hubNotOffered: cappedHub } : {}),
     ...(hubInventory.hubPluginError ? { hubPluginError: hubInventory.hubPluginError } : {}),
   };
@@ -1477,16 +1501,20 @@ export async function autoSelectMcpTools(input: {
         scopeHash: createHash("sha256").update(finalGoalScopeKey).digest("hex"), selectedIds }); } catch { /* No durable hint was saved. */ }
     }
   }
-  if (!activeGoalScope && structuralKey && (needs.decided || selectionSource === "local-relevance")) {
+  // An undecided judgment (timeout, no model) still keeps the ready tools this conversation already used; it only does not
+  // become the remembered set.
+  if (!activeGoalScope && structuralKey) {
     const sticky = stickySelectionMemo.get(structuralKey);
     if (sticky && Date.now() - sticky.at <= STICKY_SELECTION_TTL_MS) {
       const freshIds = new Set(context.tools.map((tool) => tool.id));
+      // The set only widens (the MCP config and prompt stay byte-stable), but a carried row that was not ready is marked: the key
+      // sheet asks only for what this turn chose (a carried missing-key row reopened the sheet on turns that never asked for it).
       const carried = sticky.context.tools
         .filter((tool) => !freshIds.has(tool.id))
-        .map((tool) => ({ ...tool, missingEnv: [...tool.missingEnv] }));
+        .map((tool) => ({ ...tool, missingEnv: [...tool.missingEnv], ...(tool.state === "ready" ? {} : { carriedFromEarlierTurn: true as const }) }));
       if (carried.length > 0) context.tools = [...context.tools, ...carried];
     }
-    memoSet(stickySelectionMemo, structuralKey, { context: cloneContext(context), at: Date.now() });
+    if (needs.decided || selectionSource === "local-relevance") memoSet(stickySelectionMemo, structuralKey, { context: cloneContext(context), at: Date.now() });
   }
   // 모델이 못 닿아 아무것도 못 정한 실행은 기억하지 않는다 — 그 침묵을 다음 턴까지 굳히면 안 된다.
   // A withdrawn browser reflects this moment's host state; the next turn must look at the host again.
@@ -1551,6 +1579,9 @@ export function buildMcpAutoSelectionPrompt(
     unavailable.length > 0
       ? `MCP unavailable: ${JSON.stringify(unavailable.map(tool => ({ id: tool.id, state: tool.state, required: Boolean(tool.required), ...(tool.connectionOutcome ? { reason: describeScopedMcpOutcome(tool.connectionOutcome, "en") } : {}) })))}; degrade dependent work only`
       : "",
+    (selected.notAttached ?? []).length > 0
+      ? `not attached this run: ${JSON.stringify(selected.notAttached)}; harness_search reaches one if the task needs it`
+      : "",
   ].filter(Boolean).join("\n");
   const retrievedLines = [
     // The selection receipt (needsNote) stays in the ledger; the model only needs what it can act on.
@@ -1560,7 +1591,7 @@ export function buildMcpAutoSelectionPrompt(
   ].filter(Boolean).join("\n");
   return purposePrompt([
     { id: "purpose.mcp.selection.mode", revision: 2, stability: "configuration", changeTriggers: ["runtime", "permission"], text: [modeLine, hubLine].filter(Boolean).join("\n") },
-    { id: "purpose.mcp.selection.inventory", revision: 3, stability: "task-context", changeTriggers: ["capability-inventory", "connector-inventory", "plugin-inventory", "tool-grant"], text: inventoryLines },
+    { id: "purpose.mcp.selection.inventory", revision: 4, stability: "task-context", changeTriggers: ["capability-inventory", "connector-inventory", "plugin-inventory", "tool-grant"], text: inventoryLines },
     // r2 (2026-10-28): an owner-requested plugin workflow (a screen's button or menu) carries its skill text after its pointer.
     { id: "purpose.mcp.selection.retrieved", revision: 2, stability: "turn-context", changeTriggers: ["retrieval", "plugin-inventory", "owner-input"], text: retrievedLines },
   ]);

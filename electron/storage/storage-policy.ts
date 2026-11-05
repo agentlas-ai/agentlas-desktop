@@ -22,12 +22,16 @@
  *   it): removed after 7 days; the newest folder of each agent always stays
  * - durable judgment verdicts (a cache of model verdicts): removed 30 days
  *   after their last use; a removed one costs one model call at most
- * - managed DB-upgrade copies (agentlas.sqlite.migration-backup.v1.*): the
- *   newest one stays (store/db.ts MAX_MANAGED_MIGRATION_BACKUPS; three copies
- * held ~8.6 GB beside a 3.4 GB store); older ones go once their
- *   target schema exists in the live store, after integrity checks of the live
- *   store and of the copy that stays.
- *   Updater recovery copies and other ad-hoc DB copies are never touched.
+ * - managed DB-upgrade copies (agentlas.sqlite.migration-backup.v1.*): none
+ *   stays once its migration landed (store/db.ts MAX_MANAGED_MIGRATION_BACKUPS);
+ *   a copy goes once its target schema exists in the live store and the live
+ *   store passes its integrity checks. Only stores older than the first atomic
+ *   ladder step take one at all.
+ * - legacy session index backups (backups/legacy-product-sessions/*.sqlite, a
+ *   copy of a CLI's own derived index taken before the one-time move removed
+ *   rows): removed 30 days after both the copy and the finished move
+ * - updater recovery copies: none stays once the install was verified and its
+ *   journal cleared (updater/continuity.ts). Other ad-hoc DB copies are never touched.
  */
 export const STORAGE_POLICY = {
   runDetailDays: 3,
@@ -35,6 +39,8 @@ export const STORAGE_POLICY = {
   triggerEventDeliveredDays: 30,
   telegramAttachmentDays: 7,
   cloudPackageDays: 7,
+  /** Backups of a CLI's own session index taken by the one-time legacy session move, kept this long after the move finished. */
+  legacySessionIndexBackupDays: 30,
   judgmentVerdictDays: 30,
   /** "Done" for a project whose agent recorded a verified finish (verification.json or .agentlas-complete). */
   intermediateIdleMinutes: 10,

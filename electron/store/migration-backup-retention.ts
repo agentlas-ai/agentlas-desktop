@@ -1,5 +1,5 @@
 /**
- * Storage-pass step: keep at most MAX_MANAGED_MIGRATION_BACKUPS (one) managed DB-upgrade copies
+ * Storage-pass step: keep at most MAX_MANAGED_MIGRATION_BACKUPS (none) managed DB-upgrade copies
  * (agentlas.sqlite.migration-backup.v1.*), checked off the main thread.
  *
  * Why here and not in initStore: copies are only made on an update launch,
@@ -33,6 +33,18 @@ export interface MigrationBackupRetention {
 }
 
 const CHILD_TIMEOUT_MS = 10 * 60_000;
+/** A pass that kept copies for a lasting reason (a copy it cannot verify, a store failing its integrity check) is not
+ *  repeated against the same set of files for this long: each repeat is a full integrity check of the store in a child. */
+const BLOCKED_RETRY_MS = 24 * 60 * 60_000;
+const LASTING_SKIPS = new Set<string>(["unverified", "integrity", "changed", "error", "timeout"]);
+let lastBlocked: { listing: string; at: number; result: MigrationBackupRetention } | null = null;
+
+function backupListing(storePath: string): string {
+  const prefix = `${path.basename(storePath)}.migration-backup.v1.`;
+  return fs.readdirSync(path.dirname(storePath)).filter((name) => name.startsWith(prefix)).sort()
+    .map((name) => { try { const stat = fs.statSync(path.join(path.dirname(storePath), name)); return `${name}:${stat.size}:${stat.mtimeMs}`; } catch { return name; } })
+    .join("|");
+}
 const SKIPS = new Set<string>(["none", "unverified", "integrity", "migration-lock", "changed", "busy", "error"]);
 
 function parseVerdict(stdout: string): MigrationBackupRetention | null {
@@ -66,6 +78,9 @@ export async function retireManagedMigrationBackups(options: {
   // An owner running the ladder holds this lock. The child takes it atomically
   // before deleting; checking here only avoids a pointless child.
   if (fs.existsSync(`${storePath}.migration.lock`)) return { ...none, skipped: "migration-lock" };
+  let listing = "";
+  try { listing = backupListing(storePath); } catch { listing = ""; }
+  if (lastBlocked && lastBlocked.listing === listing && Date.now() - lastBlocked.at < BLOCKED_RETRY_MS) return lastBlocked.result;
   const entry = options.childEntry ?? path.join(__dirname, "migration-backup-check.js");
   return await new Promise<MigrationBackupRetention>((resolve) => {
     let settled = false;
@@ -84,6 +99,7 @@ export async function retireManagedMigrationBackups(options: {
       settled = true;
       clearTimeout(timer);
       process.removeListener("exit", stopChild);
+      lastBlocked = LASTING_SKIPS.has(value.skipped) && value.removed === 0 ? { listing, at: Date.now(), result: value } : null;
       resolve(value);
     };
     const timer = setTimeout(() => { stopChild(); finish({ ...none, skipped: "timeout" }); }, options.timeoutMs ?? CHILD_TIMEOUT_MS);

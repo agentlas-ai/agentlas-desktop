@@ -144,7 +144,7 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
       }
       // Owner 2026-10-04: what One hands off runs with full access and Always allow, whatever this reply's own permission.
       case "one_supervisor_start_work": return service.startWork({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),
-        ...(input.project_id ? {projectId:String(input.project_id)} : {}),permissions:"full"},binding.supervisorReplyRunId);
+        ...(input.project_id ? {projectId:String(input.project_id)} : {}),...(input.done_when!==undefined ? {doneWhen:input.done_when as string[]} : {}),permissions:"full"},binding.supervisorReplyRunId);
       case "one_supervisor_start_science": return service.startScience({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),projectId:String(input.project_id ?? ""),
         ...(input.conversation_id ? {conversationId:String(input.conversation_id)} : {})},binding.supervisorReplyRunId);
       case "one_chat_send": return service.sendToChat({commandId:String(input.command_id ?? ""),chatId:String(input.chat_id ?? ""),text:String(input.message ?? "")},binding.supervisorReplyRunId);

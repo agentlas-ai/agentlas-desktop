@@ -257,7 +257,9 @@ export interface UpdaterControllerDependencies {
   /** Fence scheduler dispatch and await live effects before any native quit.
    * Separate from optional backup writer quiescence; never abort active work. */
   prepareAutomationInstall?: () => Promise<() => void>;
-  captureContinuity: (targetVersion: string, signal?: AbortSignal) => Promise<ContinuitySnapshot>;
+  /** Optional recovery copy of the store before an install. The desktop wires none: a copy is a full image of the store, nothing
+   *  restores from it, and the migration ladder protects the data (store/db.ts FIRST_ATOMIC_MIGRATION_STEP). */
+  captureContinuity?: (targetVersion: string, signal?: AbortSignal) => Promise<ContinuitySnapshot>;
   verifyContinuity: (snapshot: ContinuitySnapshot) => Promise<ContinuityVerification>;
   shutdownContinuityWorkers?: () => Promise<void>;
   broadcast: (state: UpdaterState) => void;
@@ -2147,12 +2149,14 @@ export class DesktopUpdaterController {
       const continuityAbort = new AbortController();
       if (this.disposed) return refused();
       this.continuityAbort = continuityAbort;
-      try {
+      const captureContinuity = this.deps.captureContinuity;
+      if (!captureContinuity) this.recoveryBackupPath = null;
+      if (captureContinuity) try {
         // Start the bound before dispatch. The worker adapter aborts and observes
         // child exit before rejecting; a raced promise could leave a live writer.
         continuityBoundTimer = setTimeout(() => continuityAbort.abort(), 120_000);
         continuityBoundTimer.unref?.();
-        continuity = await this.deps.captureContinuity(version, continuityAbort.signal);
+        continuity = await captureContinuity(version, continuityAbort.signal);
         if (continuityAbort.signal.aborted) throw new Error("continuity_capture_timed_out");
         this.recoveryBackupPath = continuity.backupPath;
       } catch (error) {

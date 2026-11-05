@@ -541,6 +541,8 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (operation === "harness_describe" && a.live === true) {
         const liveId = harnessId(a, ["id", "operationId", "operation", "name"]);
         if (liveId.startsWith("tool:") && !liveId.includes("/")) return harness.callHarnessPort("tool.describe", { toolId: liveId, live: true }, ctx);
+        // A connector id from harness_search asks for the same live list (its tools and digests).
+        if (liveId.startsWith("connector:")) return harness.callHarnessPort("tool.describe", { toolId: liveId.slice("connector:".length), live: true }, ctx);
       }
       if (operation === "harness_describe") return harness.describeHarness(harnessId(a, ["id", "operationId", "operation", "name"]), ctx);
       // Cancellation crosses the host boundary; no signal or authority comes from model JSON.

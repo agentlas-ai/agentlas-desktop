@@ -51,8 +51,8 @@ export function AgiUnblockLimits({ locale }: { locale: "ko" | "en" }) {
     </label>;
   return <div className={styles.limits} data-agi-unblock-limits="true">
     <strong style={{ display: "flex", alignItems: "center", gap: 8 }}><IconLock size={15} />{ko ? "막힘 해제 한도" : "Unblocking limits"}</strong>
-    <p className={styles.muted}>{ko ? "목표 막힘 해제용 · AGI 한도에서 차감"
-      : "Stuck goal recovery · Counts toward the AGI limit"}</p>
+    <p className={styles.muted}>{ko ? "목표 막힘 해제에 쓴 양을 기록합니다. 한 번 시도 한도는 AGI에게 기준으로 알려 주고, 쓴 양은 이 목표의 Alive 한도에서 차감됩니다(Alive 한도를 다 쓰면 Alive가 쉽니다). 이 한도를 넘었다고 막힘 해제나 작업이 멈추지는 않습니다."
+      : "Records what stuck goal recovery spends. The per-attempt limit is given to AGI as a guide, and spending counts toward this goal's Alive limit (Alive rests when that runs out). Going over these limits does not stop recovery or the work."}</p>
     {field(ko ? "한 번 시도" : "Per attempt", attempt, setAttempt, "attemptTokenLimit")}
     {field(ko ? "목표당 하루" : "Per goal per day", daily, setDaily, "dailyGoalTokenLimit")}
     {error && <p className={styles.error} role="alert">{error}</p>}

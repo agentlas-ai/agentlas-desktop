@@ -712,6 +712,10 @@ export function requestGoalStrategyReflection(
     recordGoalStrategyReflectionRefusal({ stage: "request", reflection: input, reason: unavailableReason(error), now });
     return null;
   }
+  // The proposal's only consumer is the hand-off to a Graph automation bound to this Goal (dispatchGoalStrategyAutomation).
+  // With no current, settled one in the episode no model call is made: its answer would be read by nothing.
+  if (!evidence.episode.automationObservations?.some((observation) => observation.bindingState === "current"
+    && observation.executionState === "terminal-receipt" && Boolean(observation.terminalRunId))) return null;
   const sourceBoundary: GoalStrategySettledBoundaryV1 = {
     invocationRunId: evidence.boundary.invocationRunId,
     terminalEventId: evidence.boundary.terminalEventId!,

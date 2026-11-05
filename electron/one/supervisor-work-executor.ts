@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
-import { supervisorError } from "../../shared/one-supervisor";
+import { supervisorDoneWhen, supervisorError } from "../../shared/one-supervisor";
 import type { InvocationRunReceipt, McpInvocationRequest } from "../../shared/types";
 import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
@@ -9,6 +9,13 @@ import {OneBudgetAdmissionDenied} from "./budget-store";
 import {TRANSIENT_SEND_DEADLINE_MS,isTransientSendRefusalCode,sendRefusalCode, isStoreBusyError, isRefusedBeforeDispatch } from "../../shared/transient-send-refusal";
 
 import {rebindSupervisorUnconfirmed, countSupervisorPreBeginRefusal, retainSupervisorStartVerdict, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, supervisorRetryExhausted, reserveSupervisorDispatch, supervisorRefusalDelay} from "./supervisor-dispatch-retry";
+
+
+/** The brief as Work receives it: the brief itself, then One's checklist for "finished" when it gave one. */
+export function withDoneWhen(brief: string, doneWhen: unknown): string {
+  const items = supervisorDoneWhen(doneWhen);
+  return items ? `${brief}\n\nFinished when:\n${items.map((item) => `- ${item}`).join("\n")}` : brief;
+}
 
 export interface SupervisorWorkRuntime {
   start(request: McpInvocationRequest, hostNoticePurpose?: SupervisorHostNoticePurpose): {runId: string} | Promise<{runId: string}>;
@@ -164,7 +171,7 @@ export class OneSupervisorWorkExecutor {
       // owner's words, and carries no owner authority (no automatic Goal, no user model pin). The owner's own brief stays theirs.
       const byOne = row.source_reply_run_id !== null;
       const request = {runId: starting.run_id, chatId: starting.chat_id,
-        userPrompt: input.text, taskIntent: "task" as const, permissions: input.permissions,
+        userPrompt: withDoneWhen(input.text, input.doneWhen), taskIntent: "task" as const, permissions: input.permissions,
         locale: frame.locale, runtimeSelection: frame.runtimeSelection,
         ...(byOne ? {promptOrigin: "system" as const} : {})};
       const resent=(supervisorDispatchRetry(this.deps.store.get(row.command_id)!)?.unconfirmedResends ?? 0)>0;

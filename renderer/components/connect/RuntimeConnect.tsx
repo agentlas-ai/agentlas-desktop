@@ -343,9 +343,8 @@ export function RuntimeConnectPopup({
           </p>
         )}
         {(failed || cancelled) && (
-          <p className={styles.note} data-tone={failed ? "error" : undefined} role="alert">
+          <p className={styles.note} data-tone={failed ? "error" : undefined} data-reason-code={failed ? snap?.reasonCode || undefined : undefined} role="alert">
             {cancelled ? (snap?.partialInstall ? copy.partial : copy.cancelled) : reasonText}
-            {failed && snap?.reasonCode && <> <span className={styles.code}>({snap.reasonCode})</span></>}
             {failed && snap?.manualInstall && <><br />{manualShellFor(spec.kind, snap.manualInstall, copy)}<span className={styles.code}>{snap.manualInstall}</span></>}
           </p>
         )}

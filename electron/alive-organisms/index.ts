@@ -167,7 +167,7 @@ const playgroundDeps: GoalPlaygroundDeps = {
   latestReceipt: (_chatId, run) => goalOwnTurnReceipt(run),
   continueGoal: (runId, expectedVersion) => continueGoalForAlive(runId, expectedVersion, invocationService),
   ownerHold: (runId) => longRunOwnerHold(runId),
-  // goal-continuation-hold parks a needs_input continuation by turning its row off; the owner's next turn turns it on.
+  // A Goal-bound automation switched off on needs_input waits for the owner (retired continuation rows are excluded).
   continuationParkedForOwner,
   agiMonitorOwnsBlocked: () => agiMonitor !== null,
   announceAction: (notice) => {

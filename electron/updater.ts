@@ -22,7 +22,7 @@ import {
   readDatabaseSchemaVersion,
   verifyUpdaterRecoveryCopies,
 } from "./updater/continuity";
-import { captureUpdaterContinuityInWorker, shutdownContinuityWorkers, verifyUpdaterContinuityInWorker } from "./updater/continuity-worker-client";
+import { shutdownContinuityWorkers, verifyUpdaterContinuityInWorker } from "./updater/continuity-worker-client";
 import {
   inspectMacInstalledAppTrust,
   repairMacInstalledAppNpmGlobals,
@@ -313,10 +313,10 @@ export function preflightUpdaterStartup(userDataPath = userDataDir()): UpdaterSt
   }
   const snapshot: ContinuitySnapshot | undefined = inspection.journal.continuity;
   if (!snapshot) {
-    // The install deliberately proceeded without a recovery copy. There is
-    // nothing to verify, and refusing to boot over a missing convenience would
-    // strand the user in exactly the way this gate was rewritten to avoid.
-    startupRecovery = null;
+    // The install proceeded without a recovery copy (the desktop takes none). There is nothing to verify, and refusing
+    // to boot over a missing convenience would strand the user. The pending install still arms the one-time
+    // post-update boot repair (handleUpdaterBootstrapFailure), which needs no copy.
+    startupRecovery = { targetVersion: inspection.journal.targetVersion };
     return { pendingInstall: true, targetVersion: inspection.journal.targetVersion, recoveryBackupAvailable: false };
   }
   startupRecovery = {
@@ -540,16 +540,6 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
         automationResume?.();
         throw error;
       }
-    },
-    captureContinuity: (targetVersion, signal) => {
-      const account = getAuthSession();
-      return captureUpdaterContinuityInWorker({
-        userDataPath,
-        databasePath: dbPath,
-        targetVersion,
-        accountSignedIn: account.signedIn,
-        ...(account.expiresAt !== undefined ? { accountExpiresAt: account.expiresAt } : {}),
-      }, signal);
     },
     verifyContinuity: (snapshot) =>
       verifyUpdaterContinuityInWorker({

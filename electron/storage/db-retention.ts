@@ -40,6 +40,7 @@ export interface DbRetentionReport {
   toolEntries: { compacted: number };
   turnContextEntries: { compacted: number };
   sessionCheckpoints: { deleted: number };
+  sourceVersions: { deleted: number };
   complete: boolean;
   checkpointedWal: boolean;
   vacuum: { ran: boolean; reason: string; fileBytesBefore: number; fileBytesAfter: number; ms: number };
@@ -275,6 +276,29 @@ function trimSessionCheckpoints(memory: Database.Database, budget: Budget): { de
   return out;
 }
 
+/* ------------------------------------------------- memory source versions */
+
+function purgeSourceVersions(memory: Database.Database, budget: Budget): { deleted: number; done: boolean } {
+  const remove = memory.prepare("DELETE FROM memory_source_versions WHERE rowid IN (SELECT rowid FROM memory_source_versions LIMIT ?)");
+  const out = { deleted: 0, done: false };
+  const started = Date.now();
+  while (!exhausted(budget) && Date.now() - started < DB_RETENTION_LIMITS.sliceMs) {
+    const changes = memory.transaction(() => remove.run(DB_RETENTION_LIMITS.sliceRows).changes)();
+    out.deleted += changes;
+    if (changes === 0) { out.done = true; return out; }
+  }
+  return out;
+}
+
+/**
+ * A memory-store table, asked through the memory handle. That handle routes `memory_*` names to the attached store
+ * (memory/database.ts routeSql); `sqlite_master` is the main store's catalogue, so tableExists never saw these tables.
+ */
+function memoryTableExists(memory: Database.Database, name: string): boolean {
+  if (!/^memory_[a-z_]+$/.test(name)) return false;
+  try { memory.prepare(`SELECT 1 FROM ${name} LIMIT 0`); return true; } catch { return false; }
+}
+
 function tableExists(db: Database.Database, name: string): boolean {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
 }
@@ -360,7 +384,7 @@ function writeCursors(db: Database.Database, cursors: Cursors): void {
 export async function runDbRetentionPass(options: DbRetentionOptions): Promise<DbRetentionReport> {
   const report: DbRetentionReport = {
     ran: false, skipped: "none", chatDetail: { runs: 0, deleted: 0 }, stepEvents: { entities: 0, deleted: 0 },
-    toolEntries: { compacted: 0 }, turnContextEntries: { compacted: 0 }, sessionCheckpoints: { deleted: 0 }, complete: false,
+    toolEntries: { compacted: 0 }, turnContextEntries: { compacted: 0 }, sessionCheckpoints: { deleted: 0 }, sourceVersions: { deleted: 0 }, complete: false,
     checkpointedWal: false, vacuum: { ran: false, reason: "not-run", fileBytesBefore: 0, fileBytesAfter: 0, ms: 0 }, workMs: 0, errors: [],
   };
   const skipped = (reason: DbRetentionReport["skipped"]): DbRetentionReport => ({ ...report, skipped: reason });
@@ -374,11 +398,11 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
   const cursors = readCursors(db);
   const chatState: ChatSweepState = { goalChats: null, decisions: new Map(), summarized: new Set() };
   const stepQueue: { entities: Array<{ run_id: string }> | null; at: number } = { entities: null, at: 0 };
-  const done = { chat: false, steps: false, journal: false, checkpoints: false };
+  const done = { chat: false, steps: false, journal: false, checkpoints: false, sourceVersions: false };
   try {
     report.ran = true;
     const memory = options.memoryDb ? (() => { try { return options.memoryDb!(); } catch { return null; } })() : null;
-    const hasCheckpoints = memory !== null && tableExists(memory, "memory_session_checkpoints") && tableExists(memory, "memory_session_checkpoint_heads");
+    const hasCheckpoints = memory !== null && memoryTableExists(memory, "memory_session_checkpoints") && memoryTableExists(memory, "memory_session_checkpoint_heads");
     const sliceLoop = async <T extends { done: boolean }>(rule: string, step: () => T, fold: (value: T) => void): Promise<boolean> => {
       while (!exhausted(budget)) {
         await options.yieldToLoop();
@@ -395,6 +419,8 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
       return false;
     };
     done.checkpoints = !hasCheckpoints || await sliceLoop("memory_session_checkpoints", () => trimSessionCheckpoints(memory!, budget), (value) => { report.sessionCheckpoints.deleted += value.deleted; });
+    const hasSourceVersions = memory !== null && memoryTableExists(memory, "memory_source_versions");
+    done.sourceVersions = !hasSourceVersions || await sliceLoop("memory_source_versions", () => purgeSourceVersions(memory!, budget), (value) => { report.sourceVersions.deleted += value.deleted; });
     done.chat = await sliceLoop("run_events.chat-call-detail", () => sweepChatDetail(db, now, cursors.chat, chatState), (value) => { report.chatDetail.runs += value.runs; report.chatDetail.deleted += value.deleted; });
     done.steps = await sliceLoop("run_events.one_domain_event.run.step_changed", () => trimStepEvents(db, now, budget, stepQueue), (value) => { report.stepEvents.entities += value.entities; report.stepEvents.deleted += value.deleted; });
     done.journal = await sliceLoop("agent_context_entries", () => compactJournal(db, now, cursors.agentContext), (value) => {
@@ -403,9 +429,10 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
     // A finished walk starts again from the beginning next time: rows written after it passed are found on the next lap.
     if (done.journal) cursors.agentContext.rowid = 0;
     options.shortBusy(() => writeCursors(db, cursors));
+    // The memory-store version purge does not hold back the main store's reclaim: its rows live in the other file.
     report.complete = done.chat && done.steps && done.journal && done.checkpoints && report.errors.length === 0;
     const changed = report.chatDetail.deleted + report.stepEvents.deleted + report.toolEntries.compacted
-      + report.turnContextEntries.compacted + report.sessionCheckpoints.deleted;
+      + report.turnContextEntries.compacted + report.sessionCheckpoints.deleted + report.sourceVersions.deleted;
     if (changed > 0) {
       const checkpoint = options.shortBusy(() => db.pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }>);
       report.checkpointedWal = Boolean(checkpoint && !checkpoint[0]?.busy);

@@ -225,7 +225,7 @@ export function oneSupervisor():OneSupervisorService {
         // This rejection is before budget/native admission: retry only the other notices in a mixed review.
         store.db.transaction(()=>{
           const row=store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND state='dispatching'").get(getOneProfile().oneId,req.runId) as SupervisorRequestRow|undefined;
-          if(row){store.retryReview(req.runId!,error.reason);store.update(row,{state:'failed',acknowledgement:'settled',reason:error.reason});}
+          if(row){if(supervisor)supervisor.retryReviewTellingOwner(req.runId!,error.reason);else store.retryReview(req.runId!,error.reason);store.update(row,{state:'failed',acknowledgement:'settled',reason:error.reason});}
         }).immediate();
       }
       // A gate that could not be answered: nothing was decided and the schedule is kept. The service returns the review's
@@ -281,7 +281,9 @@ export function oneSupervisor():OneSupervisorService {
   supervisor=new OneSupervisorService({
     store,owner,budget,executor:hostOptions?.executor,identity:getOneProfile,assertAuthority:()=>hostOptions?.assertAuthority(),workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>queueMicrotask(()=>workExecutor?.kick()),
     createConversation:()=>{const id=createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id;bindPersonalFolder(id);return id;},
-    history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text,images,selectedGroupId)=>{
+    history:chatId=>listChatMessages(chatId,100),
+    noticeOwner:(chatId,runId,text)=>{appendChatMessage(chatId,"assistant",text,{hostNotice:{purpose:"host-status",runId,status:"needs-owner"}});},
+    appendUser:(chatId,text,images,selectedGroupId)=>{
       // Legacy rows may still display their images, but only the typed selection creates new file authority.
       const groupId=selectedGroupId ?? /<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
       validateChatAttachmentSelection(chatId,groupId,images);
@@ -323,6 +325,7 @@ export function oneSupervisor():OneSupervisorService {
     },science:{
       tasks:()=>{if(!science) return Promise.reject(new Error("science_daemon_unavailable"));return science.tasks();},
       projects:()=>science?.projects() ?? [],
+      turn:input=>{if(!science) return Promise.reject(new Error("science_daemon_unavailable"));return science.turn(input);},
       start:input=>{if(!science) return Promise.reject(new Error("science_daemon_unavailable"));return science.start(input);},
       control:(input,task)=>{if(!science) return Promise.reject(new Error("science_daemon_unavailable"));return science.control(input,task);},
     },
@@ -337,7 +340,9 @@ export function oneSupervisor():OneSupervisorService {
   const stopBudgetEvents=onSettled(event=>{observeBudget(event.runId,event.receipt);
     if(event.chatId===store.conversation(getOneProfile().oneId))queueMicrotask(()=>{try{exportPersonalSession(getOneProfile().oneId,event.chatId);}catch(error){console.warn("[one-supervisor] personal session export deferred",error instanceof Error?error.message:"unknown");}});if(event.receipt.status==='completed')queueMicrotask(()=>{try{collectOnePersonalDataResult(event.runId);}catch{/* A denied/stale result stays a proposal blocker; never retries inference. */}});});
   const budgetTimer=setInterval(()=>observeBudget(),30_000);budgetTimer.unref?.();
-  stopBudgetHost=()=>{clearInterval(budgetTimer);stopBudgetEvents();};
+  // A started Science turn that ends while nobody asks is closed and reported within the minute (no pending turn: no call).
+  const scienceSettleTimer=setInterval(()=>{void supervisor?.settleScienceTurns();},30_000);scienceSettleTimer.unref?.();
+  stopBudgetHost=()=>{clearInterval(budgetTimer);clearInterval(scienceSettleTimer);stopBudgetEvents();};
   observeBudget();
   supervisor.recover();
   if (hostsWork) {

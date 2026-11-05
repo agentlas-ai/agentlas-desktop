@@ -507,6 +507,9 @@ function errorSessionId(error: unknown): string | null {
   const value = error && typeof error === "object" ? (error as { sessionId?: unknown }).sessionId : undefined;
   return typeof value === "string" && value.trim() ? value : null;
 }
+/** Automation deliveries (automation-delivery.ts) land in the conversation as host rows; a long-lived chat collects hundreds. */
+const AUTOMATION_REPORT_PURPOSE = "automation-report";
+export const AUTOMATION_REPORTS_REPLAYED_IN_FULL = 3;
 const COMPACT_HOST_PURPOSES: ReadonlyMap<string, string> = new Map([
   ["goal-continuation", "goal continuation"], ["update-resume", "resumed after update"], ["run-recovery", "recovery pass"],
 ]);
@@ -560,6 +563,9 @@ export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapsh
   });
   type Row=NonNullable<RunnerRequest["history"]>[number];
   const rows:Array<{row:Row;ledger?:ToolLedger}>=[];
+  // Automation deliveries: only the latest few replay (in full); earlier ones stay in the chat and its journal, not in the prompt.
+  const automationReports=snapshot.entries.flatMap((entry,index)=>entry.kind==="message"&&entry.payload.hostAuthored===AUTOMATION_REPORT_PURPOSE?[index]:[]);
+  const fullAutomationReports=new Set(automationReports.slice(-AUTOMATION_REPORTS_REPLAYED_IN_FULL));
   for(const [index,entry] of snapshot.entries.entries()){
     const p=entry.payload;
     if(entry.kind==="turn-context")continue;
@@ -583,7 +589,8 @@ export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapsh
     // before the append stripped them), the standing-staff background out of requests, and a turn the host wrote itself
     // as one line, so a continuation prompt never re-sends the previous answer or the Goal contract a second time.
     const purpose=typeof p.hostAuthored==="string"?p.hostAuthored:role!=="assistant"?legacyHostPurpose(p.text):undefined;
-    const compact=purpose?COMPACT_HOST_PURPOSES.get(purpose):undefined;
+    if(purpose===AUTOMATION_REPORT_PURPOSE&&!fullAutomationReports.has(index))continue;
+    const compact=purpose&&purpose!==AUTOMATION_REPORT_PURPOSE?COMPACT_HOST_PURPOSES.get(purpose):undefined;
     const text=compact?`[host: ${compact}]`:role==="assistant"?replayVisibleAssistantText(p.text):role==="user"?stripStaffGuidance(p.text):p.text;
     if(!text && role==="assistant")continue;
     rows.push({row:{id:entry.eventId,durableMessageId:entry.eventId,role,text,

@@ -18,6 +18,7 @@ import { DAY_MS, STORAGE_POLICY } from "./storage-policy";
 import { DB_RETENTION_HOST } from "./db-retention-policy";
 import { runDbRetentionPass, type DbRetentionReport } from "./db-retention";
 import { observationCaptureDir } from "../media/capture-artifacts";
+import { LEGACY_PRODUCT_SESSIONS_MARKER } from "../runtime/legacy-product-sessions-once";
 
 /**
  * Runs the storage budget (storage-policy.ts) shortly after start and then
@@ -59,8 +60,10 @@ export interface StorageMaintenanceReport {
   cloudPackages: { dirs: number; bytes: number };
   /** Product-home mirrors of another mirror, idle for the CLI-original window (product-home-retention.ts). */
   nestedProductHomes: { dirs: number; bytes: number };
-  /** Managed DB-upgrade copies above the cap of one, MAX_MANAGED_MIGRATION_BACKUPS (store/migration-backup-retention.ts). */
+  /** Managed DB-upgrade copies whose migration landed (cap MAX_MANAGED_MIGRATION_BACKUPS, store/migration-backup-retention.ts). */
   migrationBackups: MigrationBackupRetention;
+  /** Legacy session index backups once the one-time move finished (pruneLegacySessionIndexBackups). */
+  legacySessionIndexBackups: { files: number; bytes: number };
   /** App-call image observations past the settled-run detail window (pruneObservationCaptures). */
   observationCaptures: { files: number; bytes: number };
   /** The typed row-retention policy of the store (db-retention-policy.ts); null when this process is not the retention host. */
@@ -187,6 +190,38 @@ export async function pruneObservationCaptures(
   return result;
 }
 
+/**
+ * The one-time legacy session move (runtime/legacy-product-sessions.ts) copies a CLI's own session index before it removes
+ * rows of the product's own sessions (the session files themselves were moved, not deleted). Once the move has finished,
+ * which its marker records, the copy only serves a late look-back, so it is kept for a window after both. Only regular files named <label>-<13 digit ms>.sqlite directly in that folder go.
+ */
+const LEGACY_SESSION_INDEX_BACKUP = /^(?:codex-[A-Za-z0-9_]+|copilot-session-store)-\d{13}\.sqlite$/;
+
+export async function pruneLegacySessionIndexBackups(
+  folder: string,
+  options: { keepDays: number; moveFinishedAtMs: number | null; now?: number },
+): Promise<{ files: number; bytes: number }> {
+  const result = { files: 0, bytes: 0 };
+  if (options.moveFinishedAtMs === null) return result;
+  const now = options.now ?? Date.now();
+  try { if (!(await fs.promises.lstat(folder)).isDirectory()) return result; } catch { return result; }
+  let entries: fs.Dirent[] = [];
+  try { entries = await fs.promises.readdir(folder, { withFileTypes: true }); } catch { return result; }
+  for (const entry of entries) {
+    if (!entry.isFile() || !LEGACY_SESSION_INDEX_BACKUP.test(entry.name)) continue;
+    const file = path.join(folder, entry.name);
+    let stat: fs.Stats;
+    try { stat = await fs.promises.lstat(file); } catch { continue; }
+    // Kept for the window after both the copy and the finished move: a move that finished late keeps its oldest copy too.
+    if (!stat.isFile() || now - Math.max(stat.mtimeMs, options.moveFinishedAtMs) < options.keepDays * DAY_MS) continue;
+    try { await fs.promises.unlink(file); } catch { continue; }
+    result.files += 1;
+    result.bytes += stat.size;
+    for (const sidecar of ["-wal", "-shm", "-journal"]) { try { await fs.promises.unlink(`${file}${sidecar}`); } catch { /* none */ } }
+  }
+  return result;
+}
+
 function readWatermark(): RunDetailWatermark | null {
   try {
     // run_events.id is TEXT. A number check rejected every stored watermark,
@@ -279,10 +314,14 @@ export async function runStorageMaintenance(now = Date.now(), hooks: { busy?: ()
     const observationCaptures = await pruneObservationCaptures(observationCaptureDir(), { keepDays: STORAGE_POLICY.runDetailDays, now });
     // DB-upgrade copies: checked in a child process, never on this thread.
     const migrationBackups = await retireManagedMigrationBackups({ storePath: db.name });
+    const legacySessionIndexBackups = await pruneLegacySessionIndexBackups(userDataPath("backups", "legacy-product-sessions"), {
+      keepDays: STORAGE_POLICY.legacySessionIndexBackupDays, now,
+      moveFinishedAtMs: (() => { try { return fs.statSync(userDataPath(LEGACY_PRODUCT_SESSIONS_MARKER)).mtimeMs; } catch { return null; } })(),
+    });
     return {
       lowDisk,
       freeBytes: space?.freeBytes ?? null,
-      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + cloudPackages.bytes + nestedProductHomes.bytes + migrationBackups.bytes + observationCaptures.bytes,
+      freedBytes: sweep.removedBytes + transcripts.bytes + telegramAttachments.bytes + cloudPackages.bytes + nestedProductHomes.bytes + migrationBackups.bytes + observationCaptures.bytes + legacySessionIndexBackups.bytes,
       intermediates: { files: sweep.removedFiles, bytes: sweep.removedBytes },
       transcripts: { sessions: transcripts.sessions, orphans: transcripts.orphans, bytes: transcripts.bytes },
       runDetail,
@@ -293,6 +332,7 @@ export async function runStorageMaintenance(now = Date.now(), hooks: { busy?: ()
       nestedProductHomes,
       migrationBackups,
       observationCaptures,
+      legacySessionIndexBackups,
       dbRetention,
     };
   } finally {

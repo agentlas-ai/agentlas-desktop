@@ -18,6 +18,8 @@ import type Database from "better-sqlite3";
 import { onDesktopStoreChange } from "../store/change-bus";
 import { AGI_NO_ADMISSIBLE_PATH, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind, classifyAgiBlocker, type AgiBlockerDiagnosis, type AgiBlockerFacts, type AgiGoalDisplayState } from "./blocker";
 import { AgiIncidentStore, type AgiIncident } from "./incident-store";
+import { agiAutomationEventTargets, agiFactsRecheck, agiGateReadReason, agiRuntimeEventTargets, readAgiGoalFingerprints,
+  type AgiGateEntry, type AgiGoalFingerprint } from "./change-gate";
 
 export const AGI_MONITOR_INTERVAL_MS = 60_000;
 /** One "[agi-monitor] alive" line per this period: the monitor logged only failures, so a healthy monitor looked dead in main.log. */
@@ -111,6 +113,12 @@ export interface AgiMonitorDeps {
   handler?: AgiUnblockHandler | null;
   /** Monitor facts changed (goal chip / AGI incident chip refresh). */
   onChanged?(goalId: string): void;
+  /**
+   * The beat reads a goal's full facts only when its stored inputs changed, its recheck instant passed or an event names it
+   * (change-gate.ts). Default on; false reads every goal every beat. Facts that did not come from readAgiBlockerFacts carry no
+   * recheck instant and are read every beat either way.
+   */
+  changeGate?: boolean;
 }
 
 export interface AgiGoalMonitorState {
@@ -158,6 +166,11 @@ export class AgiGoalMonitor {
   private heartbeatAtMs = 0;
   private attemptsSinceHeartbeat = 0;
   private readonly busyRetries = new Map<string, { count: number; timer: ReturnType<typeof setTimeout> | null }>();
+  /** The change gate: per goal, the fingerprint and recheck instant of its last full read. In memory, bounded to the monitored goals. */
+  private readonly gate = new Map<string, AgiGateEntry & { diagnosis: AgiBlockerDiagnosis }>();
+  /** How the beat spent its reads: full reads, reads skipped by the gate, fingerprint passes. */
+  readonly gateStats = { reads: 0, skipped: 0, fingerprintPasses: 0 };
+  private fingerprintWarned = false;
   /** Model calls this monitor made. Always 0 — asserted by the contract. */
   readonly modelCalls = 0;
 
@@ -173,7 +186,7 @@ export class AgiGoalMonitor {
     this.decisionInvalidations.clear();
     for (const callback of callbacks) { try { callback(); } catch { /* cancellation of other decisions must continue */ } }
   }
-  setHandler(handler: AgiUnblockHandler | null): void { if (this.handler !== handler) this.invalidateDecisions(); this.handler = handler; }
+  setHandler(handler: AgiUnblockHandler | null): void { if (this.handler !== handler) { this.invalidateDecisions(); this.gate.clear(); } this.handler = handler; }
 
   state(goalId: string): AgiGoalMonitorState | null { return this.states.get(goalId) ?? null; }
 
@@ -212,10 +225,11 @@ export class AgiGoalMonitor {
     console.info(`[agi-monitor] started intervalMs=${intervalMs}`);
     this.unsubscribe = onDesktopStoreChange((change) => {
       if (!["chat", "long-run", "runtime", "capability-grant", "automation"].includes(change.entity)) return;
-      for (const [goalId, source] of this.sources) {
-        if (((change.entity === "chat" || change.entity === "long-run")
-          && change.id !== (change.entity === "chat" ? source.chatId : source.runId)) || this.pending.has(goalId)) continue;
+      for (const goalId of this.eventTargets(change)) {
+        if (this.pending.has(goalId)) continue;
         this.pending.add(goalId);
+        // An event names the goal: it is read in full, and stays unread-cached until that read lands.
+        this.gate.delete(goalId);
         queueMicrotask(() => {
           this.pending.delete(goalId);
           if (!this.timer) return;
@@ -225,18 +239,49 @@ export class AgiGoalMonitor {
     });
   }
 
+  /**
+   * The monitored goals a store event can concern. Chat and long-run events: the goal whose room or run it is. Automation events with an
+   * id: goals bound to that automation (by the stored binding now or at the last read). Runtime and capability events: goals whose last
+   * read had something runtime or a grant could move. Anything the event does not identify safely stays today's "every goal".
+   */
+  private eventTargets(change: { entity: string; id?: string }): string[] {
+    if (change.entity === "chat" || change.entity === "long-run") {
+      return [...this.sources].filter(([, source]) => change.id === (change.entity === "chat" ? source.chatId : source.runId)).map(([goalId]) => goalId);
+    }
+    const goalIds = [...this.sources.keys()];
+    if (this.deps.changeGate === false) return goalIds;
+    if (change.entity === "automation") {
+      let bound: string | null | "unknown" = "unknown";
+      if (change.id) {
+        try { bound = (this.deps.db.prepare("SELECT goal_id FROM automations WHERE id = ?").get(change.id) as { goal_id: string | null } | undefined)?.goal_id ?? null; }
+        catch { bound = "unknown"; }
+      }
+      return agiAutomationEventTargets(goalIds, this.gate, change.id, bound);
+    }
+    return agiRuntimeEventTargets(goalIds, this.gate);
+  }
+
   stop(): void { this.invalidateDecisions(); if (this.timer) clearInterval(this.timer); this.timer = null; this.unsubscribe?.(); this.unsubscribe = null; this.pending.clear(); for (const timer of this.dueTimers.values()) clearTimeout(timer); this.dueTimers.clear();
-    for (const entry of this.busyRetries.values()) if (entry.timer) clearTimeout(entry.timer); this.busyRetries.clear(); }
+    for (const entry of this.busyRetries.values()) if (entry.timer) clearTimeout(entry.timer); this.busyRetries.clear(); this.gate.clear(); }
 
   /** One reconcile pass over every monitored goal. Returns what it did (for contracts and logs). */
   tick(): { goals: number; attempts: number; diagnoses: AgiBlockerDiagnosis[] } {
     const diagnoses: AgiBlockerDiagnosis[] = [];
     let attempts = 0;
     const seen = new Set<string>();
-    for (const goalId of this.deps.listGoalIds()) {
+    const goalIds = this.deps.listGoalIds();
+    const fingerprints = this.readFingerprints(goalIds);
+    for (const goalId of goalIds) {
       seen.add(goalId);
+      const cached = this.gate.get(goalId);
+      if (fingerprints && cached && agiGateReadReason(cached, fingerprints.get(goalId), this.deps.now()) === null && !this.handler?.isBusy?.(goalId)) {
+        // Nothing the facts depend on moved and no time-based fact can have flipped: the last read still stands.
+        this.gateStats.skipped += 1;
+        diagnoses.push(cached.diagnosis);
+        continue;
+      }
       try {
-        const result = this.reconcile(goalId, "monitor");
+        const result = this.reconcile(goalId, "monitor", fingerprints?.get(goalId) ?? null);
         if (result.diagnosis) diagnoses.push(result.diagnosis);
         if (result.attempted) attempts += 1;
       } catch (error) { this.wakeFailed(goalId, error, `goal ${goalId} reconcile`); }
@@ -245,6 +290,7 @@ export class AgiGoalMonitor {
     // and its open incidents are closed too. Only its in-memory state was dropped before, so a cancelled Goal's incident stayed open
     // (production: open since 2026-09-29, 21 days) and its due timer could still fire a reconcile.
     for (const goalId of [...this.states.keys()]) if (!seen.has(goalId)) { this.states.delete(goalId); this.sources.delete(goalId); }
+    for (const goalId of [...this.gate.keys()]) if (!seen.has(goalId)) this.gate.delete(goalId);
     for (const [goalId, timer] of [...this.dueTimers]) if (!seen.has(goalId)) { clearTimeout(timer); this.dueTimers.delete(goalId); }
     const nowMs = this.deps.now();
     const open = this.deps.db.prepare("SELECT DISTINCT goal_id FROM agi_incidents WHERE status = 'open'").all() as Array<{ goal_id: string }>;
@@ -266,10 +312,15 @@ export class AgiGoalMonitor {
    * Reconcile one goal now. Used by the beat, and by the Alive hook (unblock_attempt_due) so both paths share the
    * same durable attempt receipt and retry deadline.
    */
-  reconcile(goalId: string, trigger: AgiUnblockInput["trigger"]): { diagnosis: AgiBlockerDiagnosis | null; attempted: boolean; result: AgiUnblockResult | null } {
+  reconcile(goalId: string, trigger: AgiUnblockInput["trigger"], fingerprint?: AgiGoalFingerprint | null):
+    { diagnosis: AgiBlockerDiagnosis | null; attempted: boolean; result: AgiUnblockResult | null } {
     const nowMs = this.deps.now();
+    // The fingerprint is taken before the read: a change that lands in between makes the next beat read again, never miss.
+    const readFingerprint = fingerprint === undefined ? this.readFingerprints([goalId])?.get(goalId) ?? null : fingerprint;
+    this.gateStats.reads += 1;
     const facts = this.deps.readFacts(goalId);
     if (!facts) {
+      this.gate.delete(goalId);
       this.incidents.resolveGoal(goalId, "goal_gone", nowMs);
       this.states.delete(goalId);
       this.sources.delete(goalId);
@@ -407,6 +458,7 @@ export class AgiGoalMonitor {
         reasonCode: incident.reasonCode, attempts: incident.attempts, openedAtMs: incident.openedAtMs } : null,
     };
     this.states.set(goalId, next);
+    this.noteGate(goalId, readFingerprint, facts, diagnosis, incident, attempted, nowMs);
     if (!before || JSON.stringify(before) !== JSON.stringify(next)) {
       try { this.deps.onChanged?.(goalId); } catch { /* a refresh signal cannot fail the beat */ }
     }
@@ -418,17 +470,79 @@ export class AgiGoalMonitor {
    * window), and requires the doubling retry delay for that streak since the newest of them.
    */
   private goalCauseBackoff(goalId: string, reasonCode: string, incidentId: string, nowMs: number): boolean {
+    const rows = this.goalCauseAttempts(goalId, reasonCode, incidentId, nowMs);
+    if (rows.length === 0) return false;
+    return nowMs - rows[0]!.at_ms < agiRetryDelayMs(rows.length);
+  }
+  private goalCauseAttempts(goalId: string, reasonCode: string, incidentId: string, nowMs: number): Array<{ at_ms: number }> {
     // Every real attempt of this cause in the window counts, including the attempts this same incident made under an earlier digest
     // (an incident carries on across digests, incident-store.ts open). No code resets the streak: "agi.action.state-changed" is the
     // refusal of an attempt whose fence moved (nothing was done), and an "acted" attempt is exactly what a flapping goal
     // repeats without getting anywhere (production: 95 acted of 190). The window is what lets the delay shrink again.
-    const rows = this.deps.db.prepare(`SELECT a.at_ms AS at_ms FROM agi_unblock_attempts a
+    return this.deps.db.prepare(`SELECT a.at_ms AS at_ms FROM agi_unblock_attempts a
       JOIN agi_incidents i ON i.id = a.incident_id
       WHERE a.goal_id = ? AND (i.reason_code = ? OR a.incident_id = ?) AND a.at_ms > ? AND a.at_ms <= ?
         AND COALESCE(a.code, '') NOT IN ('agi.no-handler', 'agi.attempt-claimed')
       ORDER BY a.at_ms DESC LIMIT 12`).all(goalId, reasonCode, incidentId, nowMs - GOAL_CAUSE_WINDOW_MS, nowMs) as Array<{ at_ms: number }>;
-    if (rows.length === 0) return false;
-    return nowMs - rows[0]!.at_ms < agiRetryDelayMs(rows.length);
+  }
+
+  /** One fingerprint pass for these goals, or null when the gate is off or the store could not answer (every goal is then read). */
+  private readFingerprints(goalIds: readonly string[]): Map<string, AgiGoalFingerprint> | null {
+    if (this.deps.changeGate === false) return null;
+    try { this.gateStats.fingerprintPasses += 1; return readAgiGoalFingerprints(this.deps.db, goalIds); }
+    catch (error) {
+      if (!this.fingerprintWarned) { this.fingerprintWarned = true; console.warn("[agi-monitor] change gate unavailable; reading every goal each beat:", error); }
+      return null;
+    }
+  }
+
+  /**
+   * Remember what this read depends on so the next beat can skip the goal. Nothing is remembered (the goal is read every beat, as before)
+   * when the read depends on live state, an attempt just ran, an attempt is waiting on a retry instant that cannot be named, or the facts
+   * carry no recheck instant (not produced by readAgiBlockerFacts).
+   */
+  private noteGate(goalId: string, fingerprint: AgiGoalFingerprint | null, facts: AgiBlockerFacts, diagnosis: AgiBlockerDiagnosis,
+    incident: AgiIncident | null, attempted: boolean, nowMs: number): void {
+    this.gate.delete(goalId);
+    if (this.deps.changeGate === false || !fingerprint) return;
+    const recheck = agiFactsRecheck(facts);
+    if (!recheck || recheck.volatile || attempted || facts.repairInFlight || facts.heldBy === "chat_busy" || this.handler?.isBusy?.(goalId)) return;
+    let recheckAtMs = recheck.recheckAtMs;
+    if (diagnosis.attemptDue) {
+      const retryAt = this.retryRecheckAt(goalId, diagnosis, incident, nowMs);
+      if (retryAt === null) return;
+      recheckAtMs = Math.min(recheckAtMs, retryAt);
+    }
+    let liveAtRead: string | undefined;
+    if (recheck.live) { try { liveAtRead = recheck.live(); } catch { return; } }
+    this.gate.set(goalId, { fingerprint: fingerprint.fingerprint, automationIds: fingerprint.automationIds, recheckAtMs, diagnosis,
+      ...(recheck.live && liveAtRead !== undefined ? { liveProbe: recheck.live, liveAtRead } : {}),
+      runtimeSensitive: facts.signals.length > 0 || Boolean(facts.heldBy) || diagnosis.attemptDue || (diagnosis.display !== "running" && diagnosis.display !== "terminal") });
+  }
+
+  /**
+   * An incident that is due but was not claimed this beat waits for a time-based condition of the claim above: the doubling retry delay
+   * after this digest's own attempt, or the per-goal cause backoff. That instant, or Infinity when the digest's attempt is final (a
+   * changed digest comes with a changed fingerprint). null = cannot say (an unexplained refusal, a clock rollback, a model attempt whose
+   * terminal receipt may land without any fingerprinted change): read again next beat.
+   */
+  private retryRecheckAt(goalId: string, diagnosis: AgiBlockerDiagnosis, incident: AgiIncident | null, nowMs: number): number | null {
+    if (!incident) return null;
+    const prior = this.deps.db.prepare("SELECT outcome,code,at_ms FROM agi_unblock_attempts WHERE goal_id = ? AND state_digest = ?")
+      .get(goalId, diagnosis.stateDigest) as { outcome: string; code: string | null; at_ms: number } | undefined;
+    if (prior) {
+      if (prior.code === "agi.model-attempt-dispatched" || prior.at_ms > nowMs) return null;
+      if (["failed", "rested", "needs-human"].includes(prior.outcome)) {
+        const at = prior.at_ms + agiRetryDelayMs(incident.attempts);
+        return at > nowMs ? at : null;
+      }
+      if (prior.outcome === "no-handler") return this.handler ? null : Number.POSITIVE_INFINITY; // setHandler clears the gate
+      return Number.POSITIVE_INFINITY;
+    }
+    const rows = this.goalCauseAttempts(goalId, incident.reasonCode, incident.id, nowMs);
+    if (rows.length === 0) return null;
+    const at = rows[0]!.at_ms + agiRetryDelayMs(rows.length);
+    return at > nowMs ? at : null;
   }
   private record(goalId: string, digest: string, incidentId: string, trigger: string, result: AgiUnblockResult, nowMs: number, outcome: string): void {
     this.deps.db.prepare(`INSERT INTO agi_unblock_attempts(goal_id,state_digest,incident_id,trigger,outcome,code,result_json,at_ms)

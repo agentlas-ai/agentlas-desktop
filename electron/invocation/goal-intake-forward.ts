@@ -20,6 +20,7 @@
  * owner turn to Desktop and the A2 chat host handover (runtime/chat-host-handover.ts) releases the service's resident session.
  *
  * No electron import: the background service loads this without Electron (test-daemon-loads-without-electron). */
+import { autoMessageGoalId } from "../../shared/auto-goal";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { DeviceBridgeError, daemonDeviceBridge } from "../daemon/device-bridge";
 import { getDb } from "../store/db";
@@ -43,7 +44,7 @@ const DRAIN_LIMIT = 20;
 const INTAKE_RETRY_DELAYS_MS = [1_000, 5_000] as const;
 const INTAKE_RETRY_COOLDOWN_MS = 60_000;
 
-const goalIdFor = (sourceMessageId: string): string => `goal:auto-message:${sourceMessageId}`;
+const goalIdFor = autoMessageGoalId;
 
 /* ─────────── service half ─────────── */
 

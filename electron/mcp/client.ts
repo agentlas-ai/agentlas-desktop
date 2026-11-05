@@ -4134,6 +4134,10 @@ async function runMcpInvocationInContext(
         reselect: () => autoSelectMcpTools({
           ...autoSelectInput,
           bypassSelectionMemo: true,
+          // The tools the owner just gave a key for stay chosen: a second judgment that left them out (or timed out) attached nothing
+          // after the owner typed the key.
+          requiredToolCatalogIds: [...new Set([...(autoSelectInput.requiredToolCatalogIds ?? []),
+            ...selectedContext.tools.filter((tool) => tool.state === "missing-key" && tool.missingEnv.length > 0).map((tool) => tool.id)])],
           ...(selectedContext.goalSelectionScope ? { credentialRetry: {
             ...selectedContext.goalSelectionScope,
             // This callback runs only after the current gate's typed provided

@@ -143,8 +143,6 @@ export interface RunGraphOptions {
   loginResumeRunIds?: Record<string, string>;
   /** Source payload variables used only when creating a new occurrence checkpoint. */
   initialVars?: Record<string, unknown>;
-  /** Fresh host-loaded owner corrections for a goal continuation; never graph identity. */
-  ownerContinuationContext?: string;
   /** Abort 후 취소를 무시하는 노드를 기다릴 정리 유예. 테스트는 짧게 주입한다. */
   abortGraceMs?: number;
   /**
@@ -182,15 +180,6 @@ export interface RunGraphOptions {
    * reflection merely because it entered through the daemon or SDK.
    */
   strategyCycle?: "auto" | "defer";
-  /**
-   * Goal-loop signals of each agent node's invocation (continue marker, completion
-   * claim). The scheduler settles a goal continuation from these; the graph result
-   * carries only text, and the markers are stripped from it.
-   */
-  onAgentInvocationSignals?: (nodeId: string, signals: {
-    stormbreakerContinueRequested: boolean;
-    goalCompletionClaim?: { claimed: boolean; evidence: string | null; goalId: string | null };
-  }) => void;
 }
 
 /** 노드가 바깥 세상에 무엇을 하는가. 선언하지 않으면 시뮬레이션에서 변경으로 간주한다(fail-closed). */
@@ -5173,7 +5162,6 @@ export async function runGraph(
           ...buildNodeContinuityPromptParts(nodeChat.id, prompt, strategyDirective),
           { id: "graph-node.uncertain-effect-observation", stability: "turn-context", changeTriggers: ["checkpoint"], text: uncertainEffectNote },
           { id: "graph-node.tool-proof-observation", stability: "turn-context", changeTriggers: ["checkpoint"], text: toolProofNudge },
-          { id: "graph-node.owner-continuation", stability: "turn-context", changeTriggers: ["owner-input", "checkpoint"], text: opts.ownerContinuationContext },
         ]);
         beginNode(node, executionPrompt);
         let checkpointPersistenceError: Error | null = null;
@@ -5721,12 +5709,6 @@ export async function runGraph(
             });
           }
           if (result.toolBroker) toolBrokerByNode.set(node.id, result.toolBroker);
-          try {
-            opts.onAgentInvocationSignals?.(node.id, {
-              stormbreakerContinueRequested: result.stormbreakerContinueRequested === true,
-              ...(result.goalCompletionClaim ? { goalCompletionClaim: result.goalCompletionClaim } : {}),
-            });
-          } catch { /* an observer must not change the node's result */ }
           // An output step's result is its declared content (outputs below) and its mutating tool calls are its proof.
           // When it sent that content through its tools and wrote no line of its own (a tool-only turn the runner
           // completed, R-065), the declared content is the result: NODE_NO_RESULT is for a step whose text is its output.

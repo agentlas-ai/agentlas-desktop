@@ -62,7 +62,7 @@ export function registerOriginalMemorySource(db:Database.Database,owner:string,p
     const id=old?.source_id??randomUUID(),revision=(old?.metadata_revision??0)+1;
     if(old){const changed=db.prepare("UPDATE memory_source_catalogue SET source_kind=?,writer_contract=?,schema_version=?,source_revision=?,address_json=?,range_unit=?,range_start=?,range_end=?,content_digest=?,metadata_revision=?,updated_at=? WHERE source_id=? AND metadata_revision=?").run(...snapshot,revision,now,id,old.metadata_revision);if(changed.changes!==1)throw new Error("memory_source_changed");}
     else db.prepare("INSERT INTO memory_source_catalogue VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(id,producer,owner,input.actorId,input.visibilityDomain,input.logicalKey,input.sourceKind,input.readerContract,input.writerContract,input.schemaVersion,input.sourceRevision,address,unit,start,end,digest,revision,now,now);
-    db.prepare("INSERT INTO memory_source_versions VALUES(?,?,?,?,?,?,?,?,?)").run(id,revision,input.sourceRevision,address,unit,start,end,digest,now);
+    // No version history is written: nothing reads one, and an agent journal moves its range on every append (one row each).
     return {sourceId:id,metadataRevision:revision,sourceRevision:input.sourceRevision};
   }).immediate();
 }

@@ -1,3 +1,4 @@
+import { autoMessageGoalId } from "../../shared/auto-goal";
 import { captureGoalExecutionObligations, prepareGoalObligationContinuation } from "../long-run/goal-obligation-context";
 import { channelPublishReceiptsPromptBlockFor } from "../publish-receipts";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
@@ -202,7 +203,7 @@ export async function prepareInvocationAutomaticGoal(input: {
     if (input.classifyOnly) return { kind: "bypass", decision };
     stage = "admission";
     const run = admitJudgedAutomaticGoal({
-      goalId: `goal:auto-message:${source.messageId}`, chatId: source.chatId, sourceMessageId: source.messageId, decision,
+      goalId: autoMessageGoalId(source.messageId), chatId: source.chatId, sourceMessageId: source.messageId, decision,
       /*
        * A criterion the verifier cannot check is a criterion that fails forever.
        *

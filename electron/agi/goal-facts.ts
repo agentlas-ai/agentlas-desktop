@@ -22,6 +22,7 @@ import { isGoalObserving } from "../long-run/effect-observation-tickets";
 import { isBrowserDomToolError } from "../browser/fallback-ladder";
 import { CONTINUATION_REFUSED_NOTICE_CODE, continuationRefusalCause } from "../../shared/continuation-refusal-notice";
 import type { AgiBlockerFacts, AgiBlockerSignal, AgiTacticFact } from "./blocker";
+import { AGI_RECHECK_FLOOR_MS, noteAgiFactsRecheck } from "./change-gate";
 
 /** The scheduler ticks every minute; a due slot missed by more than this with no run started is a miss. */
 export const AGI_MISSED_DUE_GRACE_MS = 5 * 60_000;
@@ -53,7 +54,7 @@ export interface AgiGoalFactsDeps {
    * kept starting model attempts on a room that was waiting for its team (production 2026-10-19, Yotube room).
    */
   childChatIds?(chatId: string): readonly string[];
-  /** goal-continuation-hold parked the continuation row on needs_input. */
+  /** A Goal-bound automation is switched off and its last run ended on needs_input. */
   continuationParkedForOwner?(goalId: string): boolean;
   /** A pending tool approval in the goal chat (an owner consent, surfaced by its own card). */
   pendingApproval?(chatId: string): boolean;
@@ -128,7 +129,7 @@ function ownerHold(db: Database.Database, runId: string): boolean {
   return typeof row?.paused === "number" && (typeof row.released !== "number" || row.paused > row.released);
 }
 
-function tactics(db: Database.Database, goalId: string, nowMs: number): { tactics: AgiTacticFact[]; blockedNodeId: string | null; readiness?: PlanReadiness } {
+function tactics(db: Database.Database, goalId: string, nowMs: number): { tactics: AgiTacticFact[]; blockedNodeId: string | null; readiness?: PlanReadiness; deadlineAtMs?: number | null } {
   if (!tableExists(db, "goal_plan_nodes") || !tableExists(db, "goal_plan_decisions")) return { tactics: [], blockedNodeId: null };
   const plan = readGoalPlan(goalId, undefined, db);
   if (!plan) return { tactics: [], blockedNodeId: null };
@@ -139,7 +140,7 @@ function tactics(db: Database.Database, goalId: string, nowMs: number): { tactic
   const blocked = db.prepare(`SELECT node_id FROM goal_plan_nodes WHERE goal_id=? AND revision=? AND plan_seq=?
     AND kind='tactic' AND status IN ('active','proposed')
     AND CASE WHEN json_valid(payload_json) THEN json_type(payload_json,'$.guidance')='object' ELSE 0 END ORDER BY ord LIMIT 1`).get(goalId, plan.revision, plan.planSeq) as { node_id: string } | undefined;
-  return { blockedNodeId: blocked?.node_id ?? null, readiness, tactics: plan.tactics.map(t => ({ nodeId: t.id,
+  return { blockedNodeId: blocked?.node_id ?? null, readiness, deadlineAtMs: plan.deadline_at ? Date.parse(plan.deadline_at) : null, tactics: plan.tactics.map(t => ({ nodeId: t.id,
     status: t.status, dependsOn: t.depends_on, readiness: readiness.branches.find(branch => branch.nodeId === t.id) })) };
 }
 
@@ -450,13 +451,18 @@ function currentUnscheduledRest(db: Database.Database, run: AgiGoalRow): { code:
 
 export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): AgiBlockerFacts | null {
   const { db } = deps;
+  // Taken before the read: a time flip that lands while the read runs is still a future instant for the change gate.
+  const readStartMs = deps.nowMs();
   const run = readAgiGoalRow(db, goalId);
   if (!run) return null;
   const signals: AgiBlockerSignal[] = [];
   const refs: string[] = [];
   const heldByOwner = (run.status === "paused" && run.pauseReason === "user") || ownerHold(db, run.id);
+  // The teammate chats are listed once per read (and only when the room itself is idle, as before); the change gate reuses the list.
+  let childIds: readonly string[] | undefined;
+  const children = (): readonly string[] => (childIds ??= run.rootChatId ? deps.childChatIds?.(run.rootChatId) ?? [] : []);
   const busy = run.rootChatId
-    ? deps.chatBusy?.(run.rootChatId) === true || (deps.childChatIds?.(run.rootChatId) ?? []).some((child) => deps.chatBusy?.(child) === true)
+    ? deps.chatBusy?.(run.rootChatId) === true || children().some((child) => deps.chatBusy?.(child) === true)
     : false;
   const terminal = ["completed", "failed", "cancelled", "cancelling"].includes(run.status);
   const latest = goalTurnReceipt(deps, run.id, run.rootChatId);
@@ -522,7 +528,7 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
   const heldBy: AgiBlockerFacts["heldBy"] = terminal || heldByOwner ? undefined : busy ? "chat_busy" : startingUntil !== null ? "host_start" : hostWait ? "host_wait" : undefined;
   // Look again the moment the grace ends (the one-minute beat would otherwise be the first look).
   const nextWakeAtMs = startingUntil !== null && !(wake.nextWakeAtMs! <= startingUntil) ? startingUntil : wake.nextWakeAtMs;
-  return { goalId, chatId: run.rootChatId, ...wake, nextWakeAtMs, ...(heldBy ? { heldBy } : {}),
+  const facts: AgiBlockerFacts = { goalId, chatId: run.rootChatId, ...wake, nextWakeAtMs, ...(heldBy ? { heldBy } : {}),
     fenceState: JSON.stringify([wake.fenceState, latest?.runId ?? null, latest?.status ?? null, plan.readiness?.mutationIdentity ?? null]),
     repairInFlight: busy || isGoalObserving(goalId), runId: run.id, runVersion: run.version, status: busy && !terminal && !heldByOwner ? "running" : run.status,
     pauseReason: run.pauseReason, blockedReason: run.blockedReason,
@@ -531,6 +537,53 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
     signals: current, tactics: plan.tactics, planReadiness: plan.readiness,
     blockedNodeId: plan.blockedNodeId, evidenceRefs: refs, continuationAutomation: hasContinuationAutomation(db, goalId),
     ...(run.rootChatId && deps.teamAvailable ? { teamAvailable: (() => { try { return deps.teamAvailable!(run.rootChatId!); } catch { return true; } })() } : {}) };
+  // For the monitor's change gate (change-gate.ts): when this read may be reused and until when. Lazy, so other readers pay nothing.
+  const readAtMs = readStartMs;
+  noteAgiFactsRecheck(facts, () => ({
+    volatile: busy || isGoalObserving(goalId) || (latest !== null && !SETTLED_RECEIPT_STATUS.has(latest.status))
+      || signals.some(signal => signal.kind === "boundary" && signal.code === "tool_approval_pending"),
+    recheckAtMs: factsRecheckAtMs(db, run, readAtMs, { nextWakeAtMs, refs, deadlineAtMs: plan.deadlineAtMs ?? null, readiness: plan.readiness }),
+    // The inputs a stored fingerprint cannot see: which of the room and its teammate chats run a turn, an observation in flight, an approval.
+    live: () => JSON.stringify([run.rootChatId ? [run.rootChatId, ...children()].map((chat) => deps.chatBusy?.(chat) === true) : [],
+      isGoalObserving(goalId), run.rootChatId ? deps.pendingApproval?.(run.rootChatId) === true : false]),
+  }));
+  return facts;
+}
+
+/** Turn receipt statuses that end a turn. Any other status is a turn in flight (live state a stored fingerprint cannot see). */
+const SETTLED_RECEIPT_STATUS = new Set(["completed", "failed", "refused", "cancelled", "canceled", "aborted", "interrupted", "waiting_input"]);
+/** The signals of the browser ladder and of continuation notices only look back this far (see browserLadderSignal, continuationRefusedSignal). */
+const SIGNAL_LOOKBACK_MS = 24 * 60 * 60_000;
+
+/**
+ * The earliest instant after `nowMs` at which a time-based fact of this read could flip, never later than the floor. Computed from the
+ * facts already read: the next wake (wait due, wallclock deadline, a scheduler slot's miss grace, a scheduled retry, the host start
+ * grace), a deferred branch becoming useful, the plan's deadline, the 24 h lookback of a ladder or continuation signal expiring, and the
+ * episode wait's next check or deadline (the quiet baseline stops applying then).
+ */
+function factsRecheckAtMs(db: Database.Database, run: AgiGoalRow, nowMs: number,
+  input: { nextWakeAtMs: number | undefined; refs: readonly string[]; deadlineAtMs: number | null; readiness: PlanReadiness | undefined }): number {
+  const times: number[] = [nowMs + AGI_RECHECK_FLOOR_MS];
+  const add = (value: unknown) => {
+    const at = typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : Number.NaN;
+    if (Number.isFinite(at) && at > nowMs) times.push(at);
+  };
+  add(input.nextWakeAtMs); add(input.deadlineAtMs);
+  for (const branch of input.readiness?.branches ?? []) add(branch.earliestUsefulAt);
+  try {
+    if (tableExists(db, "run_events")) {
+      for (const ref of input.refs) {
+        const id = ref.startsWith("run_event:") ? ref.slice("run_event:".length) : null;
+        const row = id ? db.prepare("SELECT ts FROM run_events WHERE id = ?").get(id) as { ts: string } | undefined : undefined;
+        if (row) add(Date.parse(row.ts) + SIGNAL_LOOKBACK_MS + 1);
+      }
+    }
+    const wait = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
+      .get(run.id) as { payload_json: string } | undefined;
+    const subscription = wait ? JSON.parse(wait.payload_json)?.subscription : null;
+    if (subscription) { add(subscription.nextCheckAt); add(subscription.deadline); add(subscription.intent?.subject?.notBefore); }
+  } catch { /* a source that cannot be read leaves the floor */ }
+  return Math.min(...times);
 }
 
 /**

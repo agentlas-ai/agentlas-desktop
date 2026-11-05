@@ -614,7 +614,9 @@ const PORTS: PortDefinition[] = [
       if (!skill) return refused("skill_not_found", "skill.search lists readable skills");
       const expected = str(args.skillRevision);
       if (expected && expected !== skill.revision) return refused("skill_revision_changed", `current revision ${skill.revision}`);
-      return ok({ skillId: str(args.skillId), revision: skill.revision, content: skill.content });
+      // The one step that makes it count for this run: skill.activate with this exact revision (required).
+      return ok({ skillId: str(args.skillId), revision: skill.revision, content: skill.content,
+        next: `follow it now; harness_call skill.activate {"skillId":"${str(args.skillId)}","skillRevision":"${skill.revision}"} records it for this run` });
     },
   },
   {
@@ -622,7 +624,7 @@ const PORTS: PortDefinition[] = [
     handler: async (args, ctx) => {
       const skillId = str(args.skillId);
       const skill = await readSkill(skillId);
-      if (!skill) return refused("skill_not_found");
+      if (!skill) return refused("skill_not_found", "skill.search lists readable skills");
       if (str(args.skillRevision) !== skill.revision) return refused("skill_revision_changed", `read it again with skill.read (current ${skill.revision})`);
       if (ctx.dryRun) return refused("dry_run");
       const activationId = `act_${randomUUID()}`;
@@ -655,7 +657,7 @@ const PORTS: PortDefinition[] = [
     // `next` names the one step that lists the connector's tools in this turn (tool.describe live), which tool.call then needs.
     handler: async (args) => { const row = await findConnector(args); return row ? ok({ ...row, auth: await connectorAuth(row, "discovery"),
       ...(row.enabled ? { next: `harness_call tool.describe with {"toolId":"${row.catalogId ?? row.serverId}","live":true} lists its tools; then tool.call` } : {}) })
-      : refused("connector_not_installed", "tool.search lists catalog connectors"); },
+      : refused("connector_not_installed", "no installed connector has this id; harness_search lists the installed ones (installing one is the owner's choice)"); },
   },
   {
     operationId: "connector.status", kind: "query", purpose: "Read MCP definition or stored connection observation; no live probe.", required: ["connectionId"],
@@ -670,7 +672,14 @@ const PORTS: PortDefinition[] = [
       const registry = await import("../mcp-tools/registry");
       let server = registry.listInstalledServers().find((row) => row.id === ref || row.catalogId === ref) ?? null;
       if (!server) {
-        try { server = registry.installFromCatalog(ref); } catch { return refused("connector_not_in_catalog", "tool.search lists catalog connectors"); }
+        // Installing is the owner's choice: a connector that is not installed yet is installed only after the owner presses Allow on
+        // the approval card in this conversation (the same card every tool approval uses). No answer or Deny installs nothing.
+        const entry = (await import("../mcp-tools/catalog")).getCatalogEntry(ref);
+        if (!entry) return refused("connector_not_in_catalog", "no installed or catalog connector has this id; harness_search lists the installed ones");
+        if (!await ownerApprovesInstall(entry.nameEn || entry.name || ref, ref, ctx)) {
+          return refused("install_not_approved", `the owner did not approve installing ${entry.nameEn || entry.name || ref}; continue without it or ask the owner`);
+        }
+        try { server = registry.installFromCatalog(ref); } catch { return refused("connector_not_in_catalog", "no installed or catalog connector has this id; harness_search lists the installed ones"); }
       }
       if (!server.enabled) {
         // A local process that no first-party catalog entry vouches for (the Hub bridge parks these off as needs-approval, an import
@@ -1082,6 +1091,11 @@ const PORTS: PortDefinition[] = [
         requestedTool = row && named ? named[2] : null;
       }
       const dispatch = await waitForAbort(ctx.signal, import("./tool-dispatch"));
+      // A catalog connector named by its installed server id (harness_search returns connector:<serverId>) is that catalog row.
+      if (!row) {
+        const byServer = await waitForAbort(ctx.signal, dispatch.findServer(id));
+        if (byServer?.catalogId) row = rows.find((item) => item.providerRef === byServer.catalogId);
+      }
       if (!row) {
         // A connector the owner registered by hand has no catalog entry, but it is installed: describe it by its connector id, so
         // a turn that was not handed it before the run can still read its tools and call one (tool.call resolves it the same way).
@@ -1094,7 +1108,7 @@ const PORTS: PortDefinition[] = [
           ...(live?.ok ? { tools: live.tools.map(({ name, description, schemaDigest, inputSchema }) => ({ name, description, schemaDigest, inputSchema,
             call: { operation: "tool.call", args: { toolId: name, providerRef: custom.id, schemaDigest, arguments: {} } } })) }
             : live ? { liveState: live.code } : {}),
-          next: custom.enabled ? (live?.ok ? "harness_call a tool's `call` with its arguments filled in" : "describe with live: true, then tool.call with providerRef + schemaDigest") : "connector.connect" });
+          next: custom.enabled ? (live?.ok ? "harness_call a tool's `call` with its arguments filled in" : `harness_call tool.describe {"toolId":"${custom.id}","live":true} lists its tools, each with its exact tool.call`) : "connector.connect" });
       }
       // A host-channel built-in exists for this call only through the calling run's sealed binding (no launch here).
       const installed = row.enabled ? await waitForAbort(ctx.signal, dispatch.findServer(row.providerRef)) : null;
@@ -1115,7 +1129,9 @@ const PORTS: PortDefinition[] = [
         ...(live?.ok ? { tools: live.tools.map(({ name, description, schemaDigest, inputSchema }) => ({ name, description, schemaDigest, inputSchema,
           call: { operation: "tool.call", args: { toolId: name, providerRef: row.providerRef, schemaDigest, arguments: {} } } })) }
           : live ? { liveState: live.code } : {}),
-        next: row.enabled ? "call it by its MCP tool name, or describe with live: true and tool.call with providerRef + schemaDigest" : "connector.connect" });
+        next: !row.enabled ? "connector.connect" : live?.ok ? "harness_call a tool's `call` with its arguments filled in"
+          : bound?.ok && bound.prepared ? "it is in this run's tool list: call it by its MCP tool name"
+          : `harness_call tool.describe {"toolId":"${row.providerRef}","live":true} lists its tools, each with its exact tool.call` });
     },
   },
   { operationId: "tool.call", kind: "job", purpose: "Dispatch once through policy/auth/current binding and preserve exact result.", required: ["toolId", "providerRef", "schemaDigest", "arguments"], handler: async (args, ctx) => (await import("./tool-dispatch")).TOOL_PORT_HANDLERS["tool.call"](args, ctx) },
@@ -1513,7 +1529,15 @@ const HARNESS_ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, 
   "turn.status": { threadId: ["chatId", "conversationId"] },
   "turn.interrupt": { threadId: ["chatId", "conversationId"] },
   "turn.start": { threadId: ["chatId", "conversationId"] },
-  "result.read": { resultRef: ["ref", "result", "resultId"] },
+  "result.read": { resultRef: ["ref", "result", "resultId", "callId"] },
+  // connector.connect returns connectionId; the connector ports name the same row connectorId or connectionId (findConnector reads both).
+  "connector.describe": { connectorId: ["connectionId", "id"] },
+  "connector.connect": { connectorId: ["connectionId", "id"] },
+  "connector.status": { connectionId: ["connectorId", "id"] },
+  "connector.disconnect": { connectionId: ["connectorId", "id"] },
+  "auth.status": { connectionId: ["connectorId", "id"] },
+  "auth.logout": { connectionId: ["connectorId", "id"] },
+  "auth.cancel": { connectionId: ["connectorId"] },
   "tool.describe": { toolId: ["providerRef", "provider"] },
 };
 /** Reads whose thread defaults to the conversation the call is made from. */
@@ -1654,6 +1678,18 @@ async function callHarnessPortUnworded(operationId: string, rawArgs: Record<stri
 }
 
 export type HarnessItemKind = "plugin" | "skill" | "connector" | "tool" | "operation" | "feature";
+
+/** The owner's Allow on an install card in the calling conversation; false when there is no conversation, on Deny, or when it expires. */
+async function ownerApprovesInstall(name: string, catalogId: string, ctx: HarnessCallContext): Promise<boolean> {
+  if (!ctx.chatId || ctx.chatId === "ui") return false;
+  try {
+    const { requestToolApproval } = await import("../runtime/tool-approval");
+    const outcome = await requestToolApproval({ sessionKey: `install:${ctx.chatId}:${catalogId}`, runtime: "agentlas", tool: `Install ${name}`,
+      detail: `Install the ${name} connector (${catalogId}) from the Agentlas catalog so this task can use it.`, chatId: ctx.chatId,
+      capability: "other", ...(ctx.signal ? { signal: ctx.signal } : {}) });
+    return outcome.decision !== "deny";
+  } catch { return false; }
+}
 
 /** Unified inert discovery across plugins, skills, connectors, catalog tools and the port operations themselves. */
 /** App catalog paths (automations.listRuns, …) that answer a query; empty when none or the catalog is unreachable. */

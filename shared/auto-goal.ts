@@ -2,6 +2,13 @@ import { copyGoalExecutionObligations, type GoalExecutionObligations } from "./g
 /** Goal model only. Adapters own intent classification, authority and scheduling. */
 export const AUTO_GOAL_SCHEMA = "agentlas.auto-goal.v1" as const;
 
+/** A Goal the host admitted from one owner message has the id `goal:auto-message:<messageId>`; this is the only spelling. */
+export const AUTO_MESSAGE_GOAL_PREFIX = "goal:auto-message:" as const;
+export function autoMessageGoalId(sourceMessageId: string): string { return `${AUTO_MESSAGE_GOAL_PREFIX}${sourceMessageId}`; }
+export function isAutoMessageGoalId(goalId: string | null | undefined): goalId is string {
+  return typeof goalId === "string" && goalId.startsWith(AUTO_MESSAGE_GOAL_PREFIX);
+}
+
 /** Goal lifetime, not an episode budget or permission to perform effects. */
 export type GoalLifecycle = "finite" | "ongoing";
 

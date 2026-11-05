@@ -1084,16 +1084,19 @@ export function consolidateSplitAutoExperiencePacks(db: Database.Database): {
 
 const MANAGED_MIGRATION_BACKUP_SCHEMA = "agentlas.managed-migration-backup.v1";
 /**
- * How many managed DB-upgrade copies stay beside the live store. One: the newest, which is the rollback material of the
- * last migration. Three copies held ~8.6 GB beside a 3.4 GB store on the owner's Mac ; every extra copy is a
- * full VACUUM INTO image of the store.
- *
- * Kept safe at one because pruning is gated twice in pruneManagedMigrationBackups: an older copy goes only after its
- * target schema exists in the live store (so a failed migration keeps its copy, and while any copy is still ahead of the
- * live schema the whole set stays), and only after the integrity checks of the live store and of the copy that stays.
- * Exported so the private gates read the number from the compiled dist instead of pinning it.
+ * How many managed DB-upgrade copies stay beside the live store once their migration has landed: none. Each copy is a full
+ * VACUUM INTO image of the store, as large as the store itself, and nothing reads it after a successful upgrade (the updater
+ * never restores from it). A copy whose target schema is not yet in the live store (a failed or interrupted migration) is
+ * still kept by pruneManagedMigrationBackups, and the storage pass removes the others only after the live store passes its
+ * integrity checks. Exported so the private gates read the number from the compiled dist instead of pinning it.
  */
-export const MAX_MANAGED_MIGRATION_BACKUPS = 1;
+export const MAX_MANAGED_MIGRATION_BACKUPS = 0;
+/**
+ * The first ladder step that is atomic. From here on every step runs in its own transaction or is a single idempotent
+ * CREATE ... IF NOT EXISTS / INSERT OR IGNORE, so a failed step rolls back and the next start retries from the stored
+ * user_version. Only a store older than this walks steps that can stop half way, and only then is a pre-upgrade copy taken.
+ */
+const FIRST_ATOMIC_MIGRATION_STEP = 110;
 const MIGRATION_BACKUP_TAG_RE = /^(?:pre-upgrade-v[1-9]\d*|v102-seats|v103-seat-session)$/;
 
 function migrationBackupFingerprint(file: string): MigrationBackupFingerprint {
@@ -1162,7 +1165,7 @@ export function managedMigrationBackupsOverCap(source: string): boolean {
  * update launch's install journal or a follower open always stopped it, so the
  * cap never held (7 copies, 8.3 GB). The install journal is not a
  * reason to keep these copies: the updater restores from updater/recovery and
- * never reads them, and the newest MAX_MANAGED_MIGRATION_BACKUPS (one) always stays. */
+ * never reads them. A copy still ahead of the live schema always stays. */
 export function pruneManagedMigrationBackups(db: Database.Database, currentBackup: string | null): ManagedMigrationBackupPruneOutcome {
   const result: ManagedMigrationBackupPruneOutcome = { removed: 0, bytes: 0, skipped: "none" };
   const skip = (skipped: ManagedMigrationBackupSkip): ManagedMigrationBackupPruneOutcome => ({ ...result, skipped });
@@ -1210,7 +1213,7 @@ export function pruneManagedMigrationBackups(db: Database.Database, currentBacku
     }
     const candidates = copies.filter((copy) => copy.file !== currentBackup)
       .sort((a, b) => b.createdAt - a.createdAt || b.file.localeCompare(a.file))
-      .slice(currentBackup ? MAX_MANAGED_MIGRATION_BACKUPS - 1 : MAX_MANAGED_MIGRATION_BACKUPS);
+      .slice(currentBackup ? Math.max(0, MAX_MANAGED_MIGRATION_BACKUPS - 1) : MAX_MANAGED_MIGRATION_BACKUPS);
     if (candidates.length === 0) return result;
     const kept = copies.filter((copy) => !candidates.includes(copy));
     // Complete preflight before deleting anything. Read failures or corruption
@@ -1268,6 +1271,7 @@ export function pruneManagedMigrationBackups(db: Database.Database, currentBacku
 }
 
 function backupDatabaseFile(db: Database.Database, tag: string): string | null {
+  let partial: string | null = null;
   try {
     const source = db.name;
     if (!source || source === ":memory:") return null;
@@ -1291,7 +1295,9 @@ function backupDatabaseFile(db: Database.Database, tag: string): string | null {
     // no checkpoint is needed. It must not run inside a transaction — callers
     // take the backup before they open theirs. Gate:
     // scripts/store-sidecar-lock-safety-contract.cjs (probes the fcntl locks).
+    partial = target;
     db.prepare("VACUUM INTO ?").run(target);
+    partial = null;
     hardenStoreFile(target);
     if (managed) {
       try {
@@ -1308,6 +1314,10 @@ function backupDatabaseFile(db: Database.Database, tag: string): string | null {
     }
     return target;
   } catch {
+    // A copy cut off half way (a full disk) is not rollback material; leaving it would hold the whole managed set.
+    if (partial) for (const file of [partial, `${partial}-wal`, `${partial}-shm`, `${partial}-journal`]) {
+      try { fs.rmSync(file, { force: true }); } catch { /* best effort */ }
+    }
     return null;
   }
 }
@@ -1790,8 +1800,9 @@ export function initStore(options: StoreInitOptions = {}): void {
   // 무엇 때문에 멈췄고 사본이 어디 있는지 말한다. 조용한 영구 실패를 없애는 것이 목적이지
   // 실패 자체를 삼키는 것이 아니다 — 게이트: `npm run test:ancient-schema-ladder`.
   let upgradeBackupPath: string | null = null;
-  if (userVersion > 0 && userVersion < SCHEMA_VERSION) {
+  if (userVersion > 0 && userVersion < FIRST_ATOMIC_MIGRATION_STEP) {
     upgradeBackupPath = backupDatabaseFile(_db, `pre-upgrade-v${userVersion}`);
+    if (!upgradeBackupPath) console.warn(`[store] schema ${userVersion} walks non-atomic upgrade steps and its pre-upgrade copy could not be taken (disk space?); upgrading without it`);
   }
   try {
 
@@ -7325,12 +7336,20 @@ export function initStore(options: StoreInitOptions = {}): void {
         `schema ${userVersion} → ${SCHEMA_VERSION} upgrade stopped — ${reason}`,
       )}` +
         (upgradeBackupPath
-          ? L(` (승급 직전 사본: ${upgradeBackupPath})`, ` (copy taken right before the upgrade: ${upgradeBackupPath})`)
-          : "") +
-        L(
-          " · user_version 은 그대로라 다음 실행도 같은 지점에서 멈춥니다. 사본으로 되돌린 뒤 보고해 주세요.",
-          " · user_version was not advanced, so the next run will stop at the same point. Restore from the copy, then report this.",
-        ),
+          ? L(` (승급 직전 사본: ${upgradeBackupPath})`, ` (copy taken right before the upgrade: ${upgradeBackupPath})`) +
+            L(
+              " · user_version 은 그대로라 다음 실행도 같은 지점에서 멈춥니다. 사본으로 되돌린 뒤 보고해 주세요.",
+              " · user_version was not advanced, so the next run will stop at the same point. Restore from the copy, then report this.",
+            )
+          : userVersion >= FIRST_ATOMIC_MIGRATION_STEP
+            ? L(
+              " · 멈춘 단계는 되돌려졌고 기존 데이터는 그대로입니다. 다음 실행에서 이 단계를 다시 시도합니다. 계속 멈추면 보고해 주세요.",
+              " · The stopped step was rolled back and existing data is unchanged. The next start tries this step again; report this if it keeps stopping.",
+            )
+            : L(
+              " · user_version 은 그대로라 다음 실행도 같은 지점에서 멈춥니다. 보고해 주세요.",
+              " · user_version was not advanced, so the next run will stop at the same point. Please report this.",
+            )),
       { cause: error instanceof Error ? error : undefined },
     );
   }

@@ -1,4 +1,4 @@
-import { AUTO_GOAL_SCHEMA, resolveGoalLifecycle, type GoalRevision } from "../../shared/auto-goal";
+import { AUTO_GOAL_SCHEMA, autoMessageGoalId, resolveGoalLifecycle, type GoalRevision } from "../../shared/auto-goal";
 import { buildAutomaticGoalCriteria } from "../../shared/automatic-goal-criteria";
 import { getDb } from "../store/db";
 
@@ -34,7 +34,7 @@ export function automaticCriterionPolicy(goal: GoalRevision): AutomaticCriterion
   try {
     if (goal.schemaVersion !== AUTO_GOAL_SCHEMA || goal.revision !== 1 || goal.parentRevision !== null
       || goal.reason !== "initial_execution_request" || goal.originalRequest?.role !== "user"
-      || goal.goalId !== `goal:auto-message:${goal.originalRequest.messageId}`
+      || goal.goalId !== autoMessageGoalId(goal.originalRequest.messageId)
       || goal.chatId !== goal.originalRequest.chatId || !goal.originalRequest.text?.trim()
       || canonical(goal.originalRequest) !== canonical(goal.sourceMessage)
       || goal.objective !== goal.originalRequest.text) return null;

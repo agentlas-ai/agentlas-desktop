@@ -1,5 +1,5 @@
 import type { RuntimeSelection, ChatHistoryEntry, ImageAttachment } from "./types";
-import { endsWithQuietMarker } from "./agent-control-markers";
+import { endsWithQuietMarker, stripAgentControlMarkers } from "./agent-control-markers";
 import type { OneBubbleColor } from "./one-profile";
 import type { SupervisorControlProgress, SupervisorJournalInput, SupervisorJournalPage, SupervisorRuntimeOwner, SupervisorStopInput } from "./one-supervisor-runtime";
 
@@ -110,7 +110,17 @@ export interface OneSupervisorSnapshot {
   checkins?: OneCheckin[];
 }
 export interface SupervisorSendInput { commandId: string; text: string; runtimeSelection?: RuntimeSelection; oneId?:string; permissions?:"read"|"write"|"full"; images?:ImageAttachment[]; fileGroupId?:string }
-export interface SupervisorWorkInput extends SupervisorSendInput { projectId?: string; permissions?: "read" | "write" | "full"; budgetId?:string }
+export interface SupervisorWorkInput extends SupervisorSendInput { projectId?: string; permissions?: "read" | "write" | "full"; budgetId?:string;
+  /** What must be true when the work is finished, one checkable item each: handed to Work with the brief and to One's review. */
+  doneWhen?: string[] }
+export const SUPERVISOR_DONE_WHEN_LIMITS = { items: 8, chars: 240 } as const;
+/** Lenient by design: a hand-off never fails over its checklist. Non-strings and blanks drop, items are cut, the first 8 stay. */
+export function supervisorDoneWhen(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter((item): item is string => typeof item === "string").map((item) => item.replace(/\s+/g, " ").trim())
+    .filter(Boolean).map((item) => item.slice(0, SUPERVISOR_DONE_WHEN_LIMITS.chars)).slice(0, SUPERVISOR_DONE_WHEN_LIMITS.items);
+  return items.length ? items : undefined;
+}
 export interface SupervisorScienceInput { commandId: string; text: string; projectId: string; oneId?:string }
 /**
  * One speaks first only when it matters (dots parity, owner 2026-10-04). A host-started One turn — a finished
@@ -119,8 +129,16 @@ export interface SupervisorScienceInput { commandId: string; text: string; proje
  */
 export const ONE_QUIET_REPLY = "[quiet]" as const;
 /** A reply that ends with the marker is quiet even after a progress preamble (shared/agent-control-markers.ts). */
+/**
+ * One chose to say nothing: the reply ends with the quiet marker and what comes before it is at most a short progress line
+ * (a model's "checking the run…" preamble). A real report that happens to end with the marker is not dropped: it is shown
+ * without the marker, because losing a result the owner needed is worse than one extra line.
+ */
+export const ONE_QUIET_PREAMBLE_MAX_CHARS = 240;
 export function isOneQuietReply(text: string): boolean {
-  return endsWithQuietMarker(text);
+  if (!endsWithQuietMarker(text)) return false;
+  const before = stripAgentControlMarkers(text).trim();
+  return before.length <= ONE_QUIET_PREAMBLE_MAX_CHARS && before.split(/\n/u).filter((line) => line.trim()).length <= 1;
 }
 
 /** A check-in the owner asked One to run on its own: every N minutes, or daily at a local HH:MM. */

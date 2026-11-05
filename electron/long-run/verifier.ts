@@ -784,23 +784,28 @@ export type GoalConversationEntry = { ref: string | null; role: "assistant" | "o
 const GOAL_CONVERSATION_MAX_ENTRIES = 12;
 export function goalConversationExchange(chatId: string, goalBinding: { goalId: string; revision: number },
   currentRunId: string): GoalConversationEntry[] {
+  // Only the newest GOAL_CONVERSATION_MAX_ENTRIES of the exchange are kept, so each side is read newest first and stops
+  // once it has that many: the newest N of the merge are always among the newest N of each side (same result, no full scan).
   const runs = getDb().prepare(`SELECT a.invocation_run_id AS id, MIN(a.started_at) AS started FROM long_run_worker_attempts a
     JOIN long_runs r ON r.id = a.run_id WHERE r.goal_id = ? AND a.invocation_run_id IS NOT NULL
-    GROUP BY a.invocation_run_id ORDER BY started`).all(goalBinding.goalId) as Array<{ id: string }>;
-  const entries: GoalConversationEntry[] = [];
+    GROUP BY a.invocation_run_id ORDER BY started DESC`).all(goalBinding.goalId) as Array<{ id: string }>;
+  const replies: GoalConversationEntry[] = [];
   for (const { id } of runs) {
+    if (replies.length >= GOAL_CONVERSATION_MAX_ENTRIES) break;
     if (id === currentRunId || !invocationMatchesGoalRevision(id, goalBinding.goalId, goalBinding.revision)) continue;
     const prior = getInvocationRunReceipt(id);
     if (prior?.status !== "completed" || prior.chatId !== chatId) continue;
     const reply = exactRunAssistantResult(chatId, id);
-    if (reply?.text.trim()) entries.push({ ref: `chat-message:${reply.id}`, role: "assistant", createdAt: reply.createdAt, text: reply.text });
+    if (reply?.text.trim()) replies.push({ ref: `chat-message:${reply.id}`, role: "assistant", createdAt: reply.createdAt, text: reply.text });
   }
+  const entries: GoalConversationEntry[] = replies.reverse();
   const origin = getChatGoalRevision(goalBinding.goalId)?.originalRequest?.messageId;
   const since = origin ? (getDb().prepare("SELECT created_at FROM chat_messages WHERE id = ? AND chat_id = ?")
     .get(origin, chatId) as { created_at: string } | undefined)?.created_at : undefined;
   if (since) {
-    const owner = getDb().prepare(`SELECT id, text, created_at FROM chat_messages WHERE chat_id = ? AND role = 'user'
-      AND created_at > ? AND id <> ? ORDER BY created_at, rowid`).all(chatId, since, origin) as Array<{ text: string; created_at: string }>;
+    const owner = (getDb().prepare(`SELECT id, text, created_at FROM chat_messages WHERE chat_id = ? AND role = 'user'
+      AND created_at > ? AND id <> ? AND trim(text) <> '' ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+      .all(chatId, since, origin, GOAL_CONVERSATION_MAX_ENTRIES) as Array<{ text: string; created_at: string }>).reverse();
     for (const row of owner) if (row.text.trim()) entries.push({ ref: null, role: "owner", createdAt: row.created_at, text: row.text });
   }
   return entries.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-GOAL_CONVERSATION_MAX_ENTRIES);

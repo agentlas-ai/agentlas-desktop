@@ -868,8 +868,7 @@ export function OneTurnWork({
               <span className={styles.rowText}><span className={styles.notice} data-level="error">{terminalFailureCopy(presentation.terminalErrorCode, locale)}</span></span>
               <IconChevronDown size={12} aria-hidden="true" />
             </summary>
-            <div style={{ padding: "6px 0 0 22px", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12, color: "var(--muted-deep)" }}>
-              {presentation.terminalErrorCode && <code>{presentation.terminalErrorCode}</code>}
+            <div data-error-code={presentation.terminalErrorCode || undefined} style={{ padding: "6px 0 0 22px", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12, color: "var(--muted-deep)" }}>
               <div>{presentation.terminalMessage}</div>
             </div>
           </details>

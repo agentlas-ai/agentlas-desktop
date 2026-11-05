@@ -97,10 +97,33 @@ interface LiveCall { record: CallRecord; controller: AbortController; done: Prom
 const live = new Map<string, LiveCall>();
 
 const CALL_ID = /^(?:tc|np)_[0-9a-f-]{36}$/;
+
+/**
+ * A callId that is not one: a run's id goes to the run's receipt. In production a model asked tool.result for eight run ids in a
+ * row (15 runs, 43 refusals in a week), each refused "callId comes from tool.call" with no way to the run it wanted.
+ */
+function notACallId(callId: string): PortOutcome {
+  if (callId && runIdKnown(callId)) {
+    return refused("not_a_tool_call", `${callId} is a run id, not a tool.call callId; read that run with harness_call app.call {"operation":"invoke.receipt","args":{"runId":"${callId}"}}`);
+  }
+  return refused("invalid-input", "callId comes from tool.call");
+}
+function runIdKnown(id: string): boolean {
+  if (!/^[A-Za-z0-9_-]{8,80}$/.test(id)) return false;
+  try {
+    const { getDb } = require("../store/db") as typeof import("../store/db");
+    const db = getDb();
+    if (db.prepare("SELECT 1 FROM run_events WHERE run_id = ? LIMIT 1").get(id)) return true;
+    // A long run's id (run_…): invoke.receipt reads its latest invocation.
+    try { return Boolean(db.prepare("SELECT 1 FROM long_run_worker_attempts WHERE run_id = ? LIMIT 1").get(id)); } catch { return false; }
+  } catch { return false; }
+}
+// tool.call returns callId (tc_…) and resultRef (result:tc_…); each reader takes either, so an echoed id is never refused for its prefix.
 const refToCallId = (ref: string): string | null => {
-  const id = ref.startsWith("result:") ? ref.slice(7) : "";
+  const id = ref.startsWith("result:") ? ref.slice(7) : ref;
   return CALL_ID.test(id) ? id : null;
 };
+const callIdOf = (value: unknown): string => { const raw = str(value); return refToCallId(raw) ?? raw; };
 
 async function storeDir(): Promise<string> {
   const { userDataPath } = await import("../runtime-paths");
@@ -154,6 +177,7 @@ const view = (record: CallRecord) => ({
   settledAt: record.settledAt,
   cancelRequested: record.cancelRequested,
   ...(record.error ? { error: record.error } : {}),
+  ...(!TERMINAL.has(record.state) ? { next: `still ${record.state}: harness_call tool.result {"callId":"${record.callId}"} reads it again; tool.cancel stops it` } : {}),
   ...(record.state === "dispatch-unsettled" ? { note: "the request may or may not have taken effect on the provider; check the provider's own state before any retry" } : {}),
   ...(record.result ? { redacted: record.result.redacted === true, preview: record.result.text.slice(0, 4000), previewTruncated: record.result.text.length > 4000, isError: record.result.isError, artifacts: record.result.artifacts.map(({ index, mimeType, bytes }) => ({ index, mimeType, bytes })) } : {}),
 });
@@ -412,7 +436,7 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
   if (!tool) {
     // A misspelled tool name names the closest one the connector lists now (names tool.describe shows); it is never called instead.
     const near = didYouMean(toolName, inventory.tools.map((item) => item.name));
-    return refused("stale-binding", `the connector no longer lists ${toolName}; tool.describe for the current tools${near ? `.${near}` : ""}`);
+    return refused("stale-binding", `the connector does not list ${toolName}; harness_call tool.describe {"toolId":"${providerRef}","live":true} lists its tools now${near ? `.${near}` : ""}`);
   }
   if (tool.schemaDigest !== schemaDigest) return refused("stale-schema", `current schemaDigest is ${tool.schemaDigest}; re-read the schema before calling`);
   if (ctx.signal?.aborted) return stoppedBeforeSend();
@@ -464,8 +488,8 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
 // ── tool.result / tool.cancel / tool.subscribe ───────────────────────────────────────────────────────────────────────
 
 export async function toolResult(args: Args, ctx: HarnessCallContext): Promise<PortOutcome> {
-  const callId = str(args.callId);
-  if (!CALL_ID.test(callId)) return refused("invalid-input", "callId comes from tool.call");
+  const callId = callIdOf(args.callId);
+  if (!CALL_ID.test(callId)) return notACallId(callId);
   const owner = retainedCallOwner(args, ctx);
   if ("reason" in owner) return refused(owner.reason);
   const record = await loadRecord(callId, owner.chatId, ctx);
@@ -473,8 +497,8 @@ export async function toolResult(args: Args, ctx: HarnessCallContext): Promise<P
 }
 
 export async function toolCancel(args: Args, ctx: HarnessCallContext): Promise<PortOutcome> {
-  const callId = str(args.callId);
-  if (!CALL_ID.test(callId)) return refused("invalid-input", "callId comes from tool.call");
+  const callId = callIdOf(args.callId);
+  if (!CALL_ID.test(callId)) return notACallId(callId);
   if (ctx.dryRun) return refused("dry_run", "a dry run cancels nothing");
   const owner = retainedCallOwner(args, ctx);
   if ("reason" in owner) return refused(owner.reason);
@@ -496,9 +520,10 @@ export async function toolCancel(args: Args, ctx: HarnessCallContext): Promise<P
 }
 
 export async function toolSubscribe(args: Args, ctx: HarnessCallContext): Promise<PortOutcome> {
-  const callId = str(args.callId);
+  const callId = callIdOf(args.callId);
   const after = Number(args.afterSequence);
-  if (!CALL_ID.test(callId) || !Number.isInteger(after) || after < 0) return refused("invalid-input", "callId and afterSequence (integer >= 0)");
+  if (!CALL_ID.test(callId)) return notACallId(callId);
+  if (!Number.isInteger(after) || after < 0) return refused("invalid-input", "callId and afterSequence (integer >= 0)");
   const owner = retainedCallOwner(args, ctx);
   if ("reason" in owner) return refused(owner.reason);
   const record = await loadRecord(callId, owner.chatId, ctx);

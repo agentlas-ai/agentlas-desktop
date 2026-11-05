@@ -28,6 +28,18 @@ export function scienceRequestId(commandId:string):string {
   return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
 }
 
+/**
+ * True when a failed Science start is known not to have started anything: this adapter refused before it sent composer.start (no such
+ * project or conversation), or the daemon client says the command never went on the wire. Anything else (a lost reply, a remote
+ * rejection that may carry receipts) is unknown and stays held, where a turn that did start is still paired by its request id.
+ */
+export function scienceStartNotSent(error:unknown):boolean {
+  const failure=(error as {failure?:{outcome?:unknown}}|null)?.failure;
+  if (failure?.outcome==="not-dispatched") return true;
+  const code=(error as {code?:unknown}|null)?.code;
+  return code==="supervisor_science_project_missing" || code==="supervisor_science_conversation_missing" || code==="supervisor_open_science_conversation_first";
+}
+
 /** Observed native service only: discovery never boots Science or duplicates its executor. */
 const SCIENCE_OBSERVATION_IN_FLIGHT=4;
 
@@ -93,6 +105,40 @@ export class SupervisorScienceAdapter {
   private forget(projectId:string,conversationId:string):void {
     const observation=this.lastProjectObservation.get(projectId);
     if (observation) observation.turns=observation.turns.filter(turn=>turn.conversationId!==conversationId);
+  }
+  /** One turn as the supervisor keeps it: its task, and whether the SDK has finished with it. */
+  private turnEntry(projectId:string,conversationId:string,title:string,turn:Row,messages:Row[]):CachedTurn {
+    const active=["queued","running","cancelling"].includes(id(turn.status));
+    const result=messages.find(message=>message.role==="assistant" && message.visibility==="visible" && message.id===turn.assistantMessageId);
+    return {projectId,conversationId,turnId:id(turn.id),runId:id(turn.invocationRunId),rawRunId:turn.invocationRunId,final:FINAL_TURN_STATES.includes(id(turn.status)),
+      task:{taskId:`science-turn:${id(turn.id)}`,surface:"science",title,
+        chatId:null,projectId,runId:id(turn.invocationRunId)||null,state:id(turn.status),controlVersion:supervisorHash([turn.id,turn.status,turn.updatedAt]),
+        observedAt:id(turn.updatedAt)||new Date().toISOString(),owner:"science-daemon",controls:active ? (turn.status==="cancelling" ? [] : ["steer","cancel"]) : [],
+        result:id(result?.content)||null,resultVerified:false,sourceCommandId:id(turn.requestId)||null}};
+  }
+  /**
+   * A turn the snapshot's per-conversation read did not show: a follow-up turn (steering or loop continuation) can start within
+   * milliseconds of the one One started, and composer.attach gives only the active turn, else the newest. Read by its id, in the named
+   * conversation or in each of the project's first few; null when none has it. A transport failure throws (the caller backs off).
+   */
+  async turn(input:{projectId:string;turnId:string;conversationId?:string}):Promise<SupervisorTask|null> {
+    const deadline=performance.now()+2_000;
+    const observe=(command:DaemonScienceCommand)=>this.client.commandObserved(command,{observationDeadlineMs:deadline});
+    const listed=rows(await observe({op:"conversations.list",input:{projectId:input.projectId}})).filter(conversation=>id(conversation.id) && (!input.conversationId || id(conversation.id)===input.conversationId)).slice(0,4);
+    const read=await Promise.allSettled(listed.map(async conversation=>({conversation,turn:row(await observe({op:"composer.receipt",input:{projectId:input.projectId,conversationId:id(conversation.id),turnId:input.turnId}}))})));
+    const hit=read.flatMap(outcome=>outcome.status==="fulfilled" && id(outcome.value.turn.id)===input.turnId ? [outcome.value] : [])[0];
+    if (!hit) {
+      const failed=read.find((outcome):outcome is PromiseRejectedResult=>outcome.status==="rejected" && !(outcome.reason instanceof Error && /science-turn-not-found/.test(outcome.reason.message)));
+      if (failed) throw failed.reason;
+      return null;
+    }
+    const conversationId=id(hit.conversation.id);
+    // The result text is only read once the turn is over.
+    const final=FINAL_TURN_STATES.includes(id(hit.turn.status));
+    const messages=final ? rows(await observe({op:"messages.list",input:{projectId:input.projectId,conversationId}})) : [];
+    const entry=this.turnEntry(input.projectId,conversationId,id(hit.conversation.title)||"Science",hit.turn,messages);
+    this.targets.set(entry.task.taskId,{projectId:input.projectId,conversationId,turnId:entry.turnId});
+    return {...entry.task,controls:[...entry.task.controls]};
   }
   private command(command:DaemonScienceCommand):Promise<unknown> {
     return this.client.commandObserved(command,{timeoutMs:3_000});
@@ -166,13 +212,7 @@ export class SupervisorScienceAdapter {
         if (observed.cached) entry=observed.cached;
         else {
           const {turn,messages}=observed;
-          const active=["queued","running","cancelling"].includes(id(turn.status));
-          const result=messages.find(message=>message.role==="assistant" && message.visibility==="visible" && message.id===turn.assistantMessageId);
-          entry={projectId,conversationId,turnId:id(turn.id),runId:id(turn.invocationRunId),rawRunId:turn.invocationRunId,final:FINAL_TURN_STATES.includes(id(turn.status)),
-            task:{taskId:`science-turn:${id(turn.id)}`,surface:"science",title,
-              chatId:null,projectId,runId:id(turn.invocationRunId)||null,state:id(turn.status),controlVersion:supervisorHash([turn.id,turn.status,turn.updatedAt]),
-              observedAt:id(turn.updatedAt)||new Date().toISOString(),owner:"science-daemon",controls:active ? (turn.status==="cancelling" ? [] : ["steer","cancel"]) : [],
-              result:id(result?.content)||null,resultVerified:false,sourceCommandId:id(turn.requestId)||null}};
+          entry=this.turnEntry(projectId,conversationId,title,turn,messages);
         }
         entries.push(entry);
         // A cached turn still registers its control target, bound to the loop of this snapshot exactly as a fresh one is.
@@ -211,7 +251,7 @@ export class SupervisorScienceAdapter {
     if (!id(conversation?.id)) throw supervisorError('supervisor_open_science_conversation_first');
     let result:Row;
     try {
-      result=row(await this.command({op:"composer.start",input:{requestId:input.commandId,projectId:input.projectId,conversationId:id(conversation!.id),mode:"append-user-message",content:input.text}}));
+      result=row(await this.command({op:"composer.start",input:{requestId:scienceRequestId(input.commandId),projectId:input.projectId,conversationId:id(conversation!.id),mode:"append-user-message",content:input.text}}));
     } finally {
       // Settled or not (a timed-out start may still have queued a turn): the conversation's cached turn is no longer the newest.
       this.forget(input.projectId,id(conversation!.id));
@@ -225,11 +265,11 @@ export class SupervisorScienceAdapter {
     if (!target) throw supervisorError('supervisor_science_target_missing');
     if (input.action==="cancel" && target.loop) {
       const loop=target.loop;
-      return this.command({op:"loops.transition",input:{requestId:input.commandId,projectId:target.projectId,loopSessionId:id(loop.id),action:"cancel",
+      return this.command({op:"loops.transition",input:{requestId:scienceRequestId(input.commandId),projectId:target.projectId,loopSessionId:id(loop.id),action:"cancel",
         expectedLoopVersion:Number(loop.version),expectedLoopStateSha256:id(loop.stateSha256),reason:"Explicit cancellation from the personal agent workspace"}});
     }
     if (!target.conversationId || !target.turnId) throw supervisorError('supervisor_science_turn_unavailable');
     if (input.action==="cancel") return this.command({op:"composer.cancel",input:{projectId:target.projectId,conversationId:target.conversationId,turnId:target.turnId}});
-    return this.command({op:"composer.steer",input:{requestId:input.commandId,projectId:target.projectId,conversationId:target.conversationId,targetTurnId:target.turnId,content:input.text!,intent:"steer"}});
+    return this.command({op:"composer.steer",input:{requestId:scienceRequestId(input.commandId),projectId:target.projectId,conversationId:target.conversationId,targetTurnId:target.turnId,content:input.text!,intent:"steer"}});
   }
 }

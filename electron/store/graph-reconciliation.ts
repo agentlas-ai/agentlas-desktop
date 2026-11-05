@@ -1205,8 +1205,9 @@ export function graphCheckpointRunnableNodes(graph: WorkflowGraph, checkpoint: G
 
 const SCHEDULE_RECOVERY_EVENT = "workflow_schedule_recovery";
 /**
- * Host re-arms of a Goal continuation's cursor, written by goal-continuation-hold.ts: the bounded fresh retry after a
- * failed or unfinished pass, and the ledger cadence after a good pass. Neither changes the definition.
+ * Host re-arms of a Goal continuation's cursor, written by the retired continuation path: the bounded fresh retry after a
+ * failed or unfinished pass, and the ledger cadence after a good pass. Neither changes the definition. No new receipts are
+ * written; stored ones are still read so recovery treats an old row the same way.
  */
 const GOAL_CONTINUATION_ARM_EVENTS = ["goal_continuation_advisory_retry", "goal_continuation_cadence_armed"] as const;
 const ADVISORY_RECEIPT_LIMIT = 200;
@@ -1230,7 +1231,7 @@ function latestFailedScheduleRun(automation: Automation): FailedScheduleRun | nu
 
 /**
  * The cursor is the host's own re-arm of a Goal continuation (W1, 2026-10-18). A failed pass is re-armed by
- * scheduleAdvisoryContinuation (goal-continuation-hold.ts) as a fresh episode ("fresh-independent-context", earlier
+ * the retired continuation path as a fresh episode ("fresh-independent-context", earlier
  * effects unverified); a good pass moves to the ledger's cadence (armContinuationCadence). The cursor recovery read the
  * retry as a held occurrence (and, while the advisory still rewrote the prompt and schedule, as an owner graph revision)
  * and quarantined the continuation for good: production 834c86d9 "Goal continuation · Yotube" 2026-10-11 20:50:45

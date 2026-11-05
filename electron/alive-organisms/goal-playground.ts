@@ -75,7 +75,7 @@ export interface GoalPlaygroundDeps {
   continueGoal(runId: string, expectedVersion: number): GoalContinueOutcome;
   /** The owner's latest pause on this run is not yet released (long_run_owner_paused ledger hold). */
   ownerHold?(runId: string): boolean;
-  /** The goal's continuation row is parked off on needs_input (goal-continuation-hold) until the owner's next turn. */
+  /** A Goal-bound automation is switched off and its last run ended on needs_input: it waits for the owner. */
   continuationParkedForOwner?(goalId: string): boolean;
   /** One owner-visible line in the goal chat for an action Alive actually took. Idempotent per actionId. */
   announceAction?(input: GoalActionNotice): void;

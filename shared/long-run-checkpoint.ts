@@ -221,14 +221,15 @@ export function compileLongRunCheckpoint(
     } } : {}),
     workspacePath: checkpoint.workspacePath,
     eventCursor: checkpoint.capsule.lastCommittedEventSeq,
-    completedTaskIds: ongoing ? checkpoint.completedTaskIds.slice(-16) : checkpoint.completedTaskIds.slice(0, 16),
+    // Newest last in every list: the packet keeps the most recent entries (the oldest ones were handed over first).
+    completedTaskIds: checkpoint.completedTaskIds.slice(-16),
     currentOperation: checkpoint.currentOperation,
     // These are the verifier's diagnostic reasons, not a fixed-size display
     // preview. Preserve them while the complete packet fits; a 160-character
     // cut could discard the only explanation of what the next episode must
     // inspect even when the selected model had ample context left.
     nextActions: checkpoint.nextActions.map((item) => ({ ...item })),
-    evidenceRefs: checkpoint.capsule.evidenceRefs.slice(0, 8),
+    evidenceRefs: checkpoint.capsule.evidenceRefs.slice(-8),
     artifactRefs: artifactRefs.slice(0, 8),
     sideEffects: checkpoint.sideEffects.state,
     omittedCompletedTasks: Math.max(0, checkpoint.completedTaskIds.length - 16),

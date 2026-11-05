@@ -13,6 +13,10 @@ const BLS_CALENDAR = 'https://www.bls.gov/schedule/news_release/bls.ics';
 const BEA_CALENDAR = 'https://apps.bea.gov/API/signup/release_dates.json';
 const MONTHS = ['january','february','march','april','may','june','july','august','september','october','november','december'];
 const cache = new Map<string,{key:string;result:FinanceDashboardFeedsResult}>();
+/** Each section is kept on its own: one failing source no longer makes every reopen read all four again, and a watchlist change does not
+ *  read the economy calendar again. Earnings dates move rarely; news is the freshest. A section that failed is never kept. */
+const SECTION_TTL:Record<string,number> = { 'finance-news': 5*60*1000, 'finance-sec': 15*60*1000, 'finance-economy': 15*60*1000, 'finance-earnings': 6*60*60*1000 };
+const sectionCache = new Map<string,{until:number;section:unknown}>();
 const pending = new Map<string,AbortController>();
 const cooldown = new Map<string,number>();
 let active = 0, nextSecRequestAt = 0;
@@ -290,7 +294,11 @@ async function getFinanceDashboardFeedsOnce(input:FeedsInput):Promise<FinanceDas
   try {const sections=await Promise.all(FINANCE_FEED_IDS.map(async feedId=>{
     if(!enabled.includes(feedId))return{...section(feedId),status:'disabled' as const};
     try{const selectedSource=feedId==='finance-news'?effective.news:feedId==='finance-sec'?effective.filings:effective.calendar;
-      return await(feedId==='finance-earnings'?earnings(assets,selectedSource,scope,controller.signal):selectedSource!=='finance-yfinance'?selectedToolFeed(feedId,assets,selectedSource,scope,controller.signal):feedId==='finance-news'?news(assets,controller.signal):feedId==='finance-sec'?filings(assets,controller.signal):economy(controller.signal));}
+      const sectionKey=JSON.stringify([id,feedId,selectedSource,feedId==='finance-economy'?null:assets.map(a=>[a.id,a.symbol,a.name,a.exchange,a.currency,a.kind])]),kept=sectionCache.get(sectionKey);
+      if(kept&&kept.until>Date.now())return clone(kept.section as FinanceDashboardFeedSection);
+      const fresh=await(feedId==='finance-earnings'?earnings(assets,selectedSource,scope,controller.signal):selectedSource!=='finance-yfinance'?selectedToolFeed(feedId,assets,selectedSource,scope,controller.signal):feedId==='finance-news'?news(assets,controller.signal):feedId==='finance-sec'?filings(assets,controller.signal):economy(controller.signal));
+      if(fresh.status!=='error'){sectionCache.set(sectionKey,{until:Date.now()+(SECTION_TTL[feedId]??TTL),section:clone(fresh)});while(sectionCache.size>MAX_OWNERS*4)sectionCache.delete(sectionCache.keys().next().value!);}
+      return fresh;}
     catch(e){check(controller.signal);return{...section(feedId),status:'error' as const,errorCode:errorCode(e)};}
   }));if(expired)throw new Error('finance_feed_timeout');check(controller.signal);scope.assertCurrent();const result={fetchedAt,expiresAt:new Date(Date.now()+TTL).toISOString(),sections};cache.delete(id);if(!sections.some(item=>item.status==='error'))cache.set(id,{key,result:clone(result)});/* a failed source is never kept: Retry must ask again */while(cache.size>MAX_OWNERS)cache.delete(cache.keys().next().value!);return result;
   }catch(e){if(expired)throw new Error('finance_feed_timeout');throw e;}finally{clearTimeout(deadline);input.signal?.removeEventListener('abort',cancel);if(pending.get(id)===controller)pending.delete(id);}

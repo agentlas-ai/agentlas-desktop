@@ -1,3 +1,4 @@
+import { AUTO_MESSAGE_GOAL_PREFIX } from "../../shared/auto-goal";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { currentGoalExecutionObligations, currentGoalObligationsSatisfied } from "./goal-obligation-context";
 /** An automatic Goal admitted for a turn the background service ran follows that turn.
@@ -55,7 +56,7 @@ import {
 } from "../store/long-runs";
 
 export const DAEMON_TURN_GOAL_SETTLED_EVENT = "run.daemon_turn_settled";
-const AUTO_GOAL_PREFIX = "goal:auto-message:";
+const AUTO_GOAL_PREFIX = AUTO_MESSAGE_GOAL_PREFIX;
 const SUCCESS_KINDS = ["invoke_completed"];
 const FAILURE_KINDS = ["invoke_failed", "invoke_threw"];
 const STOP_KINDS = ["invoke_cancelled", "invoke_interrupted"];
@@ -478,7 +479,7 @@ export function followDaemonTurnGoalOfChat(chatId: string): DaemonTurnGoalResult
 export function settleDaemonTurnGoals(limit = 50): DaemonTurnGoalResult[] {
   // Host-parked Goals (paused by Desktop quitting or restarting) count only when a service turn was admitted for them, and come
   // after the live ones so a pile of parked Goals never crowds a queued one out of the window.
-  const rows = getDb().prepare(`SELECT goal_id FROM long_runs WHERE goal_id LIKE 'goal:auto-message:%'
+  const rows = getDb().prepare(`SELECT goal_id FROM long_runs WHERE goal_id LIKE '${AUTO_MESSAGE_GOAL_PREFIX}%'
       AND (status IN ('queued','running')
         OR (status = 'paused' AND pause_reason IN ('app_closed','crash_recovery')
           AND EXISTS (SELECT 1 FROM run_events m JOIN invocation_run_owners o ON o.run_id = m.run_id AND o.owner_kind = 'daemon'

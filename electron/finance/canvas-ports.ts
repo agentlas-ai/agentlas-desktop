@@ -7,7 +7,7 @@ import { canvasInputJsonSchema } from './canvas-input-schema';
 import { buildCanvasCard } from '../canvas/present';
 import { presentCanvasCard } from './canvas-present';
 import { canvasDomainForGuide, canvasDomains, canvasGuideTopics, type CanvasSeriesRequest } from '../canvas/registry';
-import { canvasGuideReadInTurn, canvasSeriesReadInTurn, canvasTurnKey } from '../canvas/turn-state';
+import { canvasGuideReadInTurn, canvasRefusedInTurn, canvasSeriesReadInTurn, canvasTurnKey } from '../canvas/turn-state';
 
 /**
  * ui.canvas: the one port that draws a result card (kpis, bars, ranges, chart, leans, table, heatmap, allocation, timeline, checklist, gauge,
@@ -36,12 +36,13 @@ export async function callCanvasPort(raw: Record<string, unknown>, ctx: HarnessC
       for (const reader of readers) { const line = await reader.readSeries(series, period, ctx.signal, ctx); if (line) return line; }
       return null;
     };
-    const card = await buildCanvasCard(args, { guide, named, first, layouts: guide ? domain?.guides(guide) : undefined, warningPrefix: domain?.id ?? 'canvas', reads: canvasSeriesReadInTurn.get(key), readSeries, signal: ctx.signal });
+    const card = await buildCanvasCard(args, { guide, named, first, layouts: guide ? domain?.guides(guide) : undefined, warningPrefix: domain?.id ?? 'canvas', reads: canvasSeriesReadInTurn.get(key), refusedBefore: canvasRefusedInTurn.has(key), readSeries, signal: ctx.signal });
     const nativeUi = await presentCanvasCard(card, raw, ctx);
     if (nativeUi?.status !== 'presented') return { status: 'unavailable', reason: 'canvas_ui_not_presented', next: 'The card could not be shown. Give the same findings in the answer text.' };
     return { status: 'ok', nativeUi, data: { shown: true, warnings: card.warnings, next: 'The card is shown under your answer. The answer text is the conclusion in one or two sentences; the card carries the figures and sources.' } };
   } catch (error) {
     if (error instanceof z.ZodError) {
+      if (ctx.runId) { canvasRefusedInTurn.add(canvasTurnKey(ctx)); if (canvasRefusedInTurn.size > 200) canvasRefusedInTurn.delete(canvasRefusedInTurn.values().next().value!); }
       const layout = error.issues.find(issue => issue.path.join('.') === 'blocks' || issue.path.join('.') === 'guide')?.message;
       return { status: 'refused', reason: 'canvas_arguments_invalid', next: layout ? `${layout} Call ui.canvas again now with those blocks; a chart needs only its series named: the host reads the numbers.` : 'Read the operation schema and supply its exact fields.', data: { issues: error.issues.slice(0, 8).map(issue => ({ path: issue.path.join('.'), message: issue.message })) } };
     }

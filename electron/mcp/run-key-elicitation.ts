@@ -161,7 +161,8 @@ export function buildRunKeyRequest(
   /** Saved env key names (value-free). A saved name that looks like a missing key is offered on the sheet. */
   storedNames: readonly string[] = [],
 ): McpRunKeyRequest | null {
-  const missing = tools.filter((tool) => tool.state === "missing-key" && tool.missingEnv.length > 0);
+  // A row carried from an earlier turn is listed for a stable tool set, not asked for again.
+  const missing = tools.filter((tool) => tool.state === "missing-key" && tool.missingEnv.length > 0 && !tool.carriedFromEarlierTurn);
   if (missing.length === 0) return null;
   const knownRead = [
     ...MCP_TOOL_CATALOG.flatMap((entry) => entry.envRequirements.map((req) => req.key)),

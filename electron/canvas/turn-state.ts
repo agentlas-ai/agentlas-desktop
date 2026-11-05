@@ -6,4 +6,6 @@
 export type CanvasSeriesRead = { assetId?: string; metric: string; query?: string; period?: string };
 export const canvasGuideReadInTurn = new Map<string, string>();
 export const canvasSeriesReadInTurn = new Map<string, CanvasSeriesRead[]>();
+/** Turns whose card was already refused once for its layout or guide: the next card in that turn is drawn as sent (never a dead end). */
+export const canvasRefusedInTurn = new Set<string>();
 export const canvasTurnKey = (ctx: { chatId?: string; runId?: string }) => `${ctx.chatId ?? ''}\0${ctx.runId ?? ''}`;

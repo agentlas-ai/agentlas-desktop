@@ -76,11 +76,8 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat, chatI
   >
     <p style={{ color: "var(--muted-deep)", fontSize: 12, marginBottom: 8 }}>{locale === "ko" ? "예약 보고" : "Scheduled report"}</p>
     <Markdown text={display.name ? `${display.name}\n\n${display.body}` : display.body} messageId={`automation-report:${notice.automationId}:${notice.runId}`} onOpenLinkedFile={openNoticeLink} />
-    {display.code && <code
-      data-machine-code={display.code}
-      title={locale === "ko" ? "사유 코드" : "Reason code"}
-      style={{ display: "inline-block", maxWidth: "100%", marginTop: 4, padding: "1px 6px", borderRadius: 5, background: "var(--paper-3)", color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.6, overflowWrap: "anywhere" }}
-    >{display.code}</code>}
+    {/* The owner reads the sentence; the machine code stays only as a hidden marker for diagnostics, never as visible text. */}
+    {display.code && <span hidden data-machine-code={display.code} />}
   </article>;
   }
   // goal-continuation and any other host-written continuation request: internal, not rendered.

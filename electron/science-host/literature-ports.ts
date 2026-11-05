@@ -20,7 +20,7 @@ type Outcome = { status: "ok"; data: unknown } | { status: "refused" | "unavaila
 /** The two Science functions, as this host calls them. */
 export interface ScienceLiteratureSdk {
   search(input: Record<string, unknown>): Promise<LiteratureSearchResult>;
-  fullText(input: { doi?: string; pmid?: string; maxChars?: number }): Promise<LiteratureFullTextResult>;
+  fullText(input: { doi?: string; pmid?: string; maxChars?: number; signal?: AbortSignal }): Promise<LiteratureFullTextResult>;
 }
 interface LiteratureRecord {
   canonicalId: string; title: string; abstract: string | null; authors: string[]; publicationYear: number | null; publicationDate: string | null;
@@ -94,6 +94,12 @@ const FULL_TEXT_SCHEMA = {
 };
 
 const ABSTRACT_CHARS = 1_500;
+/** The first `ABSTRACT_CHARS` characters, never ending on half of a surrogate pair (an emoji or a rare CJK character at the cut). */
+function abstractHead(abstract: string): string {
+  const head = abstract.slice(0, ABSTRACT_CHARS);
+  const last = head.charCodeAt(head.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head;
+}
 /** The agent gets what it needs to cite and judge, bounded: abstracts are cut, receipts keep their outcome only. */
 function projectSearch(result: LiteratureSearchResult) {
   return {
@@ -104,7 +110,7 @@ function projectSearch(result: LiteratureSearchResult) {
       publicationYear: record.publicationYear, publicationDate: record.publicationDate, containerTitle: record.containerTitle, publisher: record.publisher,
       doi: record.doi, pmid: record.pmid, arxivId: record.arxivId, landingUrl: record.landingUrl, openAccessUrl: record.openAccessUrl,
       citationCount: record.citationCount, isRetracted: record.isRetracted, isPreprint: record.isPreprint, providers: record.providers, score: record.score,
-      abstract: record.abstract === null ? null : record.abstract.slice(0, ABSTRACT_CHARS), abstractCut: record.abstract !== null && record.abstract.length > ABSTRACT_CHARS,
+      abstract: record.abstract === null ? null : abstractHead(record.abstract), abstractCut: record.abstract !== null && record.abstract.length > ABSTRACT_CHARS,
       ...(record.abstractProvenance ? { abstractProvenance: record.abstractProvenance } : {}),
     })),
   };
@@ -117,6 +123,8 @@ function mapFailure(error: unknown): Outcome {
     return unavailable("science_extension_not_active", `Science is not switched on in this app (Settings, Science); ${BROWSER_NEXT}`);
   }
   if (/science-runtime-load-failed|science-runtime-load-reentrant/.test(message)) return unavailable("science_runtime_unavailable", BROWSER_NEXT);
+  // A stopped turn: the answer is not read, but the call ends with a typed outcome rather than a provider failure.
+  if (/science-academic-search-aborted/.test(message)) return unavailable("cancelled", "the turn was stopped; nothing more to do for this call");
   const invalid = /science-academic-search-(query|year-range|provider)-invalid/.exec(message);
   if (invalid) return refused(`${invalid[1]}_invalid`, "fix that argument and call again (see the operation's input schema)");
   if (/identity-unsupported/.test(message)) return refused("identity_invalid", "give exactly one of doi (10.xxxx/…) or pmid (digits)");
@@ -130,7 +138,7 @@ function mapFailure(error: unknown): Outcome {
   return unavailable("literature_call_failed", `${BROWSER_NEXT} (${message.slice(0, 120).replace(/[^\x20-\x7e]/g, "?")})`);
 }
 
-async function searchHandler(args: Record<string, unknown>, _ctx: Pick<HarnessCallContext, "signal" | "dryRun">): Promise<Outcome> {
+async function searchHandler(args: Record<string, unknown>, ctx: Pick<HarnessCallContext, "signal" | "dryRun">): Promise<Outcome> {
   const parsed = searchInput.safeParse(args);
   if (!parsed.success) return refused("arguments_invalid", `see the input schema: ${parsed.error.issues[0]?.path.join(".") || "arguments"} ${parsed.error.issues[0]?.message ?? "invalid"}`);
   const sdk = await sdkLoader().catch(() => null);
@@ -146,6 +154,7 @@ async function searchHandler(args: Record<string, unknown>, _ctx: Pick<HarnessCa
       ...(value.limit === undefined ? {} : { limit: value.limit }),
       ...(value.include_preprints === undefined ? {} : { includePreprints: value.include_preprints }),
       ...(value.providers === undefined ? {} : { providers: value.providers }),
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
     });
     const projected = projectSearch(result);
     if (result.coverage.successfulProviders === 0) {
@@ -155,15 +164,21 @@ async function searchHandler(args: Record<string, unknown>, _ctx: Pick<HarnessCa
   } catch (error) { return mapFailure(error); }
 }
 
-async function fullTextHandler(args: Record<string, unknown>, _ctx: Pick<HarnessCallContext, "signal" | "dryRun">): Promise<Outcome> {
+async function fullTextHandler(args: Record<string, unknown>, ctx: Pick<HarnessCallContext, "signal" | "dryRun">): Promise<Outcome> {
   const parsed = fullTextInput.safeParse(args);
-  if (!parsed.success) return refused("identity_invalid", "give exactly one of doi or pmid (and optionally max_chars)");
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    // Only a wrong doi/pmid choice is an identity problem; max_chars out of range or an unknown key is an argument problem.
+    const identity = !issue || issue.code === "custom" || issue.path[0] === "doi" || issue.path[0] === "pmid";
+    return identity ? refused("identity_invalid", "give exactly one of doi or pmid (and optionally max_chars)")
+      : refused("arguments_invalid", `see the input schema: ${issue.path.join(".") || "arguments"} ${issue.message}`);
+  }
   const sdk = await sdkLoader().catch(() => null);
   if (!sdk) return unavailable("science_literature_not_in_this_build", `this app's Science build predates project-free full-text retrieval; ${BROWSER_NEXT}`);
   const value = parsed.data;
   try {
     const result = await sdk.fullText({ ...(value.doi === undefined ? {} : { doi: value.doi }), ...(value.pmid === undefined ? {} : { pmid: value.pmid }),
-      ...(value.max_chars === undefined ? {} : { maxChars: value.max_chars }) });
+      ...(value.max_chars === undefined ? {} : { maxChars: value.max_chars }), ...(ctx.signal ? { signal: ctx.signal } : {}) });
     return { status: "ok", data: { persisted: false, evidenceScope: result.evidenceScope, identity: result.identity, pmcid: result.pmcid, license: result.license,
       text: result.text, truncated: result.truncated, totalChars: result.totalChars, sectionHeadings: result.sectionHeadings.slice(0, 80), receipt: result.receipt } };
   } catch (error) { return mapFailure(error); }

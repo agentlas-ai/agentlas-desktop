@@ -77,12 +77,6 @@ export const STORMBREAKER_LONG_RUN_MARKER = "<<stormbreaker-long-run>>";
  * task만 닫고, 실제 완료 판정은 기존 신호 일치 규칙이 그대로 내린다.
  */
 export const GOAL_COMPLETE_MARKER = "<<agentlas-goal-complete>>";
-export const STORMBREAKER_LONG_RUN_SCHEDULE = "every-30m";
-// persistent goal 연속실행 케이던스 — 고정 30분 대신 goal 상태에 따라 가변.
-// 진행 중이면 짧게 붙어서 돌고, 사람/외부 제약에 막혔으면 백오프한다.
-// 토큰은 schedule.ts parseLegacyToken("every-Nm/Nh")이 해석하는 형태만 쓴다.
-export const GOAL_RUN_SCHEDULE_ACTIVE = "every-10m";
-export const GOAL_RUN_SCHEDULE_BACKOFF = "every-2h";
 // "계속 라이브로" 모드(chat.continuousMode)의 안전 상한 — 사실상 무제한이지만, 완전한 폭주
 // (매번 continue 마커만 반복하는 등)로부터 사용자 컴퓨터를 지키는 최후 방어선일 뿐이다. 매 턴이
 // 실제 CLI 호출로 실제 시간이 걸리므로, 정상적인 장시간(수십 시간) 작업에서 이 숫자에 실제로
@@ -218,16 +212,6 @@ export function buildStormbreakerContinuationPrompt(previousOutput: string | nul
 
 export function isStormbreakerLongRunPrompt(prompt: string): boolean {
   return prompt.includes(STORMBREAKER_LONG_RUN_MARKER);
-}
-
-/**
- * persistent goal 연속실행의 스케줄 토큰 — goal 원장의 continue 판정으로 정한다.
- * 진행 중(open_tasks_remain)이면 짧게, 그 외(blocked/예산/판정불가)는 백오프.
- * 반환 토큰은 반드시 schedule.ts가 해석 가능한 형태여야 한다(게이트가 실측한다).
- */
-export function goalContinuationSchedule(decision: { continue: boolean; reason: string } | null): string {
-  if (decision?.continue) return GOAL_RUN_SCHEDULE_ACTIVE;
-  return GOAL_RUN_SCHEDULE_BACKOFF;
 }
 
 /**

@@ -80,8 +80,9 @@ export function goalWaitRefusalMessage(reason: string, locale: "ko" | "en", inte
         : "The wait's deadline had already passed, so it was not scheduled. Reply with a new deadline, or press Resume to continue.";
     default:
       return ko
-        ? `대기를 등록하지 못해 목표를 멈췄어요(사유 코드: ${reason}). 답장하거나 재개를 누르면 이어서 진행합니다.`
-        : `The wait could not be registered, so the goal is paused (reason code: ${reason}). Reply or press Resume to continue.`;
+        // The owner reads a sentence, never the code: the code stays on the goal_wait_refused event.
+        ? "대기를 등록하지 못해 목표를 멈췄어요. 답장하거나 재개를 누르면 이어서 진행합니다."
+        : "The wait could not be registered, so the goal is paused. Reply or press Resume to continue.";
   }
 }
 

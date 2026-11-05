@@ -7777,7 +7777,18 @@ export function registerIpcHandlers(): void {
     // A receipt is a read of the durable run record (the same row for a Main-owned and a daemon-owned run). An agent's app.call
     // (invoke.receipt) asks for it through the app-control event; the original-renderer proof is for the owner's window
     // (native-gui-controls.ts), so the read takes the service path directly, not the custody route that proof guards.
-    if (isAppControlEvent(_event)) return invocationService.receipt(runId);
+    if (isAppControlEvent(_event)) {
+      // A model holds several run ids (a long run's run_…, its workers' invocation ids); a long-run id reads that run's latest
+      // invocation. Before this, invoke.receipt with the long-run id a turn had just seen answered null and the model gave up.
+      const direct = invocationService.receipt(runId);
+      if (direct || typeof runId !== "string" || !runId) return direct;
+      try {
+        const latest = (require("./store/db") as typeof import("./store/db")).getDb()
+          .prepare("SELECT invocation_run_id FROM long_run_worker_attempts WHERE run_id = ? AND invocation_run_id IS NOT NULL ORDER BY attempt DESC, rowid DESC LIMIT 1")
+          .get(runId) as { invocation_run_id?: string } | undefined;
+        return latest?.invocation_run_id ? invocationService.receipt(latest.invocation_run_id) : direct;
+      } catch { return direct; }
+    }
     const durable = await durableOwnerTextRoutes().receipt(_event, runId);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const native = configuredNativeGuiControls();

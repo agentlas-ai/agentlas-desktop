@@ -4,10 +4,12 @@
  *  - per unblock attempt: default 60,000 tokens;
  *  - per goal per day:    default 200,000 tokens;
  * both editable by the owner (AGI popover / settings), and every token is also deducted from the goal's Alive grant
- * (alive_agents.budget.tokensUsed) when the goal has an AGI life, so the popover's grant still governs.
+ * (alive_agents.budget.tokensUsed) when the goal has an AGI life.
  *
- * The monitor itself costs 0 tokens; only a model-backed unblock attempt (P4) spends. The executor asks
- * admitAgiTokens before any model-spending step and charges measured usage after it.
+ * They are accounting and guidance, not a stop: under the owner's nonblocking execution policy admitAgiTokens admits
+ * every step and the attempt limit is handed to the model as a guide. Spending still counts toward the goal's Alive grant,
+ * whose own limit can rest Alive (alive-organisms/host.ts); the owner surface says both. The monitor itself costs 0
+ * tokens; only a model-backed unblock attempt spends, and chargeAgiTokens records it.
  */
 import type Database from "better-sqlite3";
 
