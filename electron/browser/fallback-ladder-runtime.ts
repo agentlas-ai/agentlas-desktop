@@ -21,8 +21,8 @@ import {
   BROWSER_HUMAN_CHECK_NOTICE,
   BROWSER_LADDER_EVENT_KIND,
   BROWSER_LADDER_SCHEMA,
-  HUMAN_CHECK_POLL_MS,
-  HUMAN_CHECK_WATCH_MS,
+  HUMAN_CHECK_BACKSTOP_MS,
+  HUMAN_CHECK_SLOW_WATCH_MS,
   LADDER_STOP_COOLDOWN_MS,
   SELF_HEAL_DELAYS_MS,
   agentlasBrowserMarkers,
@@ -102,6 +102,10 @@ interface LadderPage {
   evaluate: (expression: string) => Promise<unknown>;
   reload: () => Promise<string | null>;
   present: () => Promise<void>;
+  /** Stable tab identity on its surface (the watcher follows the tabs that showed the check, not "the first page"). */
+  id?: string;
+  /** Calls `onSignal` when this tab navigates, finishes loading or goes away. A signal wakes a re-read; it is never evidence. Returns the stop. */
+  watch?: (onSignal: () => void) => () => void;
 }
 
 async function dedicatedPages(): Promise<LadderPage[]> {
@@ -110,6 +114,8 @@ async function dedicatedPages(): Promise<LadderPage[]> {
   return targets.map((target) => ({
     url: target.url,
     surface: "dedicated" as const,
+    id: target.id,
+    watch: (onSignal: () => void) => runtime.watchDedicatedPageSignals(target, onSignal),
     evaluate: (expression: string) => runtime.evaluateCdpPage(target, expression),
     reload: async () => {
       // A blocked command must not be reported as a successful reload merely
@@ -134,6 +140,14 @@ function nativePages(grant: NativeBrowserRelayGrant): LadderPage[] {
   return grant.pages().filter((page): page is NativeBrowserRelayPage & { evaluate: NonNullable<NativeBrowserRelayPage["evaluate"]> } => typeof page.evaluate === "function")
     .map((page) => ({
       url: page.url, surface: "native" as const,
+      ...(page.id ? { id: page.id } : {}),
+      ...(page.retainLoginVerification ? { watch: (onSignal: () => void) => {
+        const controller = new AbortController();
+        let lease: ReturnType<NonNullable<typeof page.retainLoginVerification>> | null = null;
+        let stopWatching: (() => void) | undefined;
+        try { lease = page.retainLoginVerification!(controller.signal); stopWatching = lease.watchNavigation?.(onSignal); } catch { /* the backstop poll reads the page */ }
+        return () => { try { stopWatching?.(); } catch { /* gone */ } try { lease?.release(); } catch { /* gone */ } controller.abort(); };
+      } } : {}),
       evaluate: page.evaluate,
       reload: page.reload,
       present: async () => { await page.present?.(); },
@@ -224,6 +238,8 @@ interface LadderScope {
   page: LadderPage | undefined;
   site: string | null;
   suggestions: string[];
+  /** The app continues this run by itself after the owner passes the check (decided when the card goes up; the model is told the truth). */
+  resumeEligible?: boolean;
   handoff?: { kind: "connector" | "computer-use" | "native-guest"; id: string };
 }
 
@@ -342,6 +358,22 @@ async function computerUseDedicated(scope: LadderScope): Promise<RungOutcome> {
 }
 
 const humanWatchers = new Map<string, { stop: () => void; present: () => Promise<void> }>();
+/** Whether the app continues the run by itself after the check (set when the card goes up; any later answer for the same chat and site tells the same truth). */
+const humanResumeEligible = new Map<string, boolean>();
+
+/** The continuation owner (page-release-resume.ts), loaded only when a human-check watcher starts; a load failure leaves the old behavior (the owner writes). */
+async function pageResume(): Promise<import("./page-release-resume").PageResumeHandle | null> {
+  try { return (await import("./page-release-resume")).pageReleaseResume(); } catch { return null; }
+}
+
+const tabKey = (page: LadderPage, index: number): string => page.id ?? `#${index}`;
+
+/** Does a tab of this site still show the check? Only the tabs of the site count; none of them present = the browser is gone. */
+async function readSiteTabs(grant: NativeBrowserRelayGrant | null, site: string | null): Promise<Array<{ key: string; page: LadderPage; humanCheck: boolean }>> {
+  const pages = await surfacePages(grant).catch(() => [] as LadderPage[]);
+  const ofSite = pages.map((page, index) => ({ page, key: tabKey(page, index) })).filter(({ page }) => siteOf(page.url) === site || site === null).slice(0, 8);
+  return Promise.all(ofSite.map(async ({ page, key }) => ({ key, page, humanCheck: Boolean((await pageFacts(page).catch(() => undefined))?.humanCheck) })));
+}
 
 async function humanCheckWait(scope: LadderScope, ladderId: string): Promise<RungOutcome> {
   const page = scope.page;
@@ -352,27 +384,94 @@ async function humanCheckWait(scope: LadderScope, ladderId: string): Promise<Run
   const startedAt = Date.now();
   let stopped = false;
   const binding = scope.binding;
-  const timer = setInterval(() => {
-    if (stopped) return;
-    void (async () => {
-      const pages = await surfacePages(scope.grant).catch(() => [] as LadderPage[]);
-      const facts = await pageFacts(pages.find((p) => siteOf(p.url) === scope.site) ?? pages[0]).catch(() => undefined);
-      const cleared = facts !== undefined && !facts.humanCheck;
-      const expired = Date.now() - startedAt >= HUMAN_CHECK_WATCH_MS;
-      if (!cleared && !expired) return;
-      stop();
-      recordEvent({ schemaVersion: BROWSER_LADDER_SCHEMA, ladderId, code: "human-check-required", step: "final", rung: "human-check-wait",
-        result: cleared ? "recovered" : "timeout", surface: page.surface, final: cleared ? "recovered" : "stopped",
-        reasonCode: cleared ? "human_check_cleared" : "human_check_timeout", site: scope.site, elapsedMs: Date.now() - startedAt }, binding);
-      // The recorded clear is the fact; no global "resume goals" call follows it. That handler was removed in 1.2.53
-      // (3a60b734: a browser event must not wake every Goal; an exact invocation/node wait handle consumes restoration),
-      // and the call left behind did nothing. A blocked Goal continues through its own sweep (blocked-goal-sweep.ts).
-    })().catch(() => undefined);
-  }, HUMAN_CHECK_POLL_MS);
-  timer.unref?.();
-  const stop = () => { if (stopped) return; stopped = true; clearInterval(timer); humanWatchers.delete(key); };
-  humanWatchers.set(key, { stop, present: page.present });
-  return { result: "waiting", detail: { watcher: "started" } };
+  // The tabs that showed the check when the card went up. Only these decide; a wall on another tab is not this one's.
+  const first = await readSiteTabs(scope.grant, scope.site);
+  const walled = new Set(first.filter((tab) => tab.humanCheck).map((tab) => tab.key));
+  if (walled.size === 0) { const own = first.find((tab) => tab.page.id !== undefined && tab.page.id === page.id) ?? first[0]; if (own) walled.add(own.key); }
+  // A run with ids can be continued after the owner passes the check; an unbound call has no chat to continue in.
+  const resume = binding ? await pageResume() : null;
+  if (binding && resume) {
+    const begun = resume.begin({ ladderId, chatId: binding.chatId, runId: binding.runId, site: scope.site, locale: binding.locale,
+      surface: scope.grant || binding.nativeRequired ? "native" : "dedicated", waitStartedAtIso: new Date(startedAt).toISOString() });
+    scope.resumeEligible = begun.eligible;
+    humanResumeEligible.set(key, scope.resumeEligible);
+  }
+  let backstop: ReturnType<typeof setTimeout> | undefined;
+  let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+  let judging = false;
+  const cleanups: Array<() => void> = [];
+  // A stop that came in during the awaits below must still release what is registered after it.
+  const addCleanup = (cleanup: () => void) => { if (stopped) { try { cleanup(); } catch { /* gone */ } } else cleanups.push(cleanup); };
+  const stop = () => {
+    if (stopped) return; stopped = true;
+    if (backstop) clearTimeout(backstop);
+    if (wakeTimer) clearTimeout(wakeTimer);
+    for (const cleanup of cleanups.splice(0)) { try { cleanup(); } catch { /* gone */ } }
+    humanWatchers.delete(key);
+    humanResumeEligible.delete(key);
+  };
+  const finish = (result: "recovered" | "timeout" | "closed" | "moved-on", resumeOutcome: "released" | "abandoned") => {
+    stop();
+    // The recorded clear is the fact. A browser event must not wake every Goal (3a60b734 removed that global call), so the continuation is
+    // exact: this ladder's own chat, once, through page-release-resume.ts. A blocked Goal continues through its own sweep (blocked-goal-sweep.ts).
+    const cleared = result === "recovered";
+    recordEvent({ schemaVersion: BROWSER_LADDER_SCHEMA, ladderId, code: "human-check-required", step: "final", rung: "human-check-wait",
+      result: cleared ? "recovered" : "timeout", surface: page.surface, final: cleared ? "recovered" : "stopped",
+      reasonCode: cleared ? "human_check_cleared" : result === "timeout" ? "human_check_timeout" : "human_check_watch_ended", site: scope.site, elapsedMs: Date.now() - startedAt }, binding);
+    if (resumeOutcome === "released") resume?.released(ladderId); else resume?.abandon(ladderId, result === "timeout" ? "watch_expired" : result === "moved-on" ? "chat_moved_on" : "tab_closed");
+  };
+  // One judgment, from the page itself: a tab that showed the check and now does not = passed (checked BEFORE the time limit, so a sleep of
+  // hours still sees what the owner just did); a tab gone or a browser gone = nothing was passed; the check still up = keep waiting.
+  const judge = async () => {
+    if (stopped || judging) return;
+    judging = true;
+    try {
+      const current = binding ? runs.get(binding.chatId) : undefined;
+      if (current && current !== binding) { finish("moved-on", "abandoned"); return; }
+      let tabs = await readSiteTabs(scope.grant, scope.site);
+      const present = () => tabs.filter((tab) => walled.has(tab.key));
+      if (present().length === 0) { await new Promise((r) => setTimeout(r, 1_500)); tabs = await readSiteTabs(scope.grant, scope.site); }
+      const mine = present();
+      if (mine.some((tab) => !tab.humanCheck)) { finish("recovered", "released"); return; }
+      if (mine.length === 0) { finish("closed", "abandoned"); return; }
+      if (Date.now() - startedAt >= HUMAN_CHECK_SLOW_WATCH_MS) finish("timeout", "abandoned");
+    } catch { /* the next signal or the backstop reads again */ } finally {
+      judging = false;
+      if (!stopped) { backstop = setTimeout(() => { void judge(); }, HUMAN_CHECK_BACKSTOP_MS); backstop.unref?.(); }
+    }
+  };
+  const wake = () => {
+    if (stopped || wakeTimer) return;
+    wakeTimer = setTimeout(() => { wakeTimer = undefined; if (backstop) clearTimeout(backstop); void judge(); }, 500);
+    wakeTimer.unref?.();
+  };
+  // Signals: a walled tab navigates / loads / closes, a clearance cookie is written, the app window gets focus (the owner came back).
+  for (const tab of first) if (walled.has(tab.key) && tab.page.watch) { try { addCleanup(tab.page.watch(wake)); } catch { /* the backstop reads */ } }
+  try {
+    const login = await import("./login-recovery-runtime");
+    addCleanup(login.watchClearanceCookie(scope.grant || binding?.nativeRequired ? "native-partition" : "cdp-profile", wake));
+  } catch { /* the backstop reads */ }
+  try {
+    if (process.type === "browser" && process.env.ELECTRON_RUN_AS_NODE !== "1") {
+      const { app } = await import("electron");
+      app.on("browser-window-focus", wake);
+      addCleanup(() => app.removeListener("browser-window-focus", wake));
+    }
+  } catch { /* no window events here */ }
+  if (!stopped) {
+    backstop = setTimeout(() => { void judge(); }, HUMAN_CHECK_BACKSTOP_MS);
+    backstop.unref?.();
+    humanWatchers.set(key, { stop, present: page.present });
+  }
+  return { result: "waiting", detail: { watcher: "started", tabs: walled.size } };
+}
+
+/** After an app restart: is the check still up on the site? Only the dedicated Chrome outlives the app; a native guest window does not. */
+export async function recheckHumanCheckWait(input: { site: string | null; surface: BrowserSurface }): Promise<"cleared" | "still" | "unknown"> {
+  if (input.surface !== "dedicated" || !input.site) return "unknown";
+  const tabs = await readSiteTabs(null, input.site);
+  if (tabs.length === 0) return "unknown";
+  return tabs.some((tab) => tab.humanCheck) ? "still" : "cleared";
 }
 
 // ── Ladder flights (one per surface key; a stopped ladder cools down) ────────────────────────────────────────
@@ -411,7 +510,9 @@ function answerFor(result: LadderRunResult, input: { mutating: boolean; neverRan
       : `Agentlas browser ladder: the browser path failed (${state.code}). The dedicated Agentlas browser is now visible; use computer use with app "pid:${scope.handoff?.id}". Computer use is locked to that window until this run ends — other apps, the owner's own Chrome, OS dialogs and password prompts are refused.`;
   } else if (state.final === "waiting-owner") {
     text = state.code === "human-check-required"
-      ? "Agentlas browser ladder: human_check_required — the site shows a human check. The owner was shown one card with the browser in front. This run does not resume by itself: continue with other work, and if nothing else is left, tell the owner what is waiting and stop. The next browser call after the owner has dealt with it goes straight through. Do not try to solve or bypass it."
+      ? (scope.resumeEligible ?? humanResumeEligible.get(`${scope.binding?.chatId ?? "unbound"}:${scope.site ?? "site"}`)) === true
+        ? "Agentlas browser ladder: human_check_required — the site shows a human check. The owner was shown one card with the browser in front. Continue with other work, and if nothing else is left, tell the owner what is waiting and stop. When the owner has passed it, the app continues this task by itself in this chat, and the next browser call goes straight through." + " Do not try to solve or bypass it."
+        : "Agentlas browser ladder: human_check_required — the site shows a human check. The owner was shown one card with the browser in front. This run does not resume by itself: continue with other work, and if nothing else is left, tell the owner what is waiting and stop. The next browser call after the owner has dealt with it goes straight through. Do not try to solve or bypass it."
       : "Agentlas browser ladder: the site needs the owner's sign-in; one card is open. This run does not resume by itself: continue with other work, and if nothing else is left, tell the owner what is waiting and stop. The next browser call after the owner has signed in goes straight through.";
   } else {
     const suggestion = scope.suggestions.length ? ` Try the tool resolver: agentlas_resolve_plugins with need "${scope.suggestions[0].replace(/ \(agentlas_resolve_plugins\)$/, "")}"; installing stays the owner's decision.` : "";
@@ -638,6 +739,8 @@ export function observeBrowserToolForHumanCheck(input: { toolName: string; chatI
     const grant = input.nativeGrant ?? null;
     const page = (await surfacePages(grant).catch(() => [] as LadderPage[]))[0];
     const facts = await pageFacts(page);
+    // The page is past the check after a release: this run is already continuing, so the app does not start a second turn.
+    if (facts && !facts.humanCheck && input.chatId) void pageResume().then((resume) => resume?.noteBrowserOk(input.chatId!, siteOf(facts.url)));
     if (!facts?.humanCheck) return;
     await onAgentlasBrowserToolFailure({ chatId: input.chatId ?? null, nativeEndpoint: grant?.endpoint ?? null, toolName: input.toolName, mutating: true, resultText: "" });
   })().catch(() => undefined);

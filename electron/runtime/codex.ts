@@ -80,6 +80,7 @@ import {
   answerCodexApproval,
   codexApprovalCapability,
   codexAppServerSupported,
+  codexExecutableKey,
   codexMcpThreadConfig,
   codexPoolKey,
   codexProtocolReceipt,
@@ -1795,6 +1796,8 @@ async function runCodexResidentTurn(input: {
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const cwd = req.cwd ?? agentRunCwd();
   const env = req.env ?? process.env;
+  // What this process has learned about the CLI (no app-server, no thread rebind) belongs to this executable generation only.
+  const executableKey = codexExecutableKey(bin, cwd, env);
   const approvalsReviewer = req.approvalsReviewer ?? "user";
   const policy = codexThreadPolicy(req.permission, cwd, approvalsReviewer);
   const requestedConfigDigest = inspectCodexWorkforceGrant(req, mcpArgs);
@@ -1819,7 +1822,7 @@ async function runCodexResidentTurn(input: {
    * does an executable that refused thread/unsubscribe.
    */
   const residentIdentity = () => {
-    const mcpThread = !turnScoped && !req.workforceRuntimeToolGrant && codexThreadMcpRebindSupported()
+    const mcpThread = !turnScoped && !req.workforceRuntimeToolGrant && codexThreadMcpRebindSupported(executableKey)
       ? codexMcpThreadConfig(mcpArgs, env) : null;
     // The shell's temp folder is a function of the pool key's chat component (the same key that shares one process between a
     // seat's conversations), so equal keys keep equal spawn arguments (sandbox-tool-cache.ts).
@@ -1881,7 +1884,7 @@ async function runCodexResidentTurn(input: {
         terminal: { accepted: false, threadMismatch: 0, turnMismatch: 0, earlyOverflow: 0 }, failure: initialization.failure });
       // 구형 CLI 는 `app-server` 하위 명령 자체가 없다 — 프로세스 수명 동안 1회 학습해 영구 강등.
       if (looksLikeMissingAppServer("", err)) {
-        markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
+        markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err), executableKey);
         events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
       }
       if (req.workforceRuntimeToolGrant) throw err;
@@ -1934,7 +1937,7 @@ async function runCodexResidentTurn(input: {
         } else {
           const released = await releaseCodexResidentThread(held, heldThreadId, { ...(req.signal ? { signal: req.signal } : {}) });
           if (released === "unsupported") {
-            markCodexThreadMcpRebindUnsupported();
+            markCodexThreadMcpRebindUnsupported(executableKey);
             dropReason = "rebind_unsupported";
           } else {
             // No longer subscribed: only a thread/resume (which re-subscribes) may follow, never a bare turn/start.
@@ -3114,7 +3117,7 @@ async function runCodexResidentTurn(input: {
       // A closed transport cannot prove that a dispatched tool-only turn did nothing.
       broken = true;
       if (looksLikeMissingAppServer(session.conn.lastStderr, new Error(closedReason))) {
-        markCodexAppServerUnsupported(closedReason || session.conn.lastStderr);
+        markCodexAppServerUnsupported(closedReason || session.conn.lastStderr, executableKey);
         events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
       }
       // The exact turn/start receipt was received above: the session holds this turn's request.
@@ -3229,7 +3232,7 @@ async function runCodexResidentTurn(input: {
       if (err instanceof CodexModelSelectionError) throw err;
       if (err instanceof CodexSessionContinuityError) throw err;
       if (looksLikeMissingAppServer(session.conn?.lastStderr ?? "", err)) {
-        markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
+        markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err), executableKey);
         events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
       }
       // Empty visible text is not evidence of no dispatch or no external action.
@@ -3429,14 +3432,18 @@ export const runCodex: Runner = async (
   // app-server codexThreadPolicy(read) (readOnly sandbox, network off, approvals answered by the host arbiter).
   // A Workforce receipt exists only on the acknowledged app-server path.
   // Ordinary Codex exec fallback is not an equivalent evidence producer.
-  if (req.workforceRuntimeToolGrant && (!codexAppServerSupported()
-    || residencyDisabledFor(KIND, req.env ?? process.env) || req.isolatedMcpConfig || !req.chatId)) {
+  if (req.workforceRuntimeToolGrant && (residencyDisabledFor(KIND, req.env ?? process.env) || req.isolatedMcpConfig || !req.chatId)) {
     throw new Error("workforce_codex_observation_app_server_required");
   }
   const bin = await getBin(req.runtimeSource, req.cwd ?? agentRunCwd(), req.env ?? process.env);
   if (!bin) {
     // No executable: nothing can have been sent. A typed pre-dispatch refusal, not an unsettled turn (docs 31 W1).
     throw preDispatchRefusal(new Error(tStatus(req.locale, "errCliMissingCodex")), "cli-discovery", "codex_cli_missing");
+  }
+  const executableKey = codexExecutableKey(bin, req.cwd ?? agentRunCwd(), req.env ?? process.env);
+  // The learned "no app-server" is read per executable generation, after the executable is known.
+  if (req.workforceRuntimeToolGrant && !codexAppServerSupported(executableKey)) {
+    throw new Error("workforce_codex_observation_app_server_required");
   }
   if (req.untrustedNoTools && req.judgmentOnly) {
     const noToolsModel = codexNoToolsModel(req.model);
@@ -3694,7 +3701,7 @@ export const runCodex: Runner = async (
   if (
     isolationHeld &&
     !freshReason &&
-    codexAppServerSupported() &&
+    codexAppServerSupported(executableKey) &&
     !residencyDisabledFor(KIND, runReq.env ?? process.env) &&
     !runReq.untrustedNoTools &&
     !runReq.singleUse &&

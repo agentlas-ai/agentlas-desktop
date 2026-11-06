@@ -2,7 +2,7 @@ import { z } from "zod";
 import { esc } from "../../kit";
 import { list, loose, optionalNum, optionalText, text, tone } from "../../fields";
 import { defineAsset, type AnyAsset } from "../contract";
-import { C, TONE, arrow, clamp, cleanEdges, f, finder, labelTone, layout, lines, pill, placeLabels, rank, rounded, sentence, shell, shellCss, tw, uniqueBy, wrap, type Box, type Pt } from "./_graph";
+import { C, TONE, arrow, clamp, cleanEdges, f, finder, edgeTone, layout, lines, pill, placeLabels, rank, rounded, sentence, shell, shellCss, tw, uniqueBy, wrap, type Box, type Pt } from "./_graph";
 
 const even = (v: number) => Math.round(v / 2) * 2;
 
@@ -39,10 +39,10 @@ export const flowchart = defineAsset({
   use: "A process or decision flow as boxes and arrows: steps, yes/no decisions, inputs and outputs, merging and looping back.",
   useKo: "처리 절차나 의사결정 흐름을 상자와 화살표로 그립니다(단계, 예/아니오 분기, 입출력, 합류와 되돌아가기).",
   tags: ["flowchart", "flow", "process", "decision", "workflow", "steps", "branch", "순서도", "흐름도", "프로세스", "분기", "절차"],
-  notes: "At most 14 nodes and 24 edges. Kinds: start, step, decision, io, end, note. Edges name node ids; without edges the nodes are chained in order. direction: tb (default) or lr.",
+  notes: "At most 14 nodes and 24 edges. Kinds: start, step, decision, io, end, note. Edges name node ids; without edges the nodes are chained in order. An edge may carry tone (up green, down red, warn, info) to colour its label, e.g. up for a yes branch; no tone is neutral. direction: tb (default) or lr.",
   fields: {
     nodes: list(z.object({ id: text(24), label: text(80), kind }).strip(), 2, 14),
-    edges: list(z.object({ from: text(24), to: text(24), label: optionalText(24) }).strip(), 0, 24).default([]),
+    edges: list(z.object({ from: text(24), to: text(24), label: optionalText(24), tone: tone.optional() }).strip(), 0, 24).default([]),
     direction,
   },
   sample: {
@@ -55,8 +55,8 @@ export const flowchart = defineAsset({
       { id: "cancel", label: "Order cancelled", kind: "end" }, { id: "note", label: "Restock takes 3–5 days", kind: "note" },
     ],
     edges: [
-      { from: "placed", to: "pay" }, { from: "pay", to: "paid" }, { from: "paid", to: "stock", label: "Yes" }, { from: "paid", to: "decline", label: "No" }, { from: "decline", to: "cancel" },
-      { from: "stock", to: "pack", label: "Yes" }, { from: "stock", to: "back", label: "No" }, { from: "back", to: "pack", label: "Restocked" }, { from: "pack", to: "ship" }, { from: "ship", to: "done" }, { from: "back", to: "note" },
+      { from: "placed", to: "pay" }, { from: "pay", to: "paid" }, { from: "paid", to: "stock", label: "Yes", tone: "up" }, { from: "paid", to: "decline", label: "No", tone: "down" }, { from: "decline", to: "cancel" },
+      { from: "stock", to: "pack", label: "Yes", tone: "up" }, { from: "stock", to: "back", label: "No", tone: "down" }, { from: "back", to: "pack", label: "Restocked" }, { from: "pack", to: "ship" }, { from: "ship", to: "done" }, { from: "back", to: "note" },
     ],
   },
   render(b, { uid }) {
@@ -69,7 +69,7 @@ export const flowchart = defineAsset({
       const note = shapes[e.from].k === "note" || shapes[e.to].k === "note", d = rounded(g.routes[i].pts, 10);
       return d ? `<path d="${d}" fill="none" stroke="${note ? C.faint : C.edge}" stroke-width="${note ? 1.3 : 1.7}"${note ? ' stroke-dasharray="4 4"' : ` marker-end="url(#${uid}h)"`}/>` : "";
     }).join("");
-    const chips = edges.map((e, i) => { const at = g.routes[i].label; if (!e.label || !at) return ""; const t = labelTone(e.label); return pill(at[0], at[1], e.label, { ...t, maxW: 100 }).svg; }).join("");
+    const chips = edges.map((e, i) => { const at = g.routes[i].label; if (!e.label || !at) return ""; const t = edgeTone(e.tone); return pill(at[0], at[1], e.label, { ...t, maxW: 100 }).svg; }).join("");
     const body = `${paths}${shapes.map((s, i) => drawNode(s, g.pos[i][0], g.pos[i][1])).join("")}${chips}`;
     return `${b.title ? `<div class="sec">${esc(b.title)}</div>` : ""}${shell(uid, g.width, g.height, arrow(`${uid}h`, C.edge), body)}`;
   },
@@ -93,11 +93,11 @@ export const swimlaneDiagram = defineAsset({
   use: "A process split by who does each step: horizontal lanes for the actors, steps placed along a time axis, arrows that cross lanes at each hand-off.",
   useKo: "누가 어떤 단계를 맡는지 담당자별 가로 레인으로 나누고, 시간 순서대로 단계와 인계 화살표를 그립니다.",
   tags: ["swimlane", "lanes", "actors", "handoff", "responsibility", "process", "workflow", "스윔레인", "레인", "역할", "담당", "인계", "업무 흐름"],
-  notes: "2-5 lanes, at most 14 steps. A step names its lane (by name) and may set at (the time column, 1-based); without at the columns follow the links. Without links the steps are chained in order.",
+  notes: "2-5 lanes, at most 14 steps. A step names its lane (by name) and may set at (the time column, 1-based); without at the columns follow the links. Without links the steps are chained in order. A link may carry tone (up green, down red, warn, info) to colour its label; no tone is neutral.",
   fields: {
     lanes: list(laneField, 2, 5),
     steps: list(z.object({ id: text(24), lane: text(28), label: text(60), kind: stepKind, at: optionalNum }).strip(), 2, 14),
-    links: list(z.object({ from: text(24), to: text(24), label: optionalText(20) }).strip(), 0, 24).default([]),
+    links: list(z.object({ from: text(24), to: text(24), label: optionalText(20), tone: tone.optional() }).strip(), 0, 24).default([]),
   },
   sample: {
     title: "Support ticket hand-offs",
@@ -108,7 +108,7 @@ export const swimlaneDiagram = defineAsset({
       { id: "confirm", lane: "Support agent", label: "Confirm fix with customer" }, { id: "closed", lane: "Customer", label: "Ticket closed", kind: "end" },
     ],
     links: [
-      { from: "submit", to: "triage" }, { from: "triage", to: "bug" }, { from: "bug", to: "reply", label: "No" }, { from: "bug", to: "fix", label: "Yes" }, { from: "fix", to: "review" },
+      { from: "submit", to: "triage" }, { from: "triage", to: "bug" }, { from: "bug", to: "reply", label: "No", tone: "down" }, { from: "bug", to: "fix", label: "Yes", tone: "up" }, { from: "fix", to: "review" },
       { from: "review", to: "confirm" }, { from: "reply", to: "closed" }, { from: "confirm", to: "closed" },
     ],
   },
@@ -171,7 +171,7 @@ export const swimlaneDiagram = defineAsset({
       return `<rect x="${f(x - w / 2)}" y="${f(y - h / 2)}" width="${w}" height="${h}" rx="9" fill="${t.fill}" stroke="${t.stroke}" stroke-width="1.5"/>${txt()}`;
     }).join("");
     const strokes = paths.map(d => `<path d="${rounded(d, 9)}" fill="none" stroke="${C.edge}" stroke-width="1.6" marker-end="url(#${uid}h)"/>`).join("");
-    const chips = edges.map((e, i) => (e.label && at[i] ? pill(at[i]![0], at[i]![1], e.label, { ...labelTone(e.label), maxW: 100 }).svg : "")).join("");
+    const chips = edges.map((e, i) => (e.label && at[i] ? pill(at[i]![0], at[i]![1], e.label, { ...edgeTone(e.tone), maxW: 100 }).svg : "")).join("");
     const body = `<g clip-path="url(#${uid}k)">${bands}${axis}</g><rect x=".5" y=".5" width="${W - 1}" height="${H - 1}" rx="12" fill="none" stroke="${C.line}"/>${strokes}${nodes}${chips}`;
     return `${b.title ? `<div class="sec">${esc(b.title)}</div>` : ""}${shell(uid, W, H, `${arrow(`${uid}h`, C.edge)}${arrow(`${uid}o`, C.faint, true)}<clipPath id="${uid}k"><rect width="${W}" height="${H}" rx="12"/></clipPath>`, body)}`;
   },
@@ -272,10 +272,10 @@ export const stateDiagram = defineAsset({
   use: "A lifecycle as states and the transitions between them: an initial dot, named states, final states, labelled transitions and self-loops.",
   useKo: "상태와 상태 전이를 그려 수명주기를 보여줍니다(시작점, 상태, 종료 상태, 전이 조건, 자기 전이).",
   tags: ["state", "state machine", "lifecycle", "transition", "status", "fsm", "상태", "상태도", "상태 전이", "수명주기", "라이프사이클"],
-  notes: "At most 12 states and 24 transitions. kind: normal, initial (a dot, no label) or final. tone colours a state (up, down, warn, info). A transition with the same from and to is a self-loop. direction: lr (default) or tb.",
+  notes: "At most 12 states and 24 transitions. kind: normal, initial (a dot, no label) or final. tone colours a state (up, down, warn, info). A transition may carry tone too, to colour its label. A transition with the same from and to is a self-loop. direction: lr (default) or tb.",
   fields: {
     states: list(z.object({ id: text(24), label: optionalText(40), kind: stateKind, tone: tone.optional() }).strip(), 2, 12),
-    transitions: list(z.object({ from: text(24), to: text(24), label: optionalText(30) }).strip(), 0, 24).default([]),
+    transitions: list(z.object({ from: text(24), to: text(24), label: optionalText(30), tone: tone.optional() }).strip(), 0, 24).default([]),
     direction,
   },
   sample: {
@@ -321,7 +321,7 @@ export const stateDiagram = defineAsset({
       if (label) { const p = pill(0, 0, label, { maxW: 140 }); chip = tb ? pill(x + d.w / 2 + 27 + p.w / 2, y, label, { maxW: 140 }).svg : pill(x, y + d.h / 2 + 33, label, { maxW: 140 }).svg; }
       return `<path d="${path}" fill="none" stroke="${C.edge}" stroke-width="1.7" marker-end="url(#${uid}h)"/>${chip}`;
     }).join("");
-    const labels = edges.map((e, i) => { const at = g.routes[i].label; return e.label && at ? pill(at[0], at[1], e.label, { ...labelTone(e.label), maxW: 118 }).svg : ""; }).join("");
+    const labels = edges.map((e, i) => { const at = g.routes[i].label; return e.label && at ? pill(at[0], at[1], e.label, { ...edgeTone(e.tone), maxW: 118 }).svg : ""; }).join("");
     return `${b.title ? `<div class="sec">${esc(b.title)}</div>` : ""}${shell(uid, g.width, g.height, arrow(`${uid}h`, C.edge), `${strokes}${loopSvg}${nodeSvg}${labels}`)}`;
   },
   summary(b) {

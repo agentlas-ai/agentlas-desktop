@@ -10,6 +10,8 @@ import { MobileBridgeRefusal, type MobileBridgeSpecificRefusalCode } from "../..
 export const MOBILE_ATTACHMENT_CHUNK_BYTES = 1024 * 1024;
 /** Transfers in progress per device. A protection for the bridge, not a limit on what is attached: the phone retries after `attachment_upload_busy`. */
 const MAX_UNFINISHED_UPLOADS_PER_DEVICE = 4;
+/** A transfer silent this long (two minutes: a slow link still moves a chunk by then) is what a dropped connection leaves behind; at the limit it stops counting and is removed. */
+const QUIET_UPLOAD_MS = 120_000;
 /** Room the store needs besides the staged copy: the database row and its WAL copy exist together for a moment. */
 const DISK_HEADROOM_BYTES = 64 * 1024 * 1024;
 /** How often staged uploads are checked for expiry while any exist. */
@@ -59,7 +61,7 @@ function uniqueAttachmentName(name: string, taken: ReadonlySet<string>): string 
 
 type StagedFile = { name: string; sourceName: string; size: number; received: number; path: string; hash: Hash; sha256?: string };
 type Upload = {
-  id: string; deviceId: string; chatId?: string; scope: MobileAttachmentScope; groupId: string; finished: boolean; expiresAt: number;
+  id: string; deviceId: string; chatId?: string; scope: MobileAttachmentScope; groupId: string; finished: boolean; expiresAt: number; touchedAt: number;
   dir: string; files: StagedFile[]; result?: ReturnType<typeof persistChatFileStagedFiles>; claimedBy?: string;
 };
 
@@ -155,8 +157,12 @@ export class MobileChatAttachmentUploads {
     if (scope !== "chat" && scope !== "build") throw uploadError("attachment_scope_invalid");
     if (scope === "build" && chatId) throw uploadError("attachment_scope_invalid", "A build upload belongs to no conversation.");
     if (!Array.isArray(files) || !files.length) throw uploadError("attachment_count_invalid");
-    const unfinished = [...this.uploads.values()].filter(upload => upload.deviceId === deviceId && !upload.finished).length;
-    if (unfinished >= MAX_UNFINISHED_UPLOADS_PER_DEVICE) throw uploadError("attachment_upload_busy", "Other attachments from this phone are still arriving; send again when they finish.");
+    const unfinishedOf = () => [...this.uploads.values()].filter(upload => upload.deviceId === deviceId && !upload.finished);
+    if (unfinishedOf().length >= MAX_UNFINISHED_UPLOADS_PER_DEVICE) {
+      // Busy means four transfers are really arriving. What a dropped connection left silent does not hold the slot for 30 minutes.
+      for (const upload of unfinishedOf()) if (this.now() - upload.touchedAt > QUIET_UPLOAD_MS) this.discard(upload);
+    }
+    if (unfinishedOf().length >= MAX_UNFINISHED_UPLOADS_PER_DEVICE) throw uploadError("attachment_upload_busy", "Other attachments from this phone are still arriving; send again when they finish.");
     const names = new Set<string>();
     const prepared = files.map(file => {
       if (!file || typeof file.name !== "string" || !file.name || file.name.length > 180 || /[\\/:\u0000-\u001f\u007f]/u.test(file.name) || file.name.startsWith(".")) throw uploadError("attachment_name_invalid");
@@ -185,7 +191,7 @@ export class MobileChatAttachmentUploads {
       fs.writeFileSync(target, Buffer.alloc(0), { mode: 0o600, flag: "wx" });
       return { ...file, received: 0, path: target, hash: createHash("sha256") };
     });
-    this.uploads.set(uploadId, { id: uploadId, deviceId, chatId, scope, groupId: randomUUID(), finished: false, expiresAt: this.now() + ONE_ATTACHMENT_LIMITS.capabilityTtlMs, dir, files: staged });
+    this.uploads.set(uploadId, { id: uploadId, deviceId, chatId, scope, groupId: randomUUID(), finished: false, expiresAt: this.now() + ONE_ATTACHMENT_LIMITS.capabilityTtlMs, touchedAt: this.now(), dir, files: staged });
     this.armSweep();
     return { uploadId, chunkBytes: MOBILE_ATTACHMENT_CHUNK_BYTES };
   }
@@ -199,9 +205,16 @@ export class MobileChatAttachmentUploads {
 
   chunk(deviceId: string, input: { uploadId: string; fileIndex: number; offset: number; data: string }): { receivedBytes: number } {
     const upload = this.require(deviceId, input.uploadId), file = upload.files[input.fileIndex];
-    if (upload.finished || !Number.isSafeInteger(input.fileIndex) || !file || !Number.isSafeInteger(input.offset) || input.offset !== file.received) throw uploadError("attachment_chunk_offset_invalid");
+    if (upload.finished || !Number.isSafeInteger(input.fileIndex) || !file || !Number.isSafeInteger(input.offset) || input.offset < 0 || input.offset > file.received) throw uploadError("attachment_chunk_offset_invalid");
     if (typeof input.data !== "string" || input.data.length > Math.ceil(MOBILE_ATTACHMENT_CHUNK_BYTES / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/.test(input.data)) throw uploadError("attachment_chunk_invalid");
     const bytes = Buffer.from(input.data, "base64");
+    // A chunk the phone sends again because the answer was lost is already on disk and in the hash: confirm it, write nothing.
+    if (bytes.length && input.offset < file.received && input.offset + bytes.length <= file.received) {
+      upload.expiresAt = this.now() + ONE_ATTACHMENT_LIMITS.capabilityTtlMs;
+      upload.touchedAt = this.now();
+      return { receivedBytes: file.received };
+    }
+    if (input.offset !== file.received) throw uploadError("attachment_chunk_offset_invalid");
     if (!bytes.length || bytes.length > MOBILE_ATTACHMENT_CHUNK_BYTES || bytes.toString("base64") !== input.data || file.received + bytes.length > file.size) throw uploadError("attachment_chunk_size_invalid");
     try {
       const fd = fs.openSync(file.path, fs.constants.O_WRONLY | (fs.constants.O_NOFOLLOW ?? 0));
@@ -226,6 +239,7 @@ export class MobileChatAttachmentUploads {
     file.received += bytes.length;
     // A long transfer keeps its upload alive: the window counts from the last chunk, not from begin.
     upload.expiresAt = this.now() + ONE_ATTACHMENT_LIMITS.capabilityTtlMs;
+    upload.touchedAt = this.now();
     return { receivedBytes: file.received };
   }
 

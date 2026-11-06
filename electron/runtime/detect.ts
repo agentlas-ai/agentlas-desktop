@@ -56,6 +56,7 @@ import {
 import { recallRuntimeSelection, rememberRuntimeSelection } from "./selection-memory";
 import { clearCliVersionProbeCache } from "./exec";
 import { writeRuntimeSelectionMirror } from "./selection-mirror";
+import { emitRuntimeSignal } from "./runtime-signals";
 
 type ActiveRuntimeRow = {
   kind: RuntimeKind;
@@ -367,6 +368,25 @@ async function waitForRuntimeDetection<T>(start: () => Promise<T>, signal?: Abor
   }
 }
 
+/** Runtimes the last completed detection found usable (not waiting for a sign-in); null before the first detection of this process. */
+let lastUsableRuntimes: Set<string> | null = null;
+/**
+ * A runtime that was not usable and is now (a CLI installed, a local engine started, a sign-in that detection now sees) is a fact a
+ * stopped request waits for (runtime/runtime-signals.ts). Only a change signals: a routine detection that finds the same set does not,
+ * and the first detection of a process has nothing to compare with.
+ */
+function signalNewlyUsableRuntimes(list: readonly RuntimeStatus[]): void {
+  const usable = new Set<string>();
+  for (const runtime of list) {
+    if (runtime.signInRequired) continue;
+    usable.add(JSON.stringify([runtime.kind, runtime.backend, runtime.source, runtime.model ?? null]));
+  }
+  const previous = lastUsableRuntimes;
+  lastUsableRuntimes = usable;
+  if (!previous) return;
+  for (const key of usable) if (!previous.has(key)) { emitRuntimeSignal("detected", String((JSON.parse(key) as unknown[])[0])); return; }
+}
+
 export function detectRuntimes(force = false, signal?: AbortSignal): Promise<RuntimeStatus[]> {
   return waitForRuntimeDetection(() => detectRuntimesCore(force, signal), signal);
 }
@@ -431,6 +451,7 @@ async function detectRuntimesCore(force = false, signal?: AbortSignal): Promise<
     // the source for a later dashboard read.
     if (requestGeneration === detectGeneration) {
       detectCache = { at: Date.now(), providerIdentity, list: cloneRuntimeStatuses(list) };
+      signalNewlyUsableRuntimes(list);
     }
     return cloneRuntimeStatuses(list);
   } finally {

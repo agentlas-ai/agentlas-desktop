@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { esc } from "../../kit";
 import { list, optionalText, text } from "../../fields";
-import { defineAsset, type AnyAsset } from "../contract";
+import { defineAsset, sampleDay, type AnyAsset } from "../contract";
 import { LABEL, MUTED, ROW, accent, day, docCss, hue, plain } from "./_shared";
 
 /** People and publication pages: the resume, the meeting minutes, the certificate and the newsletter. */
@@ -41,7 +41,7 @@ export const meetingMinutes = defineAsset({
   notes: "Up to 6 attendees, 4 agenda items (topic at most 56, decision at most 80 characters), 5 actions with owner and due date.",
   fields: { title: text(70), date: text(24), time: optionalText(20), place: optionalText(40), attendees: list(text(26), 1, 6), agenda: list(z.object({ topic: text(56), decision: text(80) }).strip(), 1, 4), actions: list(z.object({ task: text(64), owner: text(20), due: text(14) }).strip(), 1, 5), accent },
   sample: {
-    title: "Product planning sync, Q1 roadmap", date: "", time: "10:00 - 10:45", place: "Room 4B and Zoom", attendees: ["Dana Whitfield", "Maya Okafor", "Ibrahim Khan", "Aiko Sato", "Tomas Lund", "Priya Nair"],
+    title: "Product planning sync, Q1 roadmap", date: sampleDay(135), time: "10:00 - 10:45", place: "Room 4B and Zoom", attendees: ["Dana Whitfield", "Maya Okafor", "Ibrahim Khan", "Aiko Sato", "Tomas Lund", "Priya Nair"],
     agenda: [{ topic: "Q1 roadmap priorities", decision: "Checkout redesign goes first; analytics export moves to Q2." }, { topic: "Hiring plan for the design team", decision: "Open one senior role now, a second after the January review." }, { topic: "Support backlog and tooling", decision: "Adopt the shared inbox pilot for four weeks, then decide." }],
     actions: [{ task: "Write the checkout redesign brief", owner: "Maya", due: "Oct 21" }, { task: "Post the senior designer role", owner: "Dana", due: "Oct 18" }, { task: "Set up the shared inbox pilot", owner: "Ibrahim", due: "Oct 28" }, { task: "Share the Q1 roadmap with sales", owner: "Priya", due: "Oct 24" }], accent: "blue",
   },
@@ -71,7 +71,7 @@ export const certificate = defineAsset({
   tags: ["certificate", "award", "diploma", "achievement", "completion", "recognition", "수료증", "상장", "감사장", "인증서", "표창"],
   notes: "title such as Certificate of Completion; reason at most 140 characters; one or two signers; seal is a short word or year in the seal.",
   fields: { title: text(40), issuer: optionalText(40), recipient: text(40), reason: text(140), date: text(24), signers: list(z.object({ name: text(28), role: optionalText(28) }).strip(), 1, 2), seal: optionalText(10), accent },
-  sample: { title: "Certificate of Achievement", issuer: "Lumen Learning Academy", recipient: "Maya Okafor", reason: "for completing the Advanced Product Design programme with distinction, including all twelve studio projects", date: "", signers: [{ name: "Elena Marquez", role: "Programme Director" }, { name: "Dr. Samuel Reyes", role: "Dean of Studies" }], seal: "2026", accent: "amber" },
+  sample: { title: "Certificate of Achievement", issuer: "Lumen Learning Academy", recipient: "Maya Okafor", reason: "for completing the Advanced Product Design programme with distinction, including all twelve studio projects", date: sampleDay(135), signers: [{ name: "Elena Marquez", role: "Programme Director" }, { name: "Dr. Samuel Reyes", role: "Dean of Studies" }], seal: "2026", accent: "amber" },
   render(b, { ko, uid, T }) {
     const corner = `<g id="${uid}c" fill="none" stroke="var(--ac)"><path d="M12 12h30M12 12v30" stroke-width="1.8"/><path d="M12 30a18 18 0 0 0 18-18M12 38a26 26 0 0 0 26-26" stroke-width=".7"/><path d="M12 22a10 10 0 0 0 10-10" stroke-width=".7"/><circle cx="12" cy="12" r="3" fill="var(--ac)" stroke="none"/><path d="M46 12h8M12 46v8" stroke-width=".7"/></g>`;
     const art = `<svg viewBox="0 0 400 300" preserveAspectRatio="none" aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%"><defs>${corner}</defs><rect x="6" y="6" width="388" height="288" rx="3" fill="none" stroke="var(--ac)" stroke-width="3"/><rect x="12" y="12" width="376" height="276" fill="none" stroke="var(--ac)" stroke-width=".8"/><rect x="15" y="15" width="370" height="270" fill="none" stroke="var(--ac)" stroke-width=".5" stroke-dasharray="1.2 2.4"/><use href="#${uid}c"/><use href="#${uid}c" transform="translate(400 0) scale(-1 1)"/><use href="#${uid}c" transform="translate(0 300) scale(1 -1)"/><use href="#${uid}c" transform="translate(400 300) scale(-1 -1)"/></svg>`;
@@ -96,7 +96,7 @@ export const newsletter = defineAsset({
   notes: "masthead at most 30 characters; lead teaser at most 240; 1-3 briefs of at most 120 characters.",
   fields: { masthead: text(30), tagline: optionalText(50), issue: text(24), date: text(24), lead: z.object({ headline: text(70), teaser: text(240), tag: optionalText(18), byline: optionalText(30) }).strip(), briefs: list(z.object({ headline: text(46), text: text(120) }).strip(), 1, 3), footer: text(80), accent },
   sample: {
-    masthead: "The Harbor Dispatch", tagline: "News from the waterfront district", issue: "Issue 42", date: "",
+    masthead: "The Harbor Dispatch", tagline: "News from the waterfront district", issue: "Issue 42", date: sampleDay(135),
     lead: { headline: "The old ferry terminal reopens as a public market", teaser: "After four years of work, the 1923 terminal now holds 38 food stalls, a rooftop garden and a small museum of the harbour. Opening weekend drew more than 20,000 visitors, and vendors say the winter calendar is already full.", tag: "Cover story", byline: "By Lena Hartmann" },
     briefs: [{ headline: "Night ferry returns in November", text: "The 9:40 pm crossing resumes on weekends after a two-year pause, with fares unchanged at $4." }, { headline: "Library extends opening hours", text: "From Monday the harbour branch opens until 9 pm on weekdays, with quiet study rooms bookable online." }, { headline: "Seawall repairs reach midpoint", text: "Crews finished 600 of 1,200 metres; the promenade closure ends on December 6, a week ahead of plan." }],
     footer: "You are receiving this because you subscribed. Unsubscribe any time.", accent: "red",

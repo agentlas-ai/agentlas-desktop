@@ -6,6 +6,9 @@ import { getChat } from "../store/chats";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, longRunOwnerHold } from "../store/long-runs";
 import { getInvocationRunReceipt, getRunEventBySource, ownerDirectionAfterInvocationRun, recordRunEvent } from "../store/run-events";
+import { runtimeSignalFloor } from "../runtime/runtime-signals";
+import { hostAppVersion } from "../invocation/host-recovery";
+import { recoveryWaitReleasable } from "./recovery-wait";
 
 const REQUEST = "one_controller_recovery_requested";
 const LINK = "one_controller_recovery_link";
@@ -15,10 +18,12 @@ interface Reservation {
   originalRunId: string; parentRunId: string; nextRunId: string; ordinal: number; scopeDigest: string;
 }
 /**
- * Storage sanity bound on the saved chain of one original run. The two-attempt budget is per failure fingerprint
- * (oneRecoveryAttemptsForFingerprint): a different problem restarts it, so the chain may be longer than the budget.
+ * A backstop, not the limit. What bounds the model cost is the budget of one situation (ONE_AUTO_RECOVERY_MAX_ATTEMPTS per failure
+ * fingerprint, per runtime-signal epoch and app version: desktopOneRecoveryAttemptsForFingerprint), so a chain that lives through many
+ * situations is long and 16x the budget would end a still-useful chain. This only keeps the saved chain of one original run (two rows per
+ * attempt) from growing without end; at it the judgment answers a fixed line without a model call (ipc.ts oneAutoRecovery:judge).
  */
-const DESKTOP_RECOVERY_CHAIN_LIMIT = ONE_AUTO_RECOVERY_MAX_ATTEMPTS * 16;
+export const DESKTOP_RECOVERY_CHAIN_LIMIT = ONE_AUTO_RECOVERY_MAX_ATTEMPTS * 128;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 function reservation(value: unknown): Reservation {
@@ -56,18 +61,27 @@ export function desktopOneRecoveryContext(runId: string, chatId: string): { orig
 }
 
 /**
- * Attempts spent on THIS failure fingerprint: the saved requests at the end of the chain that carry it. A request saved
- * without a fingerprint (verification advice, rows from before it was kept) counts as the same problem, the conservative
- * side. This is oneRecoveryAttemptsForFingerprint's rule applied per segment, so Main's admission and the judge agree.
+ * Attempts spent on THIS failure fingerprint in THIS situation: the saved requests at the end of the chain that carry it. A request saved
+ * without a fingerprint (verification advice, rows from before it was kept) counts as the same problem, the conservative side. This is
+ * oneRecoveryAttemptsForFingerprint's rule applied per segment, so Main's admission and the judge agree.
+ *
+ * The count stops at the first request that belongs to an earlier situation (the budget bounds the model cost of one situation, it does
+ * not end the work): one made under another app version, or one that a runtime signal (sign-in, detected runtime, restored connection)
+ * has come after, with the signal spacing passed (recovery-wait.ts). Without that, a stop waiting for the situation to change could not
+ * continue when it did.
  */
-export function desktopOneRecoveryAttemptsForFingerprint(originalRunId: string, fingerprint: string | null | undefined): number {
-  const rows = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id=? AND kind=? ORDER BY seq DESC")
-    .all(originalRunId, REQUEST) as Array<{ payload_json: string }>;
+export function desktopOneRecoveryAttemptsForFingerprint(originalRunId: string, fingerprint: string | null | undefined, now = Date.now()): number {
+  const rows = getDb().prepare("SELECT ts, payload_json FROM run_events WHERE run_id=? AND kind=? ORDER BY seq DESC")
+    .all(originalRunId, REQUEST) as Array<{ ts: string; payload_json: string }>;
+  const signalFloor = runtimeSignalFloor(now), version = hostAppVersion();
   let spent = 0;
   for (const row of rows) {
-    let saved: unknown = null;
-    try { saved = (JSON.parse(row.payload_json) as { adviceFingerprint?: unknown }).adviceFingerprint; } catch { /* counts as the same problem */ }
-    if (fingerprint && typeof saved === "string" && saved && saved !== fingerprint) break;
+    let saved: { adviceFingerprint?: unknown; appVersion?: unknown } = {};
+    try { saved = JSON.parse(row.payload_json) as typeof saved; } catch { /* counts as the same problem */ }
+    if (fingerprint && typeof saved.adviceFingerprint === "string" && saved.adviceFingerprint && saved.adviceFingerprint !== fingerprint) break;
+    if (typeof saved.appVersion === "string" && saved.appVersion && saved.appVersion !== version) break;
+    const at = Date.parse(row.ts);
+    if (Number.isFinite(at) && recoveryWaitReleasable({ floor: at, armedAt: at }, signalFloor, now)) break;
     spent += 1;
   }
   return spent;
@@ -157,12 +171,13 @@ export function reserveDesktopOneRecovery(runId: string, chatId: string, capture
     }
     const sameProblem = "fingerprint" in advice && typeof advice.fingerprint === "string" ? advice.fingerprint : null;
     if (desktopOneRecoveryAttemptsForFingerprint(context.originalRunId, sameProblem) >= ONE_AUTO_RECOVERY_MAX_ATTEMPTS) return null;
+    if (context.attemptsSpent + 1 > DESKTOP_RECOVERY_CHAIN_LIMIT) return null;
     const next: Reservation = { originalRunId: context.originalRunId, parentRunId: runId, nextRunId: randomUUID(),
       ordinal: context.attemptsSpent + 1, scopeDigest: capturedScope };
     if (!parentMayContinue(next, chatId)) return null;
     const root = recordRunEvent({ runId: next.originalRunId, chatId, kind: REQUEST,
       sourceEventId: `one-desktop-recovery:${next.ordinal}`, payload: { ...next,
-        adviceDiagnosis: advice.diagnosis.slice(0, 1_000), adviceDecidedBy: advice.decidedBy,
+        adviceDiagnosis: advice.diagnosis.slice(0, 1_000), adviceDecidedBy: advice.decidedBy, appVersion: hostAppVersion().slice(0, 40),
         ...("verified" in advice ? { adviceVerified: advice.verified, adviceAssessmentReceiptId: advice.assessmentReceiptId }
           : { adviceFingerprint: advice.fingerprint }) } });
     const link = recordRunEvent({ runId: next.nextRunId, chatId, kind: LINK, sourceEventId: LINK_SOURCE, payload: { ...next } });

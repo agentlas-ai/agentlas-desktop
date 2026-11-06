@@ -29,7 +29,6 @@ export function installAssets(byCategory: Record<AssetCategory, readonly AnyAsse
 }
 
 export const assetByType = (type: unknown): AnyAsset | undefined => (typeof type === "string" ? byType.get(type) : undefined);
-
 /** The block's validator: its own fields with the host's `type`, `title` and `width`. */
 export function assetSchema(asset: AnyAsset): z.ZodTypeAny {
   let schema = schemas.get(asset.type);

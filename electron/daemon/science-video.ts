@@ -8,7 +8,10 @@ import { sameFileIdentity } from "../../shared/file-identity";
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const HASH = /^[0-9a-f]{64}$/;
 const CHUNK = 1024 * 1024;
-const LIMIT = 64 * 1024 * 1024;
+/** Largest output the transfer path can serve (same ceiling as One artifact videos). */
+const LIMIT = 192 * 1024 * 1024;
+/** What a phone gets when it does not say otherwise (`maxBytes` absent; the wire already rejects values outside 1..LIMIT): older phones refuse anything over 64 MiB and fail the whole list on it. */
+const DEFAULT_LIST_LIMIT = 64 * 1024 * 1024;
 const MIME = new Set(["video/mp4", "video/quicktime", "video/webm", "video/x-m4v", "video/ogg"]);
 export interface ScienceVideoScope { projectId: string; conversationId: string; messageId: string }
 export interface ScienceVideoPrincipal { deviceId: string; connectionId: string }
@@ -47,7 +50,7 @@ export class ScienceVideoTransfers {
     return { id: output.id, mimeType: output.mimeType, byteSize: output.byteSize, sha256: output.sha256, blobRef: output.blobRef };
   }
   /** Cursor is an exact pair of opaque output IDs. The extra row says whether a later page exists. */
-  list(scope: ScienceVideoScope, cursor?: { runId: string; outputId: string }): { items: Array<{ runId: string; outputId: string; size: number; mediaType: string }>; next: { runId: string; outputId: string } | null } {
+  list(scope: ScienceVideoScope, cursor?: { runId: string; outputId: string }, maxBytes?: number): { items: Array<{ runId: string; outputId: string; size: number; mediaType: string }>; next: { runId: string; outputId: string } | null } {
     this.scope(scope);
     if (cursor && (!UUID.test(cursor.runId) || !UUID.test(cursor.outputId))) throw new Error("science_video_cursor_invalid");
     const db = new Database(this.store.databasePath, { readonly: true, fileMustExist: true });
@@ -57,13 +60,13 @@ export class ScienceVideoTransfers {
         AND o.mime_type IN ('video/mp4','video/quicktime','video/webm','video/x-m4v','video/ogg')
         AND o.byte_size BETWEEN 1 AND ? AND o.blob_ref='science-run-blob:sha256:'||o.sha256
         AND (r.id>? OR (r.id=? AND o.id>?)) ORDER BY r.id,o.id LIMIT 51`)
-        .all(scope.projectId, scope.conversationId, scope.messageId, LIMIT, cursor?.runId ?? "", cursor?.runId ?? "", cursor?.outputId ?? "") as Array<{ runId: string; outputId: string }>;
+        .all(scope.projectId, scope.conversationId, scope.messageId, maxBytes ?? DEFAULT_LIST_LIMIT, cursor?.runId ?? "", cursor?.runId ?? "", cursor?.outputId ?? "") as Array<{ runId: string; outputId: string }>;
       const items = rows.slice(0, 50).map(row => { const output = this.output(scope, row.runId, row.outputId); return { ...row, size: output.byteSize, mediaType: output.mimeType }; });
       const last = items.at(-1);
       return { items, next: rows.length > 50 && last ? { runId: last.runId, outputId: last.outputId } : null };
     } finally { db.close(); }
   }
-  hasVideos(projectId: string, conversationId: string, messageIds: string[]): string[] {
+  hasVideos(projectId: string, conversationId: string, messageIds: string[], maxBytes?: number): string[] {
     if (!UUID.test(projectId) || !UUID.test(conversationId) || messageIds.length > 200 || new Set(messageIds).size !== messageIds.length
       || messageIds.some(id => !UUID.test(id))) throw new Error("science_video_scope_invalid");
     this.assertOwner();
@@ -80,7 +83,7 @@ export class ScienceVideoTransfers {
         WHERE r.project_id=? AND r.conversation_id=? AND r.origin_message_id IN (${placeholders}) AND r.status='succeeded'
         AND length(r.output_manifest_sha256)=64 AND o.mime_type IN ('video/mp4','video/quicktime','video/webm','video/x-m4v','video/ogg')
         AND o.byte_size BETWEEN 1 AND ? AND length(o.sha256)=64 AND o.sha256 NOT GLOB '*[^0-9a-f]*'
-        AND o.blob_ref='science-run-blob:sha256:'||o.sha256`).all(projectId, conversationId, ...visible, LIMIT) as Array<{ id: string }>;
+        AND o.blob_ref='science-run-blob:sha256:'||o.sha256`).all(projectId, conversationId, ...visible, maxBytes ?? DEFAULT_LIST_LIMIT) as Array<{ id: string }>;
       this.assertOwner();
       return rows.map(row => row.id);
     } finally { db.close(); }

@@ -33,6 +33,16 @@ export function goalWaitRefusalAlreadyNotified(input: { chatId: string; goalId: 
     .get(input.chatId, input.goalId, input.revision, input.reason));
 }
 
+/**
+ * Refusals whose answer the host already has: the proposal itself cannot be scheduled (its time lies at or after its own deadline,
+ * or the deadline is past), and nothing else about the Goal is in question. The model cannot fix them by being told again and the
+ * owner has nothing to decide, so they never park the Goal: the turn is verified now (finite Goal) or the host schedules its own
+ * observation (ongoing Goal).
+ */
+export const HOST_RESOLVABLE_WAIT_REFUSALS: ReadonlySet<string> = new Set(["goal_wait_timer_invalid", "goal_wait_deadline_elapsed"]);
+
+export function waitRefusalHostResolves(reason: string): boolean { return HOST_RESOLVABLE_WAIT_REFUSALS.has(reason); }
+
 /** A timer refused only because the Goal is finite ends the turn; it does not block the Goal. */
 export function finiteGoalTimerRefusalEndsTurn(input: {
   reason: string;
@@ -41,9 +51,43 @@ export function finiteGoalTimerRefusalEndsTurn(input: {
   intent: GoalWaitIntent | null | undefined;
   aborted: boolean;
 }): boolean {
+  if (input.lifecycle !== "finite" || input.status !== "running" || input.aborted) return false;
+  if (waitRefusalHostResolves(input.reason)) return true;
   return (input.reason === "goal_wait_ongoing_authority_required" || input.reason === "goal_wait_goal_deadline_passed")
-    && input.lifecycle === "finite"
-    && input.status === "running" && input.intent?.subject.kind === "timer" && !input.aborted;
+    && input.intent?.subject.kind === "timer";
+}
+
+/**
+ * A refused wait of a running ONGOING Goal that the host answers by scheduling its own observation instead of leaving the Goal
+ * without a next step. A refusal that came after an episode capture is left to the episode's own recovery unless the host
+ * resolves it (above) and this turn still owns the episode: the owner has not held the Goal and no newer producer replaced it.
+ */
+export function ongoingWaitRefusalSchedulesObservation(input: {
+  reason: string;
+  lifecycle: string | null | undefined;
+  status: string | null | undefined;
+  aborted: boolean;
+  hasTransientAttachments: boolean;
+  episodeRefused: boolean;
+  ownerHold: boolean;
+  producerIsThisTurn: boolean;
+}): boolean {
+  if (input.lifecycle !== "ongoing" || input.status !== "running" || input.aborted || input.hasTransientAttachments) return false;
+  if (!input.episodeRefused) return true;
+  return waitRefusalHostResolves(input.reason) && !input.ownerHold && input.producerIsThisTurn;
+}
+
+/** What the service does with a refused wait: end the turn through verification, schedule the host's observation, leave an episode refusal to
+ * its recovery owner ("protect": the Goal is blocked as a typed fact and nothing is scheduled over the owner's hold, a Stop or a newer producer),
+ * or the generic path. One decision, so a test can drive it with the same facts the service reads. */
+export type WaitRefusalDisposition = "end_turn_verification" | "schedule_observation" | "protect_episode" | "generic";
+export function waitRefusalDisposition(input: {
+  reason: string; lifecycle: string | null | undefined; status: string | null | undefined; intent: GoalWaitIntent | null | undefined;
+  aborted: boolean; hasTransientAttachments: boolean; episodeRefused: boolean; ownerHold: boolean; producerIsThisTurn: boolean;
+}): WaitRefusalDisposition {
+  if (finiteGoalTimerRefusalEndsTurn(input)) return "end_turn_verification";
+  if (ongoingWaitRefusalSchedulesObservation(input)) return "schedule_observation";
+  return input.episodeRefused ? "protect_episode" : "generic";
 }
 
 export function finiteGoalTimerRefusalMessage(locale: "ko" | "en", intent: GoalWaitIntent | null | undefined,
@@ -53,6 +97,17 @@ export function finiteGoalTimerRefusalMessage(locale: "ko" | "en", intent: GoalW
       ? "목표 마감이 지나 더 기다리지 않고, 지금 결과를 목표치와 대조해 검증합니다."
       : "The goal's deadline has passed, so there is no further wait: the result is now verified against the target.";
   }
+  // The proposal's own time and deadline do not fit: the host does not ask for another time, it verifies what exists now.
+  if (reason === "goal_wait_timer_invalid") {
+    return locale === "ko"
+      ? "요청한 재확인 시각이 대기 마감과 맞지 않아 예약하지 않았어요. 목표를 닫는 건 아니에요: 이번 턴은 지금까지의 결과로 검증하고, 끝나지 않았으면 이어갑니다."
+      : "The requested check time does not fit the wait's own deadline, so it was not scheduled. The goal is not closed: this turn is verified against the results so far, and it continues if it is not done.";
+  }
+  if (reason === "goal_wait_deadline_elapsed") {
+    return locale === "ko"
+      ? "대기 마감이 이미 지나 기다리지 않고, 지금 상태로 검증합니다. 목표를 닫는 건 아니에요."
+      : "The wait's deadline had already passed, so there is no wait: the current state is verified now. The goal is not closed.";
+  }
 
   // said "verifying the results so far to close the goal" for a goal that was far from done and kept running, and told
   // the owner to type a sentence. The refusal only ends this turn; say what was waiting and that the goal goes on.
@@ -61,29 +116,6 @@ export function finiteGoalTimerRefusalMessage(locale: "ko" | "en", intent: GoalW
   return locale === "ko"
     ? `이 목표는 마감 없이 한 번 끝내는 목표라 ${date ? `${date} ` : ""}재확인 예약${next ? `(“${next}”)` : ""}은 걸지 않았어요. 목표를 닫는 건 아니에요: 이번 턴은 지금까지의 결과로 검증하고, 아직 끝나지 않았으면 목표의 다음 회차에 이어갑니다.`
     : `This goal is a one-time goal without a deadline, so the ${date ? `${date} ` : ""}follow-up${next ? ` ("${next}")` : ""} was not scheduled. The goal is not closed: this turn is verified against the results so far, and if the goal is not done it continues at its next cycle.`;
-}
-
-/** Specific copy for a refused wait that does block the Goal. */
-export function goalWaitRefusalMessage(reason: string, locale: "ko" | "en", intent?: GoalWaitIntent | null): string {
-  const ko = locale === "ko";
-  switch (reason) {
-    case "goal_wait_ongoing_authority_required":
-    case "goal_wait_goal_deadline_passed":
-      return finiteGoalTimerRefusalMessage(locale, intent, reason);
-    case "goal_wait_timer_invalid":
-      return ko
-        ? "요청한 재확인 시각이 지금부터 1분 이내이거나 마감 뒤라서 예약하지 못했어요. 답장으로 원하는 시각을 알려 주거나 재개를 누르면 이어서 진행합니다."
-        : "The requested check time was less than a minute away or after the deadline, so it was not scheduled. Reply with the time you want, or press Resume to continue.";
-    case "goal_wait_deadline_elapsed":
-      return ko
-        ? "대기 마감 시각이 이미 지나 예약하지 못했어요. 답장으로 새 마감을 알려 주거나 재개를 누르면 이어서 진행합니다."
-        : "The wait's deadline had already passed, so it was not scheduled. Reply with a new deadline, or press Resume to continue.";
-    default:
-      return ko
-        // The owner reads a sentence, never the code: the code stays on the goal_wait_refused event.
-        ? "대기를 등록하지 못해 목표를 멈췄어요. 답장하거나 재개를 누르면 이어서 진행합니다."
-        : "The wait could not be registered, so the goal is paused. Reply or press Resume to continue.";
-  }
 }
 
 /**

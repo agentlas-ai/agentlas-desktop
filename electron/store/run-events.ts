@@ -11,6 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import { externalToolNames } from "../../shared/tool-activity";
 import { invocationHostStopCause, isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
+import { externalFailureEntry } from "../../shared/owner-failure-class";
 import { normalizeToolCall } from "../../shared/tool-call-detail";
 import { getDb } from "./db";
 import { createRuntimeRetryStore } from "./runtime-retry";
@@ -3093,7 +3094,8 @@ export function invocationFailureNoticeStatuses(chatId: string, runIds: readonly
     if (receipt.supersededByRunId) out.set(runId, "recovered");
     else if (receipt.status === "failed" && (appSideRunFailure(receipt.errorCode, receipt.runtimeFailure)
       // A failure no table names, whose ledger proves nothing reached a model, is the app's own state too (undispatchedInternalFailure).
-      || undispatchedInternalFailure({ code: receipt.errorCode, runtimeFailure: receipt.runtimeFailure, delivery: ledgerDelivery(runId) }))) out.set(runId, "app-failed");
+      // A code of the external table (a lost connection before dispatch) is an outside cause: its line stays as written.
+      || (!externalFailureEntry(receipt.errorCode) && undispatchedInternalFailure({ code: receipt.errorCode, runtimeFailure: receipt.runtimeFailure, delivery: ledgerDelivery(runId) })))) out.set(runId, "app-failed");
   }
   return out;
 }

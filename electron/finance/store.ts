@@ -7,6 +7,23 @@ import { publishFinanceWorkspaceChange } from './events';
 /** `origin` marks a scope used by this app's own agent tools or scheduled automation: its writes are recorded so that a caller holding an older revision can be rebased over them (see selfOnlyGap). The owner's screens and phone carry no origin. */
 export interface FinanceScope { workspaceId: string; userId: string; assertCurrent(): void; readOnly?: boolean; origin?: 'agent' | 'automation' }
 const lockfile = require('proper-lockfile') as { lock(path: string, options: unknown): Promise<() => Promise<void>> };
+/**
+ * The one way Finance takes a directory lock. It never refuses: a contender keeps retrying until the holder lets go, and a holder that died is
+ * released as stale. Holds are meant to be a few milliseconds (a read-modify-write of one small file), so waiting is brief. `long` is for the
+ * rare hold that really does work (installing the bundled plugin, turning monitoring on). A lock lost to staleness is logged, never thrown into
+ * the process, and releasing a lock that was already lost is not a failure of the work done under it.
+ */
+const lockOptions = (hold: 'short' | 'long', retries: unknown) => ({ realpath: false, stale: hold === 'long' ? 60000 : 30000, ...(hold === 'long' ? { update: 10000 } : {}), retries,
+  onCompromised: (error: unknown) => { console.warn('finance lock lost to staleness:', (error as NodeJS.ErrnoException)?.code ?? 'unknown'); } });
+const quietRelease = (release: () => Promise<void>) => async (): Promise<void> => { try { await release(); } catch (error) { if ((error as NodeJS.ErrnoException)?.code !== 'ERELEASED') throw error; } };
+export async function lockFinanceDirectory(target: string, hold: 'short' | 'long' = 'short'): Promise<() => Promise<void>> {
+  return quietRelease(await lockfile.lock(target, lockOptions(hold, { forever: true, minTimeout: 20, maxTimeout: 100 })));
+}
+/** One attempt, no waiting: the lock, or null when someone else holds it. */
+export async function tryLockFinanceDirectory(target: string, hold: 'short' | 'long' = 'long'): Promise<(() => Promise<void>) | null> {
+  try { return quietRelease(await lockfile.lock(target, lockOptions(hold, 0))); }
+  catch (error) { if ((error as NodeJS.ErrnoException)?.code === 'ELOCKED') return null; throw error; }
+}
 const MAX_BYTES = 24 * 1024 * 1024;
 /**
  * The validated workspace of each recently read file, reused while the file is the same file: validating a 7 MB workspace costs about
@@ -85,7 +102,7 @@ export class FinanceStore {
     const directory = this.directory(scope);
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (fs.lstatSync(directory).isSymbolicLink()) throw new Error('finance_store_invalid');
-    const release = await lockfile.lock(directory, { realpath: false, stale: 15000, retries: { retries: 40, minTimeout: 20, maxTimeout: 250 } });
+    const release = await lockFinanceDirectory(directory);
     try {
       scope.assertCurrent();
       const current = this.read(directory);
@@ -101,6 +118,8 @@ export class FinanceStore {
       try {
         scope.assertCurrent();
         fs.writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
+        // Runs immediately before the rename with nothing asynchronous in between: a caller's scope can fence the write against other state (a monitor's settings snapshot).
+        scope.assertCurrent();
         const target = path.join(directory, 'workspace.json');
         fs.renameSync(temporary, target);
         // What was just written is already validated: remember it under the new file's identity (a later write by anyone is another identity).

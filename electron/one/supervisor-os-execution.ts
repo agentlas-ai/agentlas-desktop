@@ -45,7 +45,8 @@ export function prepareSupervisorOsExecution(input:{runId?:string;chatId?:string
   // 1.3.0 device bridge: the service now asks the window process to prepare the scoped execution (remoteDaemon), see
   // prepareSupervisorOsExecutionAsync. Without a broker and without a remote source nothing is prepared here.
   if(!configuredOneOsLeaseBroker()){
-    if(input.remoteDaemon)throw supervisorError("supervisor_os_host_unavailable");
+    // Permanent for this process (no window broker is ever coming): a typed refusal that is not on the "not ready yet" list.
+    if(input.remoteDaemon)throw supervisorError("supervisor_os_remote_requires_window_broker");
     return null;
   }
   if(!isOneOsHostAvailable())throw supervisorError("supervisor_os_host_unavailable");

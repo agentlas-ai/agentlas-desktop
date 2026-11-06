@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { canvasFit, canvasLayout, isBaseCanvasBlock, type CanvasBlock, type CanvasChart, type CanvasInput, type CanvasLine, type CanvasView } from '../../shared/canvas';
+import { canvasFit, canvasLayout, type CanvasBlock, type CanvasChart, type CanvasInput, type CanvasLine, type CanvasView } from '../../shared/canvas';
 import '../../shared/canvas/blocks/registry'; // the host knows every asset block before it builds a card (the renderer loads them on demand)
 import type { HarnessCallContext } from '../harness/capability-ports';
 import type { CanvasSeriesRead } from './turn-state';
@@ -33,14 +33,13 @@ export interface CanvasBuildOptions {
  */
 export async function buildCanvasCard(input: Omit<CanvasInput, 'guide'>, o: CanvasBuildOptions): Promise<{ view: CanvasView; warnings: string[] }> {
   const args = { ...input }, { guide } = o;
-  // A card with figures (a base block) names where they came from; a card of assets alone (diagram, document, slide) needs no source.
-  if (!args.sources.length && args.blocks.some(isBaseCanvasBlock)) throw new z.ZodError([{ code: 'custom', path: ['sources'], message: 'A card with figures names where they came from: give at least one source ({ title, url }). A card of diagrams, documents or slides needs none.' }]);
+  // No card is refused for want of a source: figures the owner gave have none, and a refusal only ever blocked the card. The sources a card is given are shown with it.
   // Never a dead end: a card the guide cannot govern is drawn as sent and the guide's rule rides in the warnings. A refusal here was
   // read as "answer without a card" (Codex run 9: 11 of 20 card-less answers were a refused card that was never sent again).
   const unguided: string[] = [];
-  // The first card of a turn that misses its guide is refused once with exactly what to send (the resend is what makes a question type
-  // look the same every time); the second is drawn as sent. A refusal with an "answer without a card" exit was taken every time.
-  if (!guide && o.noGuideMessage) { if (!o.refusedBefore) throw new z.ZodError([{ code: 'custom', path: ['guide'], message: `${o.noGuideMessage} Then call again; a second card this turn is drawn as sent.` }]); unguided.push(`${o.warningPrefix}_card_without_guide: ${o.noGuideMessage}`); }
+  // A card with no guide to follow is drawn as sent and the warning says what to do next time: a refusal for want of a guide was
+  // answered with no card at all too often, and a resend costs a card's worth of output.
+  if (!guide && o.noGuideMessage) unguided.push(`${o.warningPrefix}_card_without_guide: ${o.noGuideMessage}`);
   let layout = canvasLayout(o.layouts, args.blocks.map(block => block.type));
   // Not the guide's card as sent (extra blocks, another order): the host draws the guide's card from what was sent rather than
   // refusing it, since a refused card was often not sent again (Codex,: 18 answers ended without a card). What the

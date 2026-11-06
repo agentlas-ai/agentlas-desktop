@@ -95,11 +95,18 @@ let handoffTimer:NodeJS.Timeout|undefined;
 let handoffBusy=false;
 let handoffProposal:{oneId:string;ownerEpoch:string;generation:number}|undefined;
 export function supervisorRuntimeMode(){return mode;}
+/** Positional arguments for the wire (JSON has no undefined): trailing undefined ones mean the same as absent. Both the supervisor proxy and the personal-data proxy send `{method,args}` here. */
+function withWireArgs(input:unknown):unknown{
+  const args=(input as {args?:unknown}|null)?.args;
+  if(!Array.isArray(args))return input;
+  const wire=args.slice();while(wire.length&&wire[wire.length-1]===undefined)wire.pop();
+  return{...(input as object),args:wire};
+}
 export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer'|'personal.command',input?:unknown):Promise<any> {
   const channel=bootstrap?.getChannel(),identity=channel && nativeGuiChannelIdentity(channel);
   if(!channel || !identity)fail('supervisor_native_channel_unavailable');
   const assertCurrent=()=>{if(nativeGuiChannelIdentity(channel)!==identity)fail('supervisor_native_channel_changed');};
-  const wire=await channel.dispatch('native.attach',{version:ONE_SUPERVISOR_RUNTIME_PROTOCOL,op,...(input!==undefined?{input}:{})}) as {version?:string;bootId?:string;transfer?:unknown};
+  const wire=await channel.dispatch('native.attach',{version:ONE_SUPERVISOR_RUNTIME_PROTOCOL,op,...(input!==undefined?{input:op==='command'||op==='personal.command'?withWireArgs(input):input}:{})}) as {version?:string;bootId?:string;transfer?:unknown};
   assertCurrent();
   if(wire?.version!==ONE_SUPERVISOR_RUNTIME_PROTOCOL || wire.bootId!==identity.bootId || !wire.transfer)fail('supervisor_native_rpc_reply_invalid');
   const result=await importNativeJsonValue(wire.transfer,{kind:'checkpoint-value',maxBytes:NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes,signal:new AbortController().signal,assertCurrent,

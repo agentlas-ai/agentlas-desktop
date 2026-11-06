@@ -10,7 +10,8 @@ import { canvasDomainForGuide, canvasDomains, canvasGuideTopics, type CanvasSeri
 import { canvasGuideReadInTurn, canvasRefusedInTurn, canvasSeriesReadInTurn, canvasTurnKey } from '../canvas/turn-state';
 import { assetCatalogInputJsonSchema, readAssetCatalog } from '../canvas/catalog';
 import { cardPlace } from '../canvas/place';
-import { callCanvasImage, canvasImageInputJsonSchema } from '../canvas/export';
+import { callCanvasImage, canvasImageDeps, canvasImageInputJsonSchema } from '../canvas/export';
+import { readRetainedCard } from './canvas-retained-card';
 
 /**
  * ui.canvas: the one port that draws a result card: the 12 figure blocks (kpis, bars, ranges, chart, leans, table, heatmap, allocation, timeline,
@@ -21,7 +22,7 @@ import { callCanvasImage, canvasImageInputJsonSchema } from '../canvas/export';
  */
 const inputSchema = canvasInputJsonSchema({ type: 'string', maxLength: 40, description: 'A guide topic a domain registered; the host checks the blocks against its card layouts and sets their widths.' }, { assets: true });
 composeDeclaredPrompt([{ id: 'tool.ui.canvas.schema', revision: 2, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(inputSchema) }]);
-const purpose = composeDeclaredPrompt([{ id: 'tool.ui.canvas.description', revision: 3, stability: 'fixed-policy', changeTriggers: ['release'], text: 'Use when the answer is something to look at: show the owner a card under your answer text, composed from blocks; plain prose or a short list needs no card. Asset blocks need no sources: flowcharts and diagrams, charts and tables from numbers you hold, document pages, file thumbnails, slides, motion-graphic stills; ui.asset.catalog lists the types with a sample. Figure blocks: kpis, bars, ranges, chart (name its series; the host reads the numbers), leans, table, heatmap, allocation, timeline, checklist, gauge, note; use only what you read this turn and give its sources. Pass guide when a domain guide set the card. Amounts are in full units.' }]);
+const purpose = composeDeclaredPrompt([{ id: 'tool.ui.canvas.description', revision: 4, stability: 'fixed-policy', changeTriggers: ['release'], text: 'Use when the answer is something to look at: show the owner a card under your answer text, composed from blocks; plain prose or a short list needs no card. Asset blocks need no sources: flowcharts and diagrams, charts and tables from numbers you hold, document pages, file thumbnails, slides, motion-graphic stills; ui.asset.catalog lists the types with a sample. Figure blocks: kpis, bars, ranges, chart (name its series; the host reads the numbers), leans, table, heatmap, allocation, timeline, checklist, gauge, note; use only what you read this turn or were given, naming sources when there are any. Pass guide when a domain guide set the card. Amounts are in full units.' }]);
 composeDeclaredPrompt([{ id: 'tool.ui.asset.catalog.schema', revision: 1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(assetCatalogInputJsonSchema) }]);
 composeDeclaredPrompt([{ id: 'tool.ui.canvas.image.schema', revision: 1, stability: 'versioned-content', changeTriggers: ['release', 'output-schema'], text: JSON.stringify(canvasImageInputJsonSchema) }]);
 const imagePurpose = composeDeclaredPrompt([{ id: 'tool.ui.canvas.image.description', revision: 1, stability: 'fixed-policy', changeTriggers: ['release'], text: 'Save a card this conversation showed as a PNG picture the owner keeps: the whole card or one block of it (the newest card unless instanceId names another). It writes only into this conversation\'s outputs. For a deck, design it yourself with document.deck.build.' }]);
@@ -62,6 +63,6 @@ export async function callCanvasPort(raw: Record<string, unknown>, ctx: HarnessC
 
 export const CANVAS_PORTS = [
   { operationId: 'ui.canvas', kind: 'query' as const, required: ['title', 'blocks'], inputSchema, purpose, handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callCanvasPort(args, ctx) },
-  { operationId: 'ui.canvas.image', kind: 'command' as const, required: [] as string[], inputSchema: canvasImageInputJsonSchema, purpose: imagePurpose, handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callCanvasImage(args, ctx) },
+  { operationId: 'ui.canvas.image', kind: 'command' as const, required: [] as string[], inputSchema: canvasImageInputJsonSchema, purpose: imagePurpose, handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callCanvasImage(args, ctx, canvasImageDeps(readRetainedCard)) },
   { operationId: 'ui.asset.catalog', kind: 'query' as const, required: [] as string[], inputSchema: assetCatalogInputJsonSchema, purpose: catalogPurpose, handler: async (args: Record<string, unknown>) => readAssetCatalog(args) },
 ];

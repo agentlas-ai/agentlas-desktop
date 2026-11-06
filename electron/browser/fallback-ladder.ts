@@ -90,9 +90,12 @@ export const LADDER_RUNG_LIMITS: Readonly<Record<Exclude<LadderRung, "stop">, { 
  * tool timeout (Codex: 60 s by default) must not fire first.
  */
 export const LADDER_TOTAL_BUDGET_MS = 50_000;
-/** How long the human-check watcher waits for the page to clear before it gives up (recorded, no loop). */
-export const HUMAN_CHECK_WATCH_MS = 15 * 60_000;
-export const HUMAN_CHECK_POLL_MS = 2_000;
+/**
+ * The human-check watcher is woken by page signals (navigation, load, tab gone, a clearance cookie, the app window regaining focus).
+ * One slow backstop read covers a missed signal; the watch ends after the total below (recorded, no loop).
+ */
+export const HUMAN_CHECK_BACKSTOP_MS = 120_000;
+export const HUMAN_CHECK_SLOW_WATCH_MS = 6 * 3_600_000;
 /** A stopped ladder for the same key and code is not re-run inside this window (no retry storm). */
 export const LADDER_STOP_COOLDOWN_MS = 5 * 60_000;
 

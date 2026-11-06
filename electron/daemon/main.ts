@@ -174,6 +174,9 @@ async function getDaemonInvocationControl() {
     });
     daemonInvocationControl = control;
     daemonInvocationService = (await import("../invocation/service")).invocationService;
+    // The same once-per-start judgment of a page check the owner passed (the service runs daemon-hosted turns too).
+    void import("../browser/page-release-resume").then((m) => m.pageReleaseResume().sweep())
+      .catch((error) => console.warn("[agentlasd] page-check continuation sweep failed:", error instanceof Error ? error.message : error));
   }
   return daemonInvocationControl;
 }

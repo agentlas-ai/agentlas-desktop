@@ -4,9 +4,8 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { FINANCE_ANALYST_LIMITS, FinanceAnalystDraftSchema, FinanceAnalystRefSchema, FinanceAnalystRefsSchema, FinanceAnalystRequestSchema, type FinanceAnalyst, type FinanceAnalystDraft, type FinanceAnalystRef, type FinanceAnalystRequest, type FinanceAnalystResult } from '../../shared/finance-analysts';
-import type { FinanceScope } from './store';
+import { lockFinanceDirectory, type FinanceScope } from './store';
 
-const lockfile = require('proper-lockfile') as { lock(directory: string, options: unknown): Promise<() => Promise<void>> };
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 const MAX_SKILL_BYTES = 64 * 1024, MAX_CATALOG_BYTES = 32 * 1024;
 const customRef = FinanceAnalystRefSchema.refine(ref => ref.id.startsWith('custom-'));
@@ -128,7 +127,7 @@ export class FinanceAnalystLibrary {
     if (request.id?.startsWith('builtin:')) throw new Error('finance_analyst_builtin_immutable');
     const { directory, owner } = this.location(scope);
     await ensureDirectory(directory); scope.assertCurrent();
-    const release = await lockfile.lock(directory, { realpath: false, stale: 15000, retries: { retries: 40, minTimeout: 20, maxTimeout: 250 } });
+    const release = await lockFinanceDirectory(directory);
     try {
       scope.assertCurrent(); const catalog = await this.catalog(scope, directory, owner);
       // Fail closed on any corrupt active skill, except to remove: a damaged Analyst must stay removable by the owner.

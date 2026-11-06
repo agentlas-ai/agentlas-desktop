@@ -5,6 +5,7 @@ import { FINANCE_FEED_IDS, type FinanceFeedId, type FinanceDashboardFeedItem, ty
 import type { FinanceScope } from './store';
 import { queryFinanceAdapter } from './source-adapters';
 import { readSecDirectory, readSecSubmissionsText, type SecDirectory } from './providers/sec-reads';
+import { blockHost, hostBlockedSeconds } from './providers/http';
 
 const TTL = 5 * 60 * 1000, MAX_OWNERS = 8, MAX_ASSETS = 5;
 const SEC_DIRECTORY = 'https://www.sec.gov/files/company_tickers_exchange.json';
@@ -18,7 +19,6 @@ const cache = new Map<string,{key:string;result:FinanceDashboardFeedsResult}>();
 const SECTION_TTL:Record<string,number> = { 'finance-news': 5*60*1000, 'finance-sec': 15*60*1000, 'finance-economy': 15*60*1000, 'finance-earnings': 6*60*60*1000 };
 const sectionCache = new Map<string,{until:number;section:unknown}>();
 const pending = new Map<string,AbortController>();
-const cooldown = new Map<string,number>();
 let active = 0, nextSecRequestAt = 0;
 const waiters:Array<()=>void> = [];
 const hash = (value:string) => createHash('sha256').update(value).digest('hex');
@@ -50,14 +50,14 @@ async function acquire(signal:AbortSignal):Promise<()=>void> {
 }
 async function fetchText(url:string,signal:AbortSignal):Promise<string> {
   const u=new URL(url);if(!isFinanceFeedUrlAllowed(u))throw new Error('finance_feed_url_rejected');
-  check(signal);if((cooldown.get(u.hostname)||0)>Date.now())throw new Error('finance_feed_rate_limited');
+  check(signal);if(hostBlockedSeconds(u.hostname)>0)throw new Error('finance_feed_rate_limited');
   const release=await acquire(signal),controller=new AbortController(),cancel=()=>controller.abort();
   signal.addEventListener('abort',cancel,{once:true});if(signal.aborted)controller.abort();
   const timeout=setTimeout(()=>controller.abort(),15000);
   try {
     if(u.hostname==='www.sec.gov'||u.hostname==='data.sec.gov'){const wait=Math.max(0,nextSecRequestAt-Date.now());nextSecRequestAt=Math.max(Date.now(),nextSecRequestAt)+150;if(wait)await new Promise<void>(resolve=>{const done=()=>{clearTimeout(timer);controller.signal.removeEventListener('abort',done);resolve();};const timer=setTimeout(done,wait);controller.signal.addEventListener('abort',done,{once:true});if(controller.signal.aborted)done();});check(controller.signal);}
     const response=await fetch(u,{redirect:'error',signal:controller.signal,headers:{Accept:u.hostname==='finance.yahoo.com'?'text/html':'application/json, application/rss+xml, text/calendar, text/html;q=0.8','User-Agent':'Agentlas Finance (https://agentlas.cloud)'}});
-    if(response.status===429){const seconds=Number(response.headers.get('retry-after'));cooldown.set(u.hostname,Date.now()+Math.max(1000,Math.min(300000,Number.isFinite(seconds)?seconds*1000:60000)));throw new Error('finance_feed_rate_limited');}
+    if(response.status===429){const retry=response.headers.get('retry-after');blockHost(u.hostname,(retry&&/^\d+$/.test(retry)?Number(retry):60)*1000);throw new Error('finance_feed_rate_limited');}
     if(!response.ok)throw new Error('finance_feed_http_'+response.status);
     const cap=u.href===SEC_DIRECTORY||u.hostname==='data.sec.gov'?6*1024*1024:u.hostname==='finance.yahoo.com'?2*1024*1024:1024*1024;
     if(Number(response.headers.get('content-length'))>cap)throw new Error('finance_feed_too_large');
@@ -299,7 +299,8 @@ async function getFinanceDashboardFeedsOnce(input:FeedsInput):Promise<FinanceDas
       const fresh=await(feedId==='finance-earnings'?earnings(assets,selectedSource,scope,controller.signal):selectedSource!=='finance-yfinance'?selectedToolFeed(feedId,assets,selectedSource,scope,controller.signal):feedId==='finance-news'?news(assets,controller.signal):feedId==='finance-sec'?filings(assets,controller.signal):economy(controller.signal));
       if(fresh.status!=='error'){sectionCache.set(sectionKey,{until:Date.now()+(SECTION_TTL[feedId]??TTL),section:clone(fresh)});while(sectionCache.size>MAX_OWNERS*4)sectionCache.delete(sectionCache.keys().next().value!);}
       return fresh;}
-    catch(e){check(controller.signal);return{...section(feedId),status:'error' as const,errorCode:errorCode(e)};}
-  }));if(expired)throw new Error('finance_feed_timeout');check(controller.signal);scope.assertCurrent();const result={fetchedAt,expiresAt:new Date(Date.now()+TTL).toISOString(),sections};cache.delete(id);if(!sections.some(item=>item.status==='error'))cache.set(id,{key,result:clone(result)});/* a failed source is never kept: Retry must ask again */while(cache.size>MAX_OWNERS)cache.delete(cache.keys().next().value!);return result;
+    // Past the deadline a section still running is an error section of its own; the ones that finished stay in the answer (and in the section cache, so the next open reads only the slow one).
+    catch(e){if(expired)return{...section(feedId),status:'error' as const,errorCode:'finance_feed_timeout'};check(controller.signal);return{...section(feedId),status:'error' as const,errorCode:errorCode(e)};}
+  }));if(!expired)check(controller.signal);scope.assertCurrent();const result={fetchedAt,expiresAt:new Date(Date.now()+TTL).toISOString(),sections};cache.delete(id);if(!sections.some(item=>item.status==='error'))cache.set(id,{key,result:clone(result)});/* a failed source is never kept: Retry must ask again */while(cache.size>MAX_OWNERS)cache.delete(cache.keys().next().value!);return result;
   }catch(e){if(expired)throw new Error('finance_feed_timeout');throw e;}finally{clearTimeout(deadline);input.signal?.removeEventListener('abort',cancel);if(pending.get(id)===controller)pending.delete(id);}
 }

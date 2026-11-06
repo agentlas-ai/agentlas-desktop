@@ -562,8 +562,8 @@ import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "../shared/project-hub-recom
 import { PROJECT_TEAM_ROLES_JUDGMENT, PROJECT_TEAM_ROLE_FILL_JUDGMENT } from "../shared/project-team-recommendation";
 import { normalizeRuntimeSelectionInput, RuntimeSelectionContractError } from "../shared/runtime-selection";
 import { withInvocationAccounting } from "./long-run/accounting-context";
-import { forgetOneRecoveryJudgment, judgeOneAutoRecovery, oneRecoveryRuntimeSelection } from "./one/auto-recovery";
-import { desktopOneRecoveryAttemptsForFingerprint, desktopOneRecoveryContext, desktopOneRecoveryOriginalRunId, desktopOneRecoveryScope, pendingDesktopOneRecovery, reserveDesktopOneRecovery } from "./one/desktop-recovery-admission";
+import { forgetOneRecoveryJudgment, judgeOneAutoRecovery, oneRecoveryChainFullDiagnosis, oneRecoveryRuntimeSelection } from "./one/auto-recovery";
+import { DESKTOP_RECOVERY_CHAIN_LIMIT, desktopOneRecoveryAttemptsForFingerprint, desktopOneRecoveryContext, desktopOneRecoveryOriginalRunId, desktopOneRecoveryScope, pendingDesktopOneRecovery, reserveDesktopOneRecovery } from "./one/desktop-recovery-admission";
 import { oneRunFailureFingerprint } from "../shared/one-auto-recovery";
 import { registerWorkStartIpc } from "./work-start";
 import { registerBrowserAutofillIpc } from "./browser/autofill-ipc";
@@ -3243,7 +3243,8 @@ export function registerIpcHandlers(): void {
     // 로그인 터미널을 여는 시점에 감지/사용량 캐시를 즉시 무효화 — 로그인 완료가
     // watchRecovery 폴링(및 그 이후 일반 폴링)에 재시작 없이 바로 반영되게 한다.
     // The owner pressing "Log in" is the signal that the old "signed out" fact is stale; if the login is abandoned the next run writes it again.
-    forgetRuntimeSignIn({ kind });
+    // The window only opens here: no signal yet (a kept request is released by the finished sign-in, main.ts account watch).
+    forgetRuntimeSignIn({ kind }, { signal: false });
     forgetFailedAcpModelProbes();
     clearDetectCache();
     if (kind === "claude-code" || kind === "codex") invalidateUsage(kind);
@@ -5296,6 +5297,11 @@ export function registerIpcHandlers(): void {
       if (pending) return { retry: true, attempt: pending.ordinal, originalRunId: pending.originalRunId,
         nextRecoveryRunId: pending.nextRunId, fingerprint: oneRunFailureFingerprint(scope.receipt),
         diagnosis: pending.advice.diagnosis, decidedBy: pending.advice.decidedBy };
+      // The saved chain is full (a backstop far above the per-situation budget): a fixed line, no model call, no reservation to refuse.
+      if (recoveryContext.attemptsSpent >= DESKTOP_RECOVERY_CHAIN_LIMIT) {
+        return { retry: false as const, reason: "will-not-succeed" as const, fingerprint: oneRunFailureFingerprint(scope.receipt),
+          diagnosis: oneRecoveryChainFullDiagnosis(currentUiLocale()), decidedBy: "form" as const };
+      }
       const result = await withInvocationAccounting({ runId, chatId,
         readOwner: () => scope.longRun && scope.longRun.surface !== "science"
           ? { goalId: scope.longRun.goalId, attemptId: null } : null }, () => judgeOneAutoRecovery({
@@ -5359,7 +5365,9 @@ export function registerIpcHandlers(): void {
         recoveryRunId,
         chatId,
         goal: typeof input?.goal === "string" ? input.goal : "",
-        attemptsSpent: Math.max(context.attemptsSpent, Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0),
+        // The saved chain is the authority, counted as the judge and the admission count it: the budget of this situation (a runtime signal or
+        // a new app version starts it over). The view's own number is an ordinal and would carry an older situation's attempts over.
+        attemptsSpent: desktopOneRecoveryAttemptsForFingerprint(context.originalRunId, null),
       });
       if (!result || desktopOneRecoveryScope(recoveryRunId, chatId) !== capturedScope) return null;
       if (!result.retry) return result;

@@ -88,10 +88,11 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
 
 /**
  * The transient run failures that are a fault of the app's own host rather than an occupied chat: they do not clear by waiting for
- * another conversation to end, so the queue gives them UNDISPATCHED_START_MAX_ATTEMPTS tries and then holds the message (kept, never
- * lost), like a start refused before dispatch on every bounded retry. The rest of the set frees up as the holder's turn ends and is only
- * bounded by TRANSIENT_SEND_DEADLINE_MS. Regression review C3: without the cap a persistent host fault retried for the whole
- * 2 hours, 60 s of in-run waiting per cycle and a failure line each time.
+ * another conversation to end. No model turn was sent, but a failed attempt is not free: it is a run with about a dozen ledger rows, and the
+ * tool-selection judge may run for it. So the queue keeps the message and starts it again, with the wait growing after
+ * UNDISPATCHED_START_MAX_ATTEMPTS (startRetryBackoffMs: 1, 5, then 10 minutes, ended at once by a runtime signal or a sign-in), only when the
+ * run's own mcp_config_failure event names a reason in MCP_CONFIG_HOST_NOT_READY_CODES (hostNotReadyRunCause); any other cause keeps the
+ * bounded tries and is held for host-recovery. At the old cap the owner hears one calm line; the failure line is written once, not per cycle.
  */
 const HOST_NOT_READY_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
   // The run's tool table could not be built after the in-run waits (mcp/config-build-retry.ts): the app's own host was not ready.
@@ -236,13 +237,13 @@ export function isRefusedBeforeDispatch(error: unknown): boolean {
   return !!error && typeof error === "object" && (error as { turnDelivery?: unknown }).turnDelivery === "not-dispatched";
 }
 
-/** Retries after which other surfaces hold a start refused before dispatch; the send queue only says its calm line once here and keeps retrying. */
+/** Retries after which the owner hears one calm line about a start refused before dispatch; no surface holds or ends a message at this count. */
 export const UNDISPATCHED_START_MAX_ATTEMPTS = 12;
 
 /**
  * The rule of the Desktop composer's queue (renderer-send-queue.ts undispatchedStartWaits) for every surface that has only the thrown
  * error: the start was refused before anything reached a runtime (the error's own `turnDelivery: "not-dispatched"`), for a reason that
- * is off the transient list and that the owner has nothing to do about. The message then waits (bounded by UNDISPATCHED_START_MAX_ATTEMPTS)
+ * is off the transient list and that the owner has nothing to do about. The message then waits (capped backoff, no count or age ends it)
  * instead of coming back as a code. Without the marker (a refusal over IPC, or after the hand-off) it is never taken: that message could
  * have acted. The composer also accepts a rejected admission row as the proof; the phone and the mail intake have the marker only.
  */
@@ -294,11 +295,30 @@ export function transientSendBackoffMs(attempt: number): number {
 }
 
 /**
- * The window after which a continuous refusal's clock restarts and other surfaces (service.ts intake, agent mail, the Work executor) still
- * stop waiting. The send queue, the supervisor's reply/chat-send dispatch and the parked-relay nudge no longer give up on it (owner rule
- *a message the host received lives until it is delivered).
+ * The window after which a continuous refusal's clock restarts, and the age cut of a held row an older build left behind (supervisor-service.ts).
+ * Only two things still read it: that clock restart, and the age cut of a held row an older build left behind. No delivery path ends a
+ * received input on it. Still bounded, on purpose: a start that may already have run (the one effect-unknown resend), a refusal only the
+ * owner can clear, a run that failed for a cause outside MCP_CONFIG_HOST_NOT_READY_CODES (12 tries, then host-recovery), and the app's
+ * own internal failures (12 tries, then one more).
  */
 export const TRANSIENT_SEND_DEADLINE_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Delay before the next start of a message whose earlier starts were refused or failed for the app's own state (not an occupied chat).
+ * Each failed attempt writes a run with its ledger rows and may run the tool-selection judge, so after UNDISPATCHED_START_MAX_ATTEMPTS
+ * tries the wait grows (1 min, 5 min, 10 min cap; the cap equals host-recovery's internal backstop) instead of staying at 15 s. A
+ * runtime signal or a sign-in wakes the wait at once, so a cause that clears is not waited out. `attempts` is the tries spent.
+ */
+const LONG_WAIT_STEPS_MS: readonly number[] = [60_000, 300_000, 600_000];
+export function startRetryBackoffMs(attempts: number): number {
+  const spent = Math.max(0, Math.floor(attempts));
+  if (spent < UNDISPATCHED_START_MAX_ATTEMPTS) return transientSendBackoffMs(spent);
+  return LONG_WAIT_STEPS_MS[Math.min(LONG_WAIT_STEPS_MS.length - 1, spent - UNDISPATCHED_START_MAX_ATTEMPTS)];
+}
+/** A refusal that is the app's own state, not a room or a store that frees up by itself: it is the one that waits the long steps. */
+export function startRefusalWaitsLong(code: string | null | undefined): boolean {
+  return !!code && code !== "store_busy" && !isTransientSendRefusalCode(code);
+}
 
 /** Start once; only the caller's typed refusal admission may turn a rejection into a durable acceptance. */
 export async function startOwnerSendOrAcceptRefusal<Started, Accepted>(

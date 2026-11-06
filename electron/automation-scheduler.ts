@@ -646,24 +646,6 @@ export class AutomationActiveRemovalError extends Error {
   }
 }
 
-const OVERLAP_SKIP_NOTED_MAX = 200;
-const overlapSkipNoted = new Set<string>();
-/**
- * A scheduled occurrence refused because the previous run of the same automation is still going leaves one fact on the run
- * event path (no model, no new table) instead of ending silently. Once per occurrence: the due poll asks again every tick.
- * The memory is bounded; after a restart the worst case is one more line.
- */
-function noteOccurrenceSkippedForOverlap(automationId: string, occurrence: string | null): void {
-  if (!occurrence) return;
-  const key = `${automationId}|${occurrence}`;
-  if (overlapSkipNoted.has(key)) return;
-  if (overlapSkipNoted.size >= OVERLAP_SKIP_NOTED_MAX) overlapSkipNoted.delete(overlapSkipNoted.values().next().value as string);
-  overlapSkipNoted.add(key);
-  tryRecordRunEvent({ runId: `automation-overlap:${randomUUID()}`, automationId, kind: "automation_occurrence_skipped_overlap",
-    payload: { reasonCode: "previous_run_still_running", factOnly: true, occurrence,
-      text: { ko: "이전 실행이 아직 끝나지 않아 이번 회차는 건너뛰었습니다", en: "The previous run has not finished yet, so this occurrence was skipped" } } });
-}
-
 /**
  * Deletion is destructive while a write-capable runtime owns this automation.
  * Refuse instead of assuming AbortSignal compliance: a provider that ignores
@@ -1152,10 +1134,10 @@ async function runOne(
   // A rootless start (an event trigger, a chain, a One graph command) hands on a rootless continuation, as it ran.
   const continuation = captureMainContinuation();
   if (dispatchPaused()) return { accepted: false };
-  if (running.has(a.id)) {
-    noteOccurrenceSkippedForOverlap(a.id, opts?.occurrenceId ?? (opts?.claim ? opts.expectedNextRunAt ?? null : null));
-    return { accepted: false };
-  }
+  // The previous run of this automation is still going. Nothing is dropped and nothing is recorded as skipped here: the due slot stays due
+  // (next_run_at moves only when a run settles), and a cron slot that falls due during a run is merged into one catch-up that the settlement
+  // schedules (store/automations.ts markAutomationRun, event automation_occurrence_caught_up).
+  if (running.has(a.id)) return { accepted: false };
   // A retired Goal continuation is history, not a job: no entry (Run now, chain, trigger, recovery) starts a turn from it.
   if (isGoalContinuationAutomation(a)) {
     if (opts?.preclaimed) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
@@ -2549,6 +2531,8 @@ export interface AutomationRunNowAck {
   automationId: string;
   runId: string | null;
   status: "queued" | "rejected";
+  /** Why nothing started, so a phone can tell "already running" from "paused". Absent when accepted. */
+  reason?: "paused" | "already_running" | "busy" | "not_runnable";
 }
 
 /**
@@ -2558,14 +2542,14 @@ export interface AutomationRunNowAck {
  */
 export function enqueueAutomationRunNow(id: string, mainAdmission?: MainInvocationAdmission): AutomationRunNowAck {
   mainAdmission = takeMainInvocationAdmission(mainAdmission);
-  if (dispatchPaused()) return { accepted: false, automationId: id, runId: null, status: "rejected" };
+  const rejected = (reason: NonNullable<AutomationRunNowAck["reason"]>): AutomationRunNowAck =>
+    ({ accepted: false, automationId: id, runId: null, status: "rejected", reason });
+  if (dispatchPaused()) return rejected("paused");
   const automation = getAutomation(id);
   if (!automation) throw new Error(`Automation not found: ${id}`);
-  if (running.has(id)) return { accepted: false, automationId: id, runId: null, status: "rejected" };
-  if (isGoalContinuationAutomation(automation)) return { accepted: false, automationId: id, runId: null, status: "rejected" };
-  if (!claimAutomationRun(id, LEASE_OWNER, new Date(), { allowDisabled: true })) {
-    return { accepted: false, automationId: id, runId: null, status: "rejected" };
-  }
+  if (running.has(id)) return rejected("already_running");
+  if (isGoalContinuationAutomation(automation)) return rejected("not_runnable");
+  if (!claimAutomationRun(id, LEASE_OWNER, new Date(), { allowDisabled: true })) return rejected("busy");
   const runId = `run-${id}-${Date.now()}-${randomUUID().slice(0, 8)}`;
   try {
     recordRunEvent({

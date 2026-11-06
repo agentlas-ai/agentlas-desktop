@@ -48,6 +48,7 @@ function initializationEvidence(error:unknown,connection?:AcpConnection):CodexIn
 }
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
 import { accountCodexHome } from "./codex-product-home";
+import { observeCliExecutableIdentity } from "./cli-executable-identity";
 import { detachedSpawnOpts, killCliTree, markRunChildResident, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
 import {
@@ -431,10 +432,32 @@ export async function acknowledgeCodexThreadModel(input: {
 /* ────────────────────────────── 풀 ────────────────────────────── */
 
 let sessionPool: AcpSessionPool<CodexResidentSession> | null = null;
-// A missing app-server is learned per process so one old CLI does not retry it
-// on every turn. A runtime replacement is a new executable generation, so the
-// learned downgrade must be forgotten with the resident pool.
-let appServerSupported = true;
+// A missing app-server is learned per executable generation (cli-executable-identity.ts), so one old CLI does not retry it on
+// every turn and a CLI replaced by any means (npm, brew, the app's own update) is judged again as a new executable. The pool
+// disposal also forgets all of it.
+interface CodexExecutableLearning { appServerMissing?: boolean; threadRebindMissing?: boolean }
+const executableLearning = new Map<string, CodexExecutableLearning>();
+const MAX_LEARNED_EXECUTABLES = 128;
+/** An executable whose identity cannot be observed is keyed by its path alone (the learning is then per path, as before per process). */
+const UNOBSERVED = "path:";
+
+/** What the learned downgrades are keyed by: the executable's generation. */
+export function codexExecutableKey(bin: string, cwd: string, env: NodeJS.ProcessEnv): string {
+  try {
+    const identity = observeCliExecutableIdentity({ bin, cwd, env });
+    if (identity) return `generation:${identity.generation}`;
+  } catch { /* an unreadable state is not a new generation: fall through to the path */ }
+  return `${UNOBSERVED}${bin}`;
+}
+function learningFor(key: string, create: boolean): CodexExecutableLearning | undefined {
+  let learned = executableLearning.get(key);
+  if (!learned && create) {
+    learned = {};
+    executableLearning.set(key, learned);
+    if (executableLearning.size > MAX_LEARNED_EXECUTABLES) executableLearning.delete(executableLearning.keys().next().value!);
+  }
+  return learned;
+}
 
 export function codexSessionPool(): AcpSessionPool<CodexResidentSession> {
   if (!sessionPool) {
@@ -478,8 +501,7 @@ export function codexSessionPool(): AcpSessionPool<CodexResidentSession> {
 export function disposeCodexSessionPool(): void {
   sessionPool?.disposeAll();
   sessionPool = null;
-  appServerSupported = true;
-  threadMcpRebindSupported = true;
+  executableLearning.clear();
 }
 
 /* ──────────────────── Run-scoped MCP servers on a resident thread ──────────────────── */
@@ -499,10 +521,9 @@ export function disposeCodexSessionPool(): void {
  * So the resident is keyed on the grant identity (the server names) and each turn rebinds its own table before
  * turn/start; a process whose rebind cannot be confirmed is discarded, never reused with the previous grant.
  */
-let threadMcpRebindSupported = true;
 /** False once this executable refused thread/unsubscribe: residents key on the per-invocation argv again. */
-export function codexThreadMcpRebindSupported(): boolean { return threadMcpRebindSupported; }
-export function markCodexThreadMcpRebindUnsupported(): void { threadMcpRebindSupported = false; }
+export function codexThreadMcpRebindSupported(key = ""): boolean { return !learningFor(key, false)?.threadRebindMissing; }
+export function markCodexThreadMcpRebindUnsupported(key = ""): void { learningFor(key, true)!.threadRebindMissing = true; }
 
 export interface CodexMcpThreadConfig {
   /** `mcp_servers` for thread config; empty when the invocation binds no server. */
@@ -831,19 +852,20 @@ async function claimCodexThreadWriter(
  * 이 CLI 에는 `app-server` 가 없다(구버전) — 프로세스 수명 동안 1회 학습해 영구히
  * 기존 `codex exec` 1회성 경로로 강등한다. claude 상주의 `--input-format` 학습과 같은 모양.
  */
-export function codexAppServerSupported(): boolean {
-  return appServerSupported;
+export function codexAppServerSupported(key = ""): boolean {
+  return !learningFor(key, false)?.appServerMissing;
 }
 
-export function markCodexAppServerUnsupported(why: string): void {
-  if (!appServerSupported) return;
-  appServerSupported = false;
+export function markCodexAppServerUnsupported(why: string, key = ""): void {
+  const learned = learningFor(key, true)!;
+  if (learned.appServerMissing) return;
+  learned.appServerMissing = true;
   console.warn(`[residency] codex degraded to one-shot exec: ${why.trim().slice(0, 200)}`);
 }
 
 /** 테스트 전용 — 같은 프로세스에서 여러 시나리오를 재려면 학습을 되돌려야 한다. */
 export function __resetCodexAppServerSupportForTests(): void {
-  appServerSupported = true;
+  executableLearning.clear();
 }
 
 /**

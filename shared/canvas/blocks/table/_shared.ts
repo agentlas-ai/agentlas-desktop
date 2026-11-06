@@ -65,13 +65,13 @@ export function initials(name: string): string {
   return (words.length > 1 ? [...words[0]][0] + [...words[words.length - 1]][0] : [...words[0]].slice(0, 2).join("")).toUpperCase();
 }
 
-/** "" as "Oct 15, 2026" / "2026년 10월 15일"; any other text is returned as written. */
+/** A YYYY-MM-DD day as "Mon D, YYYY" / "YYYY년 M월 D일"; any other text is returned as written. */
 export function longDay(value: string, ko: boolean): string {
   const d = /^\d{4}-\d{2}-\d{2}/.test(value) ? new Date(`${value.slice(0, 10)}T00:00:00Z`) : null;
   if (!d || Number.isNaN(d.getTime())) return value;
   return ko ? `${d.getUTCFullYear()}년 ${d.getUTCMonth() + 1}월 ${d.getUTCDate()}일` : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
-/** "" as "Oct 15" / "10월 15일"; any other text is returned as written. */
+/** A YYYY-MM-DD day as "Mon D" / "M월 D일"; any other text is returned as written. */
 export const shortDay = (value: string, ko: boolean) => (/^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(`${value.slice(0, 10)}T00:00:00Z`)) ? canvasDay(value.slice(0, 10), ko) : value);
 
 /** A summary: plain text, whitespace collapsed, no markup characters, at most 400 characters. */

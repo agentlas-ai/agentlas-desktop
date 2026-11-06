@@ -22,6 +22,7 @@ import {
   oneRecoveryHostFactDecision,
   oneAutoRecoveryFormGate,
   oneAutoRecoveryTerminalStop,
+  oneRecoveryStopWaitsForChange,
   oneAutoRecoveryFromLabel,
   oneRecoveryOutcomeFromLabel,
   oneRunFailureFingerprint,
@@ -37,6 +38,7 @@ import type { RuntimeLocale } from "../runtime/status-i18n";
 import { automationRunToolCounts } from "../automation-progress-facts";
 import { currentUiLocale } from "../ui-locale";
 import { hostFactLine } from "../../shared/host-fact-copy";
+import { armOneRecoveryWait, clearOneRecoveryWait } from "./recovery-wait";
 
 /** Host receipts: tool calls of this run that could have acted outside. Null when the ledger is unreadable. */
 export interface OneRecoveryHostFacts {
@@ -119,6 +121,7 @@ let recoverySignalSequence = 0;
 
 export function forgetOneRecoveryJudgment(chatId: string): void {
   recoveryJudgments.delete(chatId);
+  clearOneRecoveryWait(chatId);
 }
 
 function recoveryJudgmentSignature(input: OneAutoRecoveryInput): string {
@@ -192,14 +195,31 @@ export function oneRecoveryFactDiagnosis(input: { attemptsSpent: number; reason:
       en: "this run may already have changed something outside the app, so repeating it could duplicate that" }
     : input.reason === "no-progress"
       ? { ko: "같은 실패가 되풀이되어 방식이 바뀌지 않았습니다", en: "the same failure repeated without a change of approach" }
-      : { ko: "실패 원인을 분류하는 판정 모델이 응답하지 않았습니다", en: "the model that classifies the failure did not answer" };
+      : input.reason === "exhausted"
+        ? { ko: "다른 방식으로 이어서 시도했지만 같은 실패가 계속되었습니다", en: "the attempts in other ways kept failing the same way" }
+        : { ko: "실패 원인을 분류하는 판정 모델이 응답하지 않았습니다", en: "the model that classifies the failure did not answer" };
+  // A stop that comes from a watched condition continues when it changes (recovery-wait.ts); only an effect that may already have
+  // happened is final for the automatic attempts.
+  const waits = oneRecoveryStopWaitsForChange(input.reason);
   return hostFactLine({
     what: { ko: "자동 복구를 시도", en: "Automatic recovery tried" },
     times: input.attemptsSpent > 0 ? input.attemptsSpent : undefined,
     cause,
-    next: { ko: "같은 방식의 자동 재시도는 더 하지 않고 이 실행의 결과를 그대로 남겨 둡니다",
-      en: "The host makes no further automatic attempt of the same kind and keeps this run's result as it is" },
+    next: waits
+      ? { ko: "앱이 열려 있는 동안 로그인·연결·업데이트처럼 상황이 바뀌면 같은 작업을 자동으로 이어서 시도합니다",
+        en: "While the app is open, when something changes (a sign-in, the connection, an update), the host continues this work by itself" }
+      : { ko: "같은 방식의 자동 재시도는 더 하지 않고 이 실행의 결과를 그대로 남겨 둡니다",
+        en: "The host makes no further automatic attempt of the same kind and keeps this run's result as it is" },
   }, locale);
+}
+
+/** The fixed line once the saved chain of an original run is full (desktop-recovery-admission.ts DESKTOP_RECOVERY_CHAIN_LIMIT): no model writes it. */
+export function oneRecoveryChainFullDiagnosis(locale?: RuntimeLocale): string {
+  return hostFactLine({
+    what: { ko: "자동 복구를 여러 상황에 걸쳐 시도", en: "Automatic recovery tried across many situations" },
+    cause: { ko: "이 요청의 기록이 가득 찼습니다", en: "the record of this request is full" },
+    next: { ko: "이 실행의 결과를 그대로 남겨 둡니다", en: "The host keeps this run's result as it is" },
+  }, (locale ?? currentUiLocale()) === "ko" ? "ko" : "en");
 }
 
 async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promise<OneAutoRecoveryResult> {
@@ -217,6 +237,13 @@ async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promis
     currentFingerprint: fingerprint,
   });
   if (gated) {
+    // A stop that comes from a watched condition (the budget of this situation, an unreachable judge) says so from host facts and waits
+    // for the situation to change: no model call writes a line for a stop that continues by itself.
+    if (!gated.retry && oneRecoveryStopWaitsForChange(gated.reason) && input.receipt.executionPermission === "read") {
+      armOneRecoveryWait({ chatId: input.receipt.chatId, runId: input.receipt.runId });
+      return { decision: gated, fingerprint,
+        diagnosis: oneRecoveryFactDiagnosis({ attemptsSpent: input.attemptsSpent, reason: gated.reason, locale: input.locale }), decidedBy: "form" };
+    }
     const presentation = await judgeRequired<"present">({
       kind: "one-run-recovery-presentation",
       question: "Write the one short thing the person needs to know or answer now, without exposing the failure machinery.",
@@ -268,6 +295,7 @@ async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promis
   const label = verdict.verdict as string | null;
   if (label === null || label === "needs_person") {
     if (!hostFacts) {
+      armOneRecoveryWait({ chatId: input.receipt.chatId, runId: input.receipt.runId });
       return {
         decision: { retry: false, reason: "undecided" },
         fingerprint,
@@ -276,6 +304,7 @@ async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promis
       };
     }
     const hostDecision = oneRecoveryHostFactDecision({ actingCalls: hostFacts.actingCalls, attemptsSpent: input.attemptsSpent });
+    if (!hostDecision.decision.retry && oneRecoveryStopWaitsForChange(hostDecision.decision.reason)) armOneRecoveryWait({ chatId: input.receipt.chatId, runId: input.receipt.runId });
     return {
       decision: hostDecision.decision,
       fingerprint,

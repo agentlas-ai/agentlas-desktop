@@ -59,11 +59,9 @@ export function pill(x: number, y: number, label: string, o: { fill?: string; st
   const size = o.size ?? 11, h = o.h ?? 18, text = wrap(label, (o.maxW ?? 120) - 14, 1, size, true).lines[0], w = Math.max(h, tw(text, size, true) + 14);
   return { w, h, svg: `<rect x="${f(x - w / 2)}" y="${f(y - h / 2)}" width="${f(w)}" height="${h}" rx="${h / 2}" fill="${o.fill ?? C.white}" stroke="${o.stroke ?? C.soft}"/>${lines([text], x, y, { size, weight: 700, fill: o.ink ?? C.ink2 })}` };
 }
-const YES = /^(yes|y|true|ok|pass|passed|approved|accept|accepted|success|예|네|응|맞음|통과|승인|성공)$/i, NO = /^(no|n|false|fail|failed|reject|rejected|denied|error|아니오|아니요|아님|실패|거절|거부|반려)$/i;
-/** Colour of an edge label: yes-like green, no-like red, anything else neutral. */
-export function labelTone(label: string): { fill: string; stroke: string; ink: string } {
-  const key = label.trim();
-  return YES.test(key) ? { fill: C.gT, stroke: "#b9e0cf", ink: C.green } : NO.test(key) ? { fill: C.rT, stroke: "#efc4c9", ink: C.red } : { fill: C.white, stroke: C.soft, ink: C.ink2 };
+/** Colour of an edge label from the tone the block gave the edge (up green, down red, warn amber, info blue); anything else is neutral. The label's words are never read. */
+export function edgeTone(tone?: string): { fill: string; stroke: string; ink: string } {
+  return tone === "up" ? { fill: C.gT, stroke: "#b9e0cf", ink: C.green } : tone === "down" ? { fill: C.rT, stroke: "#efc4c9", ink: C.red } : tone === "warn" ? { fill: C.aT, stroke: "#ecd9ae", ink: C.amber } : tone === "info" ? { fill: C.bT, stroke: "#c3d2f4", ink: C.blue } : { fill: C.white, stroke: C.soft, ink: C.ink2 };
 }
 
 /* ---------- SVG shell and strokes ---------- */
@@ -145,8 +143,8 @@ export function uniqueBy<T extends { id: string }>(items: readonly T[]): T[] {
   const seen = new Set<string>();
   return items.filter(it => { const k = key(it.id); if (seen.has(k)) return false; seen.add(k); return true; });
 }
-export interface RawEdge { from: string; to: string; label?: string }
-export interface Edge { from: number; to: number; label?: string }
+export interface RawEdge { from: string; to: string; label?: string; tone?: string }
+export interface Edge { from: number; to: number; label?: string; tone?: string }
 /** Edges that name a node that is not there are ignored; a repeated pair keeps one edge (the labels joined when `join`); a self edge is kept only when `loops`. With no edges at all the nodes are chained in the order given. */
 export function cleanEdges(count: number, raw: readonly RawEdge[], find: (ref: string) => number, o: { loops?: boolean; join?: boolean; chain?: boolean } = {}): Edge[] {
   const out: Edge[] = [], at = new Map<string, number>();
@@ -155,7 +153,7 @@ export function cleanEdges(count: number, raw: readonly RawEdge[], find: (ref: s
     if (a < 0 || b < 0 || (a === b && !o.loops)) continue;
     const k = `${a}>${b}`, seen = at.get(k);
     if (seen !== undefined) { if (o.join && e.label && out[seen].label !== e.label) out[seen].label = out[seen].label ? `${out[seen].label} / ${e.label}` : e.label; continue; }
-    at.set(k, out.length); out.push({ from: a, to: b, label: e.label });
+    at.set(k, out.length); out.push({ from: a, to: b, label: e.label, ...(e.tone ? { tone: e.tone } : {}) });
   }
   if (!out.length && o.chain !== false) for (let i = 0; i + 1 < count; i++) out.push({ from: i, to: i + 1 });
   return out;

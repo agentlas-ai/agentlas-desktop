@@ -1,16 +1,17 @@
 import { createHash } from 'node:crypto';
 import type { HarnessCallContext } from '../harness/capability-ports';
 import { FinanceNativeResultSchema, isResultCardInstance } from '../../shared/finance-native-ui';
-import { canvasFromLegacy, type CanvasView } from '../../shared/canvas';
+import { canvasFromLegacy } from '../../shared/canvas';
+import type { RetainedCard } from '../canvas/export';
 import type { UiInstanceView } from '../../shared/ui-instances';
 
 /**
  * A card the conversation showed, read back from the host's own record: the UI instance the owner saw and the result the host retained for it.
  * The same account-bound reads and checks the phone's transcript makes (electron/mobile-bridge/finance-ui-transcript.ts): the result belongs to this chat,
  * this run and this call, to the signed-in account, and its bytes match the digest the store recorded. A card that fails any of them is not exported.
- * No electron import (the daemon loads the harness).
+ * Lives with Finance because the stored result is the Finance-shaped native envelope (finance.native-result.v1) every result card is kept in; the generic
+ * canvas export (electron/canvas/export.ts) takes this reader as a dependency and names no Finance. No electron import (the daemon loads the harness).
  */
-export type RetainedCard = { ok: true; instanceId: string; turnId: string; view: CanvasView } | { ok: false; reason: string; next: string };
 const MAX_CHARS = 256 * 1024;
 
 export async function readRetainedCard(ctx: HarnessCallContext, instanceId?: string): Promise<RetainedCard> {

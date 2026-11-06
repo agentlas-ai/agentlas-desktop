@@ -42,6 +42,25 @@ export function mcpConfigBuildHostNotReady(code: string | null, error: unknown):
   return (code !== null && MCP_CONFIG_HOST_NOT_READY_CODES.has(code)) || isStoreBusyError(error);
 }
 
+/**
+ * Whether a run that failed with "mcp-runtime-config-unavailable" / "mcp-goal-tool-scope-changed" failed for a cause that clears by itself.
+ * mcp/client.ts folds every thrown build error into the first code, so the code alone cannot say; the run's own mcp_config_failure event
+ * carries the reason (MCP_CONFIG_HOST_NOT_READY_CODES). A Goal that moved under the run always clears. No event, an unreadable ledger or any
+ * other reason is NOT a waiting cause: the message keeps the bounded tries and host-recovery takes it over.
+ */
+export function hostNotReadyRunCause(db: { prepare(sql: string): { get(...args: unknown[]): unknown } }, runId: string | null | undefined, code: string | null | undefined): boolean {
+  if (code === "mcp-goal-tool-scope-changed") return true;
+  if (code !== "mcp-runtime-config-unavailable" || !runId) return false;
+  try {
+    const row = db.prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_config_failure' ORDER BY rowid DESC LIMIT 1")
+      .get(runId) as { payload_json?: string | null } | undefined;
+    if (!row?.payload_json) return false;
+    const reason = (JSON.parse(row.payload_json) as { reasonCode?: unknown }).reasonCode;
+    // A locked store clears too: the build's own wait (mcpConfigBuildHostNotReady) counts isStoreBusyError, which also matches these codes.
+    return typeof reason === "string" && (MCP_CONFIG_HOST_NOT_READY_CODES.has(reason) || /^sqlite_(busy|locked)/i.test(reason));
+  } catch { return false; }
+}
+
 function waitUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve) => {
     const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, ms);

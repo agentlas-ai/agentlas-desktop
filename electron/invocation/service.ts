@@ -29,7 +29,8 @@ import { bindWorkAttachmentRun, goalSourceAttachmentGroupIds, workAttachmentGrou
 import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
 import { markOrdinaryGoalTurn } from "../runtime/goal-ordinary-turns";
 import { pendingSendRetriesAfterInternalFailure } from "./pending-chat-sends";
-import { TRANSIENT_SEND_DEADLINE_MS, UNDISPATCHED_START_MAX_ATTEMPTS, isHostNotReadyRunFailureCode, isStoreBusyError, isTransientSendRefusalCode, transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { UNDISPATCHED_START_MAX_ATTEMPTS, isHostNotReadyRunFailureCode, isStoreBusyError, isTransientSendRefusalCode, startRetryBackoffMs, transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { onRuntimeSignal } from "../runtime/runtime-signals";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, runMainBackgroundTask, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
@@ -51,7 +52,7 @@ import { latestGoalWaitSubscription, goalWaitContinuationPermission, registerGoa
 import { recordGoalWaitProposal } from "../long-run/goal-wait-proposal";
 import { boundedWaitRefusalCause } from "../long-run/wait-refusal-cause";
 import type { ParsedGoalWait } from "../long-run/wait-emitter";
-import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
+import { finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, GOAL_WAIT_FINITE_TIMER_NOTICE, waitRefusalDisposition } from "../long-run/goal-wait-refusal";
 import { ensureGoalEpisodeTask } from "../long-run/ongoing-episode-task";
 import { settleNativeGoalEpisode } from "../long-run/native-goal-pass";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode, goalStoppedByHost } from "../../shared/long-run";
@@ -1556,6 +1557,28 @@ function beforeDispatch<T>(write: () => T): T {
   }
 }
 
+/**
+ * The request a system successor starts from its finished predecessor: the predecessor's own choices (tool mode, required tools, runtime,
+ * permission) without its one-use capabilities or its words. A verified sign-in and a passed page check build it the same way.
+ */
+function successorRequestFrom(request: McpInvocationRequest, successorRunId: string, userPrompt: string, readOnly: boolean): McpInvocationRequest {
+  // Consumed single-use capabilities and the original action prompt cannot be replayed.
+  const { runId: _old, images: _images, oneUserAuthoredPrompt: _authored, oneMemoryUseOnceRef: _memory,
+    oneBriefingActionRef: _briefing, oneTeamPreflightRef: _team, oneAttachmentRef: _attachment,
+    oneRecurrenceSelection: _recurrence, ...rest } = request;
+  return { ...rest, runId: successorRunId, promptOrigin: "system", taskIntent: "task",
+    ...(readOnly ? { permissions: "read", onePermissionMode: "read" } : {}), userPrompt } as McpInvocationRequest;
+}
+
+/** What a passed page check needs to start its successor again after a restart (the live record is gone by then): plain data only. */
+export interface BrowserSuccessorSnapshot {
+  workspaceBinding?: InvocationWorkspaceBinding;
+  /** executionContext.source of the turn (plain data; the context's other fields are capabilities and are never stored). */
+  executionSource?: "mobile" | "telegram";
+  request: Pick<McpInvocationRequest, "toolMode" | "requiredToolCatalogIds" | "permissions" | "onePermissionMode" | "oneMode" | "locale">;
+}
+export type BrowserSuccessorTarget = { eligible: true; snapshot: BrowserSuccessorSnapshot } | { eligible: false; reason: string };
+
 export class InvocationService {
   private generatedVideoAuthEpoch = 0;
   private readonly deliveryJournal = new RunEventDeliveryJournal();
@@ -2526,6 +2549,9 @@ export class InvocationService {
       }
     });
     onAuthSessionRestored(()=>queueMicrotask(()=>{try{this.recoverQueuedSteers(undefined,true);}catch{ /* Owner recovery is retried by the existing startup/host path. */ }}));
+    // A runtime signal or a sign-in ends the long wait of a queued direction at once (see wakeLongSteerWaits).
+    onAuthSessionRestored(() => this.wakeLongSteerWaits());
+    onRuntimeSignal(() => this.wakeLongSteerWaits());
   }
 
   onEvent(listener: InvocationEventListener): () => void {
@@ -4023,7 +4049,9 @@ export class InvocationService {
       // and for the app's own failure of that wake (decideOwnerFailure plan "goal"): one plain line, never repeated while it is the
       // chat's latest reply, so a Goal whose wake died inside the app does not look stuck.
       const ownerActionCause = typeof errorCode === "string" && OWNER_ACTION_FAILURE_CODES.has(errorCode);
-      if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || finalAnswerConfirmedDurable || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
+      // A partial answer does not silence the line of a request the host keeps and continues (plan "waiting"): without it the transcript would
+      // not say why the rest arrives hours later, and the phone would show nothing.
+      if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || finalAnswerConfirmedDurable || (record.partialText.trim() && ownerFailure?.plan !== "waiting") || runReq.agentAppMode || remoteWorkspaceBinding
         || (runReq.promptOrigin === "system" && !ownerActionCause && ownerFailure?.plan !== "goal") || terminalKind === "invoke_cancelled"
         || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason)) return;
       try {
@@ -4032,7 +4060,8 @@ export class InvocationService {
         if (ownerFailure && (ownerFailure.action === "recover" || ownerFailure.action === "say") && ownerFailure.line && ownerFailure.plan !== "background") {
           const latestLine = listChatMessages(chat.id, 20).filter((entry) => entry.role === "assistant").at(-1);
           if (latestLine?.text !== ownerFailure.line) {
-            appendChatMessage(chat.id, "assistant", ownerFailure.line, { hostNotice: { purpose: "host-status", runId, status: "app-failed" } });
+            // A request kept for an outside cause (plan "waiting") is the provider's or the owner's, never "App problem".
+            appendChatMessage(chat.id, "assistant", ownerFailure.line, { hostNotice: { purpose: "host-status", runId, status: ownerFailure.plan === "waiting" ? "needs-owner" : "app-failed" } });
           }
           emptyFailureNoticePersisted = true;
           return;
@@ -4046,9 +4075,8 @@ export class InvocationService {
           : inferOwnerLocale(runReq.oneUserAuthoredPrompt ?? runReq.userPrompt, pickLocale(runReq));
         const hostCause = invocationHostStopCause(abortReason);
         // The app's own tool host was not ready and the queue starts this message again by itself (it waits a minute in the run, then
-        // tries up to the same cap as any pre-dispatch refusal, shared/transient-send-refusal.ts HOST_NOT_READY_RUN_FAILURE_CODES): the
-        // owner is told once that the app tries again, not once per cycle with the typed reason. The last attempt, when the queue holds the
-        // message instead, and a run the queue does not own, keep the typed reason (below).
+        // tries again with no cap, shared/transient-send-refusal.ts HOST_NOT_READY_RUN_FAILURE_CODES): the owner is told once that the
+        // app tries again, not once per cycle with the typed reason. A run the queue does not own keeps the typed reason (below).
         // (A store that stayed locked before dispatch is the same: the queue starts the message again by itself, so the line says that and
         // not "send it again".)
         if (!hostCause && terminalKind !== "invoke_interrupted" && (isHostNotReadyRunFailureCode(errorCode) || errorCode === STORE_BUSY_CODE)
@@ -6325,8 +6353,11 @@ export class InvocationService {
             const current = goalLongRun ? getLongRun(goalLongRun.id) : null;
             const revision = current ? getChatGoalRevision(current.goalId) : null;
             const requestedIntent = result.goalWaitRequest.status === "requested" ? result.goalWaitRequest.intent : null;
-            if (current && finiteGoalTimerRefusalEndsTurn({ reason, lifecycle: revision?.lifecycle, status: current.status,
-              intent: requestedIntent, aborted: controller.signal.aborted })) {
+            const disposition = current ? waitRefusalDisposition({ reason, lifecycle: revision?.lifecycle, status: current.status,
+              intent: requestedIntent, aborted: controller.signal.aborted, hasTransientAttachments: record.hasTransientAttachments, episodeRefused,
+              ownerHold: longRunOwnerHold(current.id),
+              producerIsThisTurn: latestGoalEpisodeProducer(current.id)?.invocation_run_id === runId }) : "generic";
+            if (current && disposition === "end_turn_verification") {
 
               // the same timer, and the retry cap stopped a Goal whose deliverables were done. Say what happened and
               // let the turn end through verification like any finite turn.
@@ -6342,8 +6373,9 @@ export class InvocationService {
                 notBefore: requestedIntent?.subject.kind === "timer" ? requestedIntent.subject.notBefore : null } });
               if (!alreadyTold) this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
                 notice: { code: GOAL_WAIT_FINITE_TIMER_NOTICE, level: "info", message } } });
-            } else if (!episodeRefused && current?.status === "running" && revision?.lifecycle === "ongoing"
-              && !controller.signal.aborted && !record.hasTransientAttachments) {
+            } else if (current && disposition === "schedule_observation") {
+              // The proposal itself cannot be scheduled (goal-wait-refusal.ts HOST_RESOLVABLE_WAIT_REFUSALS) or the registration
+              // failed before the episode: the host schedules its own observation, so the Goal always has a next step.
               let fallbackRegistered = false;
               try {
                 readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
@@ -7068,15 +7100,10 @@ export class InvocationService {
         const goal = getLongRunByGoalId(goalId);
         if (goal && ["waiting_user", "queued", "waiting_tool"].includes(goal.status)) transitionLongRun({ runId: goal.id, to: "running", actorKind: "host", reason: "authentication_restored" });
       }
-      // Consumed single-use capabilities and the original action prompt cannot be replayed.
-      const { runId: _old, images: _images, oneUserAuthoredPrompt: _authored, oneMemoryUseOnceRef: _memory,
-        oneBriefingActionRef: _briefing, oneTeamPreflightRef: _team, oneAttachmentRef: _attachment,
-        oneRecurrenceSelection: _recurrence, ...request } = record.request;
       const readOnly = !parked.durable.effectsSettled;
-      this.start({ ...request, runId: successorRunId, promptOrigin: "system", taskIntent: "task",
-        ...(readOnly ? { permissions: "read", onePermissionMode: "read" } : {}),
-        userPrompt: `login restored (source run ${runId}). Inspect results and external state, then do only what remains.${readOnly ? " read-only: report what happened." : ""}`,
-      }, record.workspaceBinding, record.executionContext, undefined, "goal-continuation",
+      this.start(successorRequestFrom(record.request, successorRunId,
+        `login restored (source run ${runId}). Inspect results and external state, then do only what remains.${readOnly ? " read-only: report what happened." : ""}`,
+        readOnly), record.workspaceBinding, record.executionContext, undefined, "goal-continuation",
         successorStart.admission);
       settleInvocationBrowserLoginWait(runId, "dispatched");
     } catch (error) {
@@ -7094,6 +7121,60 @@ export class InvocationService {
     } finally {
       parked.handle.cancel();
     }
+  }
+
+  /** Turns whose browser stopped on a human check, held only while a watcher waits for the owner (page-release-resume.ts releases them). */
+  private readonly browserSuccessorHolds = new Map<string, { request: McpInvocationRequest; workspaceBinding?: InvocationWorkspaceBinding;
+    executionContext?: InvocationExecutionContext; mainLifetime?: MainInvocationLifetime }>();
+
+  /**
+   * Can the owner passing a page check continue this turn by itself? The same ground as a verified sign-in (Main owned, interactive,
+   * not background): the Desktop, Mobile One and Telegram One carry their surface to the successor; an automation, a Site Agent App or
+   * any independent controller keeps authority of its own and is not continued from here (the reason says so). Holds the turn's
+   * continuation data until releaseBrowserSuccessorTarget.
+   */
+  browserSuccessorTarget(runId: string): BrowserSuccessorTarget {
+    const record = this.activeRuns.get(runId) ?? this.settlingRuns.get(runId);
+    if (!record) return { eligible: false, reason: "run_not_live" };
+    if (record.background) return { eligible: false, reason: "background_run" };
+    if (record.request.agentAppMode === true) return { eligible: false, reason: "agent_app_run" };
+    if (!canResumeInvocationBrowserLoginWait(record.executionContext)) return { eligible: false, reason: "independent_controller" };
+    // A Telegram turn's answer leaves only through the Telegram worker's subscription to the original run; a successor has none.
+    if (record.executionContext?.source === "telegram") return { eligible: false, reason: "telegram_reply_path" };
+    if (this.browserSuccessorHolds.size >= 32) this.browserSuccessorHolds.delete(this.browserSuccessorHolds.keys().next().value as string);
+    this.browserSuccessorHolds.set(runId, { request: record.request, ...(record.workspaceBinding ? { workspaceBinding: record.workspaceBinding } : {}),
+      ...(record.executionContext ? { executionContext: record.executionContext } : {}), ...(record.mainLifetime ? { mainLifetime: record.mainLifetime } : {}) });
+    const { toolMode, requiredToolCatalogIds, permissions, onePermissionMode, oneMode, locale } = record.request;
+    const source = record.executionContext?.source;
+    return { eligible: true, snapshot: { ...(record.workspaceBinding ? { workspaceBinding: record.workspaceBinding } : {}),
+      ...(source === "mobile" ? { executionSource: source } : {}),
+      request: { toolMode, requiredToolCatalogIds, permissions, onePermissionMode, oneMode, locale } } };
+  }
+
+  releaseBrowserSuccessorTarget(runId: string): void { this.browserSuccessorHolds.delete(runId); }
+
+  /**
+   * The one successor of a turn whose page check the owner passed. Built like the verified-sign-in successor (successorRequestFrom: the
+   * predecessor's request, so its tool mode and required tools ride along) and started after the predecessor released its chat.
+   * Without the held turn (an app restart) it starts from the stored snapshot on the same surface. Throws the start refusal unchanged;
+   * a busy chat throws the transient `runtime_turn_unsettled`.
+   */
+  async startBrowserSuccessor(input: { runId: string; chatId: string; successorRunId: string; userPrompt: string; snapshot: BrowserSuccessorSnapshot }): Promise<{ runId: string }> {
+    const held = this.browserSuccessorHolds.get(input.runId);
+    let started: { runId: string } | undefined;
+    const resume = (): void => {
+      if (!this.acceptingStarts || this.activeChatIds().includes(input.chatId)) throw Object.assign(new Error("browser_successor_chat_busy"), { code: "runtime_turn_unsettled" });
+      const successorStart = held?.mainLifetime ? held.mainLifetime.successorStart(input.chatId, input.successorRunId) : { admission: undefined };
+      if (!successorStart) throw Object.assign(new Error("browser_successor_scope_changed"), { code: "browser_successor_scope_changed" });
+      const base = held?.request ?? { chatId: input.chatId, userPrompt: "", ...input.snapshot.request } as McpInvocationRequest;
+      started = this.start(successorRequestFrom(base, input.successorRunId, input.userPrompt, false),
+        held?.workspaceBinding ?? input.snapshot.workspaceBinding,
+        // After a restart only a phone turn is restored (its answer is read from the chat); a Telegram turn is never started here.
+        held?.executionContext ?? (input.snapshot.executionSource === "mobile" ? { source: "mobile" } : undefined),
+        undefined, undefined, successorStart.admission);
+    };
+    await (held?.mainLifetime ? held.mainLifetime.afterSettled(resume) : resume());
+    return started as { runId: string };
   }
 
   /**
@@ -8671,14 +8752,17 @@ export class InvocationService {
    */
   private startHostRecovery(job: { originalRunId: string; chatId: string; request: McpInvocationRequest; userMessageId: string | null;
     startedAtIso: string; locale: "ko" | "en"; workspaceBinding?: InvocationWorkspaceBinding; executionContext?: InvocationExecutionContext }): void {
+    // The ports keep only the small binding values, never `job`: its request can carry image bytes, and a request that waits for an outside
+    // cause is rebuilt from its claim by the waiter (invocation/host-recovery.ts scheduleHostRecovery).
+    const { workspaceBinding, executionContext, originalRunId, locale } = job;
     scheduleHostRecovery({
-      start: (request) => this.start(request, job.workspaceBinding, job.executionContext),
+      start: (request) => this.start(request, workspaceBinding, executionContext),
       chatBusy: (chatId) => this.activeChatIds().includes(chatId),
       ownerPending: (chatId) => this.hasQueuedOwnerRequest(chatId),
       // Run-end / active-chat / steer-capacity signals wake a recovery waiting for a busy chat as soon as it frees (idle-retry.ts).
       signals: this,
       setTimer: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref?.(); return timer; },
-      say: (chatId, plan) => this.sayHostFailurePlan(chatId, job.originalRunId, plan, job.locale),
+      say: (chatId, plan) => this.sayHostFailurePlan(chatId, originalRunId, plan, locale),
       log: (message, detail) => console.warn(`[host-recovery] ${message}`, detail),
     }, job);
   }
@@ -8838,6 +8922,15 @@ export class InvocationService {
     });
   }
 
+  /** Directions waiting out a long step of an undispatched refusal are tried now: a runtime signal or a sign-in may have cleared the cause. */
+  private wakeLongSteerWaits(): void {
+    for (const [id, waiting] of [...this.steerDrainBackoff]) {
+      if (waiting.attempt < UNDISPATCHED_START_MAX_ATTEMPTS || waiting.notBefore === Number.MAX_SAFE_INTEGER || waiting.notBefore <= Date.now()) continue;
+      this.steerDrainBackoff.set(id, { ...waiting, notBefore: 0 });
+      this.drainSteerQueue(waiting.chatId);
+    }
+  }
+
   /**
    * A queued direction whose start hit a locked store is started again with backoff instead of failing (R-067).
    * Production 1.3.67, 2026-10-18T02:44:23Z, Yotube room: the Film Production Director's completion report
@@ -8866,14 +8959,15 @@ export class InvocationService {
       && (isTransientSendRefusalCode(typed) || ownerIntakeWaits(error));
     if (!storeBusy && !transient) return "not-retryable";
     if (phase === "start" && storeBusy && !runnerRefusedBeforeDispatch(error)) return "not-retryable";
-    // A start refused before dispatch for a reason that is not on the "not ready yet" list (the app's own state: a handshake, a
-    // ledger or a preparation step) waits only a bounded number of tries, then the message is held, as the composer's queue does.
-    const undispatchedOnly = transient && !isTransientSendRefusalCode(typed);
+    // A start refused before dispatch (a "not ready yet" code, or the app's own state: a handshake, a ledger or a preparation step)
+    // sent no model turn, so the direction the owner gave stays at the head and is started again for as long as it takes (15 s for a room
+    // that frees up, 1, 5, then 10 minutes after the old cap for the app's own state, ended at once by a runtime signal or a sign-in): no
+    // count and no age ends it, as in the composer's queue. Only a locked store keeps its own bounded ladder; a refusal the
+    // owner alone can clear never gets here (ownerIntakeWaits excludes it), and the owner's Stop withdraws the queued direction.
     const prior = this.steerDrainBackoff.get(next.id);
     const attempt = (prior?.attempt ?? 0) + 1;
     const firstAt = prior?.firstAt ?? Date.now();
-    if (storeBusy ? attempt > STEER_DRAIN_STORE_BUSY_DELAYS_MS.length
-      : undispatchedOnly ? attempt > UNDISPATCHED_START_MAX_ATTEMPTS : Date.now() - firstAt > TRANSIENT_SEND_DEADLINE_MS) return "exhausted";
+    if (storeBusy && attempt > STEER_DRAIN_STORE_BUSY_DELAYS_MS.length) return "exhausted";
     let retry = next;
     if (phase === "start") {
       // The admission was consumed by the refused start; a recovered direction starts without one, like this retry.
@@ -8883,14 +8977,18 @@ export class InvocationService {
     for (const [id, waiting] of this.steerDrainBackoff) {
       if (id !== next.id && !this.steerQueues.get(waiting.chatId)?.some((queued) => queued.id === id)) this.steerDrainBackoff.delete(id);
     }
-    const delayMs = storeBusy ? STEER_DRAIN_STORE_BUSY_DELAYS_MS[attempt - 1]! : transientSendBackoffMs(attempt - 1);
+    // The app's own state (not a room or a store that frees up by itself) waits longer after the old cap: 1 min, 5 min, 10 min.
+    const undispatchedOnly = transient && !isTransientSendRefusalCode(typed);
+    const delayMs = storeBusy ? STEER_DRAIN_STORE_BUSY_DELAYS_MS[attempt - 1]!
+      : undispatchedOnly ? startRetryBackoffMs(attempt - 1) : transientSendBackoffMs(attempt - 1);
     this.steerDrainBackoff.set(next.id, { chatId, attempt, notBefore: Date.now() + delayMs, firstAt });
     const queue = this.steerQueues.get(chatId) ?? [];
     if (!queue.some((queued) => queued.id === next.id)) queue.unshift(retry);
     this.steerQueues.set(chatId, queue);
     const timer = setTimeout(() => this.drainSteerQueue(chatId), delayMs + 5);
     timer.unref?.();
-    console.warn(`[invocation] queued steer start ${storeBusy ? "hit a locked store" : "was refused (not ready yet)"}; retrying steer=${next.id} chat=${chatId} `
+    // Once per attempt while the ladder is short, then every 20th: a wait that lasts hours must not write a line every 15 seconds.
+    if (storeBusy || attempt <= 3 || attempt % 20 === 0) console.warn(`[invocation] queued steer start ${storeBusy ? "hit a locked store" : "was refused (not ready yet)"}; retrying steer=${next.id} chat=${chatId} `
       + `code=${storeBusy ? STORE_BUSY_CODE : typed} phase=${phase} attempt=${attempt}${storeBusy ? `/${STEER_DRAIN_STORE_BUSY_DELAYS_MS.length}` : ""} delayMs=${delayMs}`);
     return "scheduled";
   }

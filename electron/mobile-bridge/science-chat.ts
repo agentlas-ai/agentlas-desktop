@@ -162,8 +162,8 @@ export class MobileScienceChat {
     }
     let command: DaemonScienceCommand;
     switch (method) {
-      case "science.video.has": command = { op: "video.has", input: { projectId: String(params.projectId), conversationId: String(params.conversationId), messageIds: params.messageIds as string[] } }; break;
-      case "science.video.list": command = { op: "video.list", input: { projectId: String(params.projectId), conversationId: String(params.conversationId), messageId: String(params.messageId), ...(params.cursor === undefined ? {} : { cursor: params.cursor as { runId: string; outputId: string } }) } }; break;
+      case "science.video.has": command = { op: "video.has", input: { projectId: String(params.projectId), conversationId: String(params.conversationId), messageIds: params.messageIds as string[], ...(params.maxBytes === undefined ? {} : { maxBytes: Number(params.maxBytes) }) } }; break;
+      case "science.video.list": command = { op: "video.list", input: { projectId: String(params.projectId), conversationId: String(params.conversationId), messageId: String(params.messageId), ...(params.cursor === undefined ? {} : { cursor: params.cursor as { runId: string; outputId: string } }), ...(params.maxBytes === undefined ? {} : { maxBytes: Number(params.maxBytes) }) } }; break;
       case "science.video.open": command = { op: "video.open", input: { projectId: String(params.projectId), conversationId: String(params.conversationId), messageId: String(params.messageId), runId: String(params.runId), outputId: String(params.outputId), transferId: String(params.transferId), principal } }; break;
       case "science.video.prepare": command = { op: "video.prepare", input: { transferId: String(params.transferId), principal } }; break;
       case "science.video.chunk": command = { op: "video.chunk", input: { transferId: String(params.transferId), offset: Number(params.offset), principal } }; break;

@@ -10,9 +10,12 @@ import {
   isTransientRunFailureCode,
   isTransientSendRefusal,
   sendRefusalCode,
+  startRetryBackoffMs,
   transientSendBackoffMs,
 } from "../../shared/transient-send-refusal";
-import { UNCONFIRMED_MAX_RESENDS, withEarlierAttempt } from "./earlier-attempt";
+import { hostNotReadyRunCause } from "../mcp/config-build-retry";
+import { onRuntimeSignal } from "../runtime/runtime-signals";
+import { UNCONFIRMED_MAX_RESENDS, UNCONFIRMED_VERIFY_CONTINUATIONS, withEarlierAttempt } from "./earlier-attempt";
 
 /**
  * Per-chat durable send queue: whatever the owner types is accepted, shown once, and run.
@@ -175,8 +178,8 @@ export interface PendingChatSendsDeps<Sender> {
   /**
    * A start the host refused BEFORE anything reached a runtime, for a reason the owner has nothing to do about (the app's own
    * state: a handshake, a ledger or a preparation step), which is not on the transient list. The message is retried with the same
-   * backoff and kept, instead of ending as a code on the screen; after UNDISPATCHED_START_MAX_ATTEMPTS it is held (kept, never
-   * lost, never run on its own). Absent = only the transient list waits.
+   * backoff and kept, instead of ending as a code on the screen; at UNDISPATCHED_START_MAX_ATTEMPTS the owner hears one calm line and
+   * the message keeps waiting (never held, never ended by a count). Absent = only the transient list waits.
    */
   waitsBeforeDispatch?(cause: unknown, runId: string | null): boolean;
   onPlaced?(sendId: string, runId: string): void;
@@ -194,6 +197,12 @@ export interface PendingChatSendsDeps<Sender> {
    * Absent = always capped.
    */
   resendIsUnbounded?(runId: string | null): boolean;
+  /**
+   * After the plain resend is spent (UNCONFIRMED_MAX_RESENDS), may the message be sent once more with the verify-first line instead of ending
+   * "uncertain" and handing the check to the owner? The wiring answers from durable facts: the owner has written nothing newer in the chat since
+   * `sinceMs` (the Stop check is the pump's own). Absent = the message ends "uncertain" as before.
+   */
+  continueUnconfirmedAfterCap?(chatId: string, sinceMs: number): boolean;
   /**
    * Whether the owner pressed Stop on this chat after `sinceMs` (a steering interrupt is not a Stop). Checked before a message that is
    * being sent again starts: Stop always wins over a resend. Absent = no check.
@@ -243,9 +252,9 @@ const START_RECORD_TRIES = 3;
  *
  * The bounded tries are not the last word: when they are spent, the one start-again every message that provably sent nothing gets
  * (MAX_NOT_DISPATCHED_RETRIES, settleStarting) still follows, so the line of the last bounded try must not invite a resend that would
- * overlap it (regression review C13: "Sending it again is safe" was written for the 12th and again for the 13th run). Two
- * messages get no such extra try: an input the queue keeps in custody, and the app's own host being not ready, which the queue holds at its
- * cap (pass the run's error code).
+ * overlap it (regression review C13: "Sending it again is safe" was written for the 12th and again for the 13th run). An input
+ * the queue keeps in custody gets no such extra try. The app's own host being not ready is not bounded at all (pass the run's error code):
+ * the queue keeps that message and starts it again for as long as it takes.
  */
 export function pendingSendRetriesAfterInternalFailure(
   db: { prepare(sql: string): { get(...args: unknown[]): unknown } },
@@ -259,7 +268,9 @@ export function pendingSendRetriesAfterInternalFailure(
     // The owner's folder is gone: the queue starts nothing again, so no line may say that it will.
     if (isOwnerFixableRunFailureCode(code)) return false;
     if (row.attempts + 1 < UNDISPATCHED_START_MAX_ATTEMPTS) return true;
-    if (isHostNotReadyRunFailureCode(code)) return false;
+    // The app's own host not being ready is retried for as long as it takes (settleStarting) when the run's own mcp_config_failure event
+    // names a cause that clears by itself; any other cause keeps the bounded tries and host-recovery takes the message over.
+    if (isHostNotReadyRunFailureCode(code)) return hostNotReadyRunCause(db as never, runId, code);
     const request = JSON.parse(row.request_json) as { oneAttachmentRef?: unknown; oneTeamPreflightRef?: unknown };
     return !request.oneAttachmentRef && !request.oneTeamPreflightRef && (row.dispatch_retries ?? 0) < MAX_NOT_DISPATCHED_RETRIES;
   } catch { return false; }
@@ -559,14 +570,24 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       // The cap protects against one external effect running twice. A run that never started has no effect to repeat.
       let unbounded = false;
       try { unbounded = deps.resendIsUnbounded?.(row.run_id) === true; } catch { unbounded = false; }
-      if (resends >= UNCONFIRMED_MAX_RESENDS && !unbounded) return false;
+      if (resends >= UNCONFIRMED_MAX_RESENDS && !unbounded) {
+        // The plain resend is spent. One verify-first send follows (earlier-attempt.ts UNCONFIRMED_VERIFY_CONTINUATIONS) while the owner has said
+        // nothing newer; the pump still yields to the owner's Stop before it starts.
+        if (resends >= UNCONFIRMED_MAX_RESENDS + UNCONFIRMED_VERIFY_CONTINUATIONS) return false;
+        let mayContinue = false;
+        try { mayContinue = deps.continueUnconfirmedAfterCap?.(chatId, row.resend_since ?? row.updated_at ?? 0) === true; } catch { mayContinue = false; }
+        if (!mayContinue) return false;
+      }
       let again = false;
       try { again = deps.resendWhenUnconfirmed(row.run_id) === true; } catch { again = false; }
       if (!again) return false;
       const now = deps.now();
-      const moved = deps.db.prepare(`UPDATE pending_chat_sends SET state = 'queued', run_id = NULL, uncertain_resends = uncertain_resends + 1,
+      // The count says how many sends of this message may have acted (the verify-first line states "twice"). A resend of a run that left no
+      // receipt acted on nothing and never adds to it beyond the first, so the line is never attached to a count the message did not reach.
+      const counted = unbounded && resends >= UNCONFIRMED_MAX_RESENDS ? 0 : 1;
+      const moved = deps.db.prepare(`UPDATE pending_chat_sends SET state = 'queued', run_id = NULL, uncertain_resends = uncertain_resends + ?,
         last_code = ?, refused_since = NULL, not_before = ?, resend_since = ?, updated_at = ? WHERE id = ? AND state = 'starting'`)
-        .run(code, now + transientSendBackoffMs(resends), now, now, row.id) as { changes?: number } | undefined;
+        .run(counted, code, now + transientSendBackoffMs(resends), now, now, row.id) as { changes?: number } | undefined;
       if (moved && moved.changes === 0) return false;
       deps.log?.("pending send unconfirmed, sent once more", { chatId, sendId: row.id, runId: row.run_id, code });
       deps.onChange?.(chatId);
@@ -593,9 +614,17 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
     }
     let failureCode: string | null = null;
     if (placement === "not-dispatched") { try { failureCode = deps.failureCode?.(row.run_id) ?? null; } catch { failureCode = null; } }
-    // The app's own host was not ready for the run (its tool table): the same attempt cap as a start refused before dispatch, then the
-    // message is held (kept, never lost) and said once, instead of retrying for the whole refusal window with a line every cycle.
-    if (placement === "not-dispatched" && isHostNotReadyRunFailureCode(failureCode) && row.attempts + 1 >= UNDISPATCHED_START_MAX_ATTEMPTS) {
+    // The app's own host was not ready for the run (its tool table). When the run's own mcp_config_failure event names a cause that
+    // clears by itself (hostNotReadyRunCause), no model turn was sent (the tool-selection judge may have run), so the message stays queued and is started again, with the wait
+    // growing after the old cap (startRetryBackoffMs) and cut short by a runtime signal or a sign-in; no count holds or ends it, and the
+    // owner hears one calm line at the old cap. A run that failed for any other cause keeps the bounded tries and is then held (kept,
+    // never lost) for host-recovery to take over.
+    const hostNotReadyWaits = placement === "not-dispatched" && isHostNotReadyRunFailureCode(failureCode) && hostNotReadyRunCause(deps.db as never, row.run_id, failureCode);
+    if (hostNotReadyWaits && row.attempts + 1 === UNDISPATCHED_START_MAX_ATTEMPTS) {
+      deps.log?.("pending send still waiting for the app's tool host", { chatId, sendId: row.id, attempts: row.attempts + 1, code: failureCode });
+      try { deps.onWaitingLong?.({ chatId, request, sendId: row.id, ...(failureCode ? { code: failureCode } : {}) }); } catch { /* a line that cannot be written changes nothing */ }
+    }
+    if (placement === "not-dispatched" && isHostNotReadyRunFailureCode(failureCode) && !hostNotReadyWaits && row.attempts + 1 >= UNDISPATCHED_START_MAX_ATTEMPTS) {
       finish("held", failureCode);
       deps.onHeld?.(row.id, failureCode ?? "host_not_ready");
       deps.onEnded?.({ chatId, request, reason: "held", ...(failureCode ? { code: failureCode } : {}), runId: row.run_id, sendId: row.id });
@@ -610,7 +639,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       // turn of another conversation on the same seat session, a locked store). Nothing reached a model; the message keeps
       // its place and starts again after a backoff. This is not one of the bounded not-dispatched retries below.
       const now = deps.now();
-      requeueOccupied.run(failureCode ?? "not_dispatched_internal", now, now + transientSendBackoffMs(row.attempts), now, row.id);
+      requeueOccupied.run(failureCode ?? "not_dispatched_internal", now, now + (hostNotReadyWaits ? startRetryBackoffMs(row.attempts) : transientSendBackoffMs(row.attempts)), now, row.id);
       deps.log?.(internalCause ? "pending send failed before dispatch (the app's own state), queued again" : "pending send refused before dispatch (occupied), queued again",
         { chatId, sendId: row.id, runId: row.run_id, code: failureCode });
       deps.onChange?.(chatId);
@@ -799,7 +828,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
             ? { ...request, images: loadSavedImages(row, JSON.parse(row.image_refs_json) as PendingSendImageRef[]) }
             : request;
           // The second send of a message the first run lost: the model is told once, in one line (earlier-attempt.ts).
-          const startRequest: McpInvocationRequest = (row.uncertain_resends ?? 0) > 0 ? withEarlierAttempt(loaded) : loaded;
+          const startRequest: McpInvocationRequest = (row.uncertain_resends ?? 0) > 0 ? withEarlierAttempt(loaded, (row.uncertain_resends ?? 0) > UNCONFIRMED_MAX_RESENDS) : loaded;
           if (request.oneAttachmentRef || request.oneTeamPreflightRef) {
             const markStarting = () => { setStarting.run(runId, deps.now(), row.id); };
             if (deps.reserveStart) deps.reserveStart(row.id,{...request,runId},markStarting);
@@ -912,6 +941,22 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
     }
   }
 
+  /** A runtime signal or a sign-in: a message waiting out a long step of the app's tool host is tried now, not at the end of the step. */
+  function wakeLongWaits(): void {
+    try {
+      const rows = deps.db.prepare("SELECT id, chat_id, last_code FROM pending_chat_sends WHERE state = 'queued' AND attempts >= ? AND not_before IS NOT NULL AND not_before > ?")
+        .all(UNDISPATCHED_START_MAX_ATTEMPTS, deps.now()) as Array<{ id: string; chat_id: string; last_code: string | null }>;
+      for (const woken of rows) {
+        if (!isHostNotReadyRunFailureCode(woken.last_code)) continue;
+        deps.db.prepare("UPDATE pending_chat_sends SET not_before = NULL WHERE id = ? AND state = 'queued'").run(woken.id);
+        kick(woken.chat_id, 0);
+      }
+    } catch { /* the step ends by itself */ }
+  }
+  const stopWakes: Array<() => void> = [];
+  try { stopWakes.push(onRuntimeSignal(() => wakeLongWaits())); } catch { /* the step ends by itself */ }
+  try { stopWakes.push((require("../auth") as typeof import("../auth")).onAuthSessionRestored(() => wakeLongWaits())); } catch { /* the step ends by itself */ }
+
   recoverStarting();
   resumeAfterRestart();
 
@@ -958,7 +1003,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       if (options.requireUserRow && (!userRow || typeof (userRow as {id?:unknown}).id !== "string")) throw new Error("pending_send_message_custody_missing");
       const now = deps.now();
       // The marker is added only when the queue starts a message again; a request that arrives with it never keeps it (earlier-attempt.ts).
-      const stored = { ...request, runId: undefined, earlierAttemptUncertain: undefined };
+      const stored = { ...request, runId: undefined, earlierAttemptUncertain: undefined, earlierAttemptVerify: undefined };
       let requestJson = JSON.stringify(stored);
       let imageRefsJson: string | null = null;
       if (options.imagesByReference && request.images?.length && !request.oneAttachmentRef && !request.oneTeamPreflightRef
@@ -1006,7 +1051,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       if (row) kick(row.chat_id, 0);
     },
     /** For gates and shutdown: stop timers without touching the persisted rows. */
-    dispose(): void { for (const chatId of [...timers.keys()]) clearTimerFor(chatId); },
+    dispose(): void { for (const stop of stopWakes.splice(0)) { try { stop(); } catch { /* nothing to undo */ } } for (const chatId of [...timers.keys()]) clearTimerFor(chatId); },
     /** For gates: run a drain pass now. */
     pumpNow: pump,
   });

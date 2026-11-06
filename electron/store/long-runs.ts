@@ -47,6 +47,7 @@ import { NO_PROGRESS_RETRY_LIMIT, VERIFICATION_NO_PROGRESS_REASON } from "../../
 import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
 import { createRuntimeRetryStore, RUNTIME_RETRY_REOPEN_AFTER_MS } from "./runtime-retry";
+import { onRuntimeSignal } from "../runtime/runtime-signals";
 import { invocationProcessOwner } from "./invocation-run-owners";
 import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
 import { agentRunCwd } from "../runtime/exec";
@@ -1261,7 +1262,7 @@ export function nextBlockedGoalRetrySlot(runId: string, now = Date.now(),
     .get(runId) as { seq: number };
   const prior = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = ? AND seq > ? AND occurred_at > ?
     AND json_extract(payload_json, '$.action') = 'retry_scheduled'
-    AND COALESCE(json_extract(payload_json, '$.detail'), '') NOT IN ('host_pause_carried_retry', 'parked_relay_pull_forward')`)
+    AND COALESCE(json_extract(payload_json, '$.detail'), '') NOT IN ('host_pause_carried_retry', 'parked_relay_pull_forward', 'runtime_signal_pull_forward')`)
     .get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, success.seq, since) as { n: number };
   const retryIndex = prior.n;
   const providerStop = retryIndex > 0 && getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = ? AND seq > ? AND occurred_at > ?
@@ -1330,7 +1331,69 @@ export function scheduleGoalRuntimeRetryReopen(runId: string, invocationRunId: s
   return { nextAt };
 }
 
-const RUNTIME_RETRY_CLEANUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
+/** Ledger markers of a retry pulled forward by a runtime signal (nextBlockedGoalRetrySlot does not count it as a failure). */
+export const RUNTIME_SIGNAL_PULL_DETAIL = "runtime_signal_pull_forward";
+export const RUNTIME_SIGNAL_PULL_TRIGGER = "runtime-signal";
+/** A retry due within this is left to the minute sweep: pulling it forward gains nothing. */
+const RUNTIME_SIGNAL_DUE_SLACK_MS = 75_000;
+/** The pulled-forward retry is due this soon; the sweep (every 60 s) picks it up. */
+const RUNTIME_SIGNAL_PULL_DELAY_MS = 2_000;
+/** At most one signal pull per Goal in this window, however many signals arrive. */
+const RUNTIME_SIGNAL_MIN_SPACING_MS = 3 * 60_000;
+
+/**
+ * A runtime signal (a sign-in, a runtime that came up, the connection back; runtime/runtime-signals.ts) is the fact a Goal that rests on
+ * its spent-runtime-retry schedule waits for, so that schedule is pulled forward to now instead of sitting out the backstop. Only the
+ * Goals resting on exactly that schedule (fromReason goal_pass_runtime_retry_reopen) move; the provider's own stated window (a usage
+ * limit's reset time) still holds because scheduleBlockedGoalRetry never schedules earlier than goalProviderRetryNotBefore, and an
+ * owner hold, a live attempt or a Goal that changed meanwhile is left as it is. The retry store admits the one probe call at that
+ * turn (store/runtime-retry.ts reads the same signal). Returns the number of Goals moved.
+ */
+export function pullForwardRuntimeRetryReopens(options: { nowMs?: number } = {}): number {
+  const nowMs = options.nowMs ?? Date.now();
+  const rows = getDb().prepare(`SELECT r.id AS runId FROM long_runs r WHERE r.status='waiting_tool' AND r.surface!='science' AND (
+      SELECT json_extract(e.payload_json,'$.fromReason') FROM long_run_events e WHERE e.run_id=r.id AND e.kind=? ORDER BY e.seq DESC LIMIT 1
+    ) = 'goal_pass_runtime_retry_reopen'`).all(BLOCKED_GOAL_SWEEP_EVENT_KIND) as { runId: string }[];
+  let moved = 0;
+  for (const { runId } of rows) {
+    try {
+      const current = getLongRun(runId);
+      const retry = current ? pendingBlockedGoalRetry(runId) : null;
+      if (!current || !retry || longRunOwnerHold(runId) || goalOwnerAnswerHold(runId)) continue;
+      const due = Date.parse(retry.nextAt);
+      if (!Number.isFinite(due) || due <= nowMs + RUNTIME_SIGNAL_DUE_SLACK_MS) continue;
+      const last = getDb().prepare(`SELECT occurred_at AS at FROM long_run_events WHERE run_id = ? AND kind = ?
+        AND json_extract(payload_json, '$.trigger') = ? ORDER BY seq DESC LIMIT 1`).get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, RUNTIME_SIGNAL_PULL_TRIGGER) as { at: string } | undefined;
+      const lastAt = last ? Date.parse(last.at) : Number.NaN;
+      if (Number.isFinite(lastAt) && nowMs - lastAt < RUNTIME_SIGNAL_MIN_SPACING_MS) continue;
+      scheduleBlockedGoalRetry({ runId, expectedVersion: current.version, kind: retry.kind, fromReason: retry.fromReason,
+        retryIndex: retry.retryIndex, nextAt: new Date(nowMs + RUNTIME_SIGNAL_PULL_DELAY_MS).toISOString(),
+        detail: RUNTIME_SIGNAL_PULL_DETAIL, trigger: RUNTIME_SIGNAL_PULL_TRIGGER, requestedBy: "host" });
+      moved += 1;
+    } catch (error) {
+      // A Goal another process moved first, one with a live attempt or an owner hold: not ours to move now.
+      if (!(error instanceof Error && ["blocked_goal_retry_state_changed", "blocked_goal_retry_controller_live", LONG_RUN_OWNER_HOLD_CODE,
+        GOAL_OWNER_ANSWER_PENDING_CODE].includes(error.message))) console.warn("[runtime-retry] signal pull-forward skipped a Goal:", error);
+    }
+  }
+  return moved;
+}
+
+let runtimeSignalPullQueued = false;
+// Subscribed once per process at load (Desktop Main and the background service each have their own): the sweep itself is a few reads,
+// run after the signal's own call returned, and a burst of signals is one pass. A store that is not open yet is skipped quietly.
+onRuntimeSignal(() => {
+  if (runtimeSignalPullQueued) return;
+  runtimeSignalPullQueued = true;
+  const timer = setTimeout(() => {
+    runtimeSignalPullQueued = false;
+    try { pullForwardRuntimeRetryReopens(); } catch { /* no store yet, or it failed: the backstop schedule still holds */ }
+  }, 0);
+  timer.unref?.();
+});
+
+/** A Goal idle longer than this is not resumed by a startup cleanup: it stays in the state it was left in. */
+export const RUNTIME_RETRY_CLEANUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 /** Startup, once per store (idempotent query): a Goal an earlier build paused as `budget` because its runtime retry account was
  * spent (the latest status event says so) goes back onto a retry schedule. Science uses the same pause reason for its segment

@@ -3,6 +3,7 @@ import type { FinanceAsset, FinanceDataResult } from '../../shared/finance';
 import { calculateFinance } from './compute';
 import { z } from 'zod';
 import { mapLimit } from './providers/read-cache';
+import { historyReadWaitSeconds, readAfterShortWait, transientFinanceCode } from './source-failure';
 
 /** Histories are read three at a time; they are checked and combined below in the order the request named the assets. */
 const HISTORY_CONCURRENCY=3;
@@ -16,10 +17,11 @@ export async function calculateFromFinanceSources(raw:unknown,assets:FinanceAsse
  const selected=request.assetIds.map(id=>assets.find(asset=>asset.id===id)??(()=>{throw new Error('finance_compute_asset_not_found');})());
  const histories:FinanceComputeHistory[]=[],sourceUrls:string[]=[],warnings:string[]=[],inputEvidence:FinanceDataResult[]=[];
  let retrievedAt='';
- const reads=await mapLimit(selected,HISTORY_CONCURRENCY,asset=>{signal.throwIfAborted();return query(asset);},signal);
+ // A history read that failed for a temporary reason with a short stated wait is waited out and read once more here (the model is never asked to wait).
+ const reads=await mapLimit(selected,HISTORY_CONCURRENCY,async asset=>{signal.throwIfAborted();return (await readAfterShortWait(()=>query(asset),historyReadWaitSeconds,signal)).result;},signal);
  for(const [readIndex,asset] of selected.entries()){
   signal.throwIfAborted();const result=reads[readIndex];
-  if(!['ok','partial'].includes(result.status)||!result.rows.length)throw new Error('finance_compute_history_unavailable');
+  if(!['ok','partial'].includes(result.status)||!result.rows.length)throw Object.assign(new Error('finance_compute_history_unavailable'),{detail:{symbol:asset.symbol,assetId:asset.id,cause:transientFinanceCode(result.warnings)??result.warnings.find(warning=>/^finance_[a-z0-9_]+$/.test(warning))??null}});
   if(!result.sourceUrls.length||result.sourceUrls.some(value=>{try{const url=new URL(value);return !['https:','http:'].includes(url.protocol)||!!url.username||!!url.password;}catch{return true;}}))throw new Error('finance_compute_source_required');
   if(!z.string().datetime({offset:true}).safeParse(result.retrievedAt).success)throw new Error('finance_compute_retrieval_time_required');
   const column=(names:string[])=>names.map(name=>result.columns.indexOf(name)).find(index=>index>=0)??-1;
@@ -37,7 +39,7 @@ export async function calculateFromFinanceSources(raw:unknown,assets:FinanceAsse
   const dailyPrices=[...byDay.values()].sort((a,b)=>a.date.localeCompare(b.date)).slice(-2600);
   if(dailyPrices.length<prices.length)warnings.push(`${asset.symbol}: 같은 날짜가 두 번 이상 나온 관측은 마지막 값만 사용했습니다 (${prices.length-dailyPrices.length}건).`);
   if(!/^[A-Z]{3}$/.test(asset.currency)||asset.currency==='XXX')throw new Error('finance_compute_currency_unknown');
-  if(dailyPrices.length<FINANCE_COMPUTE_MIN_OBSERVATIONS)throw new Error('finance_compute_history_too_short');
+  if(dailyPrices.length<FINANCE_COMPUTE_MIN_OBSERVATIONS)throw Object.assign(new Error('finance_compute_history_too_short'),{detail:{symbol:asset.symbol,assetId:asset.id,observations:dailyPrices.length}});
   if(prices.length!==result.rows.length)warnings.push(`${asset.symbol}: 양수 종가가 있는 최근 관측만 계산에 포함했습니다 (${dailyPrices.length}/${result.rows.length}).`);
   histories.push({assetId:asset.id,symbol:asset.symbol,currency:asset.currency,priceBasis:'price',adjustment:'unknown',prices:dailyPrices});
   inputEvidence.push({...result,rows:result.rows.slice(-2600)});

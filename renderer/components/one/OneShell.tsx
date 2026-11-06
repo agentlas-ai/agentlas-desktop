@@ -21,6 +21,7 @@ import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, pauseOneFollowupIntent, resumeOneFollowupIntent, waitForOneFollowupDelivery, bindOneFollowupCapture, releaseOneFollowupCapture, followupReceiptCanRetire, observeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
 import { followupRequestJson } from "@shared/followup-custody";
+import { oneRecoveryStopWaitsForChange } from "@shared/one-auto-recovery";
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS, normalizeOnePreflightSteerRequest } from "@shared/one-preflight-steers";
 import { firstSendEchoed, firstSendRowId, firstSendsToDraw, firstSendWaitLine, firstSendWentLive, moveFirstSendToChat, patchFirstSend, readFirstSends, removeFirstSend, resumeFirstSends, saveFirstSend, takeBackWaitingFirstSend, type FirstSendEntry, type FirstSendHold } from "@/lib/one-first-send-outbox";
 
@@ -1793,6 +1794,11 @@ function OneSessionsShell() {
     previousFingerprint: null,
     judgedRunIds: new Set(),
   });
+  // A stop that waits for the situation to change (shared/one-auto-recovery.ts oneRecoveryStopWaitsForChange): chat -> the failed run.
+  // Main tells the screen with store change `one-recovery` when a sign-in, a detected runtime or a restored connection came after the
+  // stop; the run is then judged again (Main counts only the attempts of the new situation). The tick re-runs the recovery effect.
+  const recoveryWaitRunsRef = useRef(new Map<string, string>());
+  const [recoveryWakeTick, setRecoveryWakeTick] = useState(0);
   // An admission refusal is not a failed model run. Projection refresh may
   // resurrect an older receipt: never recover it on behalf of the refused turn.
   // An accepted user turn or a verified newer run (including manual Goal resume)
@@ -8380,6 +8386,8 @@ function OneSessionsShell() {
         judgementSettled = true;
         state.previousFingerprint = judgement.fingerprint;
         const safeDiagnosis = toCustomerSafeText(judgement.diagnosis, appLocale);
+        if (!judgement.retry && oneRecoveryStopWaitsForChange(judgement.reason)) recoveryWaitRunsRef.current.set(chatId, receipt.runId);
+        else recoveryWaitRunsRef.current.delete(chatId);
         if (!judgement.retry) {
           setAutoRecovery({
             phase: "stopped",
@@ -8428,7 +8436,38 @@ function OneSessionsShell() {
     // `autoRecovery` is written here, never read as an input — including it
     // would re-run this effect on its own output.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appLocale, busy, conversation?.id, conversation?.title, receipt, selected, startRun]);
+  }, [appLocale, busy, conversation?.id, conversation?.title, receipt, recoveryWakeTick, selected, startRun]);
+
+  // The situation of a waiting recovery changed (Main: store change `one-recovery`): that run is judged again, with the attempts of the
+  // new situation. Only a run that was recorded as waiting is released; a verified or retried run is never re-judged by this.
+  useEffect(() => {
+    const events = ipcEvents();
+    if (!events?.onStoreChanged) return;
+    return events.onStoreChanged((change) => {
+      if (change.entity !== "one-recovery" || !change.id) return;
+      const runId = recoveryWaitRunsRef.current.get(change.id);
+      if (!runId) return;
+      recoveryWaitRunsRef.current.delete(change.id);
+      const state = autoRecoveryRef.current;
+      state.judgedRunIds.delete(runId);
+      if (state.chatId === change.id) { state.previousFingerprint = null; state.attemptsSpent = 0; }
+      setRecoveryWakeTick((tick) => tick + 1);
+    });
+  }, []);
+
+  // A waiting chat Main pushed out (more waits than it keeps): this screen forgets that it judged the run, so the next time the chat is shown
+  // the run is judged again (which waits again) and is not locked for the session. No tick: nothing is re-judged at once.
+  useEffect(() => {
+    const events = ipcEvents();
+    if (!events?.onStoreChanged) return;
+    return events.onStoreChanged((change) => {
+      if (change.entity !== "one-recovery-dropped" || !change.id) return;
+      const runId = recoveryWaitRunsRef.current.get(change.id);
+      if (!runId) return;
+      recoveryWaitRunsRef.current.delete(change.id);
+      autoRecoveryRef.current.judgedRunIds.delete(runId);
+    });
+  }, []);
 
   // Read through a ref so answerConfirmation keeps its dependency list (notices only; nothing re-runs on a locale change).
   const answerNoticeLocaleRef = useRef(appLocale);

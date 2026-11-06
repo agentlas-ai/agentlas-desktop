@@ -1,5 +1,6 @@
 import { PROVIDER_REFUSAL_CODES, PROVIDER_UNAVAILABLE_CODES } from "./run-failure-notice";
 import { TRANSIENT_HOST_ENDED_SILENCE_CODE, isTransientExternalFailure } from "./transient-provider-failure";
+import { formatRuntimeQuotaReset } from "./runtime-quota";
 import type { InvocationRuntimeFailure } from "./types";
 
 /**
@@ -21,7 +22,7 @@ export type OwnerFailureClass = "external" | "internal";
 
 export type ExternalFailureCause =
   | "network" | "provider_outage" | "provider_limit" | "provider_auth" | "provider_refusal"
-  | "provider_empty" | "owner_stop" | "owner_wait" | "site_refusal";
+  | "provider_empty" | "owner_stop" | "owner_wait" | "site_refusal" | "fixed_limit";
 
 export interface ExternalFailureEntry {
   readonly match: "exact" | "pattern";
@@ -44,10 +45,13 @@ export const EXTERNAL_FAILURE_TABLE: readonly ExternalFailureEntry[] = Object.fr
   ...entry("provider_outage", "The model provider could not take the request (outage, overload, capacity).",
     [...PROVIDER_UNAVAILABLE_CODES, TRANSIENT_HOST_ENDED_SILENCE_CODE, "serving_unavailable", "http_502", "http_503", "http_504", "http_529"]),
   { match: "pattern", code: "http_5\\d\\d", cause: "provider_outage", reason: "Any other 5xx answer of the provider or of Agentlas serving." },
-  ...entry("provider_limit", "A usage, rate, credit, context or retry-window limit of the provider (or one the owner set).", [
+  ...entry("provider_limit", "A usage, rate, credit or retry-window limit of the provider that lifts with time.", [
     "http_429", "rate_limit", "rate_limited", "quota", "quota_exceeded", "quota_exhausted", "insufficient_credits",
     "subscription_credits_disabled", "usage_limit_reached", "runtime_retry_not_before", "runtime_retry_budget_exhausted",
-    "model_context_capacity_exceeded", "codex_context_window_exceeded", "budget_cost_exhausted", "budget_cost_unavailable",
+  ]),
+  // Not waited on (WAITABLE_EXTERNAL_CAUSES): the same request fails the same way at every check.
+  ...entry("fixed_limit", "A limit that waiting does not lift: the request does not fit the model's context window, or a budget the owner set.", [
+    "model_context_capacity_exceeded", "codex_context_window_exceeded", "local_context_limit_exceeded", "budget_cost_exhausted", "budget_cost_unavailable",
   ]),
   ...entry("provider_auth", "The provider (or the signed-in browser) needs the owner to sign in.", [
     "http_401", "auth", "auth_expired", "auth_required", "auth-required", "login_required", "login-required", "not_signed_in",
@@ -154,8 +158,12 @@ export function classifyOwnerFailure(failure: OwnerFailureFacts): OwnerFailureCl
  *  - recovering: the app starts the same request once more by itself (nothing had acted).
  *  - recovered: the retry finished the request (a quiet line under the answer).
  *  - uncertain: something may already have run, so the app did not run it again.
- *  - exhausted: the one automatic retry also failed inside the app, nothing was sent, and the request is kept: the next app start or update tries once more.
- *  - repeated: that attempt after a restart failed the same way on the same app version; the app tries again only after an update.
+ *  - exhausted: the automatic retry also failed inside the app, nothing was sent, and the request is kept: the app tries once more when a runtime
+ *    signal arrives (a sign-in, a runtime that came up, the connection back), when it restarts or updates, or after a short pause.
+ *  - repeated: the same failure came back after a pause with no signal in between; the pause no longer retries, a signal or a restart does.
+ *  - waiting: the cause is outside the app (a limit, a sign-in, no connection) and nothing had run; the request is kept and the app continues it
+ *    by itself when the cause clears (the line says which, and when the provider stated a time).
+ *  - expired: the request was kept for days and the keeping time ended; the app no longer continues it by itself.
  *  - newer: the owner has already written something newer; nothing is re-run on their behalf.
  *  - goal: the owner's Goal carries the request on by itself.
  *  - checking: something may have run, and the send queue sends the message once more by itself after telling the model so.
@@ -164,15 +172,17 @@ export function classifyOwnerFailure(failure: OwnerFailureFacts): OwnerFailureCl
  *  - interrupted: nothing ran and the app quit before its own retry started, and that claim kept no restart data (an older row or a request that cannot be rebuilt).
  *  - background: a turn the host started itself (not the owner's words); the problem is logged.
  */
-export type InternalFailurePlan = "recovering" | "recovered" | "uncertain" | "checking" | "exhausted" | "repeated" | "newer" | "goal" | "manual" | "interrupted" | "background";
+export type InternalFailurePlan = "recovering" | "recovered" | "uncertain" | "checking" | "exhausted" | "repeated" | "waiting" | "expired" | "newer" | "goal" | "manual" | "interrupted" | "background";
 
 const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
   ko: {
     recovering: "앱 안쪽 문제로 이번 시도가 끝나지 못했습니다. 아무것도 실행되지 않았고, 앱이 같은 요청을 한 번 더 자동으로 처리합니다.",
-    recovered: "앱 안쪽 문제로 한 번 막혔지만 자동으로 다시 시도해 완료했습니다.",
+    recovered: "처음 시도는 막혔지만 앱이 같은 요청을 자동으로 다시 시도해 완료했습니다.",
     uncertain: "앱 안쪽 문제로 이번 시도가 중간에 멈췄습니다. 일부 작업이 이미 실행됐을 수 있어 자동으로 다시 실행하지 않았습니다. 이어서 하려면 말씀해 주세요. 앱이 먼저 어디까지 됐는지 확인하고 이어갑니다.",
-    exhausted: "앱 안쪽 문제로 이 요청을 끝내지 못했고, 자동 재시도도 같은 문제로 멈췄습니다. 문제는 기록으로 남겼습니다. 아무것도 보내지 않았고 요청은 저장되어 있습니다. 앱이 다시 시작되거나 업데이트되면 한 번 더 처리합니다.",
-    repeated: "앱 안쪽 문제로 이 요청을 끝내지 못했고, 앱을 다시 시작한 뒤의 자동 재시도도 같은 문제로 멈췄습니다. 문제는 기록으로 남겼습니다. 아무것도 보내지 않았고 요청은 저장되어 있습니다. 같은 앱 버전에서는 더 시도하지 않으며, 앱이 업데이트되면 한 번 더 처리합니다.",
+    exhausted: "앱 안쪽 문제로 이 요청을 끝내지 못했고, 자동 재시도도 같은 문제로 멈췄습니다. 문제는 기록으로 남겼습니다. 아무것도 보내지 않았고 요청은 저장되어 있습니다. 로그인·연결 상태가 바뀌거나 앱이 다시 시작·업데이트되면, 아니면 잠시 뒤에 한 번 더 처리합니다.",
+    repeated: "앱 안쪽 문제로 이 요청을 끝내지 못했고, 시간을 두고 한 자동 재시도도 같은 문제로 멈췄습니다. 문제는 기록으로 남겼습니다. 아무것도 보내지 않았고 요청은 저장되어 있습니다. 상태가 바뀌었다는 신호 없이는 더 시도하지 않으며, 로그인·연결 상태가 바뀌거나 앱이 다시 시작·업데이트되면 한 번 더 처리합니다.",
+    waiting: "이 요청은 앱 밖의 이유로 아직 보내지 못했습니다. 아무것도 실행되지 않았고 요청은 저장되어 있습니다. 이유가 풀리면 앱이 같은 요청을 자동으로 이어 갑니다.",
+    expired: "저장해 둔 요청을 7일 안에 이어 가지 못해, 더 이상 자동으로 이어 가지 않습니다. 이어서 하려면 말씀해 주세요.",
     newer: "앱 안쪽 문제로 이전 요청이 끝나지 못했습니다. 더 최근 메시지를 보내셨으므로 이전 요청은 자동으로 다시 실행하지 않았습니다.",
     goal: "앱 안쪽 문제로 이번 시도가 끝나지 못했습니다. 이 방의 목표가 다음 차례에 이어서 처리합니다.",
     checking: "앱 안쪽 문제로 이번 시도가 중간에 멈췄습니다. 일부 작업이 이미 실행됐을 수 있어, 앱이 먼저 어디까지 됐는지 확인한 뒤 한 번 이어서 처리합니다.",
@@ -182,10 +192,12 @@ const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
   },
   en: {
     recovering: "An app-side problem stopped this attempt. Nothing had run, and the app is handling the same request once more by itself.",
-    recovered: "An app-side problem stopped it once, and the app retried by itself and finished the request.",
+    recovered: "The first attempt was blocked, and the app retried the same request by itself and finished it.",
     uncertain: "An app-side problem stopped this attempt midway. Some work may already have run, so the app did not run it again. Tell me to continue and the app first checks how far it got.",
-    exhausted: "An app-side problem stopped this request, and the automatic retry stopped the same way. The problem is logged. Nothing was sent and your request is saved. When the app restarts or updates, it handles the request once more.",
-    repeated: "An app-side problem stopped this request, and the automatic retry after a restart stopped the same way. The problem is logged. Nothing was sent and your request is saved. The app does not try again on this same version; when it updates, it handles the request once more.",
+    exhausted: "An app-side problem stopped this request, and the automatic retry stopped the same way. The problem is logged. Nothing was sent and your request is saved. When a sign-in or connection changes, when the app restarts or updates, or after a short pause, it handles the request once more.",
+    repeated: "An app-side problem stopped this request, and the timed automatic retry stopped the same way. The problem is logged. Nothing was sent and your request is saved. Without a signal that something changed the app does not try again; when a sign-in or connection changes, or the app restarts or updates, it handles the request once more.",
+    waiting: "This request could not be sent yet for a reason outside the app. Nothing ran and your request is saved. When the reason clears, the app continues the same request by itself.",
+    expired: "The request was kept for 7 days without being continued, so the app no longer continues it by itself. Tell me to continue and I will pick it up.",
     newer: "An app-side problem stopped the earlier request. You have written something newer since, so the earlier request was not re-run for you.",
     goal: "An app-side problem stopped this attempt. This room's Goal carries the work on at its next turn.",
     checking: "An app-side problem stopped this attempt midway. Some work may already have run, so the app first checks how far it got and then continues once.",
@@ -194,6 +206,37 @@ const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
     background: "An app-side problem stopped this automatic run. The problem is logged.",
   },
 };
+
+/** The outside causes (owner-failure-class ExternalFailureCause) that clear by themselves and are worth waiting for. */
+export const WAITABLE_EXTERNAL_CAUSES: ReadonlySet<ExternalFailureCause> = new Set<ExternalFailureCause>(["provider_limit", "provider_auth", "network", "provider_outage"]);
+
+/**
+ * The line for a request kept until an outside cause clears: what stopped it, what the app waits for, and the provider's own stated
+ * time when it gave one (never a guess). `untilIso` is a strict ISO time from the provider (shared/runtime-quota.ts quotaRetryAfterAt).
+ */
+export function waitingOwnerLine(locale: "ko" | "en", cause: ExternalFailureCause, untilIso: string | null): string {
+  const ko = locale === "ko";
+  const tail = ko ? " 그 사이 새 메시지를 보내시면 그쪽을 우선하고 이 요청은 다시 실행하지 않습니다."
+    : " If you send a new message meanwhile, that one comes first and this request is not run again.";
+  const saved = ko ? "아무것도 실행되지 않았고 요청은 저장되어 있습니다." : "Nothing ran and your request is saved.";
+  if (cause === "provider_limit") {
+    const reset = untilIso ? formatRuntimeQuotaReset(untilIso, locale) : null;
+    return ko
+      ? `사용 한도에 걸려 이번 요청을 보내지 못했습니다. ${saved} ${reset ? `${reset} 그 시각에 앱이 같은 요청을 자동으로 이어 갑니다.` : "풀리는 시각을 알 수 없어, 2시간 뒤에 확인하고 아직 막혀 있으면 4시간, 8시간, 이후 24시간 간격으로 다시 확인해 앱이 자동으로 이어 갑니다."}${tail}`
+      : `A usage limit stopped this request. ${saved} ${reset ? `${reset} The app continues the same request by itself at that time.` : "The reset time is unknown, so the app checks after 2 hours and, if it is still blocked, again after 4 h, 8 h, then every 24 h, and continues it by itself."}${tail}`;
+  }
+  if (cause === "provider_auth") {
+    return ko
+      ? `로그인이 필요해 이번 요청을 보내지 못했습니다. ${saved} 로그인을 마치면 앱이 같은 요청을 자동으로 이어 갑니다. 마치지 않으면 2시간 뒤부터 간격을 늘리며 다시 확인합니다.${tail}`
+      : `A sign-in is needed, so this request could not be sent. ${saved} When you finish signing in, the app continues the same request by itself; if not, it checks again from 2 hours on, at growing intervals.${tail}`;
+  }
+  if (cause === "network" || cause === "provider_outage") {
+    return ko
+      ? `연결 또는 모델 서비스 문제로 이번 요청을 보내지 못했습니다. ${saved} 연결이 돌아오면 바로, 아니면 2시간 뒤부터 간격을 늘리며(4시간, 8시간, 이후 24시간) 확인해 앱이 같은 요청을 자동으로 이어 갑니다.${tail}`
+      : `A connection or model service problem stopped this request. ${saved} The app continues the same request by itself when the connection is back, or checks after 2 hours and then at growing intervals (4 h, 8 h, then every 24 h).${tail}`;
+  }
+  return OWNER_LINES[ko ? "ko" : "en"].waiting;
+}
 
 export function internalFailureOwnerLine(locale: "ko" | "en", plan: InternalFailurePlan): string {
   return OWNER_LINES[locale === "ko" ? "ko" : "en"][plan];

@@ -78,15 +78,18 @@ const HOST_SENTENCE: Record<HostClass, { ko: (name: string) => string; en: (name
 };
 
 /** The provider-owned classes of shared/run-failure-notice.ts, worded for one worker of a team (not for the whole run). */
-// `when` is the provider-reported reset sentence (formatRuntimeQuotaReset) when the typed failure carries a valid retryAfterAt. This function
-// cannot tell a Goal turn (which the host reschedules) from a plain one, so no sentence here promises an automatic continuation.
+// `when` is the provider-reported reset sentence (formatRuntimeQuotaReset) when the typed failure carries a valid retryAfterAt. A step stopped
+// by a limit or an outage is a fact about the step. What the host does about it is not decided here: the room has already tried every other
+// model of its pool, and the turn that carries the step keeps the request and continues it when the cause clears (invocation/host-recovery.ts,
+// or the room's Goal), with its own line. So these sentences state the cause and the reset time only: they never say "recorded as failed",
+// never ask the owner to pick another model, and never promise a continuation they cannot see.
 type ProviderSentence = { ko: (name: string, when?: string | null) => string; en: (name: string, when?: string | null) => string };
 const withWhen = (sentence: string, when?: string | null): string => (when ? `${sentence} ${when}` : sentence);
 const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, ProviderSentence>> = {
-  quota: { ko: (name, when) => withWhen(`${name}이(가) 쓰는 모델의 사용 한도가 소진되어 이 단계를 마치지 못했고 실패로 기록했습니다. 다른 모델을 고르면 그 모델로 진행할 수 있습니다.`, when),
-    en: (name, when) => withWhen(`The usage limit of the model ${name} uses is used up, so this step could not finish and was recorded as failed. Choosing another model lets it proceed on that model.`, when) },
-  rate_limit: { ko: (name, when) => withWhen(`${name}이(가) 쓰는 모델 공급자가 요청 속도를 제한해 이 단계를 마치지 못했고 실패로 기록했습니다.`, when),
-    en: (name, when) => withWhen(`The provider of the model ${name} uses rate-limited the request, so this step could not finish and was recorded as failed.`, when) },
+  quota: { ko: (name, when) => withWhen(`${name}이(가) 쓰는 모델의 사용 한도가 소진되어 이 단계를 마치지 못했습니다.`, when),
+    en: (name, when) => withWhen(`The usage limit of the model ${name} uses is used up, so this step could not finish.`, when) },
+  rate_limit: { ko: (name, when) => withWhen(`${name}이(가) 쓰는 모델 공급자가 요청 속도를 제한해 이 단계를 마치지 못했습니다.`, when),
+    en: (name, when) => withWhen(`The provider of the model ${name} uses rate-limited the request, so this step could not finish.`, when) },
   auth: { ko: (name) => `${name}이(가) 쓰는 모델의 로그인이 필요하거나 만료되어 이 단계를 마치지 못했습니다. 설정에서 다시 연결해 주세요.`,
     en: (name) => `The sign-in of the model ${name} uses is needed or expired, so this step could not finish. Reconnect it in Settings.` },
   refused: { ko: (name) => `${name}이(가) 쓰는 모델 공급자가 이 단계의 응답을 거절했습니다.`,
@@ -99,8 +102,8 @@ const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, ProviderSentence>
     en: (name) => `Every tool call ${name} made failed and no answer followed, so this step could not finish.` },
   unavailable: { ko: (name) => `${name}이(가) 쓰는 Agentlas 모델 서비스를 지금 사용할 수 없어 이 단계를 마치지 못했습니다.`,
     en: (name) => `The Agentlas model service ${name} uses is unavailable right now, so this step could not finish.` },
-  provider_unavailable: { ko: (name) => `${name}이(가) 쓰는 모델 공급자가 지금 요청을 받을 수 없어(서비스 장애 또는 수용 한도 초과) 이 단계를 마치지 못했고 실패로 기록했습니다. 다른 모델을 고르면 그 모델로 진행할 수 있습니다.`,
-    en: (name) => `The provider of the model ${name} uses could not take the request right now (an outage or no free capacity), so this step could not finish and was recorded as failed. Choosing another model lets it proceed on that model.` },
+  provider_unavailable: { ko: (name) => `${name}이(가) 쓰는 모델 공급자가 지금 요청을 받을 수 없어(서비스 장애 또는 수용 한도 초과) 이 단계를 마치지 못했습니다.`,
+    en: (name) => `The provider of the model ${name} uses could not take the request right now (an outage or no free capacity), so this step could not finish.` },
   provider_connection: { ko: (name) => `${name}이(가) 쓰는 모델 공급자에 연결하지 못해 이 단계를 마치지 못했습니다.`,
     en: (name) => `The model provider ${name} uses could not be reached, so this step could not finish.` },
   runtime_unavailable: { ko: (name) => `${name}에 배정된 모델을 지금 쓸 수 없어 이 단계를 마치지 못했습니다.`,

@@ -6709,36 +6709,18 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           : {}),
       };
     }
-    /*
-     * ★한도가 찼으면 "한도가 찼다"고 말한다.
-     *
-     * 여기는 제공자가 준 영어 문장을 그대로 실어 보냈다. 그래서 한국어 화면에
-     * `[frontend-developer error] claude runtime quota: You've hit your weekly
-     * limit · resets Aug 29 at 6pm` 이 떴다 — 사람이 읽고 "무엇을 하면 되는지"를
-     * 알 수 없다(라이브 실측 2026-08-26, 오너 지적).
-     *
-     * 한도는 고장이 아니라 **기다리거나 모델을 바꾸면 풀리는 상태**다. 그러니
-     * 어느 런타임이 왜 멈췄고 무엇을 하면 되는지 한 줄로 말하고, 제공자 원문은
-     * 뒤에 그대로 붙인다(리셋 시각 같은 사실이 거기 있다 — 지우지 않는다).
-     */
-    const quotaFailure = typedRuntimeFailure?.failure.kind === "quota"
-      ? typedRuntimeFailure.failure
-      : null;
     const message = timedOut
       ? p.locale === "ko"
         ? `${spec.name}의 응답이 오래 없어 이 단계를 멈췄습니다.`
         : `${spec.name} did not respond in time, so this step was stopped.`
-      : quotaFailure
-        ? p.locale === "ko"
-          ? `${quotaFailure.runtime} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. (${quotaFailure.message})`
-          : `${quotaFailure.runtime} has hit its usage limit. Switch models or send again after it resets. (${quotaFailure.message})`
-        // An unsettled step is worded by the host, one line (the runner's "review the work history" prose is not owner copy).
-        : stepFailure?.settlement === "unsettled"
-          ? p.locale === "ko" ? "응답이 끝나기 전에 멈춰 이 단계를 마치지 못했습니다." : "This step stopped before its reply finished."
-          // One plain sentence from the failure's typed code or typed provider failure (team-worker-failure-copy.ts): the
-          // exception's own message is never shown to the owner. The code stays in the typed report below and in the ledger.
-          : teamWorkerFailureText({ locale: p.locale === "ko" ? "ko" : "en", name: spec.name, error: err,
-            runtimeFailure: typedRuntimeFailure?.failure ?? null });
+      // An unsettled step is worded by the host, one line (the runner's "review the work history" prose is not owner copy).
+      : stepFailure?.settlement === "unsettled"
+        ? p.locale === "ko" ? "응답이 끝나기 전에 멈춰 이 단계를 마치지 못했습니다." : "This step stopped before its reply finished."
+        // One plain sentence from the failure's typed code or typed provider failure (team-worker-failure-copy.ts): the
+        // exception's own message is never shown to the owner, a usage limit included (its reset time comes from the typed failure).
+        // The code stays in the typed report below and in the ledger.
+        : teamWorkerFailureText({ locale: p.locale === "ko" ? "ko" : "en", name: spec.name, error: err,
+          runtimeFailure: typedRuntimeFailure?.failure ?? null });
     p.sink(tag({
       kind: "tool-use",
       done: true,

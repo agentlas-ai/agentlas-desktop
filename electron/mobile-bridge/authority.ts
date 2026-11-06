@@ -3296,18 +3296,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, ["id"]);
         const project = getProject(requiredIdentifier(params, "id"));
         if (!project) throw new MobileBridgeRefusal("project_unavailable", "The selected Desktop project is unavailable");
-        const projected = await projectMobileBridgeProjectAsync(project);
-        return asJsonValue(
-          {
-            ...projected,
-            files: await this.projectFilePreviews.issue(
-              project.id,
-              project.folderPath,
-              projected.files,
-            ),
-          },
-          request.method,
-        );
+        return asJsonValue(await this.projectDetailWithFileRefs(project), request.method);
       }
       case "projects.filePreview": {
         const params = guardedParams(request, ["projectId", "fileRef"]);
@@ -3447,10 +3436,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         }
         const updated = updateProject(project.id, { agentPool: nextPool }, { projectAgentGrant });
         this.scheduleSnapshotUpdated();
-        return asJsonValue(
-          await projectMobileBridgeProjectAsync(updated),
-          request.method,
-        );
+        // The phone replaces its project detail with this answer, so it carries the same file refs projects.get issues.
+        return asJsonValue(await this.projectDetailWithFileRefs(updated), request.method);
       }
 
       // DESKTOP_MOBILE_BRIDGE: Chat CRUD calls the real store, then the shared
@@ -3626,30 +3613,21 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           { taskId, expectedVersion, expectedRunId },
           receipt,
         );
-        // Async pre-pass: warm the completion-claim judgments the synchronous
-        // Value Closure trust validator peeks. A miss remains unverified and
-        // cannot be promoted by a regex or static verdict.
-        await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 300_000 }).catch(() => undefined);
-        // The canonical acceptance above is committed and is the owner's action; everything from here is a derived
-        // record (ipc.ts tasks:acceptResult does the same). A Task whose title/metadata moved its version after the
-        // result was ready has no exact result-ready event, and a long event history passes the lookup window — a
-        // throw here used to answer the phone "rejected" for a Task that was already complete, and the 24 h replay
-        // ledger kept that answer for every retry of the same key.
-        let closure: ReturnType<typeof ensureAcceptedResultValueClosure> | null = null;
-        try {
-          closure = ensureAcceptedResultValueClosure({
-            priorTaskVersion: expectedVersion,
-            acceptedTask: accepted,
-            expectedRunId,
-            receipt,
-            confirmedByUser: true,
-          });
-        } catch {
-          // Derived evidence stays absent when its exact historical binding cannot be rebuilt.
-        }
-        if (closure) {
+        // The canonical acceptance above is committed. Derived records (value closure, memory seal, suggestions, goal
+        // close) finish behind the answer, as the Desktop button's own path does, so the phone never waits on a judge.
+        void (async () => {
+          // Async pre-pass: warm the completion-claim judgments the synchronous
+          // Value Closure trust validator peeks. A miss remains unverified and
+          // cannot be promoted by a regex or static verdict.
+          await prejudgeCompletionClaims(ACCEPTED_RESULT_CLOSURE_FACT_STATEMENTS, { timeoutMs: 6_000 }).catch(() => undefined);
+          // The canonical acceptance is committed and is the owner's action; everything from here is a derived
+          // record (ipc.ts tasks:acceptResult does the same). A Task whose title/metadata moved its version after the
+          // result was ready has no exact result-ready event, and a long event history passes the lookup window — a
+          // throw here used to answer the phone "rejected" for a Task that was already complete, and the 24 h replay
+          // ledger kept that answer for every retry of the same key.
+          let closure: ReturnType<typeof ensureAcceptedResultValueClosure> | null = null;
           try {
-            ensureVerifiedAcceptedResultValueClosure({
+            closure = ensureAcceptedResultValueClosure({
               priorTaskVersion: expectedVersion,
               acceptedTask: accepted,
               expectedRunId,
@@ -3657,79 +3635,93 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               confirmedByUser: true,
             });
           } catch {
-            // Mobile uses the same Main-only fail-closed artifact verifier as
-            // Desktop. A missing or stale binding leaves acceptance partial.
+            // Derived evidence stays absent when its exact historical binding cannot be rebuilt.
+          }
+          if (closure) {
+            try {
+              ensureVerifiedAcceptedResultValueClosure({
+                priorTaskVersion: expectedVersion,
+                acceptedTask: accepted,
+                expectedRunId,
+                receipt,
+                confirmedByUser: true,
+              });
+            } catch {
+              // Mobile uses the same Main-only fail-closed artifact verifier as
+              // Desktop. A missing or stale binding leaves acceptance partial.
+            }
+            try {
+              sealOneMemoryCandidateProvenance({
+                sourceTaskId: accepted.id,
+                sourceTaskVersion: accepted.version,
+                sourceRunId: expectedRunId,
+                sourceValueClosureId: closure.value.closure.valueClosureId,
+                sourceValueClosureVersion: closure.value.version,
+              });
+            } catch {
+              // Mobile acceptance remains authoritative when optional Memory
+              // provenance sealing races or finds no pending review candidate.
+            }
+            try {
+              tryProduceAcceptedResultSuggestion({
+                hostId: this.options.hostIdentity.hostId,
+                taskId: accepted.id,
+                expectedTaskVersion: accepted.version,
+                expectedTaskUpdatedAt: accepted.updatedAt,
+                expectedRunId,
+                valueClosureId: closure.value.closure.valueClosureId,
+                expectedValueClosureVersion: closure.value.version,
+                confirmedByUser: true,
+              });
+            } catch {
+              // Ecosystem growth is optional.
+            }
+            try {
+              tryCompleteOneActivationFirstValue({
+                taskId: accepted.id,
+                expectedTaskVersion: accepted.version,
+                valueClosureId: closure.value.closure.valueClosureId,
+                expectedValueClosureVersion: closure.value.version,
+              });
+            } catch {
+              // Mobile acceptance remains authoritative even if optional Desktop
+              // first-use activation evidence cannot be advanced.
+            }
+            try {
+              ensureOneExperienceReuseReceipt({
+                taskId: accepted.id,
+                expectedTaskVersion: accepted.version,
+                expectedTaskUpdatedAt: accepted.updatedAt,
+                expectedRunId,
+                valueClosureId: closure.value.closure.valueClosureId,
+                expectedValueClosureVersion: closure.value.version,
+                confirmedByUser: true,
+              });
+            } catch {
+              // The accepted Task and Value Closure remain authoritative even when
+              // optional compounding evidence cannot be recorded.
+            }
           }
           try {
-            sealOneMemoryCandidateProvenance({
-              sourceTaskId: accepted.id,
-              sourceTaskVersion: accepted.version,
-              sourceRunId: expectedRunId,
-              sourceValueClosureId: closure.value.closure.valueClosureId,
-              sourceValueClosureVersion: closure.value.version,
-            });
+            tryProduceOneImprovementProofForTask(accepted.id);
           } catch {
-            // Mobile acceptance remains authoritative when optional Memory
-            // provenance sealing races or finds no pending review candidate.
+            // Improvement Proof is derived from separately verified comparable
+            // runs. Missing proof data must never roll back Mobile acceptance.
           }
-          try {
-            tryProduceAcceptedResultSuggestion({
-              hostId: this.options.hostIdentity.hostId,
-              taskId: accepted.id,
-              expectedTaskVersion: accepted.version,
-              expectedTaskUpdatedAt: accepted.updatedAt,
-              expectedRunId,
-              valueClosureId: closure.value.closure.valueClosureId,
-              expectedValueClosureVersion: closure.value.version,
-              confirmedByUser: true,
-            });
-          } catch {
-            // Ecosystem growth is optional.
+          if (accepted.originChatId && this.cloudAgentActions.hasCloudSession()) {
+            // The Goal bound to the Task closes with its accepted result, as on Desktop (ipc.ts). It is two Core calls and
+            // derived, so the phone's answer does not wait for it and a failure is logged, never raised.
+            try {
+              void completeDesktopTaskWorkforceGoal({
+                taskId: accepted.id,
+                projectDir: getChatWorkingFolder(accepted.originChatId) ?? process.cwd(),
+              }).catch((error) => this.onError(errorOf(error)));
+            } catch (error) {
+              this.onError(errorOf(error));
+            }
           }
-          try {
-            tryCompleteOneActivationFirstValue({
-              taskId: accepted.id,
-              expectedTaskVersion: accepted.version,
-              valueClosureId: closure.value.closure.valueClosureId,
-              expectedValueClosureVersion: closure.value.version,
-            });
-          } catch {
-            // Mobile acceptance remains authoritative even if optional Desktop
-            // first-use activation evidence cannot be advanced.
-          }
-          try {
-            ensureOneExperienceReuseReceipt({
-              taskId: accepted.id,
-              expectedTaskVersion: accepted.version,
-              expectedTaskUpdatedAt: accepted.updatedAt,
-              expectedRunId,
-              valueClosureId: closure.value.closure.valueClosureId,
-              expectedValueClosureVersion: closure.value.version,
-              confirmedByUser: true,
-            });
-          } catch {
-            // The accepted Task and Value Closure remain authoritative even when
-            // optional compounding evidence cannot be recorded.
-          }
-        }
-        try {
-          tryProduceOneImprovementProofForTask(accepted.id);
-        } catch {
-          // Improvement Proof is derived from separately verified comparable
-          // runs. Missing proof data must never roll back Mobile acceptance.
-        }
-        if (accepted.originChatId && this.cloudAgentActions.hasCloudSession()) {
-          // The Goal bound to the Task closes with its accepted result, as on Desktop (ipc.ts). It is two Core calls and
-          // derived, so the phone's answer does not wait for it and a failure is logged, never raised.
-          try {
-            void completeDesktopTaskWorkforceGoal({
-              taskId: accepted.id,
-              projectDir: getChatWorkingFolder(accepted.originChatId) ?? process.cwd(),
-            }).catch((error) => this.onError(errorOf(error)));
-          } catch (error) {
-            this.onError(errorOf(error));
-          }
-        }
+          if (accepted.originChatId) this.scheduleSnapshotUpdated(accepted.originChatId);
+        })().catch((error) => this.onError(errorOf(error)));
         if (accepted.originChatId) this.scheduleSnapshotUpdated(accepted.originChatId);
         return asJsonValue({
           taskId: accepted.id,
@@ -4844,6 +4836,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               kind: selection.kind,
               ...(selection.backend !== undefined ? { backend: selection.backend } : {}),
               ...(selection.source !== undefined ? { source: selection.source } : {}),
+              ...(selection.kind === "acp" && selection.acpAgentId !== undefined
+                ? { acpAgentId: selection.acpAgentId, ...(selection.label !== undefined ? { label: selection.label } : {}) }
+                : {}),
               ...(selection.model !== undefined ? { model: selection.model } : {}),
               longContext: selection.longContext === true,
               ...(selection.effort !== undefined ? { effort: selection.effort } : {}),
@@ -5473,7 +5468,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const params = guardedParams(request, ["runId", "questionSetRevision"]);
         const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
         const run = this.buildRuns.get(runId);
-        if (!run) throw new Error("Build run not found");
+        // A restart ends every in-flight build; report the fact so the phone leaves "running".
+        if (!run) {
+          return asJsonValue({
+            status: "failed",
+            summary: "Desktop no longer holds this build (it restarted or the build is older than its history). Check Agents for the result, or start it again.",
+          }, request.method);
+        }
         if (run.status === "awaiting-approval") {
           throw new Error("Build approval is still pending on Desktop");
         }
@@ -6448,6 +6449,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.onError(errorOf(error));
       }
     }
+  }
+
+  private async projectDetailWithFileRefs(project: NonNullable<ReturnType<typeof getProject>>) {
+    const projected = await projectMobileBridgeProjectAsync(project);
+    return {
+      ...projected,
+      files: await this.projectFilePreviews.issue(project.id, project.folderPath, projected.files),
+    };
   }
 
   /** DESKTOP_MOBILE_BRIDGE: Coalesce mutation events into a fresh async projection. */

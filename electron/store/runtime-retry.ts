@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { RunnerFailureKind } from "../runtime/runner";
+import { RUNTIME_SIGNAL_META_KEY } from "../runtime/runtime-signals";
 
 /** Private host metadata in the existing meta table. No public event/schema change. */
 export interface RetryResource {
@@ -11,11 +12,14 @@ export interface RetryResource {
 export interface RetryGoal { goalId: string; revision: number }
 export interface RetryWindow { until: number; kind: RunnerFailureKind }
 interface Episode { version: 1; failures: number; generation: number; lastCall: string; closed?: boolean; lastFailureAt?: number }
-/** A spent budget is not permanent: this long after the last failure the next call is admitted once as a probe. A probe that
- * fails closes the episode again (and restarts the clock); a success resets it. Rows without a timestamp (written before this
- * field existed) count as expired, so an old closure opens on its own at the next admission. */
+/** A spent budget is not permanent. What reopens it is a fact: a runtime signal newer than the last failure (a sign-in, a runtime
+ * that came up, the connection back; runtime/runtime-signals.ts) admits the next call at once as a probe. This long after the last
+ * failure, with no signal at all, is only the backstop probe. A probe that fails closes the episode again (and restarts the clock);
+ * a success resets it. Rows without a timestamp (written before this field existed) count as expired, so an old closure opens on
+ * its own at the next admission. */
 export const RUNTIME_RETRY_REOPEN_AFTER_MS = 2 * 60 * 60 * 1000;
-const reopenExpired = (row: Episode, now: number) => row.lastFailureAt === undefined || row.lastFailureAt + RUNTIME_RETRY_REOPEN_AFTER_MS <= now;
+const reopenExpired = (row: Episode, now: number, signalFloor = 0) =>
+  row.lastFailureAt === undefined || row.lastFailureAt + RUNTIME_RETRY_REOPEN_AFTER_MS <= now || signalFloor > row.lastFailureAt;
 interface GoalFloor extends RetryWindow { version: 1; revision: number; resource: string }
 export interface TeamRetryFacts { version: 1; selfRecoverable: boolean; notBefore: number | null }
 const MAX_TIME = 8_640_000_000_000_000;
@@ -55,6 +59,14 @@ export function taskForceRetryFacts(value: unknown, now = Date.now()): TeamRetry
 }
 
 export function createRuntimeRetryStore(database: () => Database.Database) {
+  /** The newest runtime signal time (0 when none). A store that cannot read it behaves as before: only the backstop reopens. */
+  const signalFloor = (): number => {
+    try {
+      const row = database().prepare("SELECT value FROM meta WHERE key=?").get(RUNTIME_SIGNAL_META_KEY) as { value: string } | undefined;
+      const value = Number(row?.value);
+      return Number.isSafeInteger(value) && value > 0 ? value : 0;
+    } catch { return 0; }
+  };
   const read = <T>(key: string): T | null => {
     const row = database().prepare("SELECT value FROM meta WHERE key=?").get(prefix + key) as { value: string } | undefined;
     if (!row) return null;
@@ -131,13 +143,14 @@ export function createRuntimeRetryStore(database: () => Database.Database) {
     /** Closed and not yet due for its probe. An expired closure is not exhausted: the next admit() lets one call through. */
     budgetExhausted: (resource: RetryResource, goal: RetryGoal, now = Date.now()): boolean => {
       const row = episode(resource, goal);
-      return row.closed === true && !reopenExpired(row, now);
+      return row.closed === true && !reopenExpired(row, now, signalFloor());
     },
     /** When a spent budget next allows a probe; null while the budget is not spent. */
     retryReopenAt(resource: RetryResource, goal: RetryGoal): number | null {
       const row = episode(resource, goal);
       if (row.closed !== true) return null;
-      return row.lastFailureAt === undefined ? Date.now() : row.lastFailureAt + RUNTIME_RETRY_REOPEN_AFTER_MS;
+      if (row.lastFailureAt === undefined || signalFloor() > row.lastFailureAt) return Date.now();
+      return row.lastFailureAt + RUNTIME_RETRY_REOPEN_AFTER_MS;
     },
     /** Reserve before dispatch, atomically across hosts. A crash cannot replenish
      * the allowance; success settles only its own generation below. */
@@ -148,7 +161,7 @@ export function createRuntimeRetryStore(database: () => Database.Database) {
         const now = Date.now();
         let previous=episode(resource,goal);
         if (previous.closed || previous.failures >= maxFailures) {
-          if (!reopenExpired(previous, now)) return null;
+          if (!reopenExpired(previous, now, signalFloor())) return null;
           // Probe: one more call is allowed; its reservation below closes the episode again unless it succeeds.
           previous = {...previous, failures: Math.max(0, maxFailures-1), closed: undefined};
         }

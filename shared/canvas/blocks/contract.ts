@@ -58,3 +58,9 @@ export type AnyAsset = AssetBlock<any>;
 
 /** Declares an asset; returns it unchanged (the generic carries the field types into `render` and `summary`). */
 export function defineAsset<Shape extends z.ZodRawShape>(asset: AssetBlock<Shape>): AssetBlock<Shape> { return asset; }
+
+/**
+ * A day for a sample, as an offset from a fixed base: the samples hold no date literal and draw the same every time (a sample that read the clock
+ * would change the stills, the hashes and the catalog from one day to the next).
+ */
+export const sampleDay = (offset: number): string => new Date(Date.UTC(2026, 5, 1) + offset * 864e5).toISOString().slice(0, 10);

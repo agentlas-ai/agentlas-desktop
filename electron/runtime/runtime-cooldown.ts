@@ -22,6 +22,7 @@
  */
 import type { RunnerFailure, RunnerFailureKind } from "./runner";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
+import { emitRuntimeSignal } from "./runtime-signals";
 
 /** 시한을 못 읽었을 때의 보수적 기본값. 너무 길면 멀쩡해진 런타임을 잠근다. */
 const DEFAULT_COOLDOWN_MS = 10 * 60_000;
@@ -193,7 +194,10 @@ export function runtimeSignedOut(runtime: RuntimeIdentity): RuntimeSignedOut | n
 
 /** 실제 성공 한 번이 유일한 해제 조건 — 짐작으로 초록불을 되돌리지 않는다. (A success that cannot name its seat clears every seat of that executable and model.) */
 export function noteRuntimeSucceeded(runtime: RuntimeIdentity): void {
-  for (const key of candidateKeys(signedOut, runtime)) signedOut.delete(key);
+  let cleared = false;
+  for (const key of candidateKeys(signedOut, runtime)) if (signedOut.delete(key)) cleared = true;
+  // A runtime that was marked signed out answered a real request: that is a fact a stopped request waits for. A routine success clears nothing and is no signal.
+  if (cleared) emitRuntimeSignal("recovered", runtime.kind);
 }
 
 /**
@@ -201,7 +205,7 @@ export function noteRuntimeSucceeded(runtime: RuntimeIdentity): void {
  * Quota and rate-limit cooldowns stay: a new login does not lift a usage limit. Matches every model and seat of the kind
  * (and of the backend when one is given), because the facts are keyed per model.
  */
-export function forgetRuntimeSignIn(match: { kind: string; backend?: string }): void {
+export function forgetRuntimeSignIn(match: { kind: string; backend?: string }, options: { signal?: boolean } = {}): void {
   const matches = (key: string): boolean => {
     try {
       const identity: unknown = JSON.parse(key);
@@ -210,6 +214,9 @@ export function forgetRuntimeSignIn(match: { kind: string; backend?: string }): 
   };
   for (const key of [...signedOut.keys()]) if (matches(key)) signedOut.delete(key);
   for (const [key, entry] of [...cooldowns]) if (entry.kind === "auth" && matches(key)) cooldowns.delete(key);
+  // The person did what a stopped request was waiting for: every waiter looks again (each keeps its own guard).
+  // `signal: false` is the sign-in window merely opening: the sign-in is not done, so a kept request must not be released by it.
+  if (options.signal !== false) emitRuntimeSignal("signed-in", match.kind);
 }
 
 /** True while a "signed out" fact is newer than the start gate. `since` is the fact's time (epoch ms or the ISO string the listing carries). */

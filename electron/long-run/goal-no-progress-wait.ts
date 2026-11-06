@@ -1,6 +1,6 @@
 import { getDb } from "../store/db";
 import { goalOwnerAnswerHold, getLongRun, longRunOwnerHold, nextBlockedGoalRetrySlot, noProgressRetryDelayMs, releaseGoalOwnerAnswerHold,
-  scheduleBlockedGoalRetry, type LongRunRecord } from "../store/long-runs";
+  RUNTIME_RETRY_CLEANUP_WINDOW_MS, scheduleBlockedGoalRetry, type LongRunRecord } from "../store/long-runs";
 import { VERIFICATION_NO_PROGRESS_REASON } from "../../shared/long-run-checkpoint";
 import { HOST_OWNER_CARD_POSTED_KIND, pendingHostOwnerCard } from "./goal-owner-card-decision";
 import { desktopAppInstanceId } from "./app-runtime-coordinator";
@@ -33,13 +33,15 @@ export function scheduleNoProgressRetry(runId: string, noProgressRetries: number
  * Startup, once per store (an idempotent query): a Goal an earlier build held for the host's own "idle stop" card goes back onto a retry
  * schedule. That card was fixed host text, not a question the model asked, and nothing woke the Goal while it stood. The card message
  * stays as history and the owner's pick on it is still read (goal-owner-card-decision.ts). A hold the Goal's own later question took over
- * (a newer run.owner_answer_pending) is the model's real question and is left alone. Returns the number moved.
+ * (a newer run.owner_answer_pending) is the model's real question and is left alone. A Goal idle for more than seven days (the window
+ * rescheduleExhaustedRuntimeRetryGoals uses) is not woken: a forgotten Goal does not start a model turn when the app updates. Returns the number moved.
  */
 export function releaseIdleStopCardHolds(options: { nowMs?: number; random?: () => number } = {}): number {
   const nowMs = options.nowMs ?? Date.now();
+  const since = new Date(nowMs - RUNTIME_RETRY_CLEANUP_WINDOW_MS).toISOString();
   const rows = getDb().prepare(`SELECT r.id AS id FROM long_runs r WHERE r.status='waiting_tool' AND r.surface!='science'
-    AND r.blocked_reason='goal_owner_answer_required' AND EXISTS (
-      SELECT 1 FROM long_run_events e WHERE e.run_id=r.id AND e.kind=?)`).all(HOST_OWNER_CARD_POSTED_KIND) as { id: string }[];
+    AND r.blocked_reason='goal_owner_answer_required' AND r.updated_at>=? AND EXISTS (
+      SELECT 1 FROM long_run_events e WHERE e.run_id=r.id AND e.kind=?)`).all(since, HOST_OWNER_CARD_POSTED_KIND) as { id: string }[];
   let moved = 0;
   for (const row of rows) {
     try {

@@ -22,6 +22,8 @@ const DEV_BOOTSTRAP_FILE = "dev-bootstrap.json";
 const DEVICE_FILE = "devices.json";
 /** How long a definitive "active" account answer is reused for new phone connections (see accountAuthorityStatusFor). */
 export const ACCOUNT_AUTHORITY_ACTIVE_TTL_MS = 5 * 60_000;
+/** The relay's local hop gives a connection about 5 s; the account service gets less than that, then local checks decide. */
+const ACCOUNT_AUTHORITY_CONNECT_WAIT_MS = 2_000;
 const ENDPOINT_FILE = "endpoint.json";
 const DEFAULT_PAIRING_TTL_MS = 2 * 60_000;
 const DEFAULT_MAX_PAIRING_ATTEMPTS = 8;
@@ -83,6 +85,11 @@ interface StoredMobileBridgeDevice {
   revokedAt: string | null;
   accountSubject?: string;
   accountAuthorityOrigin?: string;
+  /**
+   * The Desktop user this credential was issued to. Finance admission compares it locally, so a request never asks the
+   * account service who the owner is. Absent on a record that predates it until a proven backfill fills it.
+   */
+  ownerUserId?: string;
   /**
    * The Desktop workspace this credential was issued under. Revocation is
    * driven by a proven change of this value, never by the Desktop merely
@@ -152,6 +159,10 @@ export interface MobileBridgePairingManagerOptions {
   desktopSessionActive?: () => boolean;
   /** Workspace of the currently signed-in Desktop account, when known. */
   desktopWorkspaceId?: () => string | null;
+  /** User of the currently signed-in Desktop account, when known. Stored on a new pairing as its owner. */
+  desktopUserId?: () => string | null;
+  /** How long a connection waits for the account service before it is admitted on its local checks. */
+  accountAuthorityWaitMs?: number;
   onChanged?: (reason: MobileBridgePairingChangeReason) => void;
 }
 
@@ -240,6 +251,8 @@ interface ActiveChallenge {
   desktopAccountProof: string;
   expectedAccountSubject: string;
   accountAuthorityOrigin: string;
+  /** The Desktop user when the challenge was issued; null when this host does not report one. */
+  ownerUserId: string | null;
 }
 
 function bridgeDir(userDataPath: string): string {
@@ -412,6 +425,8 @@ function validStoredDevice(value: unknown): value is StoredMobileBridgeDevice {
       (value.accountSubject === undefined && value.accountAuthorityOrigin === undefined) ||
       (validAccountSubject(value.accountSubject) && validAccountAuthorityOrigin(value.accountAuthorityOrigin))
     ) &&
+    (value.ownerUserId === undefined ||
+      (typeof value.ownerUserId === "string" && value.ownerUserId.length > 0 && value.ownerUserId.length <= 200)) &&
     // The revoke decision is driven by this value, so a malformed one must
     // fail the store rather than silently look like "a different account".
     (value.workspaceId === undefined ||
@@ -666,6 +681,8 @@ export class MobileBridgePairingManager {
   private readonly validateAccountAuthority?: MobileBridgePairingManagerOptions["validateAccountAuthority"];
   private readonly desktopSessionActive?: MobileBridgePairingManagerOptions["desktopSessionActive"];
   private readonly desktopWorkspaceId?: MobileBridgePairingManagerOptions["desktopWorkspaceId"];
+  private readonly desktopUserId?: MobileBridgePairingManagerOptions["desktopUserId"];
+  private readonly accountAuthorityWaitMs: number;
   private readonly onChanged: (reason: MobileBridgePairingChangeReason) => void;
   private activeChallenge: ActiveChallenge | null = null;
   private activeChallengeTimer: NodeJS.Timeout | null = null;
@@ -684,6 +701,8 @@ export class MobileBridgePairingManager {
     this.validateAccountAuthority = options.validateAccountAuthority;
     this.desktopSessionActive = options.desktopSessionActive;
     this.desktopWorkspaceId = options.desktopWorkspaceId;
+    this.desktopUserId = options.desktopUserId;
+    this.accountAuthorityWaitMs = Math.max(0, options.accountAuthorityWaitMs ?? ACCOUNT_AUTHORITY_CONNECT_WAIT_MS);
     this.onChanged = options.onChanged ?? (() => {});
   }
 
@@ -723,6 +742,7 @@ export class MobileBridgePairingManager {
       desktopAccountProof: accountProof.desktopAccountProof,
       expectedAccountSubject: accountProof.accountSubject,
       accountAuthorityOrigin: accountProof.accountAuthorityOrigin,
+      ownerUserId: this.desktopUserId?.() ?? null,
     };
     this.activeChallenge = challenge;
     this.activeChallengeTimer = setTimeout(() => {
@@ -838,6 +858,13 @@ export class MobileBridgePairingManager {
       throw new MobileBridgePairingError("account_mismatch", "Desktop and Mobile Agentlas accounts do not match");
     }
 
+    // The owner is whoever was signed in when the QR was shown. If the Desktop changed user in between, this attempt fails
+    // and a new QR is needed; recording the new user would hand the pairing to someone who did not scan it.
+    const ownerUserId = challenge.ownerUserId;
+    if (ownerUserId && this.desktopUserId?.() !== ownerUserId) {
+      this.emitChanged("challenge-invalidated");
+      throw new MobileBridgePairingError("account_mismatch", "Desktop account changed while pairing");
+    }
     const token = randomBytes(32).toString("base64url");
     const issuedAt = now.toISOString();
     const record: StoredMobileBridgeDevice = {
@@ -850,6 +877,7 @@ export class MobileBridgePairingManager {
       revokedAt: null,
       accountSubject: consumed.accountSubject,
       accountAuthorityOrigin: challenge.accountAuthorityOrigin,
+      ...(ownerUserId ? { ownerUserId } : {}),
       ...(this.desktopWorkspaceId?.() ? { workspaceId: this.desktopWorkspaceId()! } : {}),
     };
     const store = readDevices(this.userDataPath);
@@ -912,22 +940,54 @@ export class MobileBridgePairingManager {
       );
       return null;
     }
+    // The credential and its binding already passed every local check above. The account service can only add one thing: a
+    // definitive "inactive". It not answering (outage, slow, error) never closes the door on an already paired owner.
     let status: AccountAuthorityStatus;
     try {
-      status = await this.accountAuthorityStatusFor(record.accountSubject, record.accountAuthorityOrigin);
+      const answer = this.accountAuthorityStatusFor(record.accountSubject, record.accountAuthorityOrigin);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = Symbol("late");
+      const first = await Promise.race([
+        answer,
+        new Promise<typeof late>((resolve) => {
+          timer = setTimeout(() => resolve(late), this.accountAuthorityWaitMs);
+          timer.unref?.();
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (first === late) {
+        // Keep waiting in the background: an "inactive" that arrives later still revokes.
+        const deviceId = record.deviceId;
+        void answer.then(
+          (later) => {
+            if (later === "inactive") {
+              try {
+                this.revokeDevice(deviceId, "account_inactive");
+                console.warn(`[mobile-bridge] device ${deviceId} revoked: account authority reported inactive`);
+              } catch (error) {
+                console.warn(`[mobile-bridge] device ${deviceId} late revoke failed: ${(error as { code?: string } | null)?.code ?? "write_failed"}`);
+              }
+            }
+          },
+          () => {},
+        );
+        status = "unreachable";
+      } else {
+        status = first;
+      }
     } catch {
       status = "unreachable";
     }
     if (status === "unreachable") {
-      // Refuse this attempt, keep the credential. Revoking here is what wiped
-      // real pairings on a single relay hiccup or a 503 from the status route:
-      // a revoke is permanent and forces a QR re-scan, so it may only follow a
-      // definitive answer.
-      this.lastAuthenticationRefusal = "account_authority_unreachable";
-      console.warn(
-        `[mobile-bridge] device ${record.deviceId} refused: account authority unreachable (credential kept)`,
-      );
-      return null;
+      // Admit on the local checks and keep the credential. A revoke is permanent and forces a QR re-scan, so it may only
+      // follow a definitive answer; refusing here would instead cut the phone off from its own Desktop for as long as the
+      // account service is down.
+      if (Date.now() - this.unreachableLoggedAt >= 60_000) {
+        this.unreachableLoggedAt = Date.now();
+        console.warn(`[mobile-bridge] device ${record.deviceId} admitted without account authority answer (unreachable; credential kept)`);
+      }
+      this.lastAuthenticationRefusal = null;
+      return this.publicMetadata(record);
     }
     if (status === "inactive") {
       this.lastAuthenticationRefusal = "account_inactive";
@@ -990,6 +1050,7 @@ export class MobileBridgePairingManager {
    */
   lastAuthenticationRefusal: MobileBridgeAuthenticationRefusal | null = null;
   private signedOutLoggedAt = 0;
+  private unreachableLoggedAt = 0;
 
   /**
    * The workspace a live (unrevoked) device credential was issued under, or
@@ -1003,11 +1064,26 @@ export class MobileBridgePairingManager {
   }
 
   /** Internal admission binding only. No bearer, token hash or stable subject enters a mobile DTO. */
-  deviceAccountBinding(deviceId: string): { workspaceId: string | null; accountSubject: string; accountAuthorityOrigin: string } | null {
+  deviceAccountBinding(deviceId: string): { workspaceId: string | null; accountSubject: string; accountAuthorityOrigin: string; ownerUserId: string | null } | null {
     const record = readDevices(this.userDataPath).devices.find(device => device.deviceId === deviceId && device.revokedAt === null);
     return record?.accountSubject && record.accountAuthorityOrigin
-      ? { workspaceId: record.workspaceId ?? null, accountSubject: record.accountSubject, accountAuthorityOrigin: record.accountAuthorityOrigin }
+      ? { workspaceId: record.workspaceId ?? null, accountSubject: record.accountSubject, accountAuthorityOrigin: record.accountAuthorityOrigin, ownerUserId: record.ownerUserId ?? null }
       : null;
+  }
+
+  /**
+   * Fill the owner into a record that predates it. Only a live record with the same account subject and no owner is
+   * written, and an owner already there is never replaced, so a concurrent writer or a repeat is harmless.
+   */
+  backfillOwnerUserId(deviceId: string, userId: string, accountSubject: string): boolean {
+    if (!userId || userId.length > 200) return false;
+    const store = readDevices(this.userDataPath);
+    const record = store.devices.find(device => device.deviceId === deviceId && device.revokedAt === null);
+    if (!record || record.accountSubject !== accountSubject) return false;
+    if (record.ownerUserId) return record.ownerUserId === userId;
+    record.ownerUserId = userId;
+    try { writeDevices(this.userDataPath, store); } catch { return false; }
+    return true;
   }
 
   listDevices(): MobileBridgeDeviceMetadata[] {

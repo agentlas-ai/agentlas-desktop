@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { bold, esc } from "../../kit";
 import { list, optionalText, text } from "../../fields";
-import { defineAsset, type AnyAsset } from "../contract";
+import { defineAsset, sampleDay, type AnyAsset } from "../contract";
 import { LABEL, MUTED, ROW, RULE, accent, day, docCss, hue, paras, plain } from "./_shared";
 
 /** Prose pages: the cover, the memo, the letter, the contract page and the press release. */
@@ -36,7 +36,7 @@ export const memo = defineAsset({
   notes: "2-4 paragraphs of at most 230 characters (**bold** allowed); up to 5 action items, each with an owner and an optional due date.",
   fields: { organisation: optionalText(40), to: text(70), from: text(70), cc: optionalText(70), date: text(24), subject: text(90), paragraphs: list(text(230), 2, 4), actions: list(z.object({ task: text(70), owner: text(20), due: optionalText(12) }).strip(), 1, 5), accent },
   sample: {
-    organisation: "Calder & Finch", to: "Operations leadership team", from: "Dana Whitfield, VP Operations", cc: "Finance, Facilities", date: "", subject: "Q4 warehouse consolidation: timeline and decisions needed",
+    organisation: "Calder & Finch", to: "Operations leadership team", from: "Dana Whitfield, VP Operations", cc: "Finance, Facilities", date: sampleDay(135), subject: "Q4 warehouse consolidation: timeline and decisions needed",
     paragraphs: ["We will consolidate the Reno and Sparks warehouses into a single site by **December 18**. The move removes 14% of fixed cost and shortens average delivery by one day for 62% of orders.", "Freight carriers are confirmed for the weekend of **November 21-22**. Receiving at Reno stops on November 14 so inventory can be counted twice before the move begins.", "Staffing: all 118 warehouse employees keep their roles. Shift leads will meet with HR on October 28 to confirm commuting support for the longer drive to the new site.", "Two decisions are open: whether to keep the Sparks cold room through January, and who signs off the revised safety plan. Both are needed by **October 23**."],
     actions: [{ task: "Confirm cold-room lease option with the landlord", owner: "Maya R.", due: "Oct 20" }, { task: "Circulate the revised safety plan for sign-off", owner: "Ibrahim K.", due: "Oct 23" }, { task: "Freeze inbound orders at Reno", owner: "Tomas L.", due: "Nov 14" }, { task: "Brief customer success on delivery windows", owner: "Aiko S.", due: "Nov 18" }], accent: "blue",
   },
@@ -59,7 +59,7 @@ export const letter = defineAsset({
   notes: "sender and recipient are lists of up to 3 lines (name first). 2-3 paragraphs of at most 300 characters (**bold** allowed).",
   fields: { sender: list(text(54), 1, 3), date: text(24), recipient: list(text(54), 1, 3), subject: optionalText(80), salutation: text(40), paragraphs: list(text(300), 2, 3), closing: optionalText(30), signature: text(40), role: optionalText(50), accent },
   sample: {
-    sender: ["Elena Marquez", "Director of Partnerships, Lumen Learning", "212 Pearl Street, Suite 4, Boston, MA 02110"], date: "", recipient: ["Mr. Anthony Rhodes", "Head of Procurement, Calder & Finch", "88 Mill Road, Providence, RI 02903"],
+    sender: ["Elena Marquez", "Director of Partnerships, Lumen Learning", "212 Pearl Street, Suite 4, Boston, MA 02110"], date: sampleDay(135), recipient: ["Mr. Anthony Rhodes", "Head of Procurement, Calder & Finch", "88 Mill Road, Providence, RI 02903"],
     subject: "Renewal of the 2027 licensing agreement", salutation: "Dear Mr. Rhodes,",
     paragraphs: ["Thank you for a productive year working together. Over the past twelve months your teams completed **4,200 course enrolments**, and the feedback from your staff has shaped three features we shipped this autumn, including the new manager dashboard.", "I am writing to propose renewing the licensing agreement for 2027 on the current terms, with the analytics add-on included at no extra charge for the first year. The renewal also locks in this year's per-seat price through December 2027.", "If this suits you, I would be glad to send a draft agreement by the end of the month and to meet in person to walk through it. Please let me know which week in November works best for you and your legal team."],
     closing: "Warm regards,", signature: "Elena Marquez", role: "Director of Partnerships", accent: "ink",

@@ -89,11 +89,11 @@ export function ownerIntakeWaits(error: unknown): boolean {
   return isTransientSendRefusal(error) || startRefusedBeforeDispatchWaits(error);
 }
 
-/** The line for an owner message the intake keeps until it can start: no code, nothing ran, nothing to resend. Same words as the composer's. */
+/** The line for an owner message whose start the intake stopped retrying: saved in the chat, not started, no code. Same words as the composer's held-row line. */
 export function ownerIntakeHeldNotice(locale: "ko" | "en"): string {
   return locale === "ko"
-    ? "받았습니다. 이 방이 비거나 준비되면 시작합니다. 아직 아무것도 실행되지 않았습니다."
-    : "Received. It starts when this chat is free or ready; nothing has run yet.";
+    ? "메시지는 저장됐지만 시작되지 않았습니다. 아무것도 실행되지 않았습니다."
+    : "Your message is saved but has not started. Nothing ran.";
 }
 
 /** Before this long the message usually started on its own; a received line then would only be noise. */

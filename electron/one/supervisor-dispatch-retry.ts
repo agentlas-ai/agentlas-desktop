@@ -1,11 +1,14 @@
 import type { RuntimeSelection } from "../../shared/types";
 import { supervisorError } from "../../shared/one-supervisor";
-import { transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { startRetryBackoffMs, transientSendBackoffMs } from "../../shared/transient-send-refusal";
 import type { OneSupervisorStore, SupervisorRequestRow } from "./supervisor-store";
 import { sendRefusalCode } from "../../shared/transient-send-refusal";
 import { undispatchedInternalFailure } from "../../shared/run-failure-cause";
 import type { InvocationRunReceipt } from "../../shared/types";
-import { UNCONFIRMED_MAX_RESENDS } from "../invocation/earlier-attempt";
+import { UNCONFIRMED_MAX_RESENDS, UNCONFIRMED_VERIFY_CONTINUATIONS } from "../invocation/earlier-attempt";
+
+/** The sends of one command that may have acted: the plain resend, then one verify-first send (earlier-attempt.ts). */
+export const SUPERVISOR_UNCONFIRMED_MAX_SENDS = UNCONFIRMED_MAX_RESENDS + UNCONFIRMED_VERIFY_CONTINUATIONS;
 
 export interface SupervisorDispatchFrame { locale: "ko" | "en"; runtimeSelection: RuntimeSelection | undefined }
 /** Older host adapters use this machine code without a typed provider failure. Signing in remains an owner action. */
@@ -27,7 +30,7 @@ interface DispatchRetry {
 /** The original command keeps its frame and cumulative budget when one uncertain run is replaced. */
 export function rebindSupervisorUnconfirmed(store: OneSupervisorStore, row: SupervisorRequestRow, nextRunId: string, now = Date.now()): number | null {
   const retry = supervisorDispatchRetry(row);
-  if (!retry || retry.retryStopped || (retry.unconfirmedResends ?? 0) >= UNCONFIRMED_MAX_RESENDS || supervisorRetryExhausted(row,now)) return null;
+  if (!retry || retry.retryStopped || (retry.unconfirmedResends ?? 0) >= SUPERVISOR_UNCONFIRMED_MAX_SENDS || supervisorRetryExhausted(row,now)) return null;
   const notBefore = Math.max(retry.notBefore,now+transientSendBackoffMs(0));
   save(store,row,{...retry,unconfirmedResends:(retry.unconfirmedResends ?? 0)+1,priorRunId:row.run_id!,notBefore});
   store.update(row,{state:"stored",acknowledgement:"stored",reason:"resent_unconfirmed",runId:nextRunId});
@@ -64,7 +67,7 @@ export function supervisorDispatchRetry(row: SupervisorRequestRow): DispatchRetr
   if (value.version !== 1 || !Number.isSafeInteger(value.attempts) || value.attempts < 0
     || !Number.isFinite(value.firstAt) || !Number.isFinite(value.notBefore)
     || value.legacyHeldRestarts !== undefined && (!Number.isSafeInteger(value.legacyHeldRestarts) || value.legacyHeldRestarts < 0 || value.legacyHeldRestarts > 3)
-    || value.unconfirmedResends !== undefined && (!Number.isSafeInteger(value.unconfirmedResends) || value.unconfirmedResends < 1 || value.unconfirmedResends > UNCONFIRMED_MAX_RESENDS)
+    || value.unconfirmedResends !== undefined && (!Number.isSafeInteger(value.unconfirmedResends) || value.unconfirmedResends < 1 || value.unconfirmedResends > SUPERVISOR_UNCONFIRMED_MAX_SENDS)
     || value.priorRunId !== undefined && (typeof value.priorRunId !== "string" || !value.priorRunId)
     || !value.frame || !["ko", "en"].includes(value.frame.locale)) throw supervisorError("supervisor_retry_metadata_invalid");
   return value;
@@ -101,6 +104,13 @@ export function countSupervisorPreBeginRefusal(store: OneSupervisorStore, row: S
   if (!retry) throw supervisorError("supervisor_retry_frame_missing");
   if (!supervisorRetryExhausted(row,now)) save(store,row,{...retry,attempts:retry.attempts+1});
 }
+/** A runtime signal or a sign-in may have cleared the cause: the stored wait ends now. Returns whether the row had a wait to end. */
+export function wakeSupervisorDispatch(store: OneSupervisorStore, row: SupervisorRequestRow, now = Date.now()): boolean {
+  const retry = supervisorDispatchRetry(row);
+  if (!retry || retry.notBefore <= now) return false;
+  save(store, row, { ...retry, notBefore: 0 });
+  return true;
+}
 /** Reserve BEFORE invoking native code: a crash or lost ACK cannot reset or omit an attempt. */
 export function reserveSupervisorDispatch(store: OneSupervisorStore, row: SupervisorRequestRow, now = Date.now()): "ready" | "wait" | "exhausted" {
   return store.db.transaction(() => {
@@ -115,10 +125,12 @@ export function reserveSupervisorDispatch(store: OneSupervisorStore, row: Superv
   }).immediate();
 }
 /** A refusal and a recovered never-started hold share the same durable deadline and backoff. */
-export function supervisorRefusalDelay(store: OneSupervisorStore, row: SupervisorRequestRow, now = Date.now()): number {
+export function supervisorRefusalDelay(store: OneSupervisorStore, row: SupervisorRequestRow, now = Date.now(), long = false): number {
   const retry = supervisorDispatchRetry(row);
   if (!retry) throw supervisorError("supervisor_retry_frame_missing");
-  const notBefore = Math.max(retry.notBefore, now + transientSendBackoffMs(Math.max(0, retry.attempts - 1)));
+  // `long`: the refusal is the app's own state, so after the old attempt cap the wait grows (1 min, 5 min, 10 min) instead of staying at 15 s.
+  const step = Math.max(0, retry.attempts - 1);
+  const notBefore = Math.max(retry.notBefore, now + (long ? startRetryBackoffMs(step) : transientSendBackoffMs(step)));
   save(store, row, {...retry, notBefore});
   return notBefore - now;
 }

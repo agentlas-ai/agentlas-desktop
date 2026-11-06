@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { date, loose, optionalText, text } from "../../fields";
-import { defineAsset, type AnyAsset } from "../contract";
+import { defineAsset, sampleDay, type AnyAsset } from "../contract";
 import { INK, INK2, KINDS, MUTED, avatarColor, circle, docIcon, fileFields, fit, flag, glyph, hash, initials, kindOf, nullable, optList, plural, r1, rect, rng, shadow, shadowDefs, tile, tileCss, tw, txt, wholeNum, wrap } from "./_shared";
 
 /** The objects that are not files but are browsed like them: a folder, a web link, a mail, an event, a contact, a place and a note. */
@@ -102,7 +102,7 @@ export const calendarEvent = defineAsset({
   tags: ["calendar", "event", "meeting", "schedule", "appointment", "invite", "일정", "캘린더", "회의", "약속"],
   notes: "date is YYYY-MM-DD; start and end like 2:00 PM or 14:00; attendees are up to 8 names (five avatars are drawn, the rest become +N).",
   fields: { name: text(80), date, start: text(12), end: optionalText(12), location: optionalText(50), attendees: optList(text(32), 0, 8) },
-  sample: { name: "Q4 planning workshop", date: "", start: "2:00 PM", end: "3:30 PM", location: "Room 4B · Seoul HQ", attendees: ["Dana Reyes", "Min-jun Park", "Sofia Alvarez", "Liam O'Brien", "Aiko Tanaka", "Noah Kim"] },
+  sample: { name: "Q4 planning workshop", date: sampleDay(164), start: "2:00 PM", end: "3:30 PM", location: "Room 4B · Seoul HQ", attendees: ["Dana Reyes", "Min-jun Park", "Sofia Alvarez", "Liam O'Brien", "Aiko Tanaka", "Noah Kim"] },
   render(b, { ko, T, uid }) {
     const d = new Date(`${b.date}T00:00:00Z`), month = ko ? `${d.getUTCMonth() + 1}월` : MONTHS[d.getUTCMonth()], day = d.getUTCDate(), weekday = (ko ? DAYS_KO : DAYS)[d.getUTCDay()], range = b.end ? `${b.start} – ${b.end}` : b.start;
     let s = `<defs>${shadowDefs(uid)}</defs>` + rect(22, 20, 108, 152, "#fff", { rx: 12, filter: shadow(uid) }) + `<path d="M22 32a12 12 0 0 1 12-12h84a12 12 0 0 1 12 12v22H22Z" fill="${RED}"/>`;

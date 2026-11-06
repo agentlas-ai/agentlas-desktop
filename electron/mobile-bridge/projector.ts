@@ -505,6 +505,9 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "chat-attachments-v2",
       "remote-build-attachments-v1",
       "remote-build-options-v1",
+      // Science list/has accept `maxBytes` (up to 192 MiB) and the chunk path serves outputs that large.
+      // A phone that does not know this key ignores it and keeps the 64 MiB list.
+      "science-video-large-v1",
       "chat-runtime-selection",
       "hub-borrow",
       "route-preview",

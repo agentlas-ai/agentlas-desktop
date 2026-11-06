@@ -36,6 +36,7 @@ import type {
   RuntimeSelection,
 } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
+import { removeCanvasExports } from "../canvas/export-file";
 import { applySeatSnapshotToChats, ensureSoloSeatForAgent } from "./seats";
 import {
   ensureCanonicalTaskForChat,
@@ -941,6 +942,7 @@ export function removeChat(id: string): void {
   const result = getDb().prepare("DELETE FROM chats WHERE id = ?").run(id);
   if (result.changes > 0) {
     if (task?.originChatId === id) removeCanonicalTaskForOriginChat(id);
+    removeCanvasExports(id);
     emitDesktopStoreChange({ entity: "chat", id });
   }
 }

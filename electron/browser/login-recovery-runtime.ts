@@ -813,3 +813,62 @@ export async function recoverLoginWallsNow(input: {
   batch.finish();
   return outcomes;
 }
+
+// ── Page-state signals for the human-check watcher (fallback-ladder-runtime.ts): wake it when a tab moves, never poll fast ────────
+
+/**
+ * One persistent socket to one dedicated-Chrome tab: navigation, a detached frame, a finished load or the socket closing (the tab or
+ * the browser went away) call `onSignal`. The caller re-reads the page; the signal itself is never evidence. Returns the stop.
+ */
+export function watchDedicatedPageSignals(target: { webSocketDebuggerUrl: string }, onSignal: () => void): () => void {
+  let stopped = false;
+  let socket: { close(): void; on(event: string, listener: (...args: unknown[]) => void): void; send(data: string): void } | null = null;
+  let debounce: ReturnType<typeof setTimeout> | undefined;
+  const signal = () => { if (stopped || debounce) return; debounce = setTimeout(() => { debounce = undefined; if (!stopped) onSignal(); }, 800); debounce.unref?.(); };
+  void (async () => {
+    const launcher = await import("../mcp-tools/browser-cdp-launcher");
+    if (stopped || !loopbackWs(target.webSocketDebuggerUrl, launcher.browserCdpPort())) return;
+    const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false, maxPayload: 1024 * 1024 });
+    socket = ws;
+    ws.on("open", () => { try { ws.send(JSON.stringify({ id: 1, method: "Page.enable" })); } catch { /* the backstop poll still reads the page */ } });
+    ws.on("message", (data: unknown) => {
+      try {
+        const method = (JSON.parse(String(data)) as { method?: string }).method;
+        if (method === "Page.frameNavigated" || method === "Page.frameDetached" || method === "Page.loadEventFired" || method === "Page.frameStoppedLoading") signal();
+      } catch { /* not an event */ }
+    });
+    ws.on("close", signal);
+    ws.on("error", () => { /* close follows */ });
+  })().catch(() => undefined);
+  return () => { stopped = true; if (debounce) clearTimeout(debounce); try { socket?.close(); } catch { /* closed */ } };
+}
+
+/**
+ * A Cloudflare clearance cookie was written (the page check was passed): native partition cookie events, or the dedicated Chrome's cookie
+ * store directory (the precedent of watchSession above). Wakes the caller; the page is read again to decide.
+ */
+export function watchClearanceCookie(surface: BrowserCookieSurface, onSignal: () => void): () => void {
+  const cleanups: Array<() => void> = [];
+  let stopped = false;
+  if (surface === "native-partition") {
+    try {
+      const cookies = electronSession.fromPartition(NATIVE_PARTITION).cookies;
+      const changed = (_event: unknown, cookie: { name: string }, _cause: string, removed: boolean) => { if (!removed && cookie.name === "cf_clearance") onSignal(); };
+      cookies.on("changed", changed);
+      cleanups.push(() => cookies.removeListener("changed", changed));
+    } catch { /* no Electron session here (the background service): the backstop poll reads the page */ }
+  } else {
+    void import("./credential-import").then(({ dedicatedCookieStoreFile }) => {
+      const file = dedicatedCookieStoreFile();
+      if (!file || stopped) return;
+      let debounce: ReturnType<typeof setTimeout> | undefined;
+      const watcher = fs.watch(path.dirname(file), (_kind, name) => {
+        if (stopped || (name && !String(name).startsWith(path.basename(file))) || debounce) return;
+        debounce = setTimeout(() => { debounce = undefined; if (!stopped) onSignal(); }, 1_500);
+        debounce.unref?.();
+      });
+      cleanups.push(() => { watcher.close(); if (debounce) clearTimeout(debounce); });
+    }).catch(() => undefined);
+  }
+  return () => { stopped = true; for (const cleanup of cleanups.splice(0)) { try { cleanup(); } catch { /* gone */ } } };
+}

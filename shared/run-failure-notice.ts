@@ -99,7 +99,7 @@ export const OWNER_ACTION_FAILURE_CODES: ReadonlySet<string> = new Set(["agentla
  * (its failure carries kind `exit`, which the event does not carry, so the terminal code is the fact).
  */
 export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = new Map<string, HostFailureClass>([
-  ["model_context_capacity_exceeded", "capacity"], ["codex_context_window_exceeded", "capacity"],
+  ["model_context_capacity_exceeded", "capacity"], ["codex_context_window_exceeded", "capacity"], ["local_context_limit_exceeded", "capacity"],
   ["serving_unavailable", "unavailable"],
   // The provider (not the app) could not take the request: as the terminal code of a turn that never started work, or as the
   // cause behind an unfinished one (runtime/runner.ts unsettledTurnCauseFailure).

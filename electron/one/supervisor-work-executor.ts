@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
+import { UNCONFIRMED_MAX_RESENDS, unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
 import { supervisorDoneWhen, supervisorError } from "../../shared/one-supervisor";
 import type { InvocationRunReceipt, McpInvocationRequest } from "../../shared/types";
 import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
 import { OneSupervisorWorkQueue, type SupervisorWorkLease } from "./supervisor-work-queue";
 import {OneBudgetAdmissionDenied} from "./budget-store";
-import {TRANSIENT_SEND_DEADLINE_MS,isTransientSendRefusalCode,sendRefusalCode, isStoreBusyError, isRefusedBeforeDispatch } from "../../shared/transient-send-refusal";
+import {onRuntimeSignal} from "../runtime/runtime-signals";
+import {UNDISPATCHED_START_MAX_ATTEMPTS,isTransientSendRefusalCode,sendRefusalCode,startRefusalWaitsLong, isStoreBusyError, isRefusedBeforeDispatch } from "../../shared/transient-send-refusal";
 
-import {rebindSupervisorUnconfirmed, countSupervisorPreBeginRefusal, retainSupervisorStartVerdict, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, supervisorRetryExhausted, reserveSupervisorDispatch, supervisorRefusalDelay} from "./supervisor-dispatch-retry";
+import {rebindSupervisorUnconfirmed, SUPERVISOR_UNCONFIRMED_MAX_SENDS, countSupervisorPreBeginRefusal, retainSupervisorStartVerdict, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, reserveSupervisorDispatch, supervisorRefusalDelay, wakeSupervisorDispatch} from "./supervisor-dispatch-retry";
 
 
 /** The brief as Work receives it: the brief itself, then One's checklist for "finished" when it gave one. */
@@ -46,9 +47,9 @@ export interface SupervisorWorkExecutorOptions {
 }
 const terminal = (status: string) => ["completed", "failed", "cancelled", "interrupted"].includes(status);
 /** Holds the executor wrote itself when it lost track of a start (a restart, an owner that went away): no refusal of the brief. */
+const LOST_BINDING_CODES: ReadonlySet<string> = new Set(["personal_data_session_changed", "personal_data_follow_up_page_changed", "supervisor_work_native_binding_changed"]);
 const BOOKKEEPING_HOLDS: ReadonlySet<string> = new Set(["work_owner_unconfirmed", "native_dispatch_outcome_unknown"]);
 /** The typed reason of a job proven never started and given up on (same word as the supervisor's replies and chat sends). */
-const NEVER_STARTED_REASON = "not_started";
 
 /** Claims and dispatches real native invocations independently of a renderer.
  * The adapter's lifetime determines whether this is a Main host worker or a
@@ -63,7 +64,11 @@ export class OneSupervisorWorkExecutor {
   private readonly dispatching = new Map<string,{runId:string;startedAt:number}>();
   private readonly reconciled = new Map<string, {version: string; checkedAt: number}>();
   private readonly unsubscribe: () => void;
+  private readonly stopWakes: Array<() => void> = [];
   constructor(private readonly deps: SupervisorWorkExecutorOptions) {
+    // A runtime signal or a sign-in ends a long refusal wait now (the cause may have cleared).
+    try { this.stopWakes.push(onRuntimeSignal(() => this.wakeLongWaits())); } catch { /* the step ends by itself */ }
+    try { this.stopWakes.push((require("../auth") as typeof import("../auth")).onAuthSessionRestored(() => this.wakeLongWaits())); } catch { /* the step ends by itself */ }
     if (deps.queue.db !== deps.store.db) throw supervisorError('supervisor_work_store_mismatch');
     this.unsubscribe = deps.runtime.onSettled(event => {
       if (this.closed || !this.started) return;
@@ -89,8 +94,25 @@ export class OneSupervisorWorkExecutor {
     this.timer = null;
     this.reconciled.clear();
     this.unsubscribe();
+    for (const stop of this.stopWakes.splice(0)) { try { stop(); } catch { /* nothing to undo */ } }
     // A UI disconnect never cancels a worker. Native host shutdown remains the
     // single owner of its child tree, deadlines and terminal interruption receipt.
+  }
+  /** Claims waiting out a long step (attempts past the old cap) are claimable now. */
+  private wakeLongWaits(): void {
+    if (this.closed || !this.started) return;
+    try {
+      this.deps.assertOwner();
+      const identity = this.deps.queue.activeIdentity();
+      let woken = false;
+      for (const job of identity ? this.deps.queue.waitingRefused(identity) : []) {
+        const row = this.deps.store.get(job.command_id);
+        if (!row || row.state !== "stored" || (supervisorDispatchRetry(row)?.attempts ?? 0) < UNDISPATCHED_START_MAX_ATTEMPTS) continue;
+        if (!this.deps.store.db.transaction(() => { const fresh = this.deps.store.get(job.command_id); return !!fresh && fresh.state === "stored" && wakeSupervisorDispatch(this.deps.store, fresh, this.deps.now?.() ?? Date.now()) && this.deps.queue.wakeRefused(job); }).immediate()) continue;
+        woken = true;
+      }
+      if (woken) this.tick(false);
+    } catch (error) { this.deps.onFailure?.(error); }
   }
   kick(): void { this.tick(); }
   tick(reconcileNow = true): void {
@@ -174,8 +196,8 @@ export class OneSupervisorWorkExecutor {
         userPrompt: withDoneWhen(input.text, input.doneWhen), taskIntent: "task" as const, permissions: input.permissions,
         locale: frame.locale, runtimeSelection: frame.runtimeSelection,
         ...(byOne ? {promptOrigin: "system" as const} : {})};
-      const resent=(supervisorDispatchRetry(this.deps.store.get(row.command_id)!)?.unconfirmedResends ?? 0)>0;
-      const issued=this.deps.runtime.start(resent ? withEarlierAttempt(request) : request,byOne ? "one-dispatch-brief" : undefined);
+      const resends=supervisorDispatchRetry(this.deps.store.get(row.command_id)!)?.unconfirmedResends ?? 0;
+      const issued=this.deps.runtime.start(resends>0 ? withEarlierAttempt(request,resends>UNCONFIRMED_MAX_RESENDS) : request,byOne ? "one-dispatch-brief" : undefined);
       const started = "then" in issued ? await issued : issued;
       if (started.runId !== starting.run_id) throw supervisorError('supervisor_work_native_run_mismatch');
       this.deps.assertOwner();
@@ -231,7 +253,9 @@ export class OneSupervisorWorkExecutor {
         ? code ?? "supervisor_start_refused" : null;
     return refusal && (proven || !this.deps.runtime.noStartProof && isTransientSendRefusalCode(refusal)) ? refusal : null;
   }
-  /** Waits out the shared backoff as an unstarted (queued, cancellable) claim, then starts the same run again; gives up at the deadline. */
+  /** Waits out the shared backoff as an unstarted (queued, cancellable) claim, then starts the same run again. A received brief is never
+   * given up by a count or an age: no model turn was sent (a tool-selection judge may have run), and only the owner's Stop (workWasStopped) or a refusal the owner alone can
+   * clear (never listed by preStartRefusal) ends it. */
   private retryAfterRefusal(job: SupervisorWorkLease, code: string, beforeBegin = false): void {
     const now = this.deps.now?.() ?? Date.now();
     this.deps.store.db.transaction(() => {
@@ -243,13 +267,7 @@ export class OneSupervisorWorkExecutor {
       supervisorDispatchFrame(this.deps.store, row, () => ({locale:this.deps.locale(),runtimeSelection:JSON.parse(row!.payload_json).runtimeSelection}), now);
       row = this.deps.store.get(job.command_id)!;
       if (beforeBegin) { countSupervisorPreBeginRefusal(this.deps.store,row,now); row = this.deps.store.get(job.command_id)!; }
-      if (supervisorRetryExhausted(row, now) || now - Date.parse(row.created_at) > TRANSIENT_SEND_DEADLINE_MS) {
-        if (!this.deps.queue.transition(current, "failed", code)) return;
-        this.deps.store.update(row, {state: "failed", acknowledgement: "settled", reason: code});
-        this.deps.store.notice(row, "failed");
-        return;
-      }
-      const delay = supervisorRefusalDelay(this.deps.store, row, now);
+      const delay = supervisorRefusalDelay(this.deps.store, row, now, startRefusalWaitsLong(code));
       if (!this.deps.queue.retryRefused(current, delay, code)) throw supervisorError("supervisor_work_owner_fenced");
       if (row.state !== "stored") this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: code});
     }).immediate();
@@ -265,29 +283,10 @@ export class OneSupervisorWorkExecutor {
     if (this.deps.runtime.receipt(job.run_id)) return false;
     return this.deps.runtime.noStartProof(job.run_id);
   }
-  /** Such a job inside the shared deadline starts again under the same run id; the typed cause stays on its request. */
+  /** Such a job starts again under the same run id, however old it is (a brief the host received is delivered, not aged out); the typed
+   * cause stays on its request. The owner's Stop is checked by closeStopped before this and by retryAfterRefusal itself. */
   private heldRefusalRecoverable(job: SupervisorWorkLease): string | null {
-    if ((this.deps.now?.() ?? Date.now()) - this.retryFirstAt(job) > TRANSIENT_SEND_DEADLINE_MS) return null;
     return this.heldNeverStarted(job) ? job.reason : null;
-  }
-  /** Such a job older than the deadline is not started now (an old brief must not begin hours later): it is settled as not started, with
-   * no notice to One, so the drawer stops showing it as in progress. */
-  private heldNeverStartedExpired(job: SupervisorWorkLease): boolean {
-    return (this.deps.now?.() ?? Date.now()) - this.retryFirstAt(job) > TRANSIENT_SEND_DEADLINE_MS && this.heldNeverStarted(job);
-  }
-  private retryFirstAt(job: SupervisorWorkLease): number {
-    const row = this.deps.store.get(job.command_id);
-    return row ? supervisorDispatchRetry(row)?.firstAt ?? Math.min(Date.parse(row.created_at), job.updated_at) : job.updated_at;
-  }
-  private expireNeverStarted(job: SupervisorWorkLease): void {
-    this.deps.queue.db.transaction(() => {
-      this.deps.assertOwner();
-      const current = this.deps.queue.get(job.command_id)!;
-      if (current.one_id!==this.deps.queue.activeIdentity() || terminal(current.phase)) return;
-      this.deps.queue.transition(current, "failed", NEVER_STARTED_REASON);
-      const row = this.deps.store.get(job.command_id)!;
-      if (["stored", "dispatching", "accepted", "held"].includes(row.state)) this.deps.store.update(row, {state: "failed", acknowledgement: "settled", reason: NEVER_STARTED_REASON});
-    }).immediate();
   }
   private workWasStopped(row: SupervisorRequestRow): boolean {
     const prior=supervisorDispatchRetry(row)?.priorRunId ?? null;
@@ -303,6 +302,20 @@ export class OneSupervisorWorkExecutor {
     try {return this.deps.runtime.unconfirmedRetryAllowed?.(job.chat_id,supervisorDispatchRetry(row)?.firstAt ?? Date.parse(row.created_at))===true;}
     catch {return false;}
   }
+  /** The owner wrote something else in this Work chat since the command first started: their newer message is the direction now (the verify-first send is not made). */
+  private ownerWroteSince(job: SupervisorWorkLease, row: SupervisorRequestRow): boolean {
+    try {
+      const text=(JSON.parse(row.payload_json) as {text?: unknown}).text;
+      const since=new Date(supervisorDispatchRetry(row)?.firstAt ?? Date.parse(row.created_at)).toISOString();
+      const written=this.deps.store.db.prepare("SELECT text FROM chat_messages WHERE chat_id=? AND role='user' AND created_at>? LIMIT 20").all(job.chat_id,since) as Array<{text:string}>;
+      return written.some(entry=>typeof text!=="string" || !String(entry.text).startsWith(text));
+    } catch { return true; }
+  }
+  /** No further send of this command: the plain resend and the verify-first send are both spent, or the plain one is and the owner has written since. */
+  private unconfirmedSendsSpent(job: SupervisorWorkLease, row: SupervisorRequestRow): boolean {
+    const sent=supervisorDispatchRetry(row)?.unconfirmedResends ?? 0;
+    return sent>=SUPERVISOR_UNCONFIRMED_MAX_SENDS || (sent>=UNCONFIRMED_MAX_RESENDS && this.ownerWroteSince(job,row));
+  }
   private retryUnconfirmed(job: SupervisorWorkLease, receipt: InvocationRunReceipt | null): boolean {
     if (!this.unconfirmedAllowed(job) || !unconfirmedRunShouldBeSentAgain(receipt)
       || this.deps.runtime.placement?.(job.run_id)!=="unconfirmed" || this.deps.runtime.attach(job.chat_id)) return false;
@@ -314,13 +327,13 @@ export class OneSupervisorWorkExecutor {
       const current=this.deps.queue.get(job.command_id),row=this.deps.store.get(job.command_id);
       if(!current || current.one_id!==this.deps.queue.activeIdentity() || current.run_id!==job.run_id || current.generation!==job.generation || current.owner_epoch!==job.owner_epoch
         || !row || row.run_id!==job.run_id || !["dispatching","accepted","held"].includes(row.state) || this.workWasStopped(row)
-        || now-Date.parse(row.created_at)>TRANSIENT_SEND_DEADLINE_MS
         || !this.unconfirmedAllowed(job) || this.deps.runtime.attach(job.chat_id)
         || this.deps.runtime.placement?.(job.run_id)!=="unconfirmed")return false;
       const observed=this.deps.runtime.receipt(job.run_id);
       if(receipt ? !observed || observed.runId!==job.run_id || observed.chatId!==job.chat_id || !unconfirmedRunShouldBeSentAgain(observed) : !!observed)return false;
       // Revalidate the original task/chat/identity binding; a scoped original-issuer grant is never manufactured for a replay.
       try { this.deps.assertBinding(current,row); } catch (error) { this.deps.onFailure?.(error); return false; }
+      if(this.unconfirmedSendsSpent(job,row))return false;
       supervisorDispatchFrame(this.deps.store,row,()=>({locale:this.deps.locale(),runtimeSelection:JSON.parse(row.payload_json).runtimeSelection}),now);
       const nextRunId=randomUUID(),delay=rebindSupervisorUnconfirmed(this.deps.store,this.deps.store.get(row.command_id)!,nextRunId,now);
       if(delay===null)return false;
@@ -328,15 +341,28 @@ export class OneSupervisorWorkExecutor {
       return true;
     }).immediate();
   }
-  /** The retry budget ended without a receipt: close the automatic lane, retaining an unknown outcome rather than inventing success or cleanup. */
+  /** The chat, task, account or personal-data page this job was bound to is no longer the same one: assertBinding (supervisor.ts) threw one of
+   * the three typed codes below, and no resend can ever apply. Anything else clears by itself and is waited for: a locked store, a sign-in
+   * that is not restored yet (personal_data_sign_in_required: signed out, or just after start), an adapter not initialised yet
+   * (history_native_execution_adapter_required). */
+  private bindingChanged(job: SupervisorWorkLease, row: SupervisorRequestRow): boolean {
+    const current=this.deps.queue.get(job.command_id);
+    if(!current)return false;
+    try { this.deps.assertBinding(current,row); return false; }
+    catch (error) {
+      const code = (error as {code?: unknown} | null)?.code ?? (error instanceof Error ? error.message : null);
+      return typeof code === "string" && LOST_BINDING_CODES.has(code);
+    }
+  }
+  /** The plain resend and the one verify-first send of an effect-unknown run are spent (or the owner wrote since), or its binding is gone for good: close the automatic lane,
+   * retaining an unknown outcome rather than inventing success or cleanup. Only the effect-unknown cap ends it, never an age. */
   private closeUnconfirmed(job: SupervisorWorkLease): boolean {
     const now=this.deps.now?.() ?? Date.now(),row=this.deps.store.get(job.command_id);
     if(!row || job.phase!=="held" || job.lease_until>now || this.workWasStopped(row)
       || !this.unconfirmedAllowed(job) || this.deps.runtime.placement?.(job.run_id)!=="unconfirmed"
       || this.deps.runtime.receipt(job.run_id) || this.deps.runtime.attach(job.chat_id))return false;
     const retry=supervisorDispatchRetry(row);
-    if(retry?.retryStopped || !((retry?.unconfirmedResends ?? 0)>=1 || supervisorRetryExhausted(row,now)
-      || now-Date.parse(row.created_at)>TRANSIENT_SEND_DEADLINE_MS))return false;
+    if(retry?.retryStopped || !((retry?.unconfirmedResends ?? 0)>=UNCONFIRMED_MAX_RESENDS && this.unconfirmedSendsSpent(job,row) || this.bindingChanged(job,row)))return false;
     return this.deps.store.db.transaction(()=>{
       this.deps.assertOwner();const current=this.deps.queue.get(job.command_id),saved=this.deps.store.get(job.command_id);
       if(!current || current.one_id!==this.deps.queue.activeIdentity() || current.run_id!==job.run_id || current.generation!==job.generation || current.owner_epoch!==job.owner_epoch || current.phase!=="held"
@@ -400,7 +426,6 @@ export class OneSupervisorWorkExecutor {
     if (this.closeStopped(job)) return;
     const refused = this.heldRefusalRecoverable(job);
     if (refused) { this.retryAfterRefusal(job, refused); return; }
-    if (this.heldNeverStartedExpired(job)) { this.expireNeverStarted(job); return; }
     const receipt = this.deps.runtime.receipt(job.run_id);
     if (receipt && receipt.runId === job.run_id && receipt.chatId === job.chat_id && terminal(receipt.status)) {
       this.settle(job, receipt);

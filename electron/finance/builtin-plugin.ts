@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import Module from 'node:module';
 import { z } from 'zod';
-import type { FinanceScope } from './store';
+import { lockFinanceDirectory, type FinanceScope } from './store';
 import { userDataPath } from '../runtime-paths';
 import { bundledPluginRelease, installedPluginsRoot, materializePluginRelease, verifiedInstalledPluginRelease, verifiedPinnedPluginRelease, type VerifiedInstalledPluginRelease } from '../plugins/materialize';
 import { sameFileIdentity } from "../../shared/file-identity";
@@ -26,7 +26,6 @@ function parsePin(raw: Buffer): Pin | 'outdated' {
   const old = OutdatedPinSchema.safeParse(json); if (old.success && old.data.version !== VERSION) return 'outdated';
   throw new Error('finance_plugin_activation_invalid');
 }
-const lockfile = require('proper-lockfile') as { lock(directory: string, options: unknown): Promise<() => Promise<void>> };
 const digest = (value: Buffer | string): string => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 const errorCode = (error: unknown): string => error instanceof Error && /^finance_plugin_[a-z_]+$/.test(error.message) ? error.message : 'finance_plugin_release_unavailable';
 
@@ -122,7 +121,7 @@ export class FinanceBuiltinPlugin {
   /** Caller is the owner-consent host flow. Reading status/runtime never calls prepare. */
   async prepare(scope: FinanceScope, noticeVersion: string): Promise<FinanceBuiltinPluginStatus> {
     const { directory, owner } = this.location(scope); z.string().min(1).max(200).parse(noticeVersion); ensureDirectory(directory); scope.assertCurrent();
-    const unlock = await lockfile.lock(directory, { realpath: false, stale: 60000, update: 10000, retries: { retries: 20, minTimeout: 25, maxTimeout: 250 } });
+    const unlock = await lockFinanceDirectory(directory, 'long');
     try {
       scope.assertCurrent(); let previous: Pin | null;
       // A changed notice may be explicitly re-approved; malformed/cross-owner pins are never overwritten.

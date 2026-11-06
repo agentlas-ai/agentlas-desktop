@@ -15,20 +15,35 @@ const LEGACY_DAILY_INSTRUCTION_SHA256='d54913d7f87f7e6196d4683be6696512b3019ce77
 export function isFinanceDailyInstruction(instruction:string):boolean {
   return instruction===financeDailyInstruction()||createHash('sha256').update(instruction).digest('hex')===LEGACY_DAILY_INSTRUCTION_SHA256;
 }
+/**
+ * A call to the One supervisor answers in milliseconds: the check-in itself is one synchronous database write, in this process or in the
+ * daemon. It can only stall when the daemon or the channel to it stops answering, and the channel then gives up after minutes. Turning
+ * monitoring on or off waits for this call, so it stops waiting after this long and reports the failure (the caller rolls the setting back).
+ * A call that still lands afterwards (or is refused after the daemon already ran it) is undone by `onLate`, which must be safe to run again.
+ */
+const SUPERVISOR_CALL_BACKSTOP_MS=30_000;
+function withBackstop<F extends ()=>unknown>(call:F,onLate?:()=>void):Promise<Awaited<ReturnType<F>>>{
+  return new Promise<Awaited<ReturnType<F>>>((resolve,reject)=>{
+    let over=false;const pending=Promise.resolve().then(call) as Promise<Awaited<ReturnType<F>>>;
+    const timer=setTimeout(()=>{over=true;reject(new Error('finance_daily_registration_timeout'));if(onLate)pending.then(onLate,onLate);},SUPERVISOR_CALL_BACKSTOP_MS);timer.unref?.();
+    pending.then(value=>{if(!over){clearTimeout(timer);resolve(value);}},error=>{if(!over){clearTimeout(timer);reject(error);}});
+  });
+}
 async function endpoint(){
   const host=await import('../one/supervisor');
   return host.supervisorRunsInDaemon()?host.oneSupervisor():(await import('../one/supervisor-native-runtime')).oneSupervisorEndpoint();
 }
 export async function prepareFinanceDailyCheckin(scope:FinanceScope,commandId:string):Promise<FinanceDailyBinding> {
   scope.assertCurrent();const supervisor=await endpoint();scope.assertCurrent();
-  const snapshot=await supervisor.snapshot();scope.assertCurrent();
+  const snapshot=await withBackstop(()=>supervisor.snapshot());scope.assertCurrent();
   return {oneId:snapshot.oneId,checkinId:`checkin_${createHash('sha256').update(JSON.stringify([snapshot.oneId,commandId])).digest('hex').slice(0,24)}`,commandId};
 }
 export async function registerFinanceDailyCheckin(scope:FinanceScope,binding:FinanceDailyBinding,localTime:string):Promise<{nextRunAt:string}> {
   if(!binding.oneId||!binding.checkinId||!binding.commandId)throw new Error('finance_daily_registration_invalid');
   scope.assertCurrent();const supervisor=await endpoint();scope.assertCurrent();
   try {
-    const result=await supervisor.checkin({commandId:binding.commandId,oneId:binding.oneId,action:'create',instruction:financeDailyInstruction(),dailyAt:localTime,notify:'always'});scope.assertCurrent();
+    const {commandId,oneId}=binding;
+    const result=await withBackstop(()=>supervisor.checkin({commandId,oneId,action:'create',instruction:financeDailyInstruction(),dailyAt:localTime,notify:'always'}),()=>{void revokeFinanceDailyCheckin({...scope,assertCurrent(){}},binding).catch(()=>undefined);});scope.assertCurrent();
     if(result.receipt?.state!=='completed'||result.checkin?.id!==binding.checkinId||result.checkin.cadence.kind!=='daily'||result.checkin.cadence.time!==localTime||!Number.isFinite(Date.parse(result.checkin.nextAt)))throw new Error('finance_daily_registration_unconfirmed');
     return {nextRunAt:result.checkin.nextAt};
   } catch(error) {

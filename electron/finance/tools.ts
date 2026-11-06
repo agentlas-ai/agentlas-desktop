@@ -22,7 +22,8 @@ import { registerCanvasDomain, type CanvasSeriesRequest } from '../canvas/regist
 import { CANVAS_PORTS } from './canvas-ports';
 import { financeQueryModelView } from './model-view';
 import { canvasGuideReadInTurn, canvasRefusedInTurn, canvasSeriesReadInTurn, canvasTurnKey, type CanvasSeriesRead } from '../canvas/turn-state';
-import { FINANCE_GUIDES_REVISION, FINANCE_GUIDE_TOPICS, financeGuide, financeGuideMenu } from '../../shared/finance-guides';
+import { FINANCE_GUIDES_REVISION, FINANCE_GUIDE_TOPICS, financeGuide, financeGuideLayout, financeGuideMenu } from '../../shared/finance-guides';
+import { FINANCE_HOST_WAIT_MAX_SECONDS, financeRetryAfterSeconds, readAfterShortWait, transientFinanceCode } from './source-failure';
 
 type Outcome = { status: 'ok'; financeReceipt?: FinanceReceiptReference; nativeUi?: FinanceNativePresentation; /** Absolute paths of files this call wrote: host-only, handed to the run's outputs (harness/run-produced-files.ts), never in the result. */ produced?: readonly string[]; data: unknown } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
 type ToolContext = Pick<HarnessCallContext, 'chatId' | 'runId' | 'permission' | 'dryRun' | 'hostAccountBinding' | 'signal' | 'commandId'>;
@@ -186,13 +187,64 @@ const PORTFOLIO_PROPOSAL_NOTE = 'The review card is shown to the owner and nothi
 
 /** A query that reached no provider data is not a success: the harness said "ok" while the failure sat one level down, where a model skims past it. */
 const DATA_FAILURE = {
-  error: { reason: 'finance_data_error', next: 'The data provider returned an error and no rows (see warnings). Tell the owner the data could not be retrieved. If another metric answers the question (rates: treasury_yields; company text: news or filings), try it; otherwise retry later. Do not present anything as retrieved Finance data.' },
+  error: { reason: 'finance_data_error', next: 'The data provider returned an error and no rows (see warnings). Tell the owner the data could not be retrieved. If another metric answers the question (rates: treasury_yields; company text: news or filings), try it. Do not present anything as retrieved Finance data.' },
   unconnected: { reason: 'finance_data_unconnected', next: 'No rows: the source for this metric is not connected, is switched off, or does not cover this request (see warnings). Tell the owner what could not be checked, or use another metric; do not present anything as retrieved Finance data.' },
 } as const;
-export function financeDataFailure(data: unknown): { reason: string; next: string } | null {
-  const result = data && typeof data === 'object' ? data as { status?: unknown; rows?: unknown } : null;
+const SAVED_PRICES = 'the prices finance.load lists for saved assets (each carries the time it was observed; say that time)';
+/** Another way to answer the same question while one source is down: the metric asked for, then what reads the same thing elsewhere. */
+const ALTERNATIVE_METRIC: Readonly<Record<string, string>> = {
+  treasury_yields: 'macro_series with a FRED rate id (DGS2, DGS10, ...) reads the same rates',
+  macro_series: 'treasury_yields reads the Treasury par curve (the same rates as DGS2, DGS10, ...)',
+  news: 'filings are the issuer\'s own records',
+  filings: 'news gives headlines for the same company',
+  price: SAVED_PRICES, price_history: SAVED_PRICES,
+};
+/**
+ * What the model reads when a source is temporarily down. The host has already done the waiting and the repeating (readAfterShortWait,
+ * and the source's own retry of a 5xx): the model is not asked to wait or to call again. It gets the fact, another way to answer when there is
+ * one, and what to say when there is none.
+ */
+function transientNext(cause: string, seconds: number | null, alternative?: string, waited = false): string {
+  const blocked = seconds ? `the source is blocked for about ${seconds} s more` : '';
+  const state = waited ? `the host already waited and read it again${blocked ? `; ${blocked}` : ''}`
+    : seconds ? `${blocked}${seconds > FINANCE_HOST_WAIT_MAX_SECONDS ? ', longer than one call waits' : ''}` : "the source's own retry has already been spent";
+  return `The source is temporarily unavailable (${cause}); ${state}.${alternative ? ` If another way answers the question, use it now: ${alternative}.` : ''} Otherwise say which data could not be read at this time, answer from what you already hold, and do not present anything as retrieved Finance data.`;
+}
+export interface FinanceDataFailure { reason: string; next: string; cause?: string; retryAfterSeconds?: number }
+export function financeDataFailure(data: unknown, metric?: string, waited = false): FinanceDataFailure | null {
+  const result = data && typeof data === 'object' ? data as { status?: unknown; rows?: unknown; warnings?: unknown; sourceUrls?: unknown } : null;
   if (!result || (result.status !== 'error' && result.status !== 'unconnected')) return null;
-  return Array.isArray(result.rows) && result.rows.length ? null : DATA_FAILURE[result.status];
+  if (Array.isArray(result.rows) && result.rows.length) return null;
+  const cause = result.status === 'error' && Array.isArray(result.warnings) ? transientFinanceCode(result.warnings.filter((item): item is string => typeof item === 'string')) : null;
+  if (!cause) return DATA_FAILURE[result.status];
+  const wait = financeRetryAfterSeconds(Array.isArray(result.sourceUrls) ? result.sourceUrls.filter((item): item is string => typeof item === 'string') : []);
+  return { reason: DATA_FAILURE.error.reason, next: transientNext(cause, wait, metric ? ALTERNATIVE_METRIC[metric] : undefined, waited), cause, ...(wait ? { retryAfterSeconds: wait } : {}) };
+}
+/** A search that came back empty because the source was unreachable is a failure with a cause, not "nothing found". */
+export function financeSearchFailure(data: unknown, waited = false): FinanceDataFailure | null {
+  const result = data && typeof data === 'object' ? data as { assets?: unknown; warnings?: unknown } : null;
+  if (!result || !Array.isArray(result.assets) || result.assets.length || !Array.isArray(result.warnings)) return null;
+  const cause = transientFinanceCode(result.warnings.filter((item): item is string => typeof item === 'string'));
+  if (!cause) return null;
+  const wait = financeRetryAfterSeconds(['https://query1.finance.yahoo.com/']);
+  return { reason: DATA_FAILURE.error.reason, next: transientNext(cause, wait, `an asset the owner already saved needs no search; ${SAVED_PRICES}`, waited), cause, ...(wait ? { retryAfterSeconds: wait } : {}) };
+}
+/** Refusals only the owner can clear (a retry never does) and ones a fresh read of the workspace clears; every other code keeps the general sentence. */
+const OWNER_ACTION: Readonly<Record<string, string>> = {
+  finance_consent_required: 'accept the Finance notice',
+  finance_plugin_activation_required: 'turn on the Finance plugin',
+  finance_sign_in_required: 'sign in to Agentlas',
+  finance_monitoring_sign_in_required: 'sign in to Agentlas',
+  finance_monitoring_pro_required: 'get a plan that includes scheduled monitoring',
+  finance_monitoring_access_unavailable: 'check the account connection (monitoring access could not be verified)',
+};
+const READ_THEN_REPEAT = new Set(['finance_revision_conflict', 'finance_search_selection_stale']);
+export function financeRefusalNext(code: string): string {
+  const action = OWNER_ACTION[code];
+  if (action) return `A retry cannot fix this: the owner has to ${action} in the Finance screen. Tell the owner exactly that; do not call this again.`;
+  if (READ_THEN_REPEAT.has(code)) return 'Another change or search landed first. Read the current state with finance.load (or search again), then repeat the call once.';
+  if (code === 'finance_compute_history_unavailable') return 'One asset\'s price history could not be read (data.symbol, data.cause). If cause names a temporary source problem, the host has already spent its own retry; calculate again without that asset and say which one was left out.';
+  return 'Read the current Finance workspace and source status before retrying.';
 }
 
 /** The owner's screen language for the confirmation card's own words (title, button); the draft itself is shown as written. */
@@ -311,7 +363,7 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     scope.assertCurrent();
     if(action!=='monitor.pause')await (await import('./experience')).requireFinanceConsent(scope);scope.assertCurrent();
     if (action === 'receipt.read') return { status: 'ok', data: financeReceiptStore().read(scope, ctx, parseArguments(FinanceReceiptReadSchema,raw,action)) };
-    let data: unknown, produced: readonly string[] | undefined;
+    let data: unknown, produced: readonly string[] | undefined, hostWaited = false;
     switch (action) {
       case 'load': parseArguments(inputSchemas.load,raw,action); data = await finance.load(scope); break;
       case 'analyst.list': {parseArguments(inputSchemas['analyst.list'],raw,action);const result=await finance.analysts(scope,{action:'list'});data={items:result.items.map(({instructions:_,...item})=>item)};break;}
@@ -342,12 +394,12 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
         await settleOwnerConfirmation(ownerCard!,(await financeOwnerKorean())?`Analyst 「${args.draft.name}」을(를) 저장했습니다.`:`Saved Analyst "${args.draft.name}".`);
         break;
       }
-      case 'search': data = await finance.search(scope, parseArguments(inputSchemas.search,raw,action), ctx.signal); break;
+      case 'search': { const input = parseArguments(inputSchemas.search,raw,action); const read = await readAfterShortWait(() => finance.search(scope, input, ctx.signal), result => financeSearchFailure(result)?.retryAfterSeconds ?? null, ctx.signal); data = read.result; hostWaited = read.waited; break; }
       case 'dashboard.feeds':parseArguments(inputSchemas['dashboard.feeds'],raw,action);data=await finance.dashboardFeeds(scope,ctx.signal);break;
       case 'portfolio.value':data=await finance.valuePortfolio(scope,parseArguments(inputSchemas['portfolio.value'],raw,action),ctx.signal);break;
       case 'calculate':data=await finance.calculate(scope,parseArguments(inputSchemas.calculate,raw,action),ctx.signal);break;
       case 'asset.add': data = await finance.addAsset(scope, parseArguments(inputSchemas['asset.add'],raw,action), ctx.signal); break;
-      case 'query': { const input = parseArguments(inputSchemas.query,raw,action); data = await finance.query(scope, input, ctx.signal); if (data && typeof data === 'object' && ['ok','partial'].includes(String((data as { status?: unknown }).status))) rememberSeriesRead(ctx, input as { metrics: string[]; assetIds?: string[]; query?: string; period?: string }); break; }
+      case 'query': { const input = parseArguments(inputSchemas.query,raw,action); const read = await readAfterShortWait(() => finance.query(scope, input, ctx.signal), result => financeDataFailure(result, input.metrics[0])?.retryAfterSeconds ?? null, ctx.signal); data = read.result; hostWaited = read.waited; if (data && typeof data === 'object' && ['ok','partial'].includes(String((data as { status?: unknown }).status))) rememberSeriesRead(ctx, input as { metrics: string[]; assetIds?: string[]; query?: string; period?: string }); break; }
       case 'portfolio.propose': data = { ...await finance.proposePortfolio(scope, parseArguments(inputSchemas['portfolio.propose'],raw,action)), note: PORTFOLIO_PROPOSAL_NOTE }; break;
       case 'query.save': data = await finance.queryAndSave(scope, parseArguments(inputSchemas['query.save'],raw,action), ctx.signal); break;
       case 'apply': {
@@ -392,15 +444,20 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
         const { guide: named, ...args } = parseArguments(inputSchemas.present,raw,action);
         // The turn's guide is the first one it read: later reads are related lookups, not a new answer type (Codex read the right guide,
         // then a second one whose card fit the table it wanted, and named that).
-        const first = guideReadInTurn.get(turnKey(ctx)), guide = first ?? named;
+        const first = guideReadInTurn.get(turnKey(ctx));
+        // No guide read or named: the first guide whose card these blocks already are (the same check the card passes anyway) governs it, so the card is not held back for want of a guide call.
+        const blockTypes = args.blocks.map(block => block.type);
+        const chosen = !first && !named ? FINANCE_GUIDE_TOPICS.find(topic => Array.isArray(financeGuideLayout(topic, blockTypes))) : undefined;
+        const guide = first ?? named ?? chosen;
         // The check, the fit, the chart fill and the series reads are the canvas's (electron/canvas/present.ts), the same for ui.canvas.
         // A card follows a method guide: with none named and none read in this turn there is no layout to hold it to.
         const reads = seriesReadInTurn.get(turnKey(ctx));
         const key = turnKey(ctx), refusedBefore = canvasRefusedInTurn.has(key);
         try {
         data = await buildCanvasCard(args, { guide, named, first, layouts: guide ? financeGuide(guide)?.layouts : undefined, warningPrefix: 'finance', reads, refusedBefore,
-          noGuideMessage: `Call finance.guide with the topic that fits this answer first, or pass guide; its card says which blocks to use. Topics: ${FINANCE_GUIDE_TOPICS.join(', ')}.`,
+          noGuideMessage: `Next time call finance.guide with the topic that fits the answer first, or pass guide; its card says which blocks to use. Topics: ${FINANCE_GUIDE_TOPICS.join(', ')}.`,
           readSeries: (series, period) => readFinanceSeries(finance, scope, series, period, ctx.signal), signal: ctx.signal });
+        if (chosen) (data as { warnings: string[] }).warnings.unshift(`finance_card_guide_chosen: ${chosen}`);
         } catch (error) {
           if (error instanceof z.ZodError && ctx.runId) { canvasRefusedInTurn.add(key); if (canvasRefusedInTurn.size > 200) canvasRefusedInTurn.delete(canvasRefusedInTurn.values().next().value!); }
           throw error;
@@ -414,8 +471,9 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     try { financeReceipt = financeReceiptStore().record(scope, ctx, `finance.${action}`, data, writes.has(action) ? 'saved-result' : ['load', 'report.read', 'monitor.runs', 'archives.read', 'archives.list'].includes(action) ? 'read-snapshot' : 'service-result'); }
     catch { scope.assertCurrent(); financeReceipt = { status: 'unavailable', reason: 'finance_receipt_not_recorded', operationOutcome: 'succeeded' }; }
     scope.assertCurrent();
-    const dataFailure=action==='query'?financeDataFailure(data):null;
-    if(dataFailure)return { status: 'unavailable', reason: dataFailure.reason, next: dataFailure.next, data };
+    const firstMetric=Array.isArray(raw.metrics)&&typeof raw.metrics[0]==='string'?raw.metrics[0]:undefined;
+    const dataFailure=action==='query'?financeDataFailure(data,firstMetric,hostWaited):action==='search'?financeSearchFailure(data,hostWaited):null;
+    if(dataFailure)return { status: 'unavailable', reason: dataFailure.reason, next: dataFailure.next, data: dataFailure.cause&&data&&typeof data==='object'?{ ...data, cause: dataFailure.cause, ...(dataFailure.retryAfterSeconds?{ retryAfterSeconds: dataFailure.retryAfterSeconds }:{}) }:data };
     const nativeUi=await presentFinanceResult(action,raw,data,ctx,scope);
     if(action==='present'){
       const shown=(data as {view:{kind:string};warnings:string[]});
@@ -433,8 +491,9 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     if (cardLayout) return { status: 'refused', reason: 'finance_arguments_invalid', next: `${cardLayout} Call finance.present again now with those blocks; a chart needs only its series named (metric macro_series with a FRED id, price_history with an asset id from finance.search, or fx_rates with BASE/QUOTE): the host reads the numbers.`, data: { issues: (error as z.ZodError).issues.slice(0, 8).map((issue: z.ZodIssue) => ({ path: issue.path.join('.'), message: issue.message })) } };
     if (error instanceof z.ZodError) return { status: 'refused', reason: 'finance_arguments_invalid', next: 'Read the operation schema and supply its exact fields.', ...(action === 'analyst.draft' || action === 'present' ? { data: { issues: error.issues.slice(0, 8).map(issue => ({ path: issue.path.join('.'), message: issue.message })) } } : {}) };
     if (action === 'portfolio.propose' && error instanceof Error && error.message === 'finance_portfolio_rows_invalid') return { status: 'refused', reason: 'finance_portfolio_rows_invalid', data: { issues: (error as Error & { issues?: unknown }).issues ?? [] }, next: 'Fix the listed fields (null for anything not visible; unrecognized keys are refused) and call finance.portfolio.propose again. Nothing was shown to the owner.' };
-    const message = error instanceof Error ? error.message : '';
-    return { status: 'refused', reason: /^finance_[a-z0-9_]+$/.test(message) ? message : 'finance_operation_failed', ...(message==='finance_social_period_invalid'?{data:{supportedPeriods:[...FINANCE_SOCIAL_SUPPORTED_PERIODS]}}:{}), next: 'Read the current Finance workspace and source status before retrying.' };
+    const message = error instanceof Error ? error.message : '', code = /^finance_[a-z0-9_]+$/.test(message) ? message : 'finance_operation_failed';
+    const detail = (error as { detail?: unknown } | null)?.detail;
+    return { status: 'refused', reason: code, ...(message==='finance_social_period_invalid'?{data:{supportedPeriods:[...FINANCE_SOCIAL_SUPPORTED_PERIODS]}}:detail&&typeof detail==='object'?{data:detail}:{}), next: financeRefusalNext(code) };
   }
 }
 

@@ -1,5 +1,6 @@
 import type { ExecutionFailureCause, ExecutionFailureReport } from "../../shared/execution-effect-contract";
 import type { InvocationRuntimeFailure } from "../../shared/types";
+import { PROVIDER_UNAVAILABLE_CODES } from "../../shared/run-failure-notice";
 
 /**
  * How an owner-facing team turn ends when its structural verifier did not pass.
@@ -64,8 +65,14 @@ function causeIsLogin(cause: ExecutionFailureCause): boolean {
   return (cause.providerKind === "auth" && evidence(cause)) || cause.httpStatus === 401;
 }
 
+/** The provider could not take the request (an outage, "at capacity"): its typed code, from a marker or the exit status, never from prose. */
+function causeIsProviderUnavailable(cause: ExecutionFailureCause): boolean {
+  return evidence(cause) && typeof cause.providerCode === "string" && PROVIDER_UNAVAILABLE_CODES.includes(cause.providerCode);
+}
+
 function causeIsCapacity(cause: ExecutionFailureCause): boolean {
   return ((cause.providerKind === "quota" || cause.providerKind === "rate_limit" || cause.providerKind === "unavailable") && evidence(cause))
+    || causeIsProviderUnavailable(cause)
     || cause.httpStatus === 429 || cause.httpStatus === 503 || cause.httpStatus === 529
     || cause.recovery === "wait-capacity"
     || cause.retryAfterMs !== undefined || cause.retryAfterHint !== undefined;
@@ -88,7 +95,15 @@ export function taskForceCauseClass(report: ExecutionFailureReport | undefined |
 export function taskForceProviderFailure(report: ExecutionFailureReport | undefined | null): InvocationRuntimeFailure | null {
   const causes = report?.causes ?? [];
   const typed = (kind: ExecutionFailureCause["providerKind"]) => causes.find((cause) => cause.providerKind === kind && (cause.providerSource === "marker" || cause.providerSource === "exit"));
+  // A provider outage carries the same way a limit does, so the turn that holds the step is told apart from a failure inside the app: the
+  // owner-failure classifier reads providerCode (shared/transient-provider-failure.ts), not the kind. Without it the whole turn read as the
+  // app's own failure and was retried as one.
+  const unavailable = causes.find((cause) => causeIsProviderUnavailable(cause) && cause.providerSource === "marker");
   const cause = typed("auth") ?? typed("quota") ?? typed("rate_limit");
+  if (!cause && unavailable) {
+    return { kind: "refused", source: "marker", providerCode: unavailable.providerCode,
+      ...(unavailable.retryAfterHint ? { retryAfterAt: unavailable.retryAfterHint } : {}) };
+  }
   if (!cause || (cause.providerKind !== "auth" && cause.providerKind !== "quota" && cause.providerKind !== "rate_limit")) return null;
   return { kind: cause.providerKind, source: cause.providerSource as "marker" | "exit",
     ...(cause.providerCode ? { providerCode: cause.providerCode } : {}),

@@ -23,13 +23,13 @@ import { FinanceAnalystLibrary } from './analysts';
 import { calculateFromFinanceSources } from './calculation-service';
 import type { FinanceArtifactPresentation } from './artifacts';
 import { writeFinanceBriefing } from "./briefing";
+import { batchAllTransient, savedPriceOnTransientFailure, transientFinanceCode } from "./source-failure";
+import { lockMonitorRun } from "./monitor-run-lock";
 import { pauseFinanceMonitor, readFinanceMonitor, rollbackFinanceMonitor, scheduleFinanceMonitor } from "./monitor";
 import { cachedMonitorRun, FINANCE_MONITOR_ASSET_BATCH, FINANCE_MONITOR_BATCH_TIMEOUT_MS, FINANCE_MONITOR_LEGACY_PROGRESS_MAX_BYTES, FINANCE_MONITOR_MAX_WORK_MS, monitorBatchReportId, monitorDefinitionDigest, monitorReportDigest, monitorWarnings, newMonitorProgress, parseMonitorProgress, preserveMonitorProgress, reconcileMonitorPending, writeMonitorProgress, type FinanceMonitorProgress } from './monitor-coverage';
 /** The most positions one valuation prices: a reviewed holdings draft carries up to 100, and a currency group is valued only when every position in it is priced. */
 const PORTFOLIO_REFRESH_LIMIT = 100;
 
-const lockfile = require("proper-lockfile") as { lock(target: string, options: unknown): Promise<() => Promise<void>> };
-const MONITOR_LOCK_OPTIONS = { realpath: false, stale: 240000, retries: 0 };
 /** Scheduler receipts can advance during a run; only research identity participates in this guard. */
 function monitorDefinition(monitor: FinanceMonitor, workspace: FinanceWorkspace): string {
   const selected = monitor.assetIds.length ? monitor.assetIds : workspace.watchlist.map(asset => asset.id);
@@ -257,7 +257,7 @@ export class FinanceService {
   private queryAssets(scope:FinanceScope,route:FinanceDataSelection,watchlist:FinanceAsset[],ids:readonly string[]):FinanceAsset[]{
     return [...watchlist,...this.searchCatalog.liveAssets(scope,this.searchCatalog.begin(scope,route),ids,watchlist)];
   }
-  async query(scope: FinanceScope,input:FinanceDataRequest,signal?:AbortSignal) { signal?.throwIfAborted();scope.assertCurrent();const workspace=await this.store.load(scope);input={...input,assetIds:this.resolveAssetIds(workspace.watchlist,input.assetIds)};const route={...await this.experience.consent(scope),signal,assertCurrent:()=>{scope.assertCurrent();signal?.throwIfAborted();}};route.assertCurrent();const result=await queryFinanceData(input,this.queryAssets(scope,route,workspace.watchlist,input.assetIds),route);route.assertCurrent();return result; }
+  async query(scope: FinanceScope,input:FinanceDataRequest,signal?:AbortSignal) { signal?.throwIfAborted();scope.assertCurrent();const workspace=await this.store.load(scope);input={...input,assetIds:this.resolveAssetIds(workspace.watchlist,input.assetIds)};const route={...await this.experience.consent(scope),signal,assertCurrent:()=>{scope.assertCurrent();signal?.throwIfAborted();}};route.assertCurrent();const result=await queryFinanceData(input,this.queryAssets(scope,route,workspace.watchlist,input.assetIds),route);route.assertCurrent();return savedPriceOnTransientFailure(result,input,workspace,workspace.watchlist.find(asset=>asset.id===input.assetIds[0])); }
   async queryAndSave(scope:FinanceScope,input:FinanceDataSaveRequest,signal?:AbortSignal):Promise<FinanceDataSaveResult> {
     const parsed=FinanceDataSaveRequestSchema.safeParse(input);if(!parsed.success)throw new Error("finance_arguments_invalid");input=parsed.data;
     const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();if(signal?.aborted)throw new Error("finance_query_cancelled");}};
@@ -291,7 +291,8 @@ export class FinanceService {
   async addAsset(scope:FinanceScope,input:{query:string;symbol?:string},signal?:AbortSignal) {
     const caller=scope;scope={...caller,assertCurrent(){caller.assertCurrent();signal?.throwIfAborted();}};scope.assertCurrent();
     const found=await this.search(scope,input,signal);const matches=found.assets.filter(asset=>!input.symbol||asset.symbol.toLowerCase()===input.symbol.toLowerCase());
-    if(matches.length!==1)throw new Error("finance_asset_selection_required");
+    // A search that came back empty because the source was unreachable says so (its code), instead of asking the owner to pick among nothing.
+    if(matches.length!==1)throw new Error((!found.assets.length?transientFinanceCode(found.warnings):null)??"finance_asset_selection_required");
     const current=await this.store.load(scope);const asset=matches[0];
     if(current.watchlist.some(item=>item.id===asset.id))return {workspace:current,asset,warnings:found.warnings};
     return {workspace:await this.applyLatest(scope,latest=>latest.watchlist.some(item=>item.id===asset.id)?null:[{type:"watchlist.add",asset}]),asset,warnings:found.warnings};
@@ -366,7 +367,7 @@ export class FinanceService {
     if(before.revision!==input.expectedRevision&&!(input.expectedRevision<before.revision&&this.store.selfOnlyGap(savingScope,input.expectedRevision,before.revision)))throw new Error("finance_revision_conflict");
     if(!before.monitors.some(monitor=>monitor.id===input.monitorId))throw new Error("finance_monitor_not_found");
     let release:()=>Promise<void>;
-    try{release=await lockfile.lock(this.runDirectory(savingScope,input.monitorId),MONITOR_LOCK_OPTIONS);}
+    try{release=await lockMonitorRun(this.runDirectory(savingScope,input.monitorId));}
     catch(error){savingScope.assertCurrent();if((error as NodeJS.ErrnoException).code==="ELOCKED")throw new Error("finance_monitor_running");throw error;}
     try{
       savingScope.assertCurrent();
@@ -428,7 +429,7 @@ export class FinanceService {
     if(!prepared.ready)return {runs:[],nextCursor:null,indexStatus:'building',indexedCount:prepared.indexedCount};
     if(await history.hasRunning(scope)){
       let release:(()=>Promise<void>)|undefined;
-      try{release=await lockfile.lock(this.runDirectory(scope,input.monitorId),MONITOR_LOCK_OPTIONS);if(!await history.recover(scope))return {runs:[],nextCursor:null,indexStatus:'building',indexedCount:prepared.indexedCount};}
+      try{release=await lockMonitorRun(this.runDirectory(scope,input.monitorId));if(!await history.recover(scope))return {runs:[],nextCursor:null,indexStatus:'building',indexedCount:prepared.indexedCount};}
       catch(error){if((error as NodeJS.ErrnoException).code!=="ELOCKED")throw error;}
       finally{await release?.();}
     }
@@ -458,7 +459,7 @@ export class FinanceService {
     const history=this.history(scope,monitor.id),prepared=await history.prepare(scope);
     if(!prepared.ready)throw new Error('finance_history_index_building');
     const directory=this.runDirectory(scope,monitor.id);let release:()=>Promise<void>;
-    try{release=await lockfile.lock(directory,MONITOR_LOCK_OPTIONS);}catch(error){scope.assertCurrent();if((error as NodeJS.ErrnoException).code==="ELOCKED")throw new Error("finance_monitor_running");throw error;}
+    try{release=await lockMonitorRun(directory);}catch(error){scope.assertCurrent();if((error as NodeJS.ErrnoException).code==="ELOCKED")throw new Error("finance_monitor_running");throw error;}
     let run:FinanceMonitorRun={id:randomUUID(),monitorId:monitor.id,status:"running",startedAt:new Date().toISOString(),finishedAt:null,reportId:null,summary:"자료 조회 중",warnings:[],error:null,sourceRevision:before.revision};
     const write=()=>history.write(scope,run);
     let reportSaved=false,cachedReplay=false;
@@ -539,6 +540,8 @@ export class FinanceService {
           }
           await assertRoute();
           const usable=results.filter(result=>["ok","partial"].includes(result.status)&&result.rows.length);
+          // Every read of this batch failed for a temporary reason: nothing was learned, so no "no evidence" report is written. The first batch fails the run (the retry reads the same batch again); later ones stop here as a partial run that continues next time. The progress file is untouched.
+          if(batchAllTransient(results)){if(!progress.lastReportId)throw new Error("finance_monitor_sources_unavailable");break;}
           const briefing=usable.length?await writeFinanceBriefing(monitor.query,results,batchSignal):{summary:"조회할 수 있는 근거 자료가 없어 이 종목들을 분석하지 못했습니다.",warnings:["finance_monitor_no_evidence"]};
           await assertRoute();lastSummary=briefing.summary;
           const warnings=monitorWarnings([...results.flatMap(result=>result.warnings),...briefing.warnings,...results.flatMap((result,index)=>result.status==="ok"&&!result.rows.length?[`finance_monitor_empty:${requests[index].assetId??"context"}:${requests[index].request.metrics[0]}`]:[])]);

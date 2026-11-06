@@ -491,10 +491,12 @@ export class DesktopMobileTerminalController
       dropped: false,
       partial: { stdout: "", stderr: "" },
       pendingCarriageReturn: { stdout: false, stderr: false },
-      previews: new Map(),
+      // A shell that died and was replaced keeps who owns the terminal and what the phone previewed: the bridge lease is the
+      // authority and this is its copy, so the replacement must start from the same state or every next call disagrees.
+      previews: existing?.previews ?? new Map(),
       requests: new Map(),
-      mobileOwner: false,
-      agentInputPaused: false,
+      mobileOwner: existing?.mobileOwner ?? false,
+      agentInputPaused: existing?.agentInputPaused ?? false,
     };
     this.terminals.set(terminalId, terminal);
     if (handle.child) trackRunChild(handle.child);
@@ -809,9 +811,9 @@ export class DesktopMobileTerminalController
   ): Promise<MobileBridgeTerminalCancelDto> {
     const terminal = this.ensureTerminal(input.terminalId);
     if (!REQUEST_ID_RE.test(input.requestId)) throw new Error("Invalid terminal request id");
+    // Cancelling always succeeds: a request this shell does not know ended with the shell that ran it.
     const request = terminal.requests.get(input.requestId);
-    if (!request) throw new Error("Terminal request was not found");
-    if (request.status === "running" || request.status === "queued") {
+    if (request && (request.status === "running" || request.status === "queued")) {
       request.status = "cancelled";
       if (terminal.pty) {
         // PTY line discipline turns this byte into SIGINT for the foreground

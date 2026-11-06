@@ -343,6 +343,11 @@ export class OneSupervisorStore {
       WHERE review_run_id=? AND review_state='claimed'`).run(new Date().toISOString(), reason.slice(0, 240), reviewRunId).changes);
     return { changes, exhausted };
   }
+  /** The results a review run's last retry left unreviewed (their third started attempt), with the One they belong to. */
+  unreviewedByRun(reviewRunId: string): Array<SupervisorNotice & { oneId: string }> {
+    return this.db.prepare(`SELECT id,one_id AS oneId,task_id AS taskId,origin_chat_id AS originChatId,run_id AS runId,state,created_at AS createdAt
+      FROM one_supervisor_notices WHERE review_run_id=? AND review_state='unreviewed' ORDER BY rowid LIMIT 50`).all(reviewRunId) as Array<SupervisorNotice & { oneId: string }>;
+  }
   /** Review runs whose results are claimed but whose review request is no longer alive (a restart between claim and start). */
   orphanClaimedReviewRuns(oneId: string): string[] {
     return (this.db.prepare(`SELECT DISTINCT n.review_run_id AS runId FROM one_supervisor_notices n

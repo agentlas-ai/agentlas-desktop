@@ -73,8 +73,9 @@ export function isHostInternalException(error: unknown): boolean {
  * The one sentence the owner reads for an unexpected internal exception: what happened to the request, no cause text, no code, and the true
  * thing about what happens next. `resend` is the forecast of resend-forecast.ts: "now" = the app sends the same message again by itself,
  * "spent" = it already did once and nothing more is sent automatically, "none" = nothing is sent automatically.
- * "spent" and "none" are a separate end reason, not a delivery given up: the effect is unknown (a tool may have run), so sending again could
- * run the same action twice. The line says so and asks nothing to be resent blindly; the owner checks the result first.
+ * "spent" and "none" are a separate end reason, not a delivery given up: the effect is unknown (a tool may have run), so sending again blindly could
+ * run the same action twice. By then the app has also sent it again with the verify-first line (earlier-attempt.ts), where that applied. The line
+ * states facts only: it neither hands the check to the owner nor promises anything the app will not do by itself.
  */
 export function hostInternalFailureMessage(locale: "ko" | "en", resend: "now" | "spent" | "none" = "none"): string {
   if (resend === "now") {
@@ -84,12 +85,12 @@ export function hostInternalFailureMessage(locale: "ko" | "en", resend: "now" | 
   }
   if (resend === "spent") {
     return locale === "ko"
-      ? "앱 안에서 예상하지 못한 문제가 생겨 이번 실행을 끝내지 못했습니다. 요청은 저장되어 있습니다. 앱이 이미 한 번 다시 보냈지만 같은 문제가 났습니다. 효과를 확인할 수 없어 더 보내지 않습니다(같은 일이 두 번 실행되지 않도록). 결과를 확인한 뒤 필요하면 다시 요청해 주세요."
-      : "Something unexpected happened inside the app, so this run could not finish. Your request is saved. The app already sent it once more and it ended the same way. Its effect could not be confirmed, so it is not sent again (so the same action does not run twice). Check the result and ask again if needed.";
+      ? "앱 안에서 예상하지 못한 문제가 생겨 이번 실행을 끝내지 못했습니다. 요청은 저장되어 있습니다. 앱이 다시 보냈지만 같은 문제가 났습니다. 효과를 확인할 수 없어 더 보내지 않습니다(같은 일이 두 번 실행되지 않도록). 요청과 지금까지의 진행은 이 대화에 남아 있습니다."
+      : "Something unexpected happened inside the app, so this run could not finish. Your request is saved. The app already sent it again and it ended the same way. Its effect could not be confirmed, so it is not sent again (so the same action does not run twice). Your request and its progress so far stay in this conversation.";
   }
   return locale === "ko"
-    ? "앱 안에서 예상하지 못한 문제가 생겨 이번 실행을 끝내지 못했습니다. 요청은 저장되어 있습니다. 효과를 확인할 수 없어 더 보내지 않습니다(같은 일이 두 번 실행되지 않도록). 결과를 확인한 뒤 필요하면 다시 요청해 주세요."
-    : "Something unexpected happened inside the app, so this run could not finish. Your request is saved. Its effect could not be confirmed, so it is not sent again (so the same action does not run twice). Check the result and ask again if needed.";
+    ? "앱 안에서 예상하지 못한 문제가 생겨 이번 실행을 끝내지 못했습니다. 요청은 저장되어 있습니다. 효과를 확인할 수 없어 더 보내지 않습니다(같은 일이 두 번 실행되지 않도록). 요청과 지금까지의 진행은 이 대화에 남아 있습니다."
+    : "Something unexpected happened inside the app, so this run could not finish. Your request is saved. Its effect could not be confirmed, so it is not sent again (so the same action does not run twice). Your request and its progress so far stay in this conversation.";
 }
 
 /**
@@ -111,8 +112,8 @@ export function storeLockedMessage(locale: "ko" | "en", beforeDispatch: boolean,
       : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run, so the app is sending it once more by itself and telling the model the earlier attempt may have partly happened.";
   }
   if (resend === "spent") {
-    return ko ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다. 이미 실행됐을 수 있습니다. 앱이 이미 한 번 다시 보냈지만 같은 식으로 끝났습니다. 효과를 확인할 수 없어 더 보내지 않습니다(같은 일이 두 번 실행되지 않도록). 결과를 확인한 뒤 필요하면 다시 요청해 주세요."
-      : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run. The app already sent it once more and it ended the same way. Its effect could not be confirmed, so it is not sent again (so the same action does not run twice). Check the result and ask again if needed.";
+    return ko ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다. 이미 실행됐을 수 있습니다. 앱이 다시 보냈지만 같은 식으로 끝났습니다. 효과를 확인할 수 없어 더 보내지 않습니다(같은 일이 두 번 실행되지 않도록). 요청과 지금까지의 진행은 이 대화에 남아 있습니다."
+      : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run. The app already sent it again and it ended the same way. Its effect could not be confirmed, so it is not sent again (so the same action does not run twice). Your request and its progress so far stay in this conversation.";
   }
   return ko ? "Agentlas 저장소가 다른 기록으로 잠겨 있어 이 턴을 끝까지 기록하지 못했습니다. 이미 실행됐을 수 있어 자동으로 다시 보내지 않았습니다."
     : "The Agentlas store was locked by another write, so this turn could not be fully recorded. It may already have run, so it was not sent again automatically.";

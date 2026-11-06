@@ -2124,8 +2124,24 @@ export function markAutomationRun(
 
     const executionConsumed = opts?.executionConsumed ?? true;
     const runCount = (row.run_count ?? 0) + (executionConsumed ? 1 : 0);
+    // A cron slot that fell due while THIS run was executing (after it started, up to the moment it settled) is not lost: the run took longer
+    // than the gap between slots. The slots missed that way are merged into one catch-up that starts as soon as this run is done (the due poll
+    // picks it up at its next tick). Slots missed while the app was off (before this run started) keep the old rule: coalesced, never released
+    // as a backlog. An interval schedule counts from the end of a run by definition and has no such slot.
+    let overlappedSlots = 0;
+    if (advance && spec && spec.kind === "cron") {
+      let cursor = at;
+      for (let guard = 0; guard < 500; guard += 1) {
+        const nextIso = nextRun(spec, cursor);
+        if (!nextIso) break;
+        const nextDate = new Date(nextIso);
+        if (nextDate.getTime() > settledAt.getTime()) break;
+        overlappedSlots += 1;
+        cursor = nextDate;
+      }
+    }
     // 전진하지 않으면 next_run_at은 그대로 둔다(이벤트=null 유지, 시계=다음 예약 슬롯 유지).
-    const computedNextRunAt = advance
+    let computedNextRunAt = advance
       ? computeNextRun(row.schedule, settledAt, { scheduleJson: row.schedule_json, timezone: tz })
       : row.next_run_at;
 
@@ -2142,6 +2158,13 @@ export function markAutomationRun(
       || opts?.suspendForReconciliation === true;
     const deferRetry = opts?.deferRetry !== false;
     const retryNeeded = (!executionConsumed || internalDiagnostic) && opts?.automaticRetry !== false;
+    // The catch-up for slots that fell due during this run: only for a run that finished its job (no retry is wanted), was not stopped by the
+    // owner (automaticRetry false) and is not the last occurrence. The catch-up is the one due slot, now; the natural slot after it follows.
+    // The catch-up happens once: a run that was itself started from a catch-up (its stored next_run_at is the settle time of the run before it, not
+    // a cron slot) settles back onto the regular slots, so a job longer than its gap does not run without a pause.
+    const startedFromCatchUp = !!row.next_run_at && (() => { const n = spec && spec.kind === "cron" ? nextRun(spec, new Date(Date.parse(row.next_run_at!) - 1000)) : null; return !n || Date.parse(n) !== Date.parse(row.next_run_at!); })();
+    const catchUpOverlap = overlappedSlots > 0 && !startedFromCatchUp && !retryNeeded && !pastEnd && !reachedMax && opts?.automaticRetry !== false && triggerType === "schedule";
+    if (catchUpOverlap) computedNextRunAt = settledAt.toISOString();
     const nextRunAt = !advance ? computedNextRunAt : retryNeeded && !pastEnd && triggerType === "schedule"
       ? !deferRetry
         ? computedNextRunAt

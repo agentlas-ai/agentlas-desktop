@@ -160,6 +160,17 @@ export class OneSupervisorWorkQueue {
       .run(now + Math.max(100, Math.floor(delayMs)), reason.slice(0, 240), now, lease.command_id, lease.owner_epoch, lease.generation);
     return changed.changes === 1 ? this.get(lease.command_id) : null;
   }
+  /** Claims of this identity that are waiting out a refusal (claimed, lease not yet due). */
+  waitingRefused(oneId: string): SupervisorWorkLease[] {
+    return this.db.prepare("SELECT * FROM one_supervisor_work_jobs WHERE phase='claimed' AND one_id=? AND lease_until>?").all(oneId, this.now()) as SupervisorWorkLease[];
+  }
+  /** A claim waiting out a refusal is made claimable now (a runtime signal or a sign-in). Fenced by owner epoch and generation. */
+  wakeRefused(lease: SupervisorWorkLease): boolean {
+    const now = this.now();
+    return this.db.prepare(`UPDATE one_supervisor_work_jobs SET lease_until=?,updated_at=?
+      WHERE command_id=? AND phase='claimed' AND lease_until>? AND owner_epoch IS ? AND generation=?`)
+      .run(now, now, lease.command_id, now, lease.owner_epoch, lease.generation).changes === 1;
+  }
   /** A different run owns a bounded uncertain replay. Exact old run/phase/epoch/generation fence every late starter. */
   retryUnconfirmed(lease: SupervisorWorkLease, nextRunId: string, delayMs: number): SupervisorWorkLease | null {
     if (!nextRunId || nextRunId === lease.run_id || !["starting","running","held"].includes(lease.phase)) return null;

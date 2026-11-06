@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { esc } from "../../kit";
 import { list, loose, num, optionalNum, optionalText, text, unit } from "../../fields";
-import { defineAsset, type AnyAsset } from "../contract";
+import { defineAsset, sampleDay, type AnyAsset } from "../contract";
 import { LABEL, MUTED, ROW, accent, cents, count, day, docCss, hue, initials, money, optList, plain } from "./_shared";
 
 /** Business pages: invoice, receipt, one-pager, executive brief, fact sheet and proposal summary. */
@@ -27,7 +27,7 @@ export const invoice = defineAsset({
   notes: "Give quantity and unit price per line; the page computes amounts, subtotal, tax (taxRate in percent) and total. adjustments: up to 2 extra lines such as shipping (+) or a discount (-). currency: usd, eur, gbp, krw ...",
   fields: { invoiceNo: text(24), status, issued: text(24), due: optionalText(24), from: party, to: party, items: list(lineItem, 1, 8), adjustments: optList(z.object({ label: text(24), amount: num }).strip(), 2), taxRate: optionalNum, currency: unit.default("usd"), note: optionalText(130), accent },
   sample: {
-    invoiceNo: "INV-2026-0187", status: "due", issued: "", due: "", from: { name: "Brightline Studio LLC", lines: ["418 Alder Street, Portland, OR 97205", "billing@brightline.example"] }, to: { name: "Calder & Finch", lines: ["Accounts Payable", "88 Mill Road, Providence, RI 02903"] },
+    invoiceNo: "INV-2026-0187", status: "due", issued: sampleDay(135), due: sampleDay(165), from: { name: "Brightline Studio LLC", lines: ["418 Alder Street, Portland, OR 97205", "billing@brightline.example"] }, to: { name: "Calder & Finch", lines: ["Accounts Payable", "88 Mill Road, Providence, RI 02903"] },
     items: [{ description: "Brand identity system", qty: 1, unitPrice: 6500 }, { description: "Website design, 12 pages", qty: 1, unitPrice: 9800 }, { description: "Copywriting (hours)", qty: 24, unitPrice: 95 }, { description: "Stock photography licences", qty: 6, unitPrice: 45 }, { description: "Project management (hours)", qty: 20, unitPrice: 80 }],
     adjustments: [{ label: "Early-signing discount", amount: -500 }], taxRate: 7.5, currency: "usd", note: "Payment by bank transfer within 30 days, quoting the invoice number. Thank you for your business.", accent: "blue",
   },
@@ -132,7 +132,7 @@ export const briefPage = defineAsset({
   notes: "bluf is the answer in at most 200 characters; 3-4 findings (claim + evidence); up to 3 risks with a level (low, medium, high); 2-3 next steps.",
   fields: { title: text(80), kicker: optionalText(28), date: optionalText(24), author: optionalText(40), bluf: text(200), findings: list(z.object({ claim: text(60), evidence: text(100) }).strip(), 3, 4), risks: optList(z.object({ risk: text(60), level }).strip(), 3), next: list(z.object({ step: text(70), owner: optionalText(20) }).strip(), 2, 3), accent },
   sample: {
-    title: "Should we move checkout to the new payment provider?", kicker: "Executive brief", date: "", author: "Strategy & Operations", bluf: "Yes, but in two phases. Moving 100% of checkout in Q1 would cut fees by 0.4 points and lift approvals, provided the provider's uptime is proven on 10% of traffic first.",
+    title: "Should we move checkout to the new payment provider?", kicker: "Executive brief", date: sampleDay(135), author: "Strategy & Operations", bluf: "Yes, but in two phases. Moving 100% of checkout in Q1 would cut fees by 0.4 points and lift approvals, provided the provider's uptime is proven on 10% of traffic first.",
     findings: [{ claim: "Fees fall by about $1.1M a year", evidence: "Blended rate drops from 2.9% to 2.5% on $275M of annual volume, per the provider's signed quote." }, { claim: "Card approvals rise 1.8 points", evidence: "Pilot on 40,000 orders in September: 93.1% approved versus 91.3% on the current provider." }, { claim: "Migration needs eight engineer-weeks", evidence: "Estimate from the platform team covers token migration, webhooks and refund flows." }, { claim: "Uptime history is short", evidence: "Only 14 months of public status data; two incidents above 30 minutes in that time." }],
     risks: [{ risk: "Outage during peak sales weeks", level: "high" }, { risk: "Saved-card tokens fail to migrate", level: "medium" }, { risk: "Contract lock-in of 36 months", level: "low" }],
     next: [{ step: "Approve a 10% traffic pilot from November 3", owner: "CFO" }, { step: "Negotiate a 99.95% uptime clause with credits", owner: "Legal" }, { step: "Report pilot results to the board on Dec 12", owner: "Strategy" }], accent: "blue",
@@ -182,7 +182,7 @@ export const proposalSummary = defineAsset({
   notes: "3-5 phases with a length in weeks (the bar is drawn to scale), 1-4 cost lines (the total is computed), and one ask.",
   fields: { title: text(70), client: optionalText(40), date: optionalText(24), problem: text(240), solution: text(240), phases: list(z.object({ name: text(22), weeks: num }).strip(), 3, 5), costs: list(z.object({ item: text(34), amount: num }).strip(), 1, 4), currency: unit.default("usd"), ask: text(150), accent },
   sample: {
-    title: "Rebuilding the customer help centre", client: "Prepared for Calder & Finch", date: "", problem: "Customers cannot find answers on their own: 63% of support tickets ask about topics the help centre already covers, and the search returns the right article first only one time in four.",
+    title: "Rebuilding the customer help centre", client: "Prepared for Calder & Finch", date: sampleDay(135), problem: "Customers cannot find answers on their own: 63% of support tickets ask about topics the help centre already covers, and the search returns the right article first only one time in four.",
     solution: "A new help centre with task-based navigation, rewritten top-100 articles and a search tuned on real queries, plus an in-product widget that suggests articles before a ticket is opened.",
     phases: [{ name: "Discovery", weeks: 2 }, { name: "Content", weeks: 5 }, { name: "Build", weeks: 4 }, { name: "Pilot", weeks: 2 }, { name: "Launch", weeks: 1 }], costs: [{ item: "Research and information design", amount: 12000 }, { item: "Content rewrite, 100 articles", amount: 26000 }, { item: "Build and search tuning", amount: 18500 }, { item: "Pilot and launch support", amount: 7500 }], currency: "usd",
     ask: "Approve the $64,000 budget and name a product owner by October 30 so discovery can start on November 3.", accent: "teal",

@@ -1,5 +1,6 @@
 import type { InvocationRunReceipt } from "../../shared/types";
-import { UNCONFIRMED_MAX_RESENDS, unconfirmedRunShouldBeSentAgain } from "./earlier-attempt";
+import { UNCONFIRMED_MAX_RESENDS, UNCONFIRMED_VERIFY_CONTINUATIONS, unconfirmedRunShouldBeSentAgain } from "./earlier-attempt";
+import { ownerSpokeAfter } from "./host-recovery";
 import { readRunTurnPlacement } from "./turn-placement";
 import { queueWillStartRunAgain } from "./queue-retry-fact";
 
@@ -43,10 +44,14 @@ export function forecastAppResend(db: Db, runId: string | undefined | null, fact
     }
     // Dispatched and not proven: the one resend of earlier-attempt.ts, for the classes of failure it names.
     if (!unconfirmedRunShouldBeSentAgain(receiptLike)) return "none";
-    const row = db.prepare("SELECT id, uncertain_resends, request_json FROM pending_chat_sends WHERE run_id = ? AND state = 'starting'")
-      .get(runId) as { id: string; uncertain_resends: number | null; request_json: string } | undefined;
+    const row = db.prepare("SELECT id, chat_id, uncertain_resends, resend_since, updated_at, request_json FROM pending_chat_sends WHERE run_id = ? AND state = 'starting'")
+      .get(runId) as { id: string; chat_id: string; uncertain_resends: number | null; resend_since: number | null; updated_at: number | null; request_json: string } | undefined;
     if (row) {
-      if ((row.uncertain_resends ?? 0) >= UNCONFIRMED_MAX_RESENDS) return "spent";
+      const resends = row.uncertain_resends ?? 0;
+      if (resends >= UNCONFIRMED_MAX_RESENDS + UNCONFIRMED_VERIFY_CONTINUATIONS) return "spent";
+      // The plain resend is spent: the verify-first send follows (pending-chat-sends.ts) unless the owner has written something newer.
+      if (resends >= UNCONFIRMED_MAX_RESENDS
+        && ownerSpokeAfter(db as unknown as Parameters<typeof ownerSpokeAfter>[0], row.chat_id, null, new Date(row.resend_since ?? row.updated_at ?? 0).toISOString())) return "spent";
       const request = JSON.parse(row.request_json) as { oneAttachmentRef?: unknown; oneTeamPreflightRef?: unknown };
       if (request.oneAttachmentRef || request.oneTeamPreflightRef) return "none";
       let custody = false;
@@ -76,7 +81,7 @@ function supervisorReplyForecast(db: Db, runId: string): ResendForecast | null {
     let payload: Record<string, unknown>;
     try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { return "none"; }
     if (Object.prototype.hasOwnProperty.call(payload, "ordinaryNative") || payload.boundGoalId) return "none";
-    if (Number(payload.unconfirmedResends ?? 0) >= UNCONFIRMED_MAX_RESENDS) return "spent";
+    if (Number(payload.unconfirmedResends ?? 0) >= UNCONFIRMED_MAX_RESENDS + UNCONFIRMED_VERIFY_CONTINUATIONS) return "spent";
     if (db.prepare("SELECT 1 FROM one_supervisor_requests WHERE one_id = ? AND kind = 'stop-reply' AND run_id = ? LIMIT 1").get(row.one_id, runId)) return "none";
     return "now";
   } catch { return null; }

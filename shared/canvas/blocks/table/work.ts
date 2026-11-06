@@ -1,13 +1,13 @@
 import { z } from "zod";
 import { esc } from "../../kit";
 import { list, loose, optionalNum, optionalText, text } from "../../fields";
-import { defineAsset, type AnyAsset } from "../contract";
+import { defineAsset, sampleDay, type AnyAsset } from "../contract";
 import { CHIP, RGB, cap, chip, clamp, css, fit, hash, hue, initials, longDay, shortDay, type Hue } from "./_shared";
 
 /** Tables of work in motion: a day's schedule, project status, the people on a team, and what changed in each release. */
 
 // ---- schedule_table ---------------------------------------------------------------------------------------------------------------------
-/** "09:30", "9:30 pm", "T14:00" or 9.5 as minutes after midnight; anything else stays unread and the block is refused. */
+/** "09:30", "9:30 pm", a YYYY-MM-DDTHH:MM time or 9.5 as minutes after midnight; anything else stays unread and the block is refused. */
 function readTime(v: unknown): unknown {
   if (typeof v === "number") return v >= 0 && v <= 24 ? Math.round(v * 60) : v;
   if (typeof v !== "string") return v;
@@ -111,18 +111,18 @@ export const statusTable = defineAsset({
   use: "Project or workstream status: a red, amber or green dot with a label, owner, due date and a progress bar per row, under a strip counting each status.",
   useKo: "프로젝트·업무 현황: 행마다 빨강·주황·초록 점과 상태, 담당자, 마감일, 진행 막대를 보이고 위에 상태별 개수를 요약합니다.",
   tags: ["status", "rag", "red amber green", "tracker", "progress", "projects", "owner", "due", "현황", "상태", "진행", "트래커", "담당자", "마감"],
-  notes: "status: green, amber, red or grey (on_track, at_risk, off_track, not_started are read too); label overrides the word shown. progress is 0-100; due is a date or short text. The count strip is computed.",
+  notes: "status: green, amber, red or grey (on_track, at_risk, off_track, not_started are read too); label overrides the word shown. progress is 0-100; due is a date (YYYY-MM-DD) or short text. The count strip is computed.",
   fields: { items: list(statusItem, 1, 12), caption: optionalText(140) },
   sample: {
     title: "Q4 launch: workstream status",
     items: [
-      { name: "Pricing and packaging", status: "green", owner: "Dana Kim", due: "", progress: 100 },
-      { name: "Onboarding flow redesign", status: "green", owner: "Marcus Lee", due: "", progress: 82 },
-      { name: "Billing migration", status: "amber", label: "At risk", owner: "Priya Nair", due: "", progress: 55 },
-      { name: "Partner integrations", status: "amber", owner: "Tomas Rivera", due: "", progress: 40 },
-      { name: "Security review", status: "red", label: "Blocked", owner: "Sofia Alvarez", due: "", progress: 30 },
-      { name: "Launch campaign", status: "green", owner: "Jin Park", due: "", progress: 64 },
-      { name: "Help center content", status: "grey", owner: "Ana Costa", due: "", progress: 0 },
+      { name: "Pricing and packaging", status: "green", owner: "Dana Kim", due: sampleDay(144), progress: 100 },
+      { name: "Onboarding flow redesign", status: "green", owner: "Marcus Lee", due: sampleDay(151), progress: 82 },
+      { name: "Billing migration", status: "amber", label: "At risk", owner: "Priya Nair", due: sampleDay(158), progress: 55 },
+      { name: "Partner integrations", status: "amber", owner: "Tomas Rivera", due: sampleDay(165), progress: 40 },
+      { name: "Security review", status: "red", label: "Blocked", owner: "Sofia Alvarez", due: sampleDay(154), progress: 30 },
+      { name: "Launch campaign", status: "green", owner: "Jin Park", due: sampleDay(172), progress: 64 },
+      { name: "Help center content", status: "grey", owner: "Ana Costa", due: sampleDay(179), progress: 0 },
     ],
   },
   render(b, { ko, T }) {
@@ -224,10 +224,10 @@ export const changelogTable = defineAsset({
   sample: {
     title: "What changed in Atlas",
     releases: [
-      { version: "v2.6.0", date: "", label: "Latest", changes: [{ type: "new", text: "Shared workspaces let a whole team edit one library" }, { type: "improved", text: "Search is about three times faster on large libraries" }, { type: "fixed", text: "Exports no longer drop the last row of a table" }] },
-      { version: "v2.5.2", date: "", changes: [{ type: "fixed", text: "Sync no longer stalls after the laptop wakes from sleep" }, { type: "fixed", text: "Opening an empty project could crash the app" }, { type: "improved", text: "Clearer message when a sign-in has expired" }] },
-      { version: "v2.5.0", date: "", changes: [{ type: "new", text: "Dark mode, following the system setting" }, { type: "new", text: "Export to CSV and Parquet" }, { type: "removed", text: "The legacy v1 importer; use the migration tool instead" }] },
-      { version: "v2.4.0", date: "", changes: [{ type: "improved", text: "Keyboard shortcuts are shown in every menu" }, { type: "fixed", text: "Wrong sort order for dates before 1970" }] },
+      { version: "v2.6.0", date: sampleDay(136), label: "Latest", changes: [{ type: "new", text: "Shared workspaces let a whole team edit one library" }, { type: "improved", text: "Search is about three times faster on large libraries" }, { type: "fixed", text: "Exports no longer drop the last row of a table" }] },
+      { version: "v2.5.2", date: sampleDay(123), changes: [{ type: "fixed", text: "Sync no longer stalls after the laptop wakes from sleep" }, { type: "fixed", text: "Opening an empty project could crash the app" }, { type: "improved", text: "Clearer message when a sign-in has expired" }] },
+      { version: "v2.5.0", date: sampleDay(109), changes: [{ type: "new", text: "Dark mode, following the system setting" }, { type: "new", text: "Export to CSV and Parquet" }, { type: "removed", text: "The legacy v1 importer; use the migration tool instead" }] },
+      { version: "v2.4.0", date: sampleDay(88), changes: [{ type: "improved", text: "Keyboard shortcuts are shown in every menu" }, { type: "fixed", text: "Wrong sort order for dates before 1970" }] },
     ],
   },
   render(b, { ko, T }) {

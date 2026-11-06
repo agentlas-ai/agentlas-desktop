@@ -3,7 +3,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { FinanceAsset, FinanceMonitor } from "../../shared/finance";
 import type { Automation, WorkflowGraph } from "../../shared/types";
-import type { FinanceScope } from "./store";
+import { lockFinanceDirectory, type FinanceScope } from "./store";
 import { composeDeclaredPrompt } from "../runtime/prompt-order";
 import { userDataPath } from "../runtime-paths";
 import { requireFinanceMonitoringAccess } from "./experience";
@@ -13,7 +13,6 @@ import { listInstalledAgentsReadOnly } from "../mcp/registry";
 import { createAutomation, getAutomation, updateAutomation, updateAutomationGraph, toggleAutomation } from "../store/automations";
 import { defaultTz, nextRun, parseLegacyToken } from "../store/schedule";
 
-const lockfile = require("proper-lockfile") as { lock(target: string, options: unknown): Promise<() => Promise<void>> };
 export const FINANCE_MONITOR_SCHEDULES = ["daily-09:00", "weekday-09:00", "hourly", "every-5m"] as const;
 
 /** The existing graph kernel owns leases, due occurrences, cancellation and run history. */
@@ -81,7 +80,20 @@ export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promis
   const spec = parseLegacyToken(schedule, timezone);
   if (!spec || !nextRun(spec)) throw new Error("finance_monitor_schedule_invalid");
   const directory = registry(input.scope);
-  const release = await lockfile.lock(directory, { realpath: false, stale: 60000, retries: { retries: 30, minTimeout: 20, maxTimeout: 250 } });
+  // Everything slow happens before the registry lock: runtime detection and the plan check. The lock then covers local reads and writes only.
+  let runtime: ReturnType<typeof workStartRuntimePin> | undefined;
+  if (!binding(fileFor(directory, input.monitor.id))) {
+    const runtimes = await detectRuntimes(); input.scope.assertCurrent();
+    // The owner's active runtime when it is usable; otherwise Agentlas serving on Light (a signed-in account, free included,
+    // runs on its weekly allowance and then credits). A monitor never needs a subscription CLI.
+    const active = runtimes.find(item => item.active && !item.signInRequired && item.credentialAccess?.status !== "unavailable");
+    const serving = runtimes.find(item => item.kind === "agentlas");
+    const chosen = active ?? (serving ? { ...serving, model: "agentlas-light" } : undefined);
+    if (chosen) runtime = workStartRuntimePin(chosen);
+  }
+  // Detection may outlive the first plan observation.
+  await requireFinanceMonitoringAccess(input.scope); input.scope.assertCurrent();
+  const release = await lockFinanceDirectory(directory, "long");
   let job: Automation | null = null;
   try {
     input.scope.assertCurrent();
@@ -94,21 +106,13 @@ export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promis
       job = updateAutomation(job.id, { name: input.monitor.name, scheduleHuman: schedule, timezone, promptTemplate: prompt,executionPermission:"write",toolMode:"auto" });
       job = updateAutomationGraph(job.id,financeMonitorGraph(input.monitor));
     } else {
-      const runtimes = await detectRuntimes(); input.scope.assertCurrent();
-      // The owner's active runtime when it is usable; otherwise Agentlas serving on Light (a signed-in account, free included,
-      // runs on its weekly allowance and then credits: owner). A monitor never needs a subscription CLI.
-      const active = runtimes.find(item => item.active && !item.signInRequired && item.credentialAccess?.status !== "unavailable");
-      const serving = runtimes.find(item => item.kind === "agentlas");
-      const runtime = active ?? (serving ? { ...serving, model: "agentlas-light" } : undefined);
       const agent = listInstalledAgentsReadOnly().find(item => item.slug === "agentlas-orchestrator");
       if (!runtime || !agent) throw new Error("finance_monitor_runtime_unavailable");
       job = createAutomation({ name: input.monitor.name, scheduleHuman: schedule, timezone, targetType: "agent", targetId: agent.id,
         promptTemplate: prompt, enabled: false, createdBy: "user", executionPermission: "write", toolMode: "auto", hubMode: "local-only",graphJson:financeMonitorGraph(input.monitor),
-        runtimeSelection: workStartRuntimePin(runtime) });
+        runtimeSelection: runtime });
     }
     input.scope.assertCurrent();
-    // Runtime detection and the scheduler lease may outlive the first plan observation.
-    await requireFinanceMonitoringAccess(input.scope); input.scope.assertCurrent();
     writeBinding(file, { automationId: job.id, scheduleHuman: schedule });
     job = toggleAutomation(job.id, true);
     input.scope.assertCurrent();
@@ -122,7 +126,7 @@ export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promis
 /** Pause has no stale-view/revision requirement and never trusts a renderer's automation ID. */
 export async function pauseFinanceMonitor(input: Pick<FinanceMonitorInput, "scope" | "monitor">): Promise<FinanceMonitor> {
   const directory = registry(input.scope);
-  const release = await lockfile.lock(directory, { realpath: false, stale: 60000, retries: { retries: 30, minTimeout: 20, maxTimeout: 250 } });
+  const release = await lockFinanceDirectory(directory, "long");
   try {
     input.scope.assertCurrent();
     const prior = binding(fileFor(directory, input.monitor.id));
@@ -135,7 +139,7 @@ export async function pauseFinanceMonitor(input: Pick<FinanceMonitorInput, "scop
 /** Compensation only: revoke this exact host-bound schedule even after its initiating account session changes. */
 export async function rollbackFinanceMonitor(input: Pick<FinanceMonitorInput, "scope" | "monitor">): Promise<void> {
   const directory = registry({ ...input.scope, assertCurrent() { /* Revocation retains the captured account partition. */ } });
-  const release = await lockfile.lock(directory, { realpath: false, stale: 60000, retries: { retries: 30, minTimeout: 20, maxTimeout: 250 } });
+  const release = await lockFinanceDirectory(directory, "long");
   try {
     const prior = binding(fileFor(directory, input.monitor.id));
     if (!prior || prior.automationId !== input.monitor.automationId) throw new Error("finance_monitor_rollback_binding_mismatch");

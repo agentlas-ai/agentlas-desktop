@@ -286,6 +286,7 @@ async function startBridgeInternal(
     consumePairingAssertion: (input) => accountPairing.consumePairingAssertion(input),
     desktopSessionActive: () => Boolean(getSessionCookieHeader()),
     desktopWorkspaceId: () => getAuthSession().workspaceId ?? null,
+    desktopUserId: () => getAuthenticatedSessionBinding()?.userId ?? null,
     ...(options.hostAuthority ? { desktopSessionActive:options.hostAuthority.sessionActive, desktopWorkspaceId:options.hostAuthority.workspaceId } : {}),
     validateAccountAuthority: async (input) => {
       // A credential bound to a different authority origin is a definitive
@@ -332,6 +333,7 @@ async function startBridgeInternal(
     return mobileDomainPorts.createAccountAdmission({
       actor: getAuthenticatedSessionBinding,
       device: deviceId => pairing.deviceAccountBinding(deviceId),
+      recordOwner: (deviceId, userId, accountSubject) => pairing.backfillOwnerUserId(deviceId, userId, accountSubject),
       proof: () => accountPairing.issueDesktopProof({ hostId: identity.hostId, pairingAttemptId: `pair_${randomBytes(24).toString("base64url")}` }),
     });
   });

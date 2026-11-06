@@ -78,8 +78,10 @@ const MAX_BACKOFF_MS = 5 * 60_000;
  */
 const NO_MAILBOX_POLL_MS = 6 * 60 * 60_000;
 /** A received message whose details could not be read is retried this many passes. */
-const PENDING_MAX_ATTEMPTS = 5;
-const PENDING_KEEP = 100;
+/** Only a safety backstop on the pending list: a mail pushed out of it is told to the owner (capPending), never lost silently. */
+const PENDING_KEEP = 1000;
+/** Tries after which a mail that keeps being refused before dispatch is told to the owner once, calmly. */
+const PENDING_WAITING_LINE_AT = 12;
 
 interface SyncState {
   version: 1;
@@ -100,8 +102,7 @@ interface SyncState {
    * Received messages whose inbound handling could not start because reading
    * them failed (network, 5xx). The cursor has already moved past them, so
    * without this list they would never get their run. Every received message is written here in the SAME write that moves
-   * the cursor, and again when its run start was refused as "not ready yet" (`since` = when it began waiting, bounded by
-   * TRANSIENT_SEND_DEADLINE_MS).
+   * the cursor, and again when its run start was refused before dispatch (`since` = when it began waiting; no count or age ends it).
    */
   pending?: Array<{ messageId: string; threadId: string | null; attempts: number; since?: string }>;
 }
@@ -542,6 +543,7 @@ const TEXT = {
       : "draft a reply to the new mail; save as draft only",
     autoTitle: (subject: string) => `메일: ${subject || "(제목 없음)"}`,
     gaveUp: { title: "메일에 답장을 만들지 못했어요", body: "받은 메일 1통을 자동으로 처리하지 못했어요. 메일함에서 직접 확인해 주세요." },
+    waiting: { title: "메일 답장을 준비하고 있어요", body: "받은 메일 1통은 저장되어 있고, 준비되는 대로 자동으로 시작합니다. 아직 아무것도 실행되지 않았어요." },
   },
   en: {
     one: (from: string, subject: string) => ({ title: `New mail · ${from}`, body: subject || "(no subject)" }),
@@ -553,6 +555,7 @@ const TEXT = {
       : "draft a reply to the new mail; save as draft only",
     autoTitle: (subject: string) => `Mail: ${subject || "(no subject)"}`,
     gaveUp: { title: "Couldn't prepare a reply", body: "A received email could not be handled automatically. Open your mailbox to answer it yourself." },
+    waiting: { title: "A reply is waiting to start", body: "A received email is saved and starts by itself when the app is ready. Nothing has run yet." },
   },
 } as const;
 
@@ -596,13 +599,13 @@ function notifyNewMail(received: Array<{ messageId: string; threadId: string | n
  * with nothing telling the owner. This says so once, with no mail content (the same notice for a company mailbox), and a click
  * opens the thread. Best effort, like the new-mail notice; it respects the owner's notification setting.
  */
-function notifyInboundGaveUp(item: { messageId: string; threadId: string | null }): void {
+function notifyInboundGaveUp(item: { messageId: string; threadId: string | null }, kind: "gaveUp" | "waiting" = "gaveUp"): void {
   try {
     const { BrowserWindow, Notification } = require("electron") as typeof import("electron");
     if (!Notification.isSupported()) return;
     const { oneDesktopNotificationAllowed } = require("../one/briefing") as typeof import("../one/briefing");
     if (!oneDesktopNotificationAllowed()) return;
-    const copy = text().gaveUp;
+    const copy = text()[kind];
     const notification = new Notification({ title: copy.title, body: copy.body, silent: true });
     notification.on("click", () => {
       const window = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
@@ -706,20 +709,29 @@ export function effectiveInboundMode(mode: AgentMailInboundMode, canSend: boolea
   return mode === "reply" && canSend !== true ? "draft" : mode;
 }
 
+/** The pending list is bounded only as a safety backstop; every mail pushed out of it is told to the owner, none disappears silently. */
+function capPending<T extends { messageId: string; threadId: string | null }>(list: T[]): T[] {
+  if (list.length <= PENDING_KEEP) return list;
+  const dropped = list.slice(0, list.length - PENDING_KEEP);
+  for (const item of dropped) notifyInboundGaveUp(item);
+  return list.slice(-PENDING_KEEP);
+}
+
 function rememberPending(item: { messageId: string; threadId: string | null }, code: string): void {
   const saved = loadState();
   const list = saved.pending ?? [];
   const prior = list.find((entry) => entry.messageId === item.messageId);
   const attempts = (prior?.attempts ?? 0) + 1;
   const rest = list.filter((entry) => entry.messageId !== item.messageId);
-  if (!isTransient(code) || attempts >= PENDING_MAX_ATTEMPTS) {
-    // Gone (deleted) or failing for good: stop trying, and say so once.
+  if (!isTransient(code)) {
+    // Gone (deleted) or failing for good: stop trying, and say so once. A read that fails for a reason that clears (network, timeout,
+    // a 5xx) is never given up by a count: the mail stays pending and the next pass reads it again.
     console.warn(`[agent-mail] inbound handling dropped after ${attempts} attempt(s): ${code}`);
     saved.pending = rest;
     // A mail the owner deleted meanwhile needs no answer; any other reason leaves a mail nobody will answer.
     if (!/not_found/.test(code)) notifyInboundGaveUp(item);
   } else {
-    saved.pending = [...rest, { messageId: item.messageId, threadId: item.threadId, attempts }].slice(-PENDING_KEEP);
+    saved.pending = capPending([...rest, { messageId: item.messageId, threadId: item.threadId, attempts }]);
   }
   saveState();
 }
@@ -729,7 +741,7 @@ function deferPending(item: { messageId: string; threadId: string | null }): voi
   const saved = loadState();
   const list = saved.pending ?? [];
   if (list.some((entry) => entry.messageId === item.messageId)) return;
-  saved.pending = [...list, { messageId: item.messageId, threadId: item.threadId, attempts: 0 }].slice(-PENDING_KEEP);
+  saved.pending = capPending([...list, { messageId: item.messageId, threadId: item.threadId, attempts: 0 }]);
   saveState();
 }
 
@@ -745,33 +757,28 @@ function queueReceivedPending(saved: SyncState, received: Array<{ messageId: str
     .filter((item, index, all) => all.findIndex((other) => other.messageId === item.messageId) === index)
     .filter((item) => !list.some((entry) => entry.messageId === item.messageId) && !saved.handled.some((entry) => entry.messageId === item.messageId))
     .map((item) => ({ messageId: item.messageId, threadId: item.threadId, attempts: 0, since }));
-  if (fresh.length) saved.pending = [...list, ...fresh].slice(-PENDING_KEEP);
+  if (fresh.length) saved.pending = capPending([...list, ...fresh]);
 }
 
 /**
- * The run start was refused with a typed "not ready yet" code (shared/transient-send-refusal.ts), which is thrown before
- * anything is dispatched: the mail is still unanswered and starting it later cannot double it. Take it back out of
- * "handled" and wait for a later pass without spending a read retry. Bounded by the same 2 h the owner's send queue
- * uses; past it the mail is recorded as handled with the refusal code as the reason.
+ * The run start was refused before anything was dispatched (a typed "not ready yet" code, shared/transient-send-refusal.ts, or the
+ * app's own state): the mail is still unanswered and starting it later cannot double it. Take it back out of "handled" and keep it
+ * pending for a later pass without spending a read retry. A received mail is never given up by a count or an age: the next pass
+ * (the server's own poll interval) starts it again, for as long as it takes. `attempts` only counts the tries, for the log.
+ * (A refusal only the owner can clear never reaches here: startRefusedBeforeDispatchWaits excludes it.)
  */
 function requeueRefusedInbound(item: { messageId: string; threadId: string | null }, code: string | undefined, since: string | undefined,
-  /** A refusal that is not on the "not ready yet" list (refusals().startRefusedBeforeDispatchWaits): the tries already spent on this mail;
-   * each wait spends one more of UNDISPATCHED_START_MAX_ATTEMPTS. (markHandled has already taken the mail out of `pending`, so the caller reads it before.) */
+  /** A refusal that is not on the "not ready yet" list (refusals().startRefusedBeforeDispatchWaits): the tries already spent on this mail.
+   * (markHandled has already taken the mail out of `pending`, so the caller reads it before.) */
   triesSpent?: number): void {
   const saved = loadState();
   saved.handled = saved.handled.filter((entry) => entry.messageId !== item.messageId);
   const now = Date.now();
-  const waitedMs = since ? now - Date.parse(since) : 0;
   const attempts = triesSpent === undefined ? 0 : triesSpent + 1;
   const rest = (saved.pending ?? []).filter((entry) => entry.messageId !== item.messageId);
-  if (waitedMs > refusals().TRANSIENT_SEND_DEADLINE_MS || (triesSpent !== undefined && attempts > refusals().UNDISPATCHED_START_MAX_ATTEMPTS)) {
-    console.warn(`[agent-mail] inbound run never started within the wait limit: ${code ?? "unknown"}`);
-    notifyInboundGaveUp(item);
-    saved.pending = rest;
-    saved.handled = [...saved.handled, { messageId: item.messageId, at: new Date(now).toISOString(), chatId: null, reason: code ?? "start_refused" }].slice(-HANDLED_KEEP);
-  } else {
-    saved.pending = [...rest, { messageId: item.messageId, threadId: item.threadId, attempts, since: since ?? new Date(now).toISOString() }].slice(-PENDING_KEEP);
-  }
+  saved.pending = capPending([...rest, { messageId: item.messageId, threadId: item.threadId, attempts, since: since ?? new Date(now).toISOString() }]);
+  // A refusal that does not clear is told to the owner once, calmly, at the old cap; the mail stays pending and keeps being tried.
+  if (triesSpent !== undefined && attempts === PENDING_WAITING_LINE_AT) notifyInboundGaveUp(item, "waiting");
   // Memory is already right; a write that fails here is repeated by the next pass's save.
   try { saveState(); } catch (error) { console.warn("[agent-mail] pending state not saved yet:", error instanceof Error ? error.message : error); }
 }
@@ -815,6 +822,9 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
     if (!scopeStillSelected(scope)) return;
     if (!message.ok) {
       rememberPending(item, message.code);
+      // A read that fails for a reason that clears (network, timeout, a 5xx) fails for the rest of the pass too: stop here, the others stay
+      // pending (they were written with the cursor) and the next pass reads them, instead of one failed read per pending mail on every pass.
+      if (isTransient(message.code)) break;
       continue;
     }
     // The mail stays pending until it ends up handled (markHandled moves it in one write) or needs no run at all.
@@ -840,6 +850,7 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
     if (!organizationPortReady(scope)) { deferPending(item); continue; }
     // Recorded BEFORE the run starts: a crash or restart can lose a run, never double it.
     markHandled(item.messageId, null);
+    let refusedBeforeDispatch = false;
     try {
       const chatId = await startInboundRun(mode, threadId, message.message, mailbox.id);
       if (!scopeStillSelected(scope)) return;
@@ -847,16 +858,19 @@ async function handleScopedInbound(received: Array<{ messageId: string; threadId
     } catch (error) {
       console.warn("[agent-mail] inbound run not started:", error instanceof Error ? error.message : error);
       if (scopeStillSelected(scope)) {
-        if (refusals().isTransientSendRefusal(error)) requeueRefusedInbound(item, refusals().sendRefusalCode(error), waitingSince);
+        if (refusals().isTransientSendRefusal(error)) { requeueRefusedInbound(item, refusals().sendRefusalCode(error), waitingSince); refusedBeforeDispatch = true; }
         // The start was refused before anything was dispatched for the app's own state (the composer's rule for every other surface):
-        // the mail waits for a later pass, bounded, instead of being given up as a mail nobody will answer.
-        else if (refusals().startRefusedBeforeDispatchWaits(error)) requeueRefusedInbound(item, refusals().sendRefusalCode(error), waitingSince, waitingEntry?.attempts ?? 0);
+        // the mail waits for a later pass, without a bound, instead of being given up as a mail nobody will answer.
+        else if (refusals().startRefusedBeforeDispatchWaits(error)) { requeueRefusedInbound(item, refusals().sendRefusalCode(error), waitingSince, waitingEntry?.attempts ?? 0); refusedBeforeDispatch = true; }
         // The company-work port was gone before the run was handed to it (nothing started): the same "not ready yet" as above.
-        else if (error instanceof Error && error.message === "organization_mail_work_binding_required") requeueRefusedInbound(item, error.message, waitingSince);
+        else if (error instanceof Error && error.message === "organization_mail_work_binding_required") { requeueRefusedInbound(item, error.message, waitingSince); refusedBeforeDispatch = true; }
         // Anything else leaves a mail that was recorded as handled and will never be answered.
         else notifyInboundGaveUp({ messageId: item.messageId, threadId });
       }
     }
+    // The start was refused before dispatch: the refusal is the app's state, not this mail's, so the rest of the pass would only be refused the
+    // same way (and each try starts a run attempt). The others stay in `pending` (written with the cursor) and the next pass tries them again.
+    if (refusedBeforeDispatch) break;
   }
 }
 

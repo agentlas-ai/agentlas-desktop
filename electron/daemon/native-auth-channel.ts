@@ -52,6 +52,13 @@ const NATIVE_START_REPLY_TIMEOUT_MS = NATIVE_SEMANTIC_PREPARATION_BUDGET_MS + NA
  * by an unanswered request (Main counts those slots until it answers, so a new callback could not be admitted).
  */
 const NATIVE_SILENT_PEER_TIMEOUTS = 3;
+/** Requests a client keeps on the wire at once, and the daemon runs at once per connection. Equal on purpose: a client that holds its own excess in a local queue never makes the daemon wait, so the reply timer (which starts when the frame is written) is never spent in a queue. */
+const NATIVE_WIRE_IN_FLIGHT_ORDINARY = 8;
+const NATIVE_WIRE_IN_FLIGHT_CANCEL = 2;
+/** Backstops, not limits: far above anything real (a phone opening Finance sends about four). Client: requests held back locally; reaching it refuses only the newest request with native_auth_channel_closed_or_busy, because a thousand waiting calls means a runaway loop and holding more would only grow memory. Daemon: requests waiting for a handler slot from a peer that ignores NATIVE_WIRE_IN_FLIGHT_*; reaching it answers the old native_auth_dispatch_denied for the newest.
+ */
+const NATIVE_CLIENT_QUEUE_BACKSTOP = 1024;
+const NATIVE_DAEMON_QUEUE_BACKSTOP = 64;
 const MAX_LATE_REPLIES = 256;
 /** Only invoke.nativeStart (whole start) and native.attach (adoptSession + supervisor.recover) wait long; every other request keeps 10 s. */
 export function nativeGuiReplyTimeoutMs(method: string): number { return method === "invoke.nativeStart" || method === "native.attach" ? NATIVE_START_REPLY_TIMEOUT_MS : 10000; }
@@ -153,13 +160,24 @@ export async function startNativeAuthChannel(options: { address: string; binding
   };
   const server = net.createServer(socket => {
     if (sockets.size >= 64) { diag("too_many_sockets"); socket.destroy(); return; } sockets.add(socket); socket.setTimeout(30000, () => { diag("preauth_idle_timeout"); socket.destroy(); });
-    let buffer = "", inFlight = 0, cancelInFlight = 0; const decoder = new TextDecoder("utf-8", { fatal: true }); const closed = new Set<() => void>();
+    let buffer = "", inFlight = 0, cancelInFlight = 0; const queuedRequests: Array<{ id: number; request: { method: string; params: unknown; sequence: number }; cancel: boolean }> = []; const decoder = new TextDecoder("utf-8", { fatal: true }); const closed = new Set<() => void>();
     let why = "";
     const destroyFor = (reason: string) => { if (!why) { why = reason; diag(reason); } socket.destroy(); };
     const send = (value: unknown) => { if (socket.destroyed) return false; const wire = nativeAuthCanonical(value) + "\n"; if (Buffer.byteLength(wire) - 1 > MAX_BYTES) { destroyFor("outbound_frame_too_large"); return false; } if (socket.writableLength + Buffer.byteLength(wire) > MAX_BYTES * 2) { destroyFor("outbound_backpressure"); return false; } socket.write(wire); return true; };
     const peer: ControlSocketPeer = { notify: (method, params) => { let frame: unknown; try { frame = auth.event(peer, method, params); } catch { return false; } try { return send({ event: frame }); } catch { destroyFor("event_write_failed"); return false; } }, onClose: listener => { if (socket.destroyed) { listener(); return () => {}; } closed.add(listener); return () => { closed.delete(listener); }; } };
     const reverse: Reverse = { send, close: () => destroyFor("callback_expired_limit"), pending: new Map() }; reversePeers.set(peer, reverse);
-    const retire = () => { auth.close(peer); reversePeers.delete(peer); for (const p of reverse.pending.values()) { clearTimeout(p.timer); p.reject(nativeAuthError("native_auth_channel_lost")); } reverse.pending.clear(); sockets.delete(socket); buffer = ""; for (const f of closed) { try { f(); } catch {} } closed.clear(); }; socket.once("close", retire); socket.once("end", () => { retire(); destroyFor("peer_end"); }); socket.on("error", (error: NodeJS.ErrnoException) => destroyFor(`socket_error:${String(error?.code ?? "unknown")}`));
+    const startRequest = (entry: { id: number; request: { method: string; params: unknown; sequence: number }; cancel: boolean }) => {
+      const { request, cancel } = entry;
+      cancel ? cancelInFlight++ : inFlight++;
+      const task = Promise.resolve().then(() => options.handle(request.method, request.params, peer)).then(result => { if (!socket.destroyed) send({ id: entry.id, result: auth.reply(peer, request.sequence, result ?? null) }); }).catch(e => { if (!socket.destroyed) send({ id: entry.id, result: auth.reply(peer, request.sequence, null, errorCode(e)) }); }).finally(() => { cancel ? cancelInFlight-- : inFlight--; tasks.delete(task); startQueued(); }); tasks.add(task);
+    };
+    const startQueued = () => {
+      for (let i = 0; i < queuedRequests.length && !socket.destroyed;) {
+        const next = queuedRequests[i];
+        if (next.cancel ? cancelInFlight < NATIVE_WIRE_IN_FLIGHT_CANCEL : inFlight < NATIVE_WIRE_IN_FLIGHT_ORDINARY) { queuedRequests.splice(i, 1); startRequest(next); } else i++;
+      }
+    };
+    const retire = () => { queuedRequests.length = 0; auth.close(peer); reversePeers.delete(peer); for (const p of reverse.pending.values()) { clearTimeout(p.timer); p.reject(nativeAuthError("native_auth_channel_lost")); } reverse.pending.clear(); sockets.delete(socket); buffer = ""; for (const f of closed) { try { f(); } catch {} } closed.clear(); }; socket.once("close", retire); socket.once("end", () => { retire(); destroyFor("peer_end"); }); socket.on("error", (error: NodeJS.ErrnoException) => destroyFor(`socket_error:${String(error?.code ?? "unknown")}`));
     socket.on("data", chunk => {
       try { buffer += decoder.decode(chunk, { stream: true }); } catch { destroyFor("frame_not_utf8"); return; }
       let newline: number;
@@ -179,9 +197,14 @@ export async function startNativeAuthChannel(options: { address: string; binding
         let request: ReturnType<typeof auth.authorize>;
         try { if (message.method !== "native.auth.request") throw nativeAuthError("native_auth_method_denied"); request = auth.authorize(peer, message.params); } catch (e) { diag(`request_rejected:${errorCode(e)}`); send({ id: message.id, error: errorCode(e) }); socket.end(); continue; }
         const cancel = request.method === "invoke.cancel";
-        if (!methods.has(request.method) || (cancel ? cancelInFlight >= 2 : inFlight >= 8)) { send({ id: message.id, result: auth.reply(peer, request.sequence, null, "native_auth_dispatch_denied") }); continue; }
-        cancel ? cancelInFlight++ : inFlight++;
-        const task = Promise.resolve().then(() => options.handle(request.method, request.params, peer)).then(result => { if (!socket.destroyed) send({ id: message.id, result: auth.reply(peer, request.sequence, result ?? null) }); }).catch(e => { if (!socket.destroyed) send({ id: message.id, result: auth.reply(peer, request.sequence, null, errorCode(e)) }); }).finally(() => { cancel ? cancelInFlight-- : inFlight--; tasks.delete(task); }); tasks.add(task);
+        if (!methods.has(request.method)) { send({ id: message.id, result: auth.reply(peer, request.sequence, null, "native_auth_dispatch_denied") }); continue; }
+        // Over the per-connection concurrency cap a request waits its turn instead of being refused; the cap itself (handlers running at once per peer) is unchanged.
+        // The queue is a backstop only: a current Main keeps at most NATIVE_WIRE_IN_FLIGHT_ORDINARY / _CANCEL on the wire, so it is never reached in normal use.
+        // A peer that ignores its own cap gets the old denial once the backstop is full, which bounds the memory a connection can hold.
+        const entry = { id: message.id as number, request, cancel };
+        if (cancel ? cancelInFlight < NATIVE_WIRE_IN_FLIGHT_CANCEL : inFlight < NATIVE_WIRE_IN_FLIGHT_ORDINARY) startRequest(entry);
+        else if (queuedRequests.length < NATIVE_DAEMON_QUEUE_BACKSTOP) queuedRequests.push(entry);
+        else send({ id: message.id, result: auth.reply(peer, request.sequence, null, "native_auth_dispatch_denied") });
       }
       if (Buffer.byteLength(buffer) > MAX_BYTES) destroyFor("frame_too_large_in");
     });
@@ -223,11 +246,62 @@ export async function startNativeAuthChannel(options: { address: string; binding
       } }; terminalPorts.set(port, { peer, identity, start, capability }); return Object.freeze(port);
     }, authenticatedPeerIdentity: auth.authenticatedPeerIdentity, get activePeerCount() { return sockets.size; }, close(): Promise<void> { return closing ??= (async () => { for (const s of sockets) s.destroy(); auth.shutdown(); await new Promise<void>(r => server.close(() => r())); if (identity) { try { const current = fs.lstatSync(options.address); if (current.dev === identity.dev && current.ino === identity.ino) fs.unlinkSync(options.address); } catch {} } if (privateDir) { try { fs.rmdirSync(privateDir); } catch {} } })(); }, async settleDispatched(): Promise<void> { await Promise.allSettled([...tasks]); } };
 }
+/** Where a value sits, with array positions collapsed so the set of paths stays small: `a.b[].c`. */
+const pathKey = (parent: string, key: string | number) => typeof key === "number" ? `${parent}[]` : parent ? `${parent}.${key}` : key;
+/** One warning per method and path for the life of the process; names only, never values. Bounded. */
+const warnedValuePaths = new Set<string>();
+function warnValueOnce(kind: "dropped" | "refused", method: string, valuePath: string): void {
+  const key = `${kind}|${method}|${valuePath}`;
+  if (warnedValuePaths.has(key) || warnedValuePaths.size >= 256) return;
+  warnedValuePaths.add(key);
+  console.warn(`[native-invocation] request value ${kind === "dropped" ? "undefined dropped" : "cannot be sent; request refused"} method=${method} path=${valuePath || "$"}`);
+}
+/** Caller values headed for the wire: a property whose value is undefined is absent (as in JSON); nothing else is changed. */
+function wireValue(value: unknown, onDropped?: (valuePath: string) => void): unknown {
+  let nodes = 0;
+  const walk = (v: unknown, depth: number, at: string): unknown => {
+    if (++nodes > 8192 || depth > 24) throw nativeAuthError("native_auth_value_limit");
+    if (v === null || typeof v !== "object") return v;
+    if (Array.isArray(v)) { const out = new Array(v.length); for (let i = 0; i < v.length; i++) if (Object.hasOwn(v, i)) out[i] = walk(v[i], depth + 1, onDropped ? pathKey(at, i) : ""); return out; }
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) return v;
+    const out = Object.create(null) as Record<string, unknown>;
+    for (const key of Object.keys(v)) { const item = (v as Record<string, unknown>)[key]; if (item !== undefined) out[key] = walk(item, depth + 1, onDropped ? pathKey(at, key) : ""); else onDropped?.(pathKey(at, key)); }
+    return out;
+  };
+  return walk(value, 0, "");
+}
+/** Path of the first part the wire cannot carry (undefined/hole in an array, NaN, Infinity, Date, Map, class instance...). Called only to name the part in a warning, after a request was refused for its value. */
+function unsendablePath(value: unknown): string {
+  let nodes = 0;
+  const walk = (v: unknown, depth: number, at: string): string | undefined => {
+    if (++nodes > 8192 || depth > 24) return at;
+    if (v === null || typeof v === "boolean" || typeof v === "string") return undefined;
+    if (typeof v === "number") return Number.isFinite(v) ? undefined : at;
+    if (Array.isArray(v)) { for (let i = 0; i < v.length; i++) { if (!Object.hasOwn(v, i)) return pathKey(at, i); const hit = walk(v[i], depth + 1, pathKey(at, i)); if (hit !== undefined) return hit; } return undefined; }
+    if (!v || typeof v !== "object") return at;
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) return at;
+    for (const key of Object.keys(v)) { const hit = walk((v as Record<string, unknown>)[key], depth + 1, pathKey(at, key)); if (hit !== undefined) return hit; }
+    return undefined;
+  };
+  return walk(value, 0, "") ?? "";
+}
+/** Raised before a sequence number is consumed or a byte is written: the request is refused, the channel is untouched. */
+const localRefusals = new WeakSet<object>();
+const LOCAL_VALUE_REFUSALS = new Set(["native_auth_value_invalid", "native_auth_value_limit", "native_auth_frame_limit"]);
+/** Bytes a request adds around its params on the wire, taken at their widest: the outer frame, the signed body fields, and the newline. Variable parts (request id, sequence, connection nonce, signature) are padded above their real size, so this never under-counts. */
+function requestEnvelopeBytes(method: string, scope = "", generation = "", serviceIdentity = "", bootId = ""): number {
+  const body = { scope, generation, serviceIdentity, bootId, connection: "c".repeat(128), sequence: Number.MAX_SAFE_INTEGER, domain: "agentlas.native.request.v1", method, params: null };
+  return Buffer.byteLength(nativeAuthCanonical({ id: Number.MAX_SAFE_INTEGER, method: "native.auth.request", params: { body, signature: "s".repeat(256) } })) + 1;
+}
 export async function connectNativeGuiChannel(options: { address: string; binding: NativeAuthBinding; credential: NativeCredential; bootId: string; onEvent?: (method: string, params: unknown) => void; onRequest?: (method: "native.checkpoint", params: unknown, identity: NativeAuthenticatedIdentity) => Promise<unknown> | unknown }) {
   const auth = createNativeGuiAuthenticator(options.binding, options.credential, options.bootId), socket = net.connect(options.address);
   let nativeChannel: object | undefined;
   let buffer = "", id = 0, done = false, ordinary = 0, cancel = 0, callbackCount = 0, terminalCallbackCount = 0, completionWrites = 0, ordinaryCompletionWrites = 0, terminalCompletionWrites = 0;
   const decoder = new TextDecoder("utf-8", { fatal: true }), closeListeners = new Set<() => void>();
+  // Requests held back because their lane is at its wire cap; started in order as replies free slots. Their reply timer has not started: it starts when the frame is written.
+  const waiters: Array<{ lane: "ordinary" | "cancel"; launch(): void; reject(e: unknown): void }> = [];
   const pending = new Map<number, { resolve(v: unknown): void; reject(e: unknown): void; timer: ReturnType<typeof setTimeout>; lane: "ordinary" | "cancel" }>();
   // Requests that timed out alone: their late signed reply is verified, then dropped (never "unknown id, close").
   const lateReplies = new Map<number, (result: unknown) => void>();
@@ -239,17 +313,30 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
   const close = () => {
     if (done) return;
     console.info(`[native-invocation] channel closed reason=${closeReason || "unspecified"} pending=${pending.size} silentTimeouts=${silentTimeouts}`);
-    done = true; auth.close(); socket.destroy(); buffer = ""; completions.length = 0; lateReplies.clear();
-    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(nativeAuthError("native_auth_channel_lost")); } pending.clear(); ordinary = cancel = 0;
+    done = true; auth.close(); socket.destroy(); buffer = ""; completions.length = 0; outbound.length = 0; lateReplies.clear();
+    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(nativeAuthError("native_auth_channel_lost")); } pending.clear(); ordinary = cancel = 0; for (const w of waiters.splice(0)) w.reject(nativeAuthError("native_auth_channel_lost"));
     for (const listener of closeListeners) { try { listener(); } catch {} } closeListeners.clear();
   };
   const closeFor = (reason: string) => { if (!closeReason) closeReason = reason; close(); };
+  // Frames wait here when the socket buffer is already full, and leave in the order they entered. The peer accepts request N only right after N-1 (native-session-auth authorize: sequence === last + 1), and a request's sequence is taken in call() in the same synchronous step that appends its frame here, so queue order is sequence order. Signing before queuing (not at write time) keeps that: nothing is signed out of order, and the queue is a pure byte buffer.
+  // The queue is bounded by what already bounds the callers: NATIVE_WIRE_IN_FLIGHT_ORDINARY ordinary and _CANCEL cancel requests on the wire (the rest wait in `waiters`, whose own backstop is NATIVE_CLIENT_QUEUE_BACKSTOP), each frame at most MAX_BYTES; replies to the peer's checkpoints are one per peer request. A lost connection ends every waiting request through close() (native_auth_channel_lost).
+  const outbound: Array<{ wire: string; callback?: () => void }> = [];
+  let awaitingDrain = false;
+  const flushOutbound = () => {
+    if (awaitingDrain) return;
+    while (outbound.length && !done && !socket.destroyed && socket.writable) {
+      const next = outbound[0];
+      if (socket.writableLength + Buffer.byteLength(next.wire) > MAX_BYTES * 2) { awaitingDrain = true; socket.once("drain", () => { awaitingDrain = false; flushOutbound(); }); return; } // an empty buffer always fits one frame
+      outbound.shift(); socket.write(next.wire, next.callback);
+    }
+  };
   const write = (value: unknown, callback?: () => void) => {
     if (done || socket.destroyed || !socket.writable) throw nativeAuthError("native_auth_channel_lost");
     const wire = nativeAuthCanonical(value) + "\n";
-    if (Buffer.byteLength(wire) - 1 > MAX_BYTES || socket.writableLength + Buffer.byteLength(wire) > MAX_BYTES * 2) throw nativeAuthError("native_auth_frame_limit");
-    // false means queued under backpressure, never evidence that the frame was not sent.
-    socket.write(wire, callback);
+    if (Buffer.byteLength(wire) - 1 > MAX_BYTES) throw nativeAuthError("native_auth_frame_limit");
+    // A full socket buffer is backpressure, not a failure: wait for drain instead of refusing or closing.
+    // socket.write returning false likewise means queued, never evidence that the frame was not sent.
+    outbound.push({ wire, callback }); flushOutbound();
   };
   const flushCompletions = () => {
     while (!done && completionWrites < 2 && completions.length) {
@@ -291,28 +378,46 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
         continue;
       }
       silentTimeouts = 0;
-      pending.delete(requestId); clearTimeout(waiting.timer); waiting.lane === "cancel" ? cancel-- : ordinary--;
+      pending.delete(requestId); clearTimeout(waiting.timer); release(waiting.lane);
       if (exactKeys(message, ["id", "result"])) waiting.resolve(message.result);
       else { waiting.reject(nativeAuthError("native_auth_unsigned_error")); closeFor("unsigned_error"); return; }
     }
     if (Buffer.byteLength(buffer) > MAX_BYTES) closeFor("frame_too_large");
   });
+  /** A wire slot of this lane is free again: count it down and start the longest-waiting request that now fits. */
+  const release = (lane: "ordinary" | "cancel") => {
+    lane === "cancel" ? cancel-- : ordinary--;
+    for (let i = 0; i < waiters.length && !done;) {
+      const w = waiters[i];
+      if (w.lane === "cancel" ? cancel < NATIVE_WIRE_IN_FLIGHT_CANCEL : ordinary < NATIVE_WIRE_IN_FLIGHT_ORDINARY) { waiters.splice(i, 1); w.launch(); } else i++;
+    }
+  };
   const call = (method: string, prepare: () => unknown, lane: "ordinary" | "cancel" = "ordinary", timeoutMs = 10000, verifyLate?: (result: unknown) => void): Promise<unknown> => {
     // Reserve before signing. Known local capacity refusal must not consume a signed sequence.
-    if (done || socket.destroyed || !socket.writable || (lane === "cancel" ? cancel >= 2 : ordinary >= 32) || id >= Number.MAX_SAFE_INTEGER - 1) return Promise.reject(nativeAuthError("native_auth_channel_closed_or_busy"));
-    const requestId = ++id; lane === "cancel" ? cancel++ : ordinary++;
+    if (done || socket.destroyed || !socket.writable || id >= Number.MAX_SAFE_INTEGER - 1) return Promise.reject(nativeAuthError("native_auth_channel_closed_or_busy"));
     return new Promise((resolve, reject) => {
+     const launch = () => {
+      const requestId = ++id; lane === "cancel" ? cancel++ : ordinary++;
       // The handshake (hello/proof) has no late path: without it there is no channel, so its timeout closes.
       const timer = setTimeout(() => {
         if (!verifyLate) { closeFor("handshake_timeout"); return; }
         if (pending.get(requestId)?.timer !== timer) return;
-        pending.delete(requestId); lane === "cancel" ? cancel-- : ordinary--;
+        pending.delete(requestId); release(lane);
         lateReplies.set(requestId, verifyLate); if (lateReplies.size > MAX_LATE_REPLIES) lateReplies.delete(lateReplies.keys().next().value!);
         reject(nativeAuthError("native_auth_reply_timeout"));
         if (++silentTimeouts >= NATIVE_SILENT_PEER_TIMEOUTS) closeFor("silent_peer_timeouts");
       }, timeoutMs); pending.set(requestId, { resolve, reject, timer, lane });
       try { write({ id: requestId, method, params: prepare() }); }
-      catch (error) { pending.delete(requestId); clearTimeout(timer); lane === "cancel" ? cancel-- : ordinary--; reject(error); closeFor("request_write_failed"); } // Preserve the original diagnostic; signing/write uncertainty never rolls back or retries.
+      catch (error) {
+        pending.delete(requestId); clearTimeout(timer); release(lane); reject(error);
+        if (typeof error === "object" && error !== null && localRefusals.has(error)) return; // this request alone is refused; nothing was signed or written
+        closeFor("request_write_failed");
+      } // Preserve the original diagnostic; signing/write uncertainty never rolls back or retries.
+     };
+      // At the wire cap the request waits (FIFO) instead of being refused; its timer starts in launch(), when the frame is written.
+      if ((lane === "cancel" ? cancel < NATIVE_WIRE_IN_FLIGHT_CANCEL : ordinary < NATIVE_WIRE_IN_FLIGHT_ORDINARY) && !waiters.some(w => w.lane === lane)) launch();
+      else if (waiters.length < NATIVE_CLIENT_QUEUE_BACKSTOP) waiters.push({ lane, launch, reject });
+      else reject(nativeAuthError("native_auth_channel_closed_or_busy"));
     });
   };
   try { const challenge = await call("native.auth.hello", () => auth.hello); auth.accept(await call("native.auth.proof", () => auth.proof(challenge))); } catch (error) { closeFor("handshake_failed"); throw error; }
@@ -320,7 +425,18 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
     /** Native-only; the integration must still validate captured admission/capsule authority. */
     async dispatch(method: string, params: unknown): Promise<unknown> {
       if (!methods.has(method)) throw nativeAuthError("native_auth_method_denied"); let sequence = 0;
-      const result = await call("native.auth.request", () => { const frame = auth.request(method, params); sequence = frame.sequence; return frame.envelope; }, method === "invoke.cancel" ? "cancel" : "ordinary",
+      const wireParams = wireValue(params, valuePath => warnValueOnce("dropped", method, valuePath));
+      // Refused before call(): no sequence number, no pending entry, no byte on the wire; the channel is untouched.
+      try {
+        // A body just under the frame limit grows past it once the signed envelope is added; that used to be found inside write(), after a sequence number was taken, and closed the channel.
+        if (Buffer.byteLength(nativeAuthCanonical(wireParams)) + requestEnvelopeBytes(method, options.binding.scope, options.credential.generation, options.binding.serviceIdentity, options.bootId) > MAX_BYTES) { warnValueOnce("refused", method, "(frame size)"); throw nativeAuthError("native_auth_frame_limit"); }
+      } catch (error) { if (typeof error === "object" && error !== null && LOCAL_VALUE_REFUSALS.has((error as { code?: string }).code ?? "")) warnValueOnce("refused", method, unsendablePath(wireParams)); throw error; }
+      const result = await call("native.auth.request", () => {
+        let frame: ReturnType<typeof auth.request>;
+        // auth.request validates the whole body before it takes a sequence number, so a value refusal here consumed nothing.
+        try { frame = auth.request(method, wireParams); } catch (error) { if (typeof error === "object" && error !== null && LOCAL_VALUE_REFUSALS.has((error as { code?: string }).code ?? "")) { localRefusals.add(error); warnValueOnce("refused", method, unsendablePath(wireParams)); } throw error; }
+        sequence = frame.sequence; return frame.envelope;
+      }, method === "invoke.cancel" ? "cancel" : "ordinary",
         nativeGuiReplyTimeoutMs(method), late => { try { auth.reply(late, sequence); } catch (error) { if (!auth.consumeReplyOperationError(error, sequence)) throw error; } });
       try { return auth.reply(result, sequence); } catch (error) { if (!auth.consumeReplyOperationError(error, sequence)) closeFor("reply_invalid"); throw error; }
     },

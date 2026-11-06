@@ -6,6 +6,7 @@
  *                                chat.attachment.imagePreview  maxEdge: 64..2048
  *   remote-build-attachments-v1  build.start / build.answer  fileGroupId: uuid (a finished `build` upload of the same phone)
  *   remote-build-options-v1      build.start  mode: "single" | "team" | "package"
+ *   science-video-large-v1       science.video.has / list  maxBytes: 1..192 MiB (default 64 MiB when absent)
  *
  * The keys are validated here and taken off the request, so every existing exact-key validator and handler keeps reading
  * the request it always read. No electron import: the bridge server, the authority and the gates load this.

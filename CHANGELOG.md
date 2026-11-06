@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.129 — 2026-11-06
+
+- Phone Finance works again when the account service is slow or down: a phone is admitted by the owner of its pairing instead of a network proof on every request, the background channel no longer closes for every request because of one bad value or a busy moment, Finance reads never wait on a lock and a write holds one only for the write, a search or add that the price source cannot answer for a moment waits and goes through, turning monitoring on cannot hang, and a monitor that was killed mid-run no longer shows "already running".
+- Messages are not given up: a message the app could not start yet is retried on a growing interval and woken by signals, never dropped by a clock; a held message no longer promises to start when it cannot; team limits, overlapping schedules (caught up once, right after the running one ends), resends whose outcome is unknown and Finance blips are handled by the app instead of being handed to the owner; when reviewing a delegated result fails three times the owner gets its last output, marked and quoted.
+- Recovery: a turn stopped by an outside cause continues when that cause clears, a context or budget limit is not waited on and no longer shows as "App problem", One's automatic recovery tries again when the situation changes and has a ceiling that only a code defect can reach, and what the app learned about one CLI version is no longer applied to another executable.
+- Goals: a Goal wait the app can resolve no longer leaves the Goal blocked with nothing next, and an old idle stop-card hold is released only for Goals touched in the last week.
+- Phone and bridge: a Science stop whose answer was lost can be sent again, a terminal shell that restarts keeps the phone's control, a phone that resends the same attachment chunk continues the upload, automation, build status, accepted results and team pools answer the phone with what it can use, a file with a byte-order mark previews, the phone can publish to the Hub with source consent, and Science videos up to 192 MiB reach a phone that asks for them.
+- Finance: a transient price failure shows the last saved quote with its time and a failed batch is not reported as no evidence, a failed read tells the model when to retry and what else to use, and the dashboard keeps the sections that finished when one is late.
+- Cards and browser: a card made of assets alone is drawn without a source, a diagram edge takes its colour from its tone instead of the words of its label, pictures exported from a card are removed with their chat (at most 40 per chat), and after the owner passes a human check in the browser the same chat continues by itself.
+- The newest supervisor notice of a delegated task is kept so the same hand-off is not raised again.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.128 — 2026-11-06
 
 - Messages that must not be lost wait for the room instead of being given up by count or clock: an owner message, a supervisor dispatch, a parked relay, teammate and child-session reports and a host recovery all wait for the chat to free, a graph step waiting for a busy room is never failed by a clock, and only the owner's stop ends the wait. A resend whose effect is unknown stays capped.

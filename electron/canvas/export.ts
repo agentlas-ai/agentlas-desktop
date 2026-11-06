@@ -3,13 +3,12 @@ import { assetByType, canvasExportHtml, isBaseCanvasBlock, type CanvasAssetBlock
 import '../../shared/canvas/blocks/registry'; // every asset block is known before a card is drawn
 import type { HarnessCallContext } from '../harness/capability-ports';
 import { writeCanvasExportFile } from './export-file';
-import { readRetainedCard, type RetainedCard } from './retained-card';
 import { renderHtmlToPngInChromiumHelper } from '../science-host/chromium-print-client';
 
 /**
  * ui.canvas.image: a card the conversation showed, saved as a PNG picture the owner keeps (the whole card, or one block of it).
  * A deck is not made here: the model designs its own decks with document.deck.build (the office plugin), and a picture saved here is one it can place
- * on a slide with addImage({ path }). The card is read back from the host's own record (retained-card.ts), never taken from the model, so the picture is
+ * on a slide with addImage({ path }). The card is read back from the host's own record (finance/canvas-retained-card.ts), never taken from the model, so the picture is
  * what the owner saw. It is drawn by the owned Chromium helper process (science-host/chromium-print-client.ts), written under the generated-assets root the
  * conversation's outputs already read (export-file.ts) and handed to the run as an output (`produced`); nothing is stored in a database. A failure never
  * leaves a half file and never ends the answer: every refusal says what to do next. No electron import (the daemon loads the harness).
@@ -26,6 +25,8 @@ export const canvasImageInputJsonSchema = { type: 'object', additionalProperties
   width: { type: 'integer', minimum: 320, maximum: 1600, description: 'The picture\'s width in CSS pixels (default fits the block).' },
 } };
 
+/** A card the conversation showed, read back from the host's own record (the reader is finance/canvas-retained-card.ts, handed in as `deps.readCard`). */
+export type RetainedCard = { ok: true; instanceId: string; turnId: string; view: CanvasView } | { ok: false; reason: string; next: string };
 type Outcome = { status: 'ok'; data: unknown; produced?: readonly string[] } | { status: 'refused' | 'unavailable'; reason: string; next?: string; data?: unknown };
 type Block = CanvasBlock | CanvasAssetBlock;
 type Png = { ok: boolean; bytes?: Buffer; width?: number; height?: number; reason?: string };
@@ -36,7 +37,8 @@ export interface CanvasImageDeps {
   renderPng(html: string, options: { width: number; scale: 1 | 2; signal?: AbortSignal; timeoutMs: number }): Promise<Png>;
   writeFile(chatId: string, stem: string, extension: 'png', bytes: Buffer): string;
 }
-const REAL: CanvasImageDeps = { readCard: readRetainedCard, renderPng: (html, o) => renderHtmlToPngInChromiumHelper(html, o), writeFile: writeCanvasExportFile };
+/** The real deps, given the reader of the host's record of a shown card. */
+export const canvasImageDeps = (readCard: CanvasImageDeps['readCard']): CanvasImageDeps => ({ readCard, renderPng: (html, o) => renderHtmlToPngInChromiumHelper(html, o), writeFile: writeCanvasExportFile });
 
 /** The helper's wait for one picture: under the gateway's 30 s reply wait, so a stuck draw is reported as unavailable, not as a lost call. */
 export const IMAGE_RENDER_TIMEOUT_MS = 25_000;
@@ -47,7 +49,7 @@ const alone = (view: CanvasView, block: Block): CanvasView => ({ ...view, chips:
 /** A block drawn on its own: a slide at its 16:9 width, a thumbnail narrow, everything else at the card's. */
 const widthFor = (block: Block, asked?: number): number => asked ?? (isBaseCanvasBlock(block) ? 960 : assetByType(block.type)?.frame === '16:9' ? 1280 : assetByType(block.type)?.frame === 'thumb' ? 640 : 960);
 
-export async function callCanvasImage(raw: Record<string, unknown>, ctx: HarnessCallContext, deps: CanvasImageDeps = REAL): Promise<Outcome> {
+export async function callCanvasImage(raw: Record<string, unknown>, ctx: HarnessCallContext, deps: CanvasImageDeps): Promise<Outcome> {
   const parsed = CanvasImageInputSchema.safeParse(raw);
   if (!parsed.success) return refused('canvas_image_arguments_invalid', 'instanceId, block and width are all optional: send none for the newest card as one picture.', { issues: parsed.error.issues.slice(0, 4).map(issue => ({ path: issue.path.join('.'), message: issue.message })) });
   const { instanceId, block: blockIndex, width: askedWidth } = parsed.data;

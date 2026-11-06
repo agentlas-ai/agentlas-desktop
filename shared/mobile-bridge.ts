@@ -476,6 +476,13 @@ export function validateMobileScienceChatParams(method: MobileScienceChatMethod,
   return params.locale === undefined || params.locale === "ko" || params.locale === "en" ? null : "science_chat_locale_invalid";
 }
 
+/**
+ * Write methods whose end state is the same however often they are asked (the owner's authority answers a repeat with the
+ * settled state). They keep the authority path of a write but need no ledger entry, so a resend after a lost answer always
+ * reaches the authority instead of waiting on an unsettled key.
+ */
+export const MOBILE_BRIDGE_SELF_IDEMPOTENT_WRITE_METHODS: ReadonlySet<string> = new Set(["science.chat.cancel"]);
+
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "notifications.register", "notifications.unregister",
@@ -3450,6 +3457,11 @@ function validateVisualInputAction(value: unknown): string | null {
   }
 }
 
+/** Optional ceiling a phone sends to say it can take Science videos up to that size (default 64 MiB when absent). */
+function scienceVideoMaxBytesValid(value: unknown): boolean {
+  return value === undefined || Number.isSafeInteger(value) && Number(value) >= 1 && Number(value) <= 192 * 1024 * 1024;
+}
+
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {
   if (method === "notifications.register" || method === "notifications.unregister") return validateMobilePushParams(method, params);
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
@@ -3740,7 +3752,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "chat.attachments.finish":
       return hasOnlyKeys(params,["uploadId"]) ? requiredString(params,"uploadId",36) : "attachment_finish_fields_invalid";
     case "science.video.has":
-      return hasOnlyKeys(params, ["projectId", "conversationId", "messageIds"])
+      return hasOnlyKeys(params, ["projectId", "conversationId", "messageIds", "maxBytes"]) && scienceVideoMaxBytesValid(params.maxBytes)
         && typeof params.projectId === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(params.projectId)
         && typeof params.conversationId === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(params.conversationId)
         && Array.isArray(params.messageIds) && params.messageIds.length <= 200
@@ -3748,11 +3760,12 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         && new Set(params.messageIds).size === params.messageIds.length ? null : "science_video_scope_invalid";
     case "science.video.list":
     case "science.video.open": {
-      const fields = method === "science.video.list" ? ["projectId", "conversationId", "messageId", "cursor"] : ["projectId", "conversationId", "messageId", "runId", "outputId", "transferId"];
+      const fields = method === "science.video.list" ? ["projectId", "conversationId", "messageId", "cursor", "maxBytes"] : ["projectId", "conversationId", "messageId", "runId", "outputId", "transferId"];
       const isUuid = (value: unknown): boolean => typeof value === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
       if (!hasOnlyKeys(params, fields) || !isUuid(params.projectId) || !isUuid(params.conversationId) || !isUuid(params.messageId)) return "science_video_scope_invalid";
       if (method === "science.video.open") return isUuid(params.runId) && isUuid(params.outputId)
         && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId) ? null : "science_video_output_invalid";
+      if (!scienceVideoMaxBytesValid(params.maxBytes)) return "science_video_scope_invalid";
       return params.cursor === undefined || isRecord(params.cursor) && hasOnlyKeys(params.cursor, ["runId", "outputId"])
         && isUuid(params.cursor.runId) && isUuid(params.cursor.outputId) ? null : "science_video_cursor_invalid";
     }
@@ -3762,7 +3775,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? null : "science_video_transfer_invalid";
     case "science.video.chunk":
       return hasOnlyKeys(params, ["transferId", "offset"]) && typeof params.transferId === "string" && /^[0-9a-f]{64}$/.test(params.transferId)
-        && Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 && Number(params.offset) < 64 * 1024 * 1024
+        && Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 && Number(params.offset) < 192 * 1024 * 1024
         && Number(params.offset) % (1024 * 1024) === 0 ? null : "science_video_range_invalid";
     case "one.video.open":
       return hasOnlyKeys(params, ["taskId", "taskVersion", "chatId", "runId", "manifestId", "artifactRef", "transferId"])
@@ -4040,7 +4053,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             requiredString(params, "requestId", 160),
             params.answer === null
               ? null
-              : requiredString(params, "answer", 4_000),
+              : requiredText(params, "answer", 4_000),
           )
         : "runtime.submitUserInput accepts only requestId and answer";
     case "automations.get":
@@ -4192,13 +4205,14 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           )
         : "agents.cloudUploadSave accepts only agentLocalId, idempotencyKey, and confirmOverwrite";
     case "agents.cloudPublishHub":
-      return hasOnlyKeys(params, ["agentLocalId", "idempotencyKey", "confirmOverwrite"])
+      return hasOnlyKeys(params, ["agentLocalId", "idempotencyKey", "confirmOverwrite", "publicSourceConsent"])
         ? firstError(
             requiredString(params, "agentLocalId"),
             requiredString(params, "idempotencyKey", 160),
             optionalBoolean(params, "confirmOverwrite"),
+            optionalBoolean(params, "publicSourceConsent"),
           )
-        : "agents.cloudPublishHub accepts only agentLocalId, idempotencyKey, and confirmOverwrite";
+        : "agents.cloudPublishHub accepts only agentLocalId, idempotencyKey, confirmOverwrite, and publicSourceConsent";
     case "cloud.setHubPrices": {
       // Parse an installed client's legacy frame so Main can return the
       // explicit retirement refusal. No price shape is part of the new API.

@@ -109,8 +109,8 @@ export type DaemonScienceCommand = (
   | { op: "composer.steering"; input: Scope & { requestId?: string } }
   | { op: "composer.steeringCapability"; input: Scope }
   | { op: "composer.attach" | "questions.list" | "messages.list"; input: Scope }
-  | { op: "video.has"; input: Scope & { messageIds: string[] } }
-  | { op: "video.list"; input: ScienceVideoScope & { cursor?: { runId: string; outputId: string } } }
+  | { op: "video.has"; input: Scope & { messageIds: string[]; maxBytes?: number } }
+  | { op: "video.list"; input: ScienceVideoScope & { cursor?: { runId: string; outputId: string }; maxBytes?: number } }
   | { op: "video.open"; input: ScienceVideoScope & { runId: string; outputId: string; transferId: string; principal: ScienceVideoPrincipal } }
   | { op: "video.prepare" | "video.close"; input: { transferId: string; principal: ScienceVideoPrincipal } }
   | { op: "video.chunk"; input: { transferId: string; offset: number; principal: ScienceVideoPrincipal } }
@@ -961,8 +961,8 @@ export function createDaemonScienceService(options: {
       case "video.prepare":
       case "video.chunk": {
         const videos = scienceVideos ??= new ScienceVideoTransfers(store as unknown as ConstructorParameters<typeof ScienceVideoTransfers>[0], assertExecution, scienceVideoCancelFence);
-        if (command.op === "video.has") return { messageIds: videos.hasVideos(command.input.projectId, command.input.conversationId, command.input.messageIds) };
-        if (command.op === "video.list") return videos.list(command.input, command.input.cursor);
+        if (command.op === "video.has") return { messageIds: videos.hasVideos(command.input.projectId, command.input.conversationId, command.input.messageIds, command.input.maxBytes) };
+        if (command.op === "video.list") return videos.list(command.input, command.input.cursor, command.input.maxBytes);
         if (command.op === "video.open") return videos.open(command.input.principal, command.input, command.input.runId, command.input.outputId, command.input.transferId);
         if (command.op === "video.prepare") return videos.prepare(command.input.principal, command.input.transferId);
         if (command.op === "video.chunk") return videos.read(command.input.principal, command.input.transferId, command.input.offset);

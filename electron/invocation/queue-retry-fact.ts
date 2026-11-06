@@ -2,6 +2,7 @@ import type { InvocationRunReceipt } from "../../shared/types";
 import { undispatchedInternalFailure } from "../../shared/run-failure-cause";
 import { isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
 import { UNDISPATCHED_START_MAX_ATTEMPTS, isHostNotReadyRunFailureCode, isOwnerFixableRunFailureCode, isTransientRunFailureCode } from "../../shared/transient-send-refusal";
+import { hostNotReadyRunCause } from "../mcp/config-build-retry";
 import { hostRecoveryRequested } from "./host-recovery";
 import { readRunTurnPlacement, type RunTurnPlacement } from "./turn-placement";
 
@@ -51,8 +52,9 @@ export function queueWillStartRunAgain(
     const code = receipt.errorCode ?? null;
     // The owner's folder is gone: nothing the queue does changes that, so it starts nothing again.
     if (isOwnerFixableRunFailureCode(code)) return false;
-    // The app's own host was not ready: the queue gives that cause the attempt cap, then holds the message (pending-chat-sends.ts).
-    if (isHostNotReadyRunFailureCode(code) && row.attempts + 1 >= UNDISPATCHED_START_MAX_ATTEMPTS) return false;
+    // The app's own host was not ready: the queue keeps the message with no cap when the run's own mcp_config_failure event names a cause
+    // that clears by itself, and gives any other cause the bounded tries, then holds it for host-recovery (pending-chat-sends.ts).
+    if (isHostNotReadyRunFailureCode(code) && row.attempts + 1 >= UNDISPATCHED_START_MAX_ATTEMPTS && !hostNotReadyRunCause(db as never, receipt.runId, code)) return false;
     if (isTransientRunFailureCode(code)) return true;
     if (row.attempts + 1 < UNDISPATCHED_START_MAX_ATTEMPTS && queuedSendInternalFailure(receipt)) return true;
     // The legacy start-again is not given to an input the queue keeps in custody (its one-use refs have their own re-reservation).

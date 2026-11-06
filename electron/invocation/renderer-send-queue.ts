@@ -10,7 +10,7 @@ import { getInvocationAdmission, getPendingInvocationAdmissionForChat } from "..
 import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
 import { releaseGoneTerminalOwners } from "../store/terminal-owner-liveness";
 import { userDataDir } from "../runtime-paths";
-import { hostRecoveryRequested } from "./host-recovery";
+import { hostRecoveryRequested, ownerSpokeAfter } from "./host-recovery";
 import { withPreparedUserRow } from "../store/prepared-user-rows";
 import { pickLocale } from "../runtime/status-i18n";
 import { invocationService, type InvocationSettledEnvelope } from "./service";
@@ -177,11 +177,18 @@ export function undispatchedStartWaits(cause: unknown, runId: string | null | un
   try { return getInvocationAdmission(runId)?.status === "rejected"; } catch { return false; }
 }
 
-/** The line for a message the host holds until its chat is free or ready: no code, nothing ran, nothing to resend. */
+/** The line for a message that stays queued and starts when its chat is free or ready: no code, nothing ran. */
 export function queuedSendHeldNotice(locale: "ko" | "en"): string {
   return locale === "ko"
     ? "받았습니다. 이 방이 비거나 준비되면 시작합니다. 아직 아무것도 실행되지 않았습니다."
     : "Received. It starts when this chat is free or ready; nothing has run yet.";
+}
+
+/** The line for a message the queue stopped retrying (state held): it is saved in the chat and did not start. It promises no start. */
+export function queuedSendNotStartedNotice(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "메시지는 저장됐지만 시작되지 않았습니다. 아무것도 실행되지 않았습니다."
+    : "Your message is saved but has not started. Nothing ran.";
 }
 
 /**
@@ -348,6 +355,9 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       try { return unconfirmedResendIsUnbounded(getInvocationRunReceipt(runId)); } catch { return false; }
     },
     ownerStoppedSince: (chatId, sinceMs) => ownerStoppedChatSince(getDb(), chatId, sinceMs),
+    // The verify-first send after the plain resend is spent: only while the owner has written nothing newer in the chat (the fact host recovery
+    // reads, host-recovery.ts ownerSpokeAfter: a newer owner message, one waiting in the queue, or a Stop). An unreadable ledger says "they spoke".
+    continueUnconfirmedAfterCap: (chatId, sinceMs) => !ownerSpokeAfter(getDb(), chatId, null, new Date(sinceMs).toISOString()),
     failureCode: (runId) => getInvocationRunReceipt(runId)?.errorCode ?? null,
     // The owner's Stop, a direction steered over the run, a Goal they paused or deleted: that run's message is never started again.
     endedByOwner: (runId) => {
@@ -375,9 +385,10 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       // one that hit a refusal the owner must fix gets one neutral line.
       if (reason === "closed") return;
       if (reason === "held") {
-        // The start was refused before dispatch on every bounded retry. Held, not failed: said once, without the code.
+        // The start was refused before dispatch on every bounded retry. Held, not failed: said once, without the code. The queue does
+        // not start a held row again, so the line states the fact and does not say it will start.
         try {
-          appendChatMessage(chatId, "assistant", queuedSendHeldNotice(pickLocale(request)),
+          appendChatMessage(chatId, "assistant", queuedSendNotStartedNotice(pickLocale(request)),
             { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(null, sendId), status: "needs-owner" } });
         } catch { /* the saved message and the log remain */ }
         return;
@@ -561,6 +572,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       req = options.sanitizeRequest ? options.sanitizeRequest(req) : { ...req };
       // Only this queue marks a second send (earlier-attempt.ts); a request coming in from a window never carries the marker.
       delete (req as { earlierAttemptUncertain?: unknown }).earlierAttemptUncertain;
+      delete (req as { earlierAttemptVerify?: unknown }).earlierAttemptVerify;
       delete (req as { hostRecovery?: unknown }).hostRecovery;
       if (rawSubmission !== undefined) req.preflightSubmissionId = rawSubmission;
       const previous = options.custody?.existing(req);

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { canvasDay, esc } from "../../kit";
 import { date, list, num, optionalNum, optionalText, text } from "../../fields";
-import { defineAsset, type AnyAsset } from "../contract";
+import { defineAsset, sampleDay, type AnyAsset } from "../contract";
 import { BLUE, GREEN, GREY, ORANGE, cap, cmp, css, frame, p } from "./_cartesian";
 
 const DAY = 864e5, ms = (iso: string) => Date.parse(`${iso}T00:00:00Z`), iso = (t: number) => new Date(t).toISOString().slice(0, 10);
@@ -29,7 +29,7 @@ export const calendarHeatmap = defineAsset({
   tags: ["calendar", "heatmap", "contribution", "daily", "activity", "streak", "캘린더", "히트맵", "일별", "활동량"],
   notes: "start is the first day. days is a list of values day by day from start, or of {date, value} for a sparse list (missing days count as 0); up to 400 entries. weeks (8-26) is optional: left out, the grid runs to the last day. valueLabel names the thing counted (orders, commits).",
   fields: { start: date, days: list(z.union([z.object({ date, value: num }).strip(), num]), 1, 400), weeks: optionalNum, valueLabel: optionalText(20), caption: optionalText(120) },
-  sample: { title: "Orders per day", start: "", days: SAMPLE_DAYS, valueLabel: "orders", caption: "Weekends run at about a quarter of weekday volume, and the trend is rising." },
+  sample: { title: "Orders per day", start: sampleDay(21), days: SAMPLE_DAYS, valueLabel: "orders", caption: "Weekends run at about a quarter of weekday volume, and the trend is rising." },
   render(b, { ko, T }) {
     const items = b.days as (number | { date: string; value: number })[], start = ms(b.start), dow = new Date(start).getUTCDay(), g0 = start - dow * DAY, vals = new Map<number, number>();
     items.forEach((it, i) => { if (typeof it === "number") vals.set(dow + i, it); else { const off = Math.round((ms(it.date) - g0) / DAY); if (off >= dow) vals.set(off, it.value); } });
@@ -70,13 +70,13 @@ export const ganttChart = defineAsset({
   notes: "tasks 2-14 (label, start, end inclusive, optional group and progress 0-100), grouped by first appearance; up to 6 milestones (label, date); today is a date. The axis fits the earliest start to the latest end.",
   fields: { tasks: list(z.object({ label: text(32), start: date, end: date, group: optionalText(24), progress: optionalNum }).strip(), 2, 14), milestones: z.preprocess(v => (v === null ? undefined : v), list(z.object({ label: text(28), date }).strip(), 1, 6).optional()), today: z.preprocess(v => (v === null || v === "" ? undefined : v), date.optional()), caption: optionalText(120) },
   sample: {
-    title: "Mobile launch plan", today: "",
+    title: "Mobile launch plan", today: sampleDay(168),
     tasks: [
-      { label: "User research", start: "", end: "", group: "Discovery", progress: 100 }, { label: "Scope and specification", start: "", end: "", group: "Discovery", progress: 100 },
-      { label: "Backend API", start: "", end: "", group: "Build", progress: 55 }, { label: "Mobile app", start: "", end: "", group: "Build", progress: 35 }, { label: "Admin console", start: "", end: "", group: "Build", progress: 10 },
-      { label: "QA and security review", start: "", end: "", group: "Launch" }, { label: "Beta rollout", start: "", end: "", group: "Launch" },
+      { label: "User research", start: sampleDay(126), end: sampleDay(144), group: "Discovery", progress: 100 }, { label: "Scope and specification", start: sampleDay(140), end: sampleDay(158), group: "Discovery", progress: 100 },
+      { label: "Backend API", start: sampleDay(154), end: sampleDay(186), group: "Build", progress: 55 }, { label: "Mobile app", start: sampleDay(161), end: sampleDay(200), group: "Build", progress: 35 }, { label: "Admin console", start: sampleDay(168), end: sampleDay(193), group: "Build", progress: 10 },
+      { label: "QA and security review", start: sampleDay(189), end: sampleDay(204), group: "Launch" }, { label: "Beta rollout", start: sampleDay(196), end: sampleDay(221), group: "Launch" },
     ],
-    milestones: [{ label: "Design freeze", date: "" }, { label: "Beta opens", date: "" }, { label: "General availability", date: "" }],
+    milestones: [{ label: "Design freeze", date: sampleDay(158) }, { label: "Beta opens", date: sampleDay(196) }, { label: "General availability", date: sampleDay(225) }],
     caption: "Build is the critical path; beta opens on December 14.",
   },
   render(b, { ko, T }) {

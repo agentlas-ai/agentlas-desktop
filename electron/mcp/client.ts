@@ -72,7 +72,7 @@ import { createToolObservationNovelty } from "./tool-observation-novelty";
 import { bindInvocationAgentContext, conversationSharesSession } from "../runtime/agent-context-admission";
 import { deriveSessionChannel } from "../runtime/session-scope";
 import { nativeBrowserGrantFailureDegrades } from "./native-browser-grant-degrade";
-import { hostRecoveryOf } from "../invocation/host-recovery";
+import { hostRecoveryOf, noteRuntimeWaitFacts, recordHarnessDefect } from "../invocation/host-recovery";
 import { mayRunWithoutToolTable } from "./config-build-degrade";
 import { invokeWithUnsettledContinuation, unsettledContinuationCarriesRequest, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
 import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
@@ -152,7 +152,7 @@ import { desktopStoreTransaction } from "../store/change-bus";
 import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
 import { carriedFollowupMessageIds } from "../invocation/carried-owner-followups";
 import { runtimeCostClass } from "../runtime/model-pricing";
-import { EARLIER_ATTEMPT_LINE, hasEarlierAttempt } from "../invocation/earlier-attempt";
+import { EARLIER_ATTEMPT_LINE, EARLIER_ATTEMPT_VERIFY_LINE, hasEarlierAttempt, hasEarlierAttemptVerify } from "../invocation/earlier-attempt";
 import { isOneQuietReply } from "../../shared/one-supervisor";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { stripAgentControlMarkers } from "../../shared/agent-control-markers";
@@ -354,8 +354,8 @@ import {
 } from "../runtime/runner";
 import { markRefusedBeforeDispatch, outwardFailureCode, refusalCode, unsettledTurnCauseFailure, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
 import {
-  createToolOutcomeTally, decideTurnSettlement, EMPTY_AFTER_UNUSABLE_TOOLS_CODE, endedWithoutAnswerAfterUnusableTools,
-  innermostTypedCode, isTypedCode, STORE_BUSY_CODE,
+  createToolOutcomeTally, decideTurnSettlement, EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_REPLY_MAX_RETRIES, endedWithoutAnswerAfterUnusableTools,
+  innermostTypedCode, isTypedCode, PREPARATION_MAX_RETRIES, RATE_LIMIT_MAX_RETRIES, STORE_BUSY_CODE, STORE_BUSY_MAX_RETRIES,
 } from "../../shared/turn-settlement";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
@@ -6145,7 +6145,8 @@ async function runMcpInvocationInContext(
   if (approvedWorkAttachmentContext) { turnContextParts.push(approvedWorkAttachmentContext); declareLastTurnContext("attachments.work", "turn-context", ["attachments"]); }
   // The send queue's second send of an owner message whose first run was lost without a cause (invocation/earlier-attempt.ts): one line, so the
   // model checks what already happened before it acts. Only the queue sets the marker; the renderer's own requests never carry it.
-  if (hasEarlierAttempt(req)) { turnContextParts.push(EARLIER_ATTEMPT_LINE); declareLastTurnContext("attempt.earlier", "turn-context", ["owner-input"]); }
+  // After a second unknown outcome the same slot carries the verify-first line instead (the continuation that replaces handing the check to the owner).
+  if (hasEarlierAttempt(req)) { turnContextParts.push(hasEarlierAttemptVerify(req) ? EARLIER_ATTEMPT_VERIFY_LINE : EARLIER_ATTEMPT_LINE); declareLastTurnContext("attempt.earlier", "turn-context", ["owner-input"]); }
   if (autoRoute) {
     const routePreamble = autoRouteSystemPreamble(
       autoRoute,
@@ -7209,6 +7210,8 @@ async function runMcpInvocationInContext(
     const attemptedRuntimeKeys = new Set<string>();
     /** Why each tried runtime stopped (its failure kind), so the closing sentence can say it for every one of them. */
     const attemptedRuntimeCauses = new Map<string, RunnerFailure["kind"]>();
+    /** The time each tried runtime said it works again (ms), when it said one: what a kept request waits for (host-recovery.ts noteRuntimeWaitFacts). */
+    const attemptedRuntimeResets = new Map<string, number | null>();
     const attemptedRuntimeReceipts = new Map<string, {
       kind: RuntimeStatus["kind"];
       backend: RuntimeStatus["backend"];
@@ -7380,6 +7383,10 @@ async function runMcpInvocationInContext(
         // to the owner right after this returns) already names the one thing to do. No second, generic recovery line.
         if (failure.providerCode === RUNTIME_CREDENTIAL_UNAVAILABLE_CODE) return result;
         terminalNoticeEmitted = true;
+        // What each tried runtime said (its cause and the time it stated), so the host keeps the request and continues it when the cause
+        // clears instead of handing it back to the owner (invocation/host-recovery.ts decideOwnerFailure).
+        if (req.runId) noteRuntimeWaitFacts(req.runId, [...attemptedRuntimeReceipts.entries()].map(([key, receipt]) => ({
+          runtime: receipt.kind, kind: attemptedRuntimeCauses.get(key) ?? failure.kind, until: attemptedRuntimeResets.get(key) ?? null })));
         const elapsedMs = Math.max(0, recoveryElapsedMs());
         const details = JSON.stringify({
           schema: "agentlas.runtime-recovery-terminal/v1",
@@ -7409,8 +7416,8 @@ async function runMcpInvocationInContext(
           ? (originalFailure ?? failure).runtime
           : null;
         if (signedOutRuntime) {
-          const koAuth = `${runtimeDisplayName(signedOutRuntime)} 로그인이 만료됐거나 되어 있지 않습니다. 아래 로그인 버튼을 누르면 로그인 창이 열리고, 끝나면 같은 요청을 다시 보내면 됩니다.`;
-          const enAuth = `${runtimeDisplayName(signedOutRuntime)} is not signed in, or its session expired. Use the sign-in button below, then send the same request again.`;
+          const koAuth = `${runtimeDisplayName(signedOutRuntime)} 로그인이 만료됐거나 되어 있지 않습니다. 아래 로그인 버튼을 누르면 로그인 창이 열립니다.`;
+          const enAuth = `${runtimeDisplayName(signedOutRuntime)} is not signed in, or its session expired. Use the sign-in button below to open the sign-in window.`;
           sink({
             kind: "notice",
             model: failure.runtime,
@@ -7446,11 +7453,11 @@ async function runMcpInvocationInContext(
           const cause = (key: string): RunnerFailure["kind"] => attemptedRuntimeCauses.get(key) ?? failure.kind;
           const listKo = triedRuntimes.map(([key, receipt]) => `${runtimeDisplayName(receipt.kind)}(${causeKo[cause(key)]})`).join(", ");
           const listEn = triedRuntimes.map(([key, receipt]) => `${runtimeDisplayName(receipt.kind)} (${causeEn[cause(key)]})`).join(", ");
-          koMessage = `사용할 수 있는 실행 환경 ${triedRuntimes.length}개를 모두 써 봤지만 답을 받지 못했습니다: ${listKo}. 요청은 저장돼 있으니 원인을 해결한 뒤 다시 보내 주세요. 자세한 원인은 자세히에서 볼 수 있어요.`;
-          enMessage = `All ${triedRuntimes.length} available runtimes were tried and none answered: ${listEn}. Your request is saved: send it again once the cause is fixed. The details hold each cause.`;
+          koMessage = `사용할 수 있는 실행 환경 ${triedRuntimes.length}개를 모두 써 봤지만 답을 받지 못했습니다: ${listKo}. 자세한 원인은 자세히에서 볼 수 있어요.`;
+          enMessage = `All ${triedRuntimes.length} available runtimes were tried and none answered: ${listEn}. The details hold each cause.`;
         } else {
-          koMessage = `${stoppedName} ${ownMachine ? "모델이" : "쪽 문제로"} ${attemptCount}번 시도했지만 답을 받지 못했습니다. 요청은 저장돼 있으니 잠시 뒤 다시 보내 주세요. 자세한 원인은 자세히에서 볼 수 있어요.`;
-          enMessage = `${stoppedName} did not answer after ${attemptCount} attempt${attemptCount === 1 ? "" : "s"}${ownMachine ? "" : " (a provider-side problem)"}. Your request is saved: send it again in a moment. The details hold the cause.`;
+          koMessage = `${stoppedName} ${ownMachine ? "모델이" : "쪽 문제로"} ${attemptCount}번 시도했지만 답을 받지 못했습니다. 자세한 원인은 자세히에서 볼 수 있어요.`;
+          enMessage = `${stoppedName} did not answer after ${attemptCount} attempt${attemptCount === 1 ? "" : "s"}${ownMachine ? "" : " (a provider-side problem)"}. The details hold the cause.`;
         }
         sink({
           kind: "notice",
@@ -7517,9 +7524,26 @@ async function runMcpInvocationInContext(
         throwIfInvocationAborted(signal, locale);
         return true;
       };
+      // Backstop for a defect in the loop's own counters; a normal turn never reaches it. Each runtime is tried once
+      // (attemptedRuntimeKeys) with at most the same-runtime retries the settlement allows, and the store-lock and empty-reply retries
+      // are spent once per call, so the most any correct path runs is this many attempts.
+      const recoveryAttemptCeiling = (runtimes.length + 1) * (1 + RATE_LIMIT_MAX_RETRIES + PREPARATION_MAX_RETRIES)
+        + STORE_BUSY_MAX_RETRIES + EMPTY_REPLY_MAX_RETRIES + 2;
+      let lastFailedResult: Awaited<ReturnType<Runner>> | null = null;
       for (;;) {
         if (signal?.aborted) throw new Error(tStatus(locale, "aborted"));
         attemptCount += 1;
+        if (attemptCount > recoveryAttemptCeiling) {
+          // A loop that does not end by itself is the app's defect, not the owner's to fix: the typed row stays in the ledger and the
+          // turn ends with the same line as an exhausted pool.
+          if (req.runId) {
+            recordHarnessDefect({ runId: req.runId, chatId: chat.id, code: "runtime_recovery_attempt_ceiling", reason: "recovery_loop_ceiling", plan: "surface",
+              terminalKind: lastFailedResult?.failure?.kind ?? "unknown", delivery: lastFailedResult?.turnDelivery ?? "unknown", hostRecovery: false,
+              detail: `attempts=${attemptCount - 1} ceiling=${recoveryAttemptCeiling} runtimes=${attemptedRuntimeKeys.size}` });
+          }
+          return emitTerminalRecoveryFailure(lastFailedResult ?? { text: "", failure: runnerFailureFromError(new Error("runtime_recovery_attempt_ceiling"), active.kind) },
+            "candidate-exhausted");
+        }
         const selectedRuntime = active;
         const selectedRuntimeKey = runtimeAttemptKey(selectedRuntime);
         attemptedRuntimeKeys.add(selectedRuntimeKey);
@@ -7702,7 +7726,7 @@ async function runMcpInvocationInContext(
         // A pinned Goal continuation cannot retry inside this invocation, but
         // its next settled checkpoint still needs the typed quota signal to
         // choose another connected provider before dispatch.
-        if (result.failure) noteRuntimeFailure(active, result.failure);
+        if (result.failure) { noteRuntimeFailure(active, result.failure); lastFailedResult = result; }
         if (result.failure && executionContext?.graphWorkerAttempt) {
           graphDirectFailureError = new InvocationRunnerFailureError(result.failure, false, result.turnDelivery);
           noteGraphWorkerReturnedFailure(executionContext.graphWorkerAttempt,
@@ -7716,6 +7740,7 @@ async function runMcpInvocationInContext(
         if (recoveryStartedAt == null) recoveryStartedAt = Date.now();
         originalFailure = originalFailure ?? failed;
         attemptedRuntimeCauses.set(selectedRuntimeKey, failed.kind);
+        attemptedRuntimeResets.set(selectedRuntimeKey, parseRetryHint(failed.retryAfterHint, Date.now()));
         /*
          * The one settlement decision (shared/turn-settlement.ts) chooses between a bounded same-runtime retry (request
          * throttling that provably did no work), the role pool's next candidate, and surfacing this failure as is. It

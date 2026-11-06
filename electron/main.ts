@@ -5461,6 +5461,10 @@ app.whenReady().then(async () => {
     console.error("[invocation] queued steer recovery failed", error);
   }
   if (!developmentEffectsSuppressed()) {
+    // A page check the owner passed while the app was closed or before the chat could take the continuation: judged once per start.
+    void import("./browser/page-release-resume").then((m) => m.pageReleaseResume().sweep())
+      .then((armed) => { if (armed > 0) console.info("[browser] page-check continuations armed", { armed }); })
+      .catch((error) => console.warn("[browser] page-check continuation sweep failed", error));
     try {
       // Install durable retry ownership before optional classification or observation.
       const { sweepBlockedGoals, BLOCKED_GOAL_SWEEP_INTERVAL_MS } = await import("./long-run/blocked-goal-sweep");
@@ -5561,8 +5565,11 @@ app.whenReady().then(async () => {
   // A sign-in made outside Agentlas (terminal, the vendor's app) re-reads that provider's usage within 30 s instead of
   // whenever a usage screen is next opened (owner 2026-10-16), and screens holding the old figures re-read too.
   void import("./usage")
-    .then(({ startUsageAccountWatch }) => startUsageAccountWatch(() => {
+    .then(({ startUsageAccountWatch }) => startUsageAccountWatch((providerId) => {
       clearDetectCache();
+      // The account changed after a finished sign-in (the sign-in window or a terminal `login`): the old "signed out" fact is out of date
+      // and a request kept for that sign-in continues (runtime/runtime-signals.ts).
+      void import("./runtime/runtime-cooldown").then(({ forgetRuntimeSignIn }) => forgetRuntimeSignIn({ kind: providerId })).catch(() => undefined);
       emitDesktopStoreChange({ entity: "runtime" });
     }))
     .catch((error) => console.error("[usage] account watch failed to start", error));

@@ -10,14 +10,29 @@ import { isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
  * (ipc.ts rendererInvocationRequest strips it), and it is declared here, not on the shared request type, so the app-control
  * catalog does not offer it to anyone.
  */
-export type EarlierAttemptRequest = McpInvocationRequest & { earlierAttemptUncertain?: true };
+export type EarlierAttemptRequest = McpInvocationRequest & { earlierAttemptUncertain?: true; earlierAttemptVerify?: true };
 
 /** The one line the model reads (client.ts declares it as the turn-context slot `attempt.earlier`). */
 export const EARLIER_ATTEMPT_LINE =
   "earlier attempt: this same message was started before and its outcome is unknown; read the conversation and the results so far first, then do only what remains and repeat nothing already done";
 
-export function withEarlierAttempt<T extends McpInvocationRequest>(request: T): T & { earlierAttemptUncertain: true } {
-  return { ...request, earlierAttemptUncertain: true };
+/**
+ * The line for the send that follows a second unknown outcome (the continuation that replaces handing the check to the owner): the same
+ * message was started twice and neither outcome is known. It is its own sentence, not the shared UNCERTAIN_EFFECT_POLICY (the Goal resume and
+ * the AGI unblocker keep that one): in a real-model A/B (claude sonnet and codex exec, n up to 8 per arm) the shared text made codex
+ * hand the check back to the owner in about 7 of 8 runs when a post's delivery was unknown and its record hidden, and this sentence did not
+ * (0 of 8) with no duplicate effect either way, because it says to skip what cannot be verified and say so in the answer instead of asking.
+ */
+export const EARLIER_ATTEMPT_VERIFY_LINE =
+  "earlier attempts: this same message was started twice and neither outcome is known. Check what already exists first and use a result that is there; redo only what is cheap to redo. Do not repeat a send, post or payment unless you can see it did not happen: if you cannot tell, skip it, finish the rest, and say so in your answer instead of asking.";
+
+export function withEarlierAttempt<T extends McpInvocationRequest>(request: T, verify = false): T & { earlierAttemptUncertain: true; earlierAttemptVerify?: true } {
+  return { ...request, earlierAttemptUncertain: true, ...(verify ? { earlierAttemptVerify: true as const } : {}) };
+}
+
+/** Whether the earlier-attempt line this request carries is the verify-first one (a second unknown outcome). */
+export function hasEarlierAttemptVerify(request: McpInvocationRequest | null | undefined): boolean {
+  return hasEarlierAttempt(request) && (request as EarlierAttemptRequest).earlierAttemptVerify === true;
 }
 
 export function hasEarlierAttempt(request: McpInvocationRequest | null | undefined): boolean {
@@ -25,12 +40,20 @@ export function hasEarlierAttempt(request: McpInvocationRequest | null | undefin
 }
 
 /**
- * The queue sends a message whose effect is unknown again at most this many times. A second unknown outcome closes the row by itself,
- * as a separate end reason ("effect could not be confirmed"), never as a delivery that was given up: a tool may already have run,
- * and a second send could run the same external action twice. Only a run with NO receipt (it never started, so nothing ran) is
- * sent again without this cap (unconfirmedResendIsUnbounded).
+ * The queue sends a message whose effect is unknown again at most this many times with the plain earlier-attempt line. A tool may already have
+ * run, and a send that repeats it blindly could run the same external action twice: that is the one reason for a count here. Only a run with NO
+ * receipt (it never started, so nothing ran) is sent again without this cap (unconfirmedResendIsUnbounded).
  */
 export const UNCONFIRMED_MAX_RESENDS = 1;
+
+/**
+ * After that cap the host does not close the message and hand the check to the owner. It sends the message once more with the verify-first line
+ * (EARLIER_ATTEMPT_VERIFY_LINE): the model reads what exists, uses a result that is there, redoes only what is cheap to redo, and never repeats
+ * an action that cannot be taken back or checked blindly. That send is not a blind repeat, and it is allowed once (a second unknown outcome after
+ * a verified attempt points at a defect, not at a lost message). It is made only while the owner has written nothing newer in the chat and has
+ * not pressed Stop: a newer message of the owner is the direction now (ownerSpokeAfter, the fact host recovery reads).
+ */
+export const UNCONFIRMED_VERIFY_CONTINUATIONS = 1;
 
 /** A run that left no receipt never began: nothing ran, so sending the message again cannot repeat an effect and has no cap. */
 export function unconfirmedResendIsUnbounded(receipt: unknown): boolean {

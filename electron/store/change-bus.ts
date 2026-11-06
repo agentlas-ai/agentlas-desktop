@@ -21,6 +21,8 @@ export type DesktopStoreEntity =
   | "long-run"
   | "automation"
   | "runtime"
+  | "one-recovery"
+  | "one-recovery-dropped"
   | "surface";
 
 export interface DesktopStoreChange {

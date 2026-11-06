@@ -10,6 +10,7 @@ import {
   MOBILE_BRIDGE_MAX_MESSAGE_BYTES,
   MOBILE_BRIDGE_PAIR_EXCHANGE_PATH,
   MOBILE_BRIDGE_PROTOCOL_VERSION,
+  MOBILE_BRIDGE_SELF_IDEMPOTENT_WRITE_METHODS,
   MOBILE_BRIDGE_WRITE_METHODS,
   MOBILE_BRIDGE_VISUAL_FRAME_MAGIC,
   MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES,
@@ -134,7 +135,8 @@ const DEFAULT_READ_NOT_READY_WAIT_MS = 20_000;
 // A refused-because-signed-out upgrade is retried by every open phone; log it at most this often.
 const SIGNED_OUT_REFUSAL_LOG_INTERVAL_MS = 60_000;
 const MAX_REQUESTS_PER_MINUTE = 300;
-const MOBILE_ATTACHMENT_CHUNK_REQUEST_BUDGET = 240;
+// Video and attachment chunks wait (retryable) past this many requests in a minute; the rest of the 300 stays for Stop and approvals.
+const MOBILE_CHUNK_REQUEST_BUDGET = 240;
 const MAX_PAIR_ATTEMPTS_PER_MINUTE = 10;
 const MAX_INITIAL_EVENT_QUEUE = 512;
 const MAX_INITIAL_EVENT_QUEUE_BYTES = 4 * MOBILE_BRIDGE_MAX_MESSAGE_BYTES;
@@ -1033,13 +1035,13 @@ export class AgentlasMobileBridgeServer {
       return;
     }
     // Reserve this connection's request budget for cancellation and control.
-    if ((parsed.value.method === "legacy.video.chunk" || parsed.value.method === "one.video.chunk" || parsed.value.method === "chat.video.chunk" || parsed.value.method === "science.video.chunk") && state.requestCount > 160) {
+    if ((parsed.value.method === "legacy.video.chunk" || parsed.value.method === "one.video.chunk" || parsed.value.method === "chat.video.chunk" || parsed.value.method === "science.video.chunk") && state.requestCount > MOBILE_CHUNK_REQUEST_BUDGET) {
       this.send(state, mobileBridgeFailure(parsed.value.id, "too_many_requests", "Video transfer is paused to reserve control capacity", true));
       return;
     }
     // chat-attachments-v2: an upload of any size is many 1 MiB chunks. Past 240 requests in this minute a chunk waits (retryable),
     // so the connection never reaches the 300/minute close and keeps room for Stop and other control requests.
-    if (parsed.value.method === "chat.attachments.chunk" && state.requestCount > MOBILE_ATTACHMENT_CHUNK_REQUEST_BUDGET) {
+    if (parsed.value.method === "chat.attachments.chunk" && state.requestCount > MOBILE_CHUNK_REQUEST_BUDGET) {
       this.send(state, mobileBridgeFailure(parsed.value.id, "too_many_requests", "Attachment upload is paused to reserve control capacity", true));
       return;
     }
@@ -1084,9 +1086,11 @@ export class AgentlasMobileBridgeServer {
     const selfRevocation = request.method === "device.revokeSelf";
     const secureRequest = isOneMobileSecureMethod(request.method);
     const writeRequest = MOBILE_BRIDGE_WRITE_METHODS.has(request.method);
+    // Self-idempotent writes (e.g. a Science Stop) never wait behind a ledger entry: one whose answer was lost can be sent again.
+    const ledgered = writeRequest && !MOBILE_BRIDGE_SELF_IDEMPOTENT_WRITE_METHODS.has(request.method);
     const replayKey = request.idempotencyKey ?? request.id;
-    const replayFingerprint = writeRequest ? fingerprintMobileBridgeRequest(request) : null;
-    if (writeRequest) {
+    const replayFingerprint = ledgered ? fingerprintMobileBridgeRequest(request) : null;
+    if (ledgered) {
       if (!this.replayStore || !replayFingerprint) {
         this.send(
           state,
@@ -1225,10 +1229,12 @@ export class AgentlasMobileBridgeServer {
           "Desktop was not ready to answer this yet. It can be asked again.", true));
         return;
       }
-      if (notReady && writeRequest && this.replayStore && replayFingerprint) {
-        let released = false;
-        try { this.replayStore.release(state.context.deviceId, replayKey, replayFingerprint); released = true; }
-        catch (ledgerError) { this.onError(errorOf(ledgerError)); }
+      if (notReady && writeRequest && (!ledgered || (this.replayStore && replayFingerprint))) {
+        let released = !ledgered;
+        if (ledgered && this.replayStore && replayFingerprint) {
+          try { this.replayStore.release(state.context.deviceId, replayKey, replayFingerprint); released = true; }
+          catch (ledgerError) { this.onError(errorOf(ledgerError)); }
+        }
         if (released) {
           if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
           this.send(state, mobileBridgeFailure(request.id, MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE,
@@ -1236,7 +1242,7 @@ export class AgentlasMobileBridgeServer {
           return;
         }
       }
-      const uncertainWrite = timeout && writeRequest;
+      const uncertainWrite = timeout && ledgered;
       // An owner message into a room the personal agent runs (one/personal-agent-rooms.ts): a typed refusal, nothing ran.
       const personalAgentRoom = !timeout && !secureRequest && (error as { code?: unknown } | null)?.code === "supervised_room_read_only";
       // A refusal the owner can act on keeps its own code for a phone that has a sentence for it (shared/mobile-bridge-refusal.ts).
@@ -1259,9 +1265,9 @@ export class AgentlasMobileBridgeServer {
           : timeout
             ? "Desktop did not answer in time"
             : "Desktop rejected the request",
-        timeout && !writeRequest && !secureRequest,
+        timeout && !ledgered && !secureRequest,
       );
-      if (!timeout && writeRequest && this.replayStore && replayFingerprint) {
+      if (!timeout && ledgered && this.replayStore && replayFingerprint) {
         response = this.completeReplay(
           state.context.deviceId,
           replayKey,

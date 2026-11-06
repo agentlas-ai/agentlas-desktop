@@ -160,6 +160,17 @@ export function oneAutoRecoveryTerminalStop(
   return null;
 }
 
+/**
+ * Stops that come from a condition the host can watch, not from the work or the owner: the same failure came back for the whole
+ * budget (`exhausted`, `no-progress`), or nothing could decide (`undecided`, the judge or the ledger was unreachable). They end
+ * the automatic attempts of THIS situation, not the work: the attempts continue when the situation changes (a runtime signal such
+ * as a sign-in, a detected runtime or a restored connection, or a new app version). A named boundary, an effect that may have
+ * happened, a request the work itself cannot satisfy and the owner's own stop are not in this set.
+ */
+export function oneRecoveryStopWaitsForChange(reason: string | null | undefined): boolean {
+  return reason === "exhausted" || reason === "no-progress" || reason === "undecided";
+}
+
 export type OneRunFailureFingerprint = string;
 
 /**

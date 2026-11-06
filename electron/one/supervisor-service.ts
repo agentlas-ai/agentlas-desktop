@@ -14,6 +14,7 @@ import {
 } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, supervisorWorkForWorkerChat, type SupervisorRequestRow } from "./supervisor-store";
 import { supervisorExactResult } from "./supervisor-presentation";
+import { AGENT_CONTROL_HEADINGS } from "../../shared/agent-control-blocks";
 import { markPersonalAgentRoom, personalAgentRoomReleased, PERSONAL_AGENT_ROOM_RELEASED } from "./personal-agent-rooms";
 import { parseGraphResultDetail } from "./graph-review";
 import type { OneTeamResult } from "./host-alerts";
@@ -22,7 +23,7 @@ import { ONE_BUBBLE_COLORS, type OneBubbleColor } from '../../shared/one-profile
 import type { OneSupervisorWorkQueue } from "./supervisor-work-queue";
 import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import { isTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
-import { UNCONFIRMED_MAX_RESENDS, unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
+import { UNCONFIRMED_MAX_RESENDS, UNCONFIRMED_VERIFY_CONTINUATIONS, unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
 import type { OneSupervisorOwner } from "./supervisor-owner";
 import type { SupervisorJournalInput, SupervisorJournalPage, SupervisorStopInput } from "../../shared/one-supervisor-runtime";
 import {OneBudgetAdmissionDenied,type OneBudgetStore} from "./budget-store";
@@ -134,6 +135,22 @@ const clip = (value: unknown, max: number) => {
   const text = typeof value === "string" ? value.trim() : "";
   return text.length > max ? `${text.slice(0, max)}…` : text;
 };
+/** The display strip cuts at these headings anywhere in a text (shared/agent-control-blocks.ts headingHit; Memory Events cuts to the end): read from its own list. */
+const HEADING_DEFUSE = new RegExp(`##(?=[ \\t]*(?:${AGENT_CONTROL_HEADINGS.map(heading => heading.replace(/^##\s*/, "")).join("|")}))`, "gi");
+/**
+ * A worker's or conversation's output quoted into the host's own chat line: inside a code fence longer than any backtick run it contains, with
+ * every `<<` marker opener and `agentlas-` fence info string broken by a zero-width space, so none of the app's control grammars
+ * (ask cards, follow-ups, surfaces, goal markers, wait/ui blocks) can be formed from it, here or in the context a later turn reads.
+ */
+export function quoteUntrustedOutput(text: string): string {
+  const defused = text
+    .replace(HEADING_DEFUSE, "##\u200b")
+    .replace(/<(?=[<\/ ]{0,7}(?:agentlas-|surface-intent))/gi, "<\u200b")
+    .replace(/(`{3,}|~{3,})(?=[ \t]*agentlas)/gi, "$1\u200b");
+  const longest = Math.max(2, ...(defused.match(/`+/g) ?? []).map(run => run.length));
+  const fence = "`".repeat(longest + 1);
+  return `${fence}\n${defused}\n${fence}`;
+}
 /** Follow-ups One may send to one delegated task on its own before the owner decides (shared with the overlay and tool). */
 export const SUPERVISOR_FOLLOW_UP_LIMIT = ONE_SUPERVISOR_FOLLOW_UP_LIMIT;
 /** The typed reason of a request proven never started and given up on (not started again, nothing sent twice). */
@@ -629,14 +646,15 @@ export class OneSupervisorService {
    *). It is sent once more under a new run id with the earlier-attempt line, so the model checks what was done first, and a second
    * loss ends as it always did. Never for the owner's Stop, a steering interrupt, a host stop, a run the runtime proved in the conversation or
    * one that provably sent nothing (those have their own rules), a review, a message the owner has since followed with another, or a message
-   * that was already sent once more.
+   * that was already sent again twice (the plain resend, then one verify-first send).
    */
   private resendUnconfirmedReply(row: SupervisorRequestRow, receipt: InvocationRunReceipt): boolean {
     if (this.closed || row.kind !== "reply" || isReview(row) || ordinaryNativeMarker(row) || !row.user_message_id) return false;
     if (receipt.status !== "failed" && receipt.status !== "interrupted") return false;
     let payload: Record<string, unknown>;
     try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { return false; }
-    if (Number(payload.unconfirmedResends ?? 0) >= UNCONFIRMED_MAX_RESENDS || payload.boundGoalId) return false;
+    const sent = Number(payload.unconfirmedResends ?? 0);
+    if (sent >= UNCONFIRMED_MAX_RESENDS + UNCONFIRMED_VERIFY_CONTINUATIONS || payload.boundGoalId) return false;
     if (!unconfirmedRunShouldBeSentAgain(receipt)) return false;
     try {
       if (this.deps.runtime.placement?.(receipt.runId) !== "unconfirmed") return false;
@@ -646,7 +664,7 @@ export class OneSupervisorService {
       const nextRunId = randomUUID();
       this.deps.store.db.transaction(() => {
         this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?")
-          .run(JSON.stringify({...payload, unconfirmedResends: 1}), row.command_id);
+          .run(JSON.stringify({...payload, unconfirmedResends: sent + 1}), row.command_id);
         this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: "resent_unconfirmed", runId: nextRunId});
       }).immediate();
     } catch { return false; }
@@ -921,8 +939,8 @@ export class OneSupervisorService {
           ...(reportOnly ? {} : {toolMode:"computer-use" as const}),locale:frame.locale,runtimeSelection:frame.runtimeSelection,
           images:payload.images,fileGroupId:payload.fileGroupId};
       // A reply sent once more after an unknown outcome tells the model so (earlier-attempt.ts): it reads what was done before doing anything.
-      const resent = Number((payload as {unconfirmedResends?: unknown}).unconfirmedResends ?? 0) > 0;
-      this.observeDispatch(row, () => this.deps.runtime.start(resent ? withEarlierAttempt(startRequest) : startRequest,
+      const resends = Number((payload as {unconfirmedResends?: unknown}).unconfirmedResends ?? 0);
+      this.observeDispatch(row, () => this.deps.runtime.start(resends > 0 ? withEarlierAttempt(startRequest, resends > UNCONFIRMED_MAX_RESENDS) : startRequest,
           isReview(row) ? (payload as {purpose?: SupervisorHostNoticePurpose}).purpose ?? "one-delegation-review" : undefined), undefined, false, true);
     } finally { this.draining = false; }
   }
@@ -972,6 +990,14 @@ export class OneSupervisorService {
     if (!this.deps.noticeOwner) return;
     const ko = this.deps.locale() === "ko";
     for (const group of exhausted) {
+      // The result itself goes to the owner, written by the host with no model: a review that could not run three times must not leave
+      // finished work unread. Only when the result cannot be put together does the line fall back to naming where it is.
+      let told = false;
+      try {
+        const text = this.unreviewedResultText(this.deps.store.unreviewedByRun(reviewRunId).filter(notice => notice.originChatId === group.originChatId), ko);
+        if (text) { this.deps.noticeOwner(group.originChatId, reviewRunId, text); told = true; }
+      } catch { /* the plain line below still says where the result is */ }
+      if (told) continue;
       try {
         this.deps.noticeOwner(group.originChatId, reviewRunId, ko
           ? `작업 결과 ${group.count}건을 아직 검토하지 못했습니다. 활동 기록에서 읽을 수 있습니다.`
@@ -980,6 +1006,62 @@ export class OneSupervisorService {
     }
     // The results are pending again: look for them once the hold-off (if any) ends.
     this.armDrain(Math.max(0, this.reviewHoldOffUntil - Date.now()));
+  }
+  /**
+   * What the workers returned, put in the owner's chat by the host when their review could not run. Each line carries the outcome the host
+   * recorded (failed, stopped, unverified...), the title, and the words of the output as quoted DATA: fenced so nothing in it is read as the
+   * app's own text, with every control marker (`<<agentlas-...>>`, a fenced `agentlas-` block) defused so it cannot become a question card
+   * or a command when the chat is shown or read as context by the next turn. Clipped output says so. At most FIRST_LINES lines and
+   * TOTAL_CHARS characters; the rest is counted ("and N more"). Null when no result text exists to hand over.
+   */
+  private unreviewedResultText(notices: Array<SupervisorNotice & { oneId: string }>, ko: boolean): string | null {
+    const FIRST_LINES = 5, BODY_CHARS = 1200, TOTAL_CHARS = 4000;
+    const tasks = new Map(this.deps.tasks().map(task => [task.taskId, task]));
+    const sections: string[] = [];
+    let omitted = 0, used = 0;
+    for (const notice of notices) {
+      let title = "";
+      let body: string | null = null;
+      let verified = false;
+      if (notice.taskId.startsWith("chat:")) {
+        const target = notice.taskId.slice("chat:".length);
+        title = this.chatTitle(target) ?? "";
+        body = supervisorExactResult(this.deps.store.db, target, notice.runId)?.text ?? null;
+      } else if (notice.taskId.startsWith("graph:")) {
+        const detail = parseGraphResultDetail(this.deps.store.noticeDetail(notice.id));
+        title = detail?.name ?? "";
+        body = detail?.report ?? null;
+      } else if (notice.taskId.startsWith("team:")) {
+        let detail: { member?: string; result?: string | null } = {};
+        try { detail = JSON.parse(this.deps.store.noticeDetail(notice.id) ?? "{}"); } catch { detail = {}; }
+        title = detail.member ?? "";
+        body = detail.result ?? null;
+      } else if (notice.state === "scheduled" || notice.taskId.startsWith("host:")) {
+        continue; // a due check-in or an app alert has no result to hand over
+      } else {
+        const task = tasks.get(notice.taskId);
+        title = task?.title ?? "";
+        body = task && task.runId === notice.runId ? task.result : null;
+        verified = task?.resultVerified === true;
+        if (notice.state === "needs-owner") body = this.deps.store.noticeDetail(notice.id) ?? body;
+      }
+      const text = typeof body === "string" ? body.trim() : "";
+      if (!text) continue;
+      if (sections.length >= FIRST_LINES || used >= TOTAL_CHARS) { omitted += 1; continue; }
+      const shown = text.length > BODY_CHARS ? text.slice(0, BODY_CHARS) : text;
+      used += shown.length;
+      const outcome = notice.state === "failed" ? (ko ? "실패" : "failed")
+        : notice.state === "interrupted" ? (ko ? "중단" : "stopped")
+        : notice.state === "cancelled" ? (ko ? "취소" : "cancelled")
+        : notice.state === "needs-owner" ? (ko ? "확인 대기" : "waiting for you")
+        : verified ? (ko ? "완료·검증됨" : "completed, verified") : (ko ? "미검증" : "unverified");
+      sections.push([`${outcome}${title ? ` — ${clip(title, 120)}` : ""}`, quoteUntrustedOutput(shown),
+        ...(text.length > BODY_CHARS ? [ko ? "(이하 생략 — 전문은 활동 기록)" : "(rest left out — the full text is in Activity)"] : [])].join("\n"));
+    }
+    if (!sections.length) return null;
+    const head = ko ? `작업 ${sections.length + omitted}건의 마지막 출력(검토 없이)` : `Last output of ${sections.length + omitted} work item${sections.length + omitted === 1 ? "" : "s"} (unreviewed)`;
+    const more = omitted ? [ko ? `외 ${omitted}건은 활동 기록에서 볼 수 있습니다.` : `${omitted} more in Activity.`] : [];
+    return [head, ...sections, ...more].join("\n\n");
   }
   /** Reviews that never started cost no attempt, so their only brake is time: the capped backoff grows with the streak. */
   private holdOffUnstartedReviews(): void {
