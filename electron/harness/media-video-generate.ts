@@ -59,7 +59,7 @@ async function readyTextRoutes(): Promise<{ ready: ReadyRoute[]; capable: string
 export async function mediaVideoGenerate(args: Record<string, unknown>, ctx: PortContext): Promise<MediaVideoGenerateResult> {
   const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
   if (!prompt) return refused("prompt_required");
-  if (prompt.length > 12_000) return refused("prompt_too_long");
+  if (prompt.length > 12_000) return refused("video_prompt_too_long");
   const routeId = typeof args.routeId === "string" ? args.routeId.trim() : "";
   const durationSeconds = args.durationSeconds;
   if (durationSeconds !== undefined && (typeof durationSeconds !== "number" || !Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > 60)) {

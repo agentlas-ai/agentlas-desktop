@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { MobileBridgeChatHistoryPageDto } from "../../shared/mobile-bridge";
 import { listChatMessagesPage, listChatMessagesBeforeUiAnchor } from "../store/chats";
 import { listUiInstances } from "../harness/ui-instances";
-import { mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
+import { MOBILE_CARD_WINDOW, isMobileCardInstance, mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
 import { projectMobileBridgeHistory, type MobileBridgeHistoryConsumption, type MobileBridgeHistoryOptions } from "./projector";
 import { mobileBridgeJsonBytes, MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES } from "./sanitize";
 
@@ -59,11 +59,17 @@ export async function readMobileBridgeHistoryPage(
   const isBefore = (row: { id: string; createdAt: string }) => !before
     || row.createdAt < before.createdAt || (row.createdAt === before.createdAt && virtualAnchor === true && row.id < before.id);
   const lower = page.hasOlder ? page.messages[0] : undefined;
-  const inline = await mergeMobileInlineUiTranscript(chatId, page.messages, instances.filter(instance => {
+  const inRange = instances.filter(instance => {
     const row = { id: `ui-instance:${instance.instanceId}`, createdAt: instance.createdAt };
     return isBefore(row) && (!lower || row.createdAt >= lower.createdAt);
-  }));
-  const storeIndex = new Map(page.messages.map((message, index) => [message.id, index]));
+  });
+  // One read loads a chat's newest MOBILE_CARD_WINDOW cards. A window holding more leaves everything older than its 16th-newest card for the
+  // next page (rows and cards alike), so no card is skipped between pages.
+  const cards = inRange.filter(isMobileCardInstance).sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+  const floor = cards.length > MOBILE_CARD_WINDOW ? cards[cards.length - MOBILE_CARD_WINDOW].createdAt : undefined;
+  const stored = floor ? page.messages.filter(message => message.createdAt >= floor) : page.messages;
+  const inline = await mergeMobileInlineUiTranscript(chatId, stored, floor ? inRange.filter(instance => instance.createdAt >= floor) : inRange);
+  const storeIndex = new Map(stored.map((message, index) => [message.id, index]));
   inline.history.sort((left, right) => {
     if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1;
     const l = storeIndex.get(left.id), r = storeIndex.get(right.id);
@@ -80,7 +86,7 @@ export async function readMobileBridgeHistoryPage(
   if (inline.history.length && !consumption.consumed) {
     throw new RangeError("History message exceeds the mobile page budget");
   }
-  const hasOlder = page.hasOlder || consumption.consumed < inline.history.length;
+  const hasOlder = page.hasOlder || floor !== undefined || consumption.consumed < inline.history.length;
   const oldest = consumption.oldest;
   const nextCursor = hasOlder && oldest
     ? Buffer.from(JSON.stringify({

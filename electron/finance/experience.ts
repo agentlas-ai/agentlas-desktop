@@ -44,6 +44,19 @@ type Preferences=z.infer<typeof storedSchema>;
 type Access=FinanceExperienceState['access'];
 /** The saved monitoring registration is the one `value` was read with (a restart of monitoring is a new generation and command). */
 const sameRegistration=(fresh:Preferences,value:Preferences):boolean=>fresh.monitoring.generation===value.monitoring.generation&&fresh.monitoring.commandId===value.monitoring.commandId;
+/** Monitoring is on but no daily briefing is registered yet (the supervisor did not answer, or billing was unreachable): the sweep registers it by itself. */
+const isPending=(monitoring:Preferences['monitoring']):boolean=>monitoring.enabled&&monitoring.commandId===null;
+const NOT_A_REGISTRATION_FAILURE=new Set(['finance_account_changed','finance_sign_in_required']);
+const warned=new Set<string>();
+const warnOnce=(code:string,reason?:unknown):void=>{if(warned.has(code))return;warned.add(code);console.warn('[finance-daily] registration pending',code,typeof reason==='string'?reason:'');};
+const UNVERIFIED:Access={plan:null,monitoringAllowed:false,status:'unavailable'};
+/** The billing answer a read waits for before showing "unavailable"; turning monitoring on, admission and the firing guard wait for the full check. */
+const BILLING_READ_WAIT_MS=2_500;
+/** A failed attempt waits twice as long each time (15 s, 30 s, ...) up to this long; the sweep ticks every 30 s. */
+const RETRY_MAX_MS=600_000;
+/** A registration waiting on something only the owner can change (plan, sign-in, consent) is asked again this rarely; a request that sees it lifted asks at once. */
+const PAUSED_RETRY_MS=600_000;
+const SETTLED_LIMIT=16;
 /** Captured under the owner's settings lease; identity excludes unrelated UI changes. */
 export interface FinanceMonitoringSnapshot {ownerScope:string;hostScope:string;identity:string;settingsRevision:number;selection:FinanceDataSelection}
 interface Ports {
@@ -78,6 +91,10 @@ const defaultPorts:Ports={
 /** Local settings only; no holdings, quotes, market data or credentials are persisted here. */
 export class FinanceExperience {
   constructor(private readonly root:string,private readonly ports:Ports=defaultPorts){}
+  /** Settings file identity last seen with no pending registration, per owner directory (a user without a Finance folder costs one failed stat per sweep). */
+  private readonly settled=new Map<string,string>();
+  private readonly reconciling=new Set<string>();
+  private readonly retry=new Map<string,{at:number;fails:number;paused:boolean}>();
   private initial(scope:FinanceScope,sources:FinanceDataSourceOption[]):Preferences{return {schemaVersion:1,ownerScope:financeScopeHash(scope),revision:0,consent:null,sourceId:sources.find(source=>source.available)?.id??sources[0]?.id??'finance-yfinance',dashboardCustomized:false,enabledFeedIds:[...defaultFeeds],monitoring:{enabled:false,localTime:'09:00',timezone:this.ports.timezone(),lastSentAt:null,nextRunAt:null,generation:0,oneId:null,checkinId:null,commandId:null,admissionDay:null,admissionRunId:null}};}
   /** One settings file, read without any lock: a save replaces the file by rename, so a reader always sees a whole old or whole new file. */
   private parse(file:string):Preferences {
@@ -166,6 +183,38 @@ export class FinanceExperience {
     finally{await this.ports.revoke(scope,stopped.monitoring);}
     scope.assertCurrent();return stopped;
   }
+  /** Release the registration named by `value` (only while it is still the saved one) and revoke it; monitoring stays on, waiting for the sweep to register it again. The revoke runs whether or not the save did. */
+  private async unbind(scope:FinanceScope,directory:string,value:Preferences):Promise<Preferences>{
+    const released:Preferences={...value,monitoring:{...value.monitoring,oneId:null,checkinId:null,commandId:null,nextRunAt:null}};
+    try{await this.commit(scope,directory,fresh=>{if(!sameRegistration(fresh,value)||fresh.monitoring.commandId===null)return false;Object.assign(fresh.monitoring,{oneId:null,checkinId:null,commandId:null,nextRunAt:null});});}
+    finally{await this.ports.revoke(scope,value.monitoring);}
+    scope.assertCurrent();return released;
+  }
+  /**
+   * Register the daily briefing for `localTime`. The caller holds the monitoring lock and has checked consent, the plugin and the data sources.
+   * Every attempt is a new generation and a new command, so a late undo of an earlier attempt can never remove this one. When the supervisor
+   * does not answer, nothing is rolled back to "off": monitoring stays on with no registration and the sweep finishes the job.
+   */
+  private async register(scope:FinanceScope,directory:string,start:Preferences,localTime:string,sources:FinanceDataSourceOption[]):Promise<{value:Preferences;registered:boolean}>{
+    let value=start;
+    if(value.monitoring.commandId)value=await this.unbind(scope,directory,value);
+    value=await this.commit(scope,directory,fresh=>{const monitoring=fresh.monitoring;monitoring.generation++;monitoring.enabled=true;monitoring.localTime=localTime;monitoring.timezone=this.ports.timezone();monitoring.nextRunAt=null;},sources);
+    const commandId=`finance-daily:${financeHash([value.ownerScope,value.monitoring.generation,randomUUID()].join(':')).slice(0,48)}`;
+    try{
+      const binding=await this.ports.prepare(scope,commandId);scope.assertCurrent();
+      value=await this.commit(scope,directory,fresh=>{Object.assign(fresh.monitoring,binding);},sources);
+      const registered=await this.ports.register(scope,binding,localTime);scope.assertCurrent();
+      value=await this.commit(scope,directory,fresh=>{fresh.monitoring.nextRunAt=registered.nextRunAt;},sources);
+      return {value,registered:true};
+    }catch(error){
+      const code=error instanceof Error?error.message:'finance_daily_registration_failed';
+      // The undo must outlive an account change: it only touches this owner's own file and the exact registration made here.
+      if(value.monitoring.commandId)value=await this.unbind({...scope,assertCurrent(){}},directory,value);
+      if(NOT_A_REGISTRATION_FAILURE.has(code))throw error;
+      scope.assertCurrent();warnOnce(code,(error as {cause?:unknown}).cause);
+      return {value,registered:false};
+    }
+  }
   /** What this answer shows is `value` with `change`; the saved copy gets the same change, best effort and only while it is still the same registration. A save that fails only means the next request works the same thing out again. */
   private async adjust(scope:FinanceScope,directory:string,value:Preferences,change:(monitoring:Preferences['monitoring'])=>void):Promise<Preferences>{
     const shown:Preferences={...value,monitoring:{...value.monitoring}};change(shown.monitoring);
@@ -181,13 +230,14 @@ export class FinanceExperience {
   private async disableInactive(scope:FinanceScope,directory:string,value:Preferences,holding=false):Promise<Preferences|null>{
     const release=holding?undefined:await tryLockFinanceDirectory(path.join(directory,'monitoring'),'long');
     if(!holding&&!release)return null;
-    try{return await this.adjust(scope,directory,value,monitoring=>{monitoring.enabled=false;monitoring.nextRunAt=null;});}
+    // A registration that was never confirmed (the app stopped between saving it and registering) is not one the owner revoked: it goes back to waiting.
+    try{return value.monitoring.nextRunAt===null?await this.unbind(scope,directory,value):await this.adjust(scope,directory,value,monitoring=>{monitoring.enabled=false;monitoring.nextRunAt=null;});}
     finally{await release?.();scope.assertCurrent();}
   }
   /** Common end of a request: compare the settings with what the automation says now (slow lookup, no lock), then answer. */
   private async settle(scope:FinanceScope,directory:string,value:Preferences,sources:FinanceDataSourceOption[],access:Access,request:z.infer<typeof requestSchema>,holding=false):Promise<FinanceExperienceState>{
     const observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();let current=value;
-    if(current.monitoring.enabled&&!observed.active){
+    if(current.monitoring.enabled&&current.monitoring.commandId&&!observed.active){
       const off=await this.disableInactive(scope,directory,current,holding);
       // The on/off action is running: it decides, and this answer shows the settings as they are.
       if(!off)return this.projection(scope,current,sources,access,true);
@@ -201,14 +251,24 @@ export class FinanceExperience {
     const request=requestSchema.parse(raw);scope.assertCurrent();
     // Stop is independent of server/network access. It does not query billing first.
     const terminal=request.action==='monitoring'&&!request.enabled,local=request.action==='customize';
-    let access:Access={plan:null,monitoringAllowed:false,status:'unavailable'},sources:FinanceDataSourceOption[]=[];
-    if(!terminal&&!local)await Promise.all([this.ports.access(scope).then(value=>{access=value;},()=>{scope.assertCurrent();}),this.ports.sources().then(value=>{sources=value;},()=>{scope.assertCurrent();})]);
+    let access:Access={...UNVERIFIED},sources:FinanceDataSourceOption[]=[],settledRead=false,sourcesKnown=true;
+    // Turning monitoring on waits for the full billing check; every other request shows "unavailable" rather than wait for a slow server (a late answer is dropped, nothing is cached).
+    if(!terminal&&!local){
+      const billing=this.ports.access(scope).catch(()=>{scope.assertCurrent();return UNVERIFIED;});
+      const answer=request.action==='monitoring'?billing.then(value=>{access=value;}):new Promise<void>(resolve=>{const timer=setTimeout(resolve,BILLING_READ_WAIT_MS);timer.unref?.();billing.then(value=>{clearTimeout(timer);if(!settledRead)access=value;resolve();},()=>{clearTimeout(timer);resolve();});});
+      await Promise.all([answer,this.ports.sources().then(value=>{sources=value;},()=>{scope.assertCurrent();sourcesKnown=false;})]);
+    }
+    settledRead=true;
     scope.assertCurrent();
-    if(request.action==='monitoring')return this.monitoring(scope,request,access,sources);
+    if(request.action==='monitoring')return this.monitoring(scope,request,access,sources,sourcesKnown);
     // Reads never wait for a lock; only the short commit of a change does. Everything slow below runs before that commit.
     const {directory,value:first}=await this.snapshot(scope,sources);let value=first;
+    // The plan or sign-in that paused a waiting registration is back: do not wait out the sweep's slow retry.
+    if(!local&&isPending(value.monitoring)&&access.monitoringAllowed&&this.retry.get(directory)?.paused){this.retry.delete(directory);void this.reconcilePending(scope).catch(()=>undefined);}
     if(request.action==='accept'){const prepared=await this.prepared(scope);if(!prepared.ready)throw new Error('finance_plugin_activation_required');const now=this.ports.now().getTime();
-      value=await this.commit(scope,directory,fresh=>{const previous=fresh.consent?Date.parse(fresh.consent.acceptedAt):-1;fresh.consent={version:FINANCE_NOTICE_VERSION,acceptedAt:new Date(Math.max(now,previous+1)).toISOString()};},sources);}
+      value=await this.commit(scope,directory,fresh=>{const previous=fresh.consent?Date.parse(fresh.consent.acceptedAt):-1;fresh.consent={version:FINANCE_NOTICE_VERSION,acceptedAt:new Date(Math.max(now,previous+1)).toISOString()};},sources);
+      // A briefing that waited for this consent continues now.
+      if(isPending(value.monitoring)){this.retry.delete(directory);void this.reconcilePending(scope).catch(()=>undefined);}}
     if(request.action==='plugins.prepare'){if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');const prepared=await this.prepared(scope);if(!prepared.ready)throw new Error('finance_plugin_activation_required');}
     if(request.action==='customize')value=await this.commit(scope,directory,fresh=>{fresh.dashboardCustomized=request.customized;},sources);
     if(request.action==='feed')value=await this.commit(scope,directory,fresh=>{fresh.enabledFeedIds=request.enabled?[...new Set([...fresh.enabledFeedIds,request.feedId])]:fresh.enabledFeedIds.filter(id=>id!==request.feedId);},sources);
@@ -230,29 +290,33 @@ export class FinanceExperience {
         this.publishSelection(scope,fresh,{...previous,sourceBindings});
       },sources);
     }
-    // Billing that cannot be reached ("unavailable") is not a verdict: only a verified non-subscription or a signed-out account stops it.
-    if(!local&&value.monitoring.enabled&&!access.monitoringAllowed&&access.status!=='unavailable')value=await this.stopMonitoring(scope,directory,value);
+    // Billing that cannot be reached ("unavailable") is not a verdict. A verified non-subscription or a signed-out account only pauses: the owner can lift both, and the briefing registers again by itself.
+    if(!local&&value.monitoring.enabled&&!access.monitoringAllowed&&access.status!=='unavailable')value=value.monitoring.commandId?await this.unbind(scope,directory,value):value;
     return this.settle(scope,directory,value,sources,access,request);
   }
   /** Turning monitoring on or off registers and revokes an automation, several steps one after another. Only that action waits on this lock, and nothing else (a phone read, a setting) ever does. */
-  private async monitoring(scope:FinanceScope,request:Extract<z.infer<typeof requestSchema>,{action:'monitoring'}>,access:Access,sources:FinanceDataSourceOption[]):Promise<FinanceExperienceState>{
+  private async monitoring(scope:FinanceScope,request:Extract<z.infer<typeof requestSchema>,{action:'monitoring'}>,access:Access,sources:FinanceDataSourceOption[],sourcesKnown=true):Promise<FinanceExperienceState>{
     const directory=await this.directory(scope),release=await lockFinanceDirectory(path.join(directory,'monitoring'),'long');
     try{
       scope.assertCurrent();let value=this.read(scope,directory,sources);
       if(!request.enabled){value=await this.stopMonitoring(scope,directory,value);return this.projection(scope,value,sources,access,false);}
       if(value.consent?.version!==FINANCE_NOTICE_VERSION)throw new Error('finance_consent_required');
       if(!(await this.pluginReady(scope)))throw new Error('finance_plugin_activation_required');scope.assertCurrent();
-      if(!access.monitoringAllowed)throw new Error(access.status==='verified'?'finance_monitoring_pro_required':'finance_monitoring_access_unavailable');
-      if(!this.dailySourcesAvailable(scope,value,sources))throw new Error('finance_source_unavailable');
-      const localTime=request.localTime??value.monitoring.localTime,observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
+      // Registering before billing is reachable is safe: admission and the firing guard check the plan again before anything is sent.
+      if(!access.monitoringAllowed&&access.status==='verified')throw new Error('finance_monitoring_pro_required');
+      const localTime=request.localTime??value.monitoring.localTime;
+      if(!this.dailySourcesAvailable(scope,value,sources)){
+        if(sourcesKnown)throw new Error('finance_source_unavailable');
+        // The source list could not be read just now: stay on, and the sweep registers it once it can.
+        if(value.monitoring.commandId)value=await this.unbind(scope,directory,value);
+        value=await this.commit(scope,directory,fresh=>{Object.assign(fresh.monitoring,{enabled:true,localTime,timezone:this.ports.timezone(),nextRunAt:null});},sources);
+        return this.projection(scope,value,sources,access,true);
+      }
+      const observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
       if(value.monitoring.enabled&&observed.active&&value.monitoring.localTime===localTime){value=await this.commit(scope,directory,fresh=>{fresh.monitoring.nextRunAt=observed.nextRunAt;},sources);return this.projection(scope,value,sources,access,true);}
-      value=await this.stopMonitoring(scope,directory,value);
-      value=await this.commit(scope,directory,fresh=>{fresh.monitoring.generation++;},sources);
-      const commandId=`finance-daily:${financeHash([value.ownerScope,value.monitoring.generation].join(':')).slice(0,48)}`;
-      const binding=await this.ports.prepare(scope,commandId);scope.assertCurrent();
-      value=await this.commit(scope,directory,fresh=>{Object.assign(fresh.monitoring,binding,{enabled:true,localTime,timezone:this.ports.timezone(),nextRunAt:null});},sources);
-      try{const registered=await this.ports.register(scope,binding,localTime);scope.assertCurrent();value=await this.commit(scope,directory,fresh=>{fresh.monitoring.nextRunAt=registered.nextRunAt;},sources);}
-      catch(error){try{await this.commit(scope,directory,fresh=>{fresh.monitoring.enabled=false;fresh.monitoring.nextRunAt=null;},sources);}finally{await this.ports.revoke({...scope,assertCurrent(){}},binding);}throw error;}
+      const result=await this.register(scope,directory,value,localTime,sources);
+      if(!result.registered)return this.projection(scope,result.value,sources,access,true);
+      value=result.value;
       return await this.settle(scope,directory,value,sources,access,request,true);
     }finally{await release();scope.assertCurrent();}
   }
@@ -265,7 +329,11 @@ export class FinanceExperience {
     if(!(await this.pluginReady(scope)))throw new Error('finance_plugin_activation_required');scope.assertCurrent();
     if(!this.dailySourcesAvailable(scope,value,sources))throw new Error('finance_source_unavailable');
     const access=await this.ports.access(scope);scope.assertCurrent();
-    if(!access.monitoringAllowed)throw new Error(access.status==='verified'?'finance_monitoring_pro_required':access.status==='signed-out'?'finance_monitoring_sign_in_required':'finance_monitoring_access_unavailable');
+    if(!access.monitoringAllowed){
+      // A plan or sign-in the owner can lift pauses the briefing (it registers again by itself) instead of letting the revoked check-in switch it off.
+      if(access.status!=='unavailable'){try{await this.unbind(scope,directory,value);}catch{scope.assertCurrent();}}
+      throw new Error(access.status==='verified'?'finance_monitoring_pro_required':access.status==='signed-out'?'finance_monitoring_sign_in_required':'finance_monitoring_access_unavailable');
+    }
     const now=this.ports.now(),day=new Intl.DateTimeFormat('en-CA',{timeZone:this.ports.timezone(),year:'numeric',month:'2-digit',day:'2-digit'}).format(now);
     // The registration and the day are decided again on the fresh file: another process may have changed either since the checks above.
     await this.commit(scope,directory,fresh=>{const current=registered(fresh);if(current.admissionDay===day&&current.admissionRunId!==runId)throw new Error('finance_daily_already_admitted');current.admissionDay=day;current.admissionRunId=id.parse(runId);},sources);scope.assertCurrent();
@@ -309,8 +377,53 @@ export class FinanceExperience {
   async withMonitoringSnapshot<T>(scope:FinanceScope,expected:FinanceMonitoringSnapshot,work:()=>Promise<T>):Promise<T>{
     scope.assertCurrent();this.assertMonitoringSnapshot(scope,expected);return work();
   }
+  /**
+   * Finish a registration that could not be made when monitoring was turned on (supervisor not answering yet, billing unreachable) or that a
+   * plan change paused. Called by the existing One check-in sweep. A settled owner costs one stat of the settings file; only a pending one is
+   * read, and its attempts back off up to two minutes. Resolves when the attempt ends; the caller does not wait for it.
+   */
+  async reconcilePending(scope:FinanceScope):Promise<void>{
+    scope.assertCurrent();
+    const directory=path.join(this.root,financeScopeHash(scope));let identity:string;
+    try{const info=fs.statSync(path.join(directory,'settings.json'));identity=`${info.ino}:${info.size}:${info.mtimeMs}`;}catch{return;}
+    if(this.settled.get(directory)===identity||this.reconciling.has(directory))return;
+    const wait=this.retry.get(directory);if(wait&&this.ports.now().getTime()<wait.at)return;
+    let value:Preferences;try{value=this.read(scope,directory,[]);}catch{scope.assertCurrent();return;}
+    if(!isPending(value.monitoring)){if(this.settled.size>=SETTLED_LIMIT)this.settled.clear();this.settled.set(directory,identity);this.retry.delete(directory);return;}
+    this.reconciling.add(directory);
+    try{
+      const outcome=await this.registerPending(scope,directory,value);const now=this.ports.now().getTime();
+      if(outcome==='registered')this.retry.delete(directory);
+      else if(outcome==='paused')this.retry.set(directory,{fails:wait?.fails??0,at:now+PAUSED_RETRY_MS,paused:true});
+      else if(outcome==='failed'){const fails=(wait?.fails??0)+1;this.retry.set(directory,{fails,at:now+Math.min(15_000*2**fails,RETRY_MAX_MS),paused:false});}
+      // 'busy': the owner's own on/off action holds the lock; the next sweep asks again.
+    }catch(error){
+      // An account change ends this attempt only; the owner's next sweep starts over.
+      const code=error instanceof Error?error.message:'finance_daily_registration_failed';
+      if(!NOT_A_REGISTRATION_FAILURE.has(code)){warnOnce(code);const fails=(wait?.fails??0)+1;this.retry.set(directory,{fails,at:this.ports.now().getTime()+Math.min(15_000*2**fails,RETRY_MAX_MS),paused:false});}
+    }finally{this.reconciling.delete(directory);}
+  }
+  private async registerPending(scope:FinanceScope,directory:string,seen:Preferences):Promise<'registered'|'paused'|'failed'|'busy'>{
+    // Consent that is not the current notice's: the briefing stays on and waits for the owner to accept again (the scheduled instruction never runs without it).
+    if(seen.consent?.version!==FINANCE_NOTICE_VERSION)return 'paused';
+    let sources:FinanceDataSourceOption[]=[];try{sources=await this.ports.sources();}catch{scope.assertCurrent();}scope.assertCurrent();
+    let access:Access=UNVERIFIED;try{access=await this.ports.access(scope);}catch{scope.assertCurrent();}scope.assertCurrent();
+    // The owner's plan or sign-in is the owner's to change: stay on, register by itself once it allows monitoring. An unreachable server is not a verdict.
+    if(access.status==='signed-out'||(access.status==='verified'&&!access.monitoringAllowed))return 'paused';
+    const release=await tryLockFinanceDirectory(path.join(directory,'monitoring'),'long');
+    if(!release)return 'busy';
+    try{
+      scope.assertCurrent();const value=this.read(scope,directory,sources,true);
+      if(!isPending(value.monitoring))return 'registered';
+      if(value.consent?.version!==FINANCE_NOTICE_VERSION)return 'paused';
+      if(!(await this.pluginReady(scope))){warnOnce('finance_plugin_activation_required');return 'failed';}
+      if(!this.dailySourcesAvailable(scope,value,sources)){warnOnce('finance_source_unavailable');return 'failed';}
+      return (await this.register(scope,directory,value,value.monitoring.localTime,sources)).registered?'registered':'failed';
+    }finally{await release();scope.assertCurrent();}
+  }
   async guard(scope:FinanceScope):Promise<FinanceDailyBinding|null>{
     const {directory,value}=await this.snapshot(scope);
+    // Waiting for its registration (see reconcilePending): nothing to guard yet, and no automation of this binding exists.
     if(!value.monitoring.commandId)return null;
     if(!value.monitoring.enabled){await this.ports.revoke(scope,value.monitoring);scope.assertCurrent();return null;}
     const observed=await this.ports.observe(scope,value.monitoring);scope.assertCurrent();
@@ -320,7 +433,9 @@ export class FinanceExperience {
       // Unreachable billing is "cannot tell": keep the schedule and let the next sweep ask again (wakeFinanceDailyBriefing holds it).
       if(access.status==='unavailable')throw new Error('finance_monitoring_access_unavailable');
       let sources:FinanceDataSourceOption[]=[];try{sources=await this.ports.sources();}catch{scope.assertCurrent();}scope.assertCurrent();
-      if(!access.monitoringAllowed||value.consent?.version!==FINANCE_NOTICE_VERSION||!this.dailySourcesAvailable(scope,value,sources)||!(await this.pluginReady(scope))){await this.stopMonitoring(scope,directory,value);return null;}}
+      // A plan or sign-in that does not allow it pauses (reconcilePending registers again once it does); everything else stops.
+      if(!access.monitoringAllowed){await this.unbind(scope,directory,value);return null;}
+      if(value.consent?.version!==FINANCE_NOTICE_VERSION||!this.dailySourcesAvailable(scope,value,sources)||!(await this.pluginReady(scope))){await this.stopMonitoring(scope,directory,value);return null;}}
     const last=observed.lastSentAt??value.monitoring.lastSentAt;
     if(observed.nextRunAt!==value.monitoring.nextRunAt||last!==value.monitoring.lastSentAt)await this.adjust(scope,directory,value,monitoring=>{monitoring.nextRunAt=observed.nextRunAt;monitoring.lastSentAt=last;});
     return {oneId:value.monitoring.oneId,checkinId:value.monitoring.checkinId,commandId:value.monitoring.commandId};
@@ -329,6 +444,8 @@ export class FinanceExperience {
 let singleton:FinanceExperience|undefined;
 function experience(){return singleton??=new FinanceExperience(userDataPath('finance','experience'));}
 export function financeExperience(scope:FinanceScope,request:FinanceExperienceRequest):Promise<FinanceExperienceState>{return experience().request(scope,request);}
+/** Start finishing a pending registration without waiting for it (the sweep must not block on the supervisor). */
+export function reconcileFinanceDailyPending(scope:FinanceScope):void{void experience().reconcilePending(scope).catch(()=>undefined);}
 export function guardFinanceDailyBriefing(scope:FinanceScope):Promise<FinanceDailyBinding|null>{return experience().guard(scope);}
 
 export function requireFinanceConsent(scope:FinanceScope):Promise<FinanceDataSelection>{return experience().consent(scope);}

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.131 — 2026-11-07
+
+Includes everything planned for 1.3.130, which was not published.
+
+- Phone Finance: a phone search or add that the market data source could not answer for a moment waits and goes through instead of showing "no results" or a refusal the app kept for a day. Turning on scheduled briefings from the phone no longer fails when the background service or the billing check is slow: it stays "on, registration pending" and the check-in sweep finishes it. A plan downgrade, a sign-out or missing consent pauses the briefings (they resume by themselves) instead of turning them off. Result cards now reach the phone whole instead of as a bare label, up to a size bound, with the text and attribute values masked.
+- The automatic Toolchain detector and its trial path are removed. It scanned the run history every six hours and made model judgments for drafts nothing ever promoted or ran, and its trial permissions put unrelated drafts into One's search. The owner's toolchains, the tools that create, publish, run and search them, and the drafts already made stay; the detector's own records are cleared once when the app opens its store, and a toolchain an older build pulled back stays pulled back.
+- Memory: a memory write made by another conversation while a turn is building its recall no longer leaves that turn with no memory. Forgetting a memory or an owner edit still ends the recall, and an account switch or a different store still does.
+- Context window: a Claude conversation that runs over the model's context window now says so, in the same words as the other runtimes, and is no longer waited on or retried by a timer as if the app had a problem; a Goal pass takes the replan, switch-runtime and rest steps instead. A Science research pass that overflows the window continues with a smaller step instead of waiting or resending (Science package pinned at the build that reads this).
+- A read-only step on Antigravity answers in text or moves to a runtime that can read, instead of ending the run; an Antigravity the owner pinned gets one resend on the same runtime and then the pool, and a browser-only run is left alone.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.130 — 2026-11-07
 
 - Phone Finance: a phone search or add that the market data source could not answer for a moment waits and goes through instead of showing "no results" or a refusal the app kept for a day.

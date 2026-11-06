@@ -1302,7 +1302,9 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   // unless the pick is not the pool's to change (selection.ts routeReadStepRuntime); otherwise it runs answer-only.
   const active = routeReadStepRuntime(workloadResolution?.runtime ?? baseActive, candidateRuntimes, {
     permission: p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn ? "read" : nodePermission,
-    pinned: pinnedControllerPreferred || teammatePinnedToRoom || Boolean(runtimeChoice?.override) || p.req.agentAppMode === true });
+    pinned: pinnedControllerPreferred || teammatePinnedToRoom || Boolean(runtimeChoice?.override) || p.req.agentAppMode === true,
+    // The same rule the turn's own request uses below (browserOnly is dropped for a control-plane turn).
+    browserOnly: !(turn.runtimeToolsDisabled || controlPlaneTurn) && p.browserOnly === true });
   const picked = sameRuntime(active, baseActive) ? basePicked : pickRunner(active) ?? basePicked;
   if (workloadResolution) {
     if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
@@ -1545,6 +1547,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   let result: Awaited<ReturnType<typeof runNodeOn>> = teammateRefusal
     ? { text: "", failure: teammateRefusal }
     : await runNodeOn(executedRuntime, executedPicked);
+  // The owner's pinned controller gets its one same-runtime resend of an empty tools-free read answer before the step moves on.
+  let emptyReadResent = false;
   while (
     result.failure
     && !p.req.agentAppMode
@@ -1552,6 +1556,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     && !teammatePinnedToRoom
     && !(turn.signal ?? p.signal)?.aborted
   ) {
+    if (pinnedControllerPreferred && result.failure.providerCode === READ_ANSWER_ONLY_EMPTY_CODE && !emptyReadResent) {
+      emptyReadResent = true;
+      result = await runNodeOn(executedRuntime, executedPicked);
+      continue;
+    }
     if (!failedNodeRuntimes.some((runtime) => sameRuntimeModel(runtime, executedRuntime))) {
       failedNodeRuntimes.push(executedRuntime);
     }
@@ -1580,7 +1589,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     result = await runNodeOn(executedRuntime, executedPicked);
   }
   // No other runtime took a tools-free read answer that came back empty with nothing having acted: the same runtime gets it once more.
-  if (result.failure?.providerCode === READ_ANSWER_ONLY_EMPTY_CODE && !(turn.signal ?? p.signal)?.aborted) {
+  if (result.failure?.providerCode === READ_ANSWER_ONLY_EMPTY_CODE && !emptyReadResent && !(turn.signal ?? p.signal)?.aborted) {
     result = await runNodeOn(executedRuntime, executedPicked);
   }
   if (result.failure) {

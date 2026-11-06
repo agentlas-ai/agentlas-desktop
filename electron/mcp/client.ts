@@ -62,7 +62,7 @@ import type { ChatHostNotice } from "../../shared/types";
 // PRD §3.1 6단계 BYOC: 사용자 머신에서 사용자의 구독/키로 직접 호출.
 // chatId 기반 — chat에서 agent + project 컨텍스트 lookup.
 import fs from "node:fs";
-import { exhaustedPassFailureVerdict, modelContextFailureReason, passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
+import { contextCapacityFailureReason, exhaustedPassFailureVerdict, modelContextFailureReason, passFailureVerdict, waitForPassRetry } from "../long-run/pass-failure-verdict";
 import type { GoalPassStop } from "../long-run/goal-pass-stop";
 import { parseHubReleasePin, assertHubReleasePin } from "../../shared/hub-release-pin";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
@@ -859,13 +859,17 @@ class InvocationRunnerFailureError extends Error {
   }
 }
 
-function runtimeFailureFacts(failure: RunnerFailure, now: number, behindUnsettledTurn = false): Omit<InvocationRuntimeFailure, "cause"> | null {
+export function runtimeFailureFacts(failure: RunnerFailure, now: number, behindUnsettledTurn = false): Omit<InvocationRuntimeFailure, "cause"> | null {
+  // A typed context-window overflow reported as an `exit` (claude-code terminal_reason prompt_too_long) is the same fact codex and the
+  // managed adapters already report as `refused` + code: the same request is refused again. It travels as that, with the code, so
+  // Science continues with a smaller step instead of waiting out a timer (contextCapacityFailureReason owns the code list).
+  const overflowExit = failure.kind === "exit" && contextCapacityFailureReason(failure) === "context_capacity";
   // `empty` (no text and no tool call) is carried only as the cause behind an unfinished turn: the failure itself stays one
   // of the four provider verdicts, which is what the replay guard and the status rule read (shared/types.ts).
-  if (!["quota", "rate_limit", "auth", "refused"].includes(failure.kind) && !(behindUnsettledTurn && failure.kind === "empty")) return null;
+  if (!overflowExit && !["quota", "rate_limit", "auth", "refused"].includes(failure.kind) && !(behindUnsettledTurn && failure.kind === "empty")) return null;
   const reset = failure.kind === "quota" || failure.kind === "rate_limit" ? parseRetryHint(failure.retryAfterHint, now) : null;
   return {
-    kind: failure.kind as InvocationRuntimeFailure["kind"],
+    kind: (overflowExit ? "refused" : failure.kind) as InvocationRuntimeFailure["kind"],
     source: failure.source,
     ...(failure.providerCode && /^[a-zA-Z0-9_.-]{1,96}$/.test(failure.providerCode)
       ? { providerCode: failure.providerCode } : {}),
@@ -890,7 +894,8 @@ function invocationRuntimeFailure(error: unknown, now = Date.now()): InvocationR
  * The exception's private provider brand is required; no renderer/error prose can mint a retry. */
 export function goalPassStopForInvocationError(error: unknown, goalId: string): GoalPassStop | null {
   const failure = InvocationRunnerFailureError.providerFailure(error);
-  if (!failure || !["quota", "rate_limit", "unavailable", "timeout", "empty", "exit"].includes(failure.kind)) return null;
+  // A typed context overflow of any runtime (a codex or managed adapter refusal included) is a pause the persistence ladder answers.
+  if (!failure || (!["quota", "rate_limit", "unavailable", "timeout", "empty", "exit"].includes(failure.kind) && !contextCapacityFailureReason(failure))) return null;
   const verdict = exhaustedPassFailureVerdict(failure);
   const at = parseRetryHint(failure.retryAfterHint, Date.now());
   return { goalId, reason: verdict.reason, action: "pause", failureKind: failure.kind, runtime: failure.runtime,
@@ -3401,7 +3406,8 @@ async function runMcpInvocationInContext(
    */
   if (runtimeChoice && !continuationRuntimePinned) {
     const routed = routeReadStepRuntime(runtimeChoice.active, rolePriorityRuntimes(runtimes, "orchestrator"),
-      { permission: normalizedPermission, pinned: !readOnlyObservationRun && (runtimeResolution.pinHonored || Boolean(runtimeChoice.override)) });
+      { permission: normalizedPermission, pinned: !readOnlyObservationRun && (runtimeResolution.pinHonored || Boolean(runtimeChoice.override)),
+        browserOnly: req.toolMode === "browser" });
     const routedPicked = routed !== runtimeChoice.active ? pickRunner(routed) : null;
     if (routed !== runtimeChoice.active && routedPicked) {
       if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: req.chatId, kind: "observation_runtime_selection",
@@ -7327,6 +7333,9 @@ async function runMcpInvocationInContext(
         nativeActivity: () => nativeActivity,
       };
     };
+    // The owner's own pick for this turn (same fact as the read-step routing above): an empty tools-free read answer is sent once more
+    // to it before the step moves to the pool's next runtime.
+    const ownerPinnedRuntime = !readOnlyObservationRun && (runtimeResolution.pinHonored || Boolean(runtimeChoice?.override));
     const directRuntimeFallbackAllowed =
       !req.agentAppMode
       && !isUnattendedExecution(executionContext)
@@ -7734,6 +7743,7 @@ async function runMcpInvocationInContext(
           return result;
         }
         const failed = result.failure;
+        if (ownerPinnedRuntime && resendEmptyReadAnswer(failed)) continue;
         // First failure: this is when recovery actually begins.
         if (recoveryStartedAt == null) recoveryStartedAt = Date.now();
         originalFailure = originalFailure ?? failed;

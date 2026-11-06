@@ -865,7 +865,9 @@ function taskForceCandidateRuntimes(p: BorrowedTaskForceParams, options: { ignor
  */
 function taskForceReadStepPinned(p: BorrowedTaskForceParams): boolean {
   return oneControllerRuntimePreferred(p) || Boolean(p.runtimeOverride) || Boolean(p.workforceSelectionReceipt)
-    || p.benchmarkMode === true || p.req.agentAppMode === true;
+    || p.benchmarkMode === true || p.req.agentAppMode === true
+    // A browser-only run keeps its runtime: read-step routing is about the read tool surface, which a browser run does not use.
+    || p.browserOnly === true;
 }
 
 function oneControllerRuntimePreferred(p: BorrowedTaskForceParams): boolean {
@@ -8565,6 +8567,11 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       const typed = error instanceof TaskForceRuntimeFailureError ? error : null;
       if (!typed) throw error;
       if (p.signal?.aborted) throw error;
+      // The owner's pinned controller gets its one same-runtime resend of an empty tools-free read answer before the step moves on.
+      if (oneControllerRuntimePreferred(p) && typed.failure.providerCode === READ_ANSWER_ONLY_EMPTY_CODE && !emptyReadAnswerResent) {
+        emptyReadAnswerResent = true;
+        continue;
+      }
       if (!failedSynthesisRuntimes.some((runtime) => sameRuntimeModel(runtime, typed.runtime))) {
         failedSynthesisRuntimes.push(typed.runtime);
       }

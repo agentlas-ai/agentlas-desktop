@@ -1,5 +1,6 @@
 import { supervisorError } from "../../shared/one-supervisor";
 import { createHash } from "node:crypto";
+import { isHostCheckinInstruction } from "./host-checkin-instructions";
 import type Database from "better-sqlite3";
 import { ONE_CHECKIN_LIMITS, nextCheckinAt, type OneCheckin, type OneCheckinCadence, type SupervisorCommandReceipt, type SupervisorNotice, type SupervisorRequestState } from "../../shared/one-supervisor";
 import { ONE_SUPERVISOR_JOURNAL_SCHEMA, type SupervisorJournalPage, type SupervisorJournalEvent } from "../../shared/one-supervisor-runtime";
@@ -244,7 +245,12 @@ export class OneSupervisorStore {
     return this.db.transaction(() => {
       const prior = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE command_id=?").get(input.commandId) as Parameters<OneSupervisorStore["checkinRow"]>[0] & {one_id:string} | undefined;
       if (prior) { if (prior.one_id !== oneId) throw supervisorError('supervisor_command_identity_conflict'); return this.checkinRow(prior); }
-      if ((this.db.prepare("SELECT count(*) AS n FROM one_supervisor_checkins WHERE one_id=? AND active=1").get(oneId) as {n:number}).n >= ONE_CHECKIN_LIMITS.active) {
+      // The cap bounds the model's check-ins: one active check-in per host-authored instruction (host-checkin-instructions.ts) is exempt, the rest count.
+      const active = this.db.prepare("SELECT instruction FROM one_supervisor_checkins WHERE one_id=? AND active=1").all(oneId) as {instruction:string}[];
+      const exempt = new Set<string>();
+      let counted = 0;
+      for (const row of active) { if (isHostCheckinInstruction(row.instruction) && !exempt.has(row.instruction)) exempt.add(row.instruction); else counted++; }
+      if (!(isHostCheckinInstruction(input.instruction) && !exempt.has(input.instruction)) && counted >= ONE_CHECKIN_LIMITS.active) {
         throw supervisorError('supervisor_checkin_limit');
       }
       const id = `checkin_${supervisorHash([oneId,input.commandId]).slice(0,24)}`;

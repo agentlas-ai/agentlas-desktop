@@ -385,7 +385,8 @@ export async function runSwarmInvocation(
   const workerPriority = rolePriorityRuntimes(candidateRuntimes, "worker");
   // A read-permission worker or synthesis starts on a runtime that reads with tools unless its runtime is not the pool's to change.
   const readRoute = (runtime: typeof p.active): typeof p.active => routeReadStepRuntime(runtime, candidateRuntimes,
-    { permission: p.req.permissions, pinned: Boolean(roomPinnedWorker) || Boolean(p.runtimeOverride) || Boolean(p.workforceSelectionReceipt) });
+    { permission: p.req.permissions, pinned: Boolean(roomPinnedWorker) || Boolean(p.runtimeOverride) || Boolean(p.workforceSelectionReceipt),
+      browserOnly: p.req.toolMode === "browser" });
   const workerDefault = readRoute(roomPinnedWorker ?? workerPriority[0] ?? pickActive(candidateRuntimes, "worker") ?? p.active);
   const workerDefaultRunner = sameRuntime(workerDefault, p.active)
     ? p.picked

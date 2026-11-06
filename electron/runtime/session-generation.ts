@@ -11,6 +11,7 @@
 // the next request starts from) and the model's window here; on "new_generation" it bumps the binding's generation
 // (store.invalidateProvider), so the next turn opens a fresh native session seeded from the Agentlas journal replay.
 import { resolveEffectiveContextWindow } from "../../shared/models";
+import { CODEX_CONTEXT_WINDOW_CODE } from "./codex-turn-failure";
 
 export const GENERATION_CONTEXT_RATIO = 0.8;
 
@@ -45,6 +46,16 @@ export function decideGeneration(input: GenerationInput): GenerationDecision {
   const window = input.contextWindowTokens, last = input.lastInputTokens;
   if (!window || !Number.isFinite(window) || window <= 0 || last === null || !Number.isFinite(last) || last <= 0) return { action: "continue" };
   return last >= window * GENERATION_CONTEXT_RATIO ? { action: "new_generation", reason: "context_ratio" } : { action: "continue" };
+}
+
+/**
+ * The typed provider codes that say "this conversation is over the model's context window": claude-code's result terminal_reason
+ * (claude-code.ts claudeFailureFromEvent) and codex's context-window failure that outlived its own native compaction retry. A new
+ * generation cures them (decideGeneration symptom "context_overflow"); the host asks here, never by reading prose.
+ */
+const CONTEXT_OVERFLOW_CODES: ReadonlySet<string> = new Set(["prompt_too_long", CODEX_CONTEXT_WINDOW_CODE]);
+export function isContextOverflowFailure(failure: { providerCode?: string } | null | undefined): boolean {
+  return Boolean(failure?.providerCode && CONTEXT_OVERFLOW_CODES.has(failure.providerCode));
 }
 
 /** The model catalog is keyed by provider; a subscription runtime names the provider its models come from. */
@@ -129,3 +140,6 @@ export function compactionTokenLimit(kind: string, model: string | null | undefi
 export function nativeCompactionLimit(kind: string, model: string | null | undefined): number | undefined {
   return compactionTokenLimit(kind, model);
 }
+
+/** The window a local-model runner assumes for a model nobody measured (ollama.ts, local-openai.ts): one number for those runners and for the oversized-input check. */
+export const LOCAL_RUNTIME_UNKNOWN_WINDOW = 16_000;

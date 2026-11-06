@@ -4,7 +4,7 @@ import { createMobileBuildInterviewWitnessSource } from "../hephaestus/mobile-in
 import { purposePrompt } from "../runtime/purpose-prompts";
 import type { ToolApprovalDecision, ToolApprovalRequestEvent, ToolApprovalResolutionReceipt } from "../../shared/types";
 import { listUiInstances } from "../harness/ui-instances";
-import { mergeMobileInlineUiTranscript, mobileDomainPorts } from "./finance-ui-transcript";
+import { MOBILE_SNAPSHOT_VISUAL_BYTES, mergeMobileInlineUiTranscript, mobileDomainPorts } from "./finance-ui-transcript";
 import {isOneMobileSecureMethod, type OneMobileSecureAdapter} from "../secrets/one-mobile-secure";
 import { answerOneDispatchQuestion } from "../one/team-dispatch";
 import type { MobilePushService, MobilePushNotice } from "./push";
@@ -3180,7 +3180,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const snapshot = await oneSupervisor().snapshot();
         stage("inline-ui");
         const inline = await mergeMobileInlineUiTranscript(snapshot.conversationChatId, snapshot.messages,
-          await listUiInstances(snapshot.conversationChatId));
+          await listUiInstances(snapshot.conversationChatId), { maxVisualBytes: MOBILE_SNAPSHOT_VISUAL_BYTES });
         stage("projection");
         // The model Hope's next turn runs: the conversation's chip (room-chip-runtime.ts), else the
         // orchestrator default read from the same ordered role configuration as runtime detection, without

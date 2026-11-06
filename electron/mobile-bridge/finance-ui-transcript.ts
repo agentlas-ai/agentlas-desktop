@@ -4,17 +4,28 @@ import type { HarnessCallContext } from '../harness/capability-ports';
 import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema, financeNativeTranscriptContents, mobileDomainPorts } from '../finance/mobile-bridge';
 export { mobileDomainPorts };
 import { mergeInlineUiTranscript } from '../../shared/inline-ui-transcript';
+import { redactMobileInlineContent } from './sanitize';
 import type { InlineUiPresentationContent } from '../../shared/inline-ui-presentation';
 import type { ChatHistoryEntry } from '../../shared/types';
 import type { UiInstanceView } from '../../shared/ui-instances';
 
+/** How many of a chat's newest cards one read loads; a history page leaves the rest for the next page (history-page.ts). */
+export const MOBILE_CARD_WINDOW = 16;
+/** The largest drawn card (HTML bytes) a poll-driven snapshot carries, so a snapshot is no larger than it was; a history page allows the full wire budget. */
+export const MOBILE_SNAPSHOT_VISUAL_BYTES = 56 * 1024;
+/** A retained result card this module reads for the phone (the Finance native view, port-bound result). */
+export const isMobileCardInstance = (instance: UiInstanceView): boolean => !instance.content && instance.state !== 'closed' && !instance.closedAt
+  && instance.presentation.kind === 'native' && instance.presentation.viewId === FINANCE_NATIVE_VIEW
+  && /^np_[0-9a-f-]{36}$/.test(instance.callId) && instance.resultRef === `result:${instance.callId}`
+  && (!instance.structuredResultRef || instance.structuredResultRef === instance.resultRef);
+/** One line, no code marks, bounded: the model writes a card's title. */
+export const mobileCardHeading = (title: string): string => title.replace(/\s+/g, ' ').replace(/`/g, '').trim().slice(0, 120);
+
 /** Mobile-only hydration of immutable, account-bound results. No service query, model call or UI-store write. */
-export async function mergeMobileInlineUiTranscript(chatId: string, history: readonly ChatHistoryEntry[], instances: readonly UiInstanceView[]) {
+export async function mergeMobileInlineUiTranscript(chatId: string, history: readonly ChatHistoryEntry[], instances: readonly UiInstanceView[], options: { maxVisualBytes?: number } = {}) {
   const contents = new Map<string, readonly InlineUiPresentationContent[]>();
-  const eligible = instances.filter(instance => instance.chatId === chatId && !instance.content && instance.state !== 'closed' && !instance.closedAt
-    && instance.presentation.kind === 'native' && instance.presentation.viewId === FINANCE_NATIVE_VIEW
-    && /^np_[0-9a-f-]{36}$/.test(instance.callId) && instance.resultRef === `result:${instance.callId}`
-    && (!instance.structuredResultRef || instance.structuredResultRef === instance.resultRef));
+  const titles = new Map<string, string>();
+  const eligible = instances.filter(instance => instance.chatId === chatId && isMobileCardInstance(instance));
   if (!eligible.length) return mergeInlineUiTranscript(chatId, history, instances);
   // GUI authentication stays behind the authenticated read, never a new daemon import-time dependency.
   let account: HarnessCallContext['hostAccountBinding'];
@@ -31,8 +42,8 @@ export async function mergeMobileInlineUiTranscript(chatId: string, history: rea
       children: [{ type: 'text', text: 'This Finance result was not loaded in this view.' }],
     } }];
     // Keep older anchors pageable without reading every retained payload on each snapshot poll.
-    for (const instance of eligible.slice(0, -16)) contents.set(instance.instanceId, notLoaded(instance));
-    const candidates = eligible.slice(-16).reverse();
+    for (const instance of eligible.slice(0, -MOBILE_CARD_WINDOW)) contents.set(instance.instanceId, notLoaded(instance));
+    const candidates = eligible.slice(-MOBILE_CARD_WINDOW).reverse();
     for (const instance of candidates) {
       if (remaining <= 0) { contents.set(instance.instanceId, notLoaded(instance)); continue; }
       try {
@@ -59,7 +70,10 @@ export async function mergeMobileInlineUiTranscript(chatId: string, history: rea
             if (createHash('sha256').update(original).digest('hex') !== data.storedSha256) throw new Error('finance_result_digest_invalid');
             const checked = FinanceNativeResultSchema.safeParse(JSON.parse(original));
             if (!checked.success || checked.data.ownerScope !== ownerScope || checked.data.operationId !== binding.operationId) throw new Error('finance_result_invalid');
-            contents.set(instance.instanceId, financeNativeTranscriptContents(checked.data, { state: instance.state }));
+            const shown = { state: instance.state, ...(options.maxVisualBytes ? { maxVisualBytes: options.maxVisualBytes } : {}) };
+            contents.set(instance.instanceId, financeNativeTranscriptContents(checked.data, shown).map(redactMobileInlineContent));
+            // The row's heading is the card's own title (the stored label names the Finance port whichever domain drew it).
+            if (checked.data.view.kind === 'canvas' && mobileCardHeading(checked.data.view.title)) titles.set(instance.instanceId, mobileCardHeading(checked.data.view.title));
             break;
           }
           if (data.nextCursor !== String(original.length) || original.length >= data.totalChars || data.nextCursor === cursor) throw new Error('finance_result_cursor_invalid');
@@ -73,5 +87,5 @@ export async function mergeMobileInlineUiTranscript(chatId: string, history: rea
     }
     if (await nativePortOwnerScope(ctx) !== ownerScope) contents.clear();
   } catch { contents.clear(); }
-  return mergeInlineUiTranscript(chatId, history, instances, contents);
+  return mergeInlineUiTranscript(chatId, history, titles.size ? instances.map((instance): UiInstanceView => { const title = titles.get(instance.instanceId); return title ? { ...instance, presentation: { ...instance.presentation, fallbackText: title } } : instance; }) : instances, contents);
 }

@@ -1,6 +1,6 @@
 import type { InvocationRuntimeFailure } from "./types";
 import { formatRuntimeQuotaReset } from "./runtime-quota";
-import { EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_NO_TOOL_RAN_CODES } from "./turn-settlement";
+import { EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_NO_TOOL_RAN_CODES, READ_ANSWER_ONLY_EMPTY_CODE } from "./turn-settlement";
 
 /**
  * What the transcript says when a run ended without a reply, built from the run's typed failure only (F51, Finance 1008
@@ -151,6 +151,8 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
 export const EMPTY_CAUSE_CODE_CLASSES: ReadonlyMap<string, "tools_unusable" | "empty_no_tool"> = new Map<string, "tools_unusable" | "empty_no_tool">([
   [EMPTY_AFTER_UNUSABLE_TOOLS_CODE, "tools_unusable"],
   ...[...EMPTY_NO_TOOL_RAN_CODES].map((code) => [code, "empty_no_tool"] as const),
+  // A tools-free read answer that came back empty (antigravity.ts): no tool surface was offered and nothing that needs approval ran.
+  [READ_ANSWER_ONLY_EMPTY_CODE, "empty_no_tool"],
 ]);
 
 const TYPED_KINDS: ReadonlySet<string> = new Set(["quota", "rate_limit", "auth", "refused"]);

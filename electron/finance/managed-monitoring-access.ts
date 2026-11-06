@@ -20,13 +20,15 @@ export async function managedFinanceMonitoringAccess(scope: FinanceScope): Promi
       && value.credentials.control === captured.credentials.control;
   };
 
+  // One deadline for both attempts: the second runs only while time is left, so the whole check stays within it.
+  const deadline = AbortSignal.timeout(8_000);
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    if (!current()) return unavailable();
+    if (!current() || deadline.aborted) return unavailable();
     let response: Response;
     try {
       response = await fetch(`${captured.webBaseUrl}${endpoint}`, {
         method: 'GET', headers: { authorization: `Bearer ${captured.credentials.control}`, 'x-agentlas-managed-one': '1' },
-        redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(8_000),
+        redirect: 'error', cache: 'no-store', signal: deadline,
       });
     } catch {
       if (!current()) return unavailable();

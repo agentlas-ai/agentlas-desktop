@@ -30,6 +30,25 @@ const TRUNCATION_SUFFIX = "…[truncated]";
 /** Keep enough headroom for the response/event envelope and UTF-8 expansion. */
 export const MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES = MOBILE_BRIDGE_MAX_MESSAGE_BYTES - 64 * 1024;
 export const MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES = 64 * 1024;
+/**
+ * A drawn card or a native card goes out redacted like every other phone text: a path or key-like word in it is masked in place and the card is
+ * never replaced by its bare label. Only text and quoted attribute values are masked, never markup: the credential rule accepts `<` and `>`
+ * in a value, so run over the whole document it would eat the tags after `Password: x`. A native card is masked in its string values only.
+ */
+export function redactMobileInlineContent<T extends { kind: string }>(content: T): T {
+  const mask = (value: string) => sanitizeMobileBridgeText(value, Buffer.byteLength(value, "utf8") + 64);
+  const markup = (html: string) => html.replace(/(<[^>]*>)|([^<]+)/g, (_all, tag: string | undefined, text: string | undefined) => tag !== undefined
+    ? tag.replace(/(=\s*)(?:"([^"]*)"|'([^']*)')/g, (_pair, eq: string, double: string | undefined, single: string | undefined) => double !== undefined ? `${eq}"${mask(double)}"` : `${eq}'${mask(single ?? "")}'`)
+    : mask(text ?? ""));
+  const walk = (value: unknown): unknown => typeof value === "string" ? mask(value) : Array.isArray(value) ? value.map(walk)
+    : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, walk(item)])) : value;
+  const item = content as unknown as { kind: string; html?: string; document?: unknown };
+  return item.kind === "visual" && typeof item.html === "string" ? { ...content, html: markup(item.html) }
+    : item.kind === "native" && item.document !== undefined ? { ...content, document: walk(item.document) } : content;
+}
+
+/** A typed result (a drawn card) is one atomic message: the cap that holds the whole card, below one history page (history-page.ts). */
+export const MOBILE_BRIDGE_INLINE_UI_TEXT_BYTES = 192 * 1024;
 export const MOBILE_BRIDGE_DISPLAY_TEXT_BYTES = 4 * 1024;
 
 export function mobileBridgeJsonBytes(value: unknown): number {

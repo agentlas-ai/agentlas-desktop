@@ -1,6 +1,7 @@
 import type { RunnerFailure } from "../runtime/runner";
 import { parseRetryHint } from "../runtime/runtime-cooldown";
 import { decideTurnSettlement } from "../../shared/turn-settlement";
+import { isContextOverflowFailure } from "../runtime/session-generation";
 
 /**
  * What a failed continuation pass means for the goal that is driving it.
@@ -54,6 +55,19 @@ export function modelContextFailureReason(failure: FailureBoundary): "context_ca
   return failure.providerCode === "local_context_measurement_unavailable" ? "context_measurement" : null;
 }
 
+/**
+ * The input does not fit the model's context window, whichever runtime says so: a managed adapter's structured refusal
+ * (modelContextFailureReason) or a subscription runner's marker carrying one of the typed overflow codes that session rotation
+ * already acts on (session-generation.ts isContextOverflowFailure: claude-code's terminal_reason `prompt_too_long` arrives as kind
+ * `exit`, codex's `codex_context_window_exceeded` as `refused`).
+ * Re-sending the same request on a timer cannot help, so the pass pauses and the Goal's persistence policy changes the request.
+ */
+export function contextCapacityFailureReason(failure: FailureBoundary): "context_capacity" | "context_measurement" | null {
+  const managed = modelContextFailureReason(failure);
+  if (managed) return managed;
+  return failure.source === "marker" && isContextOverflowFailure(failure) ? "context_capacity" : null;
+}
+
 /** Stop/steering must interrupt even the longest retry backoff immediately. */
 export function waitForPassRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.resolve();
@@ -78,7 +92,7 @@ export function passFailureVerdict(
   transientAttemptsSoFar: number,
 ): PassFailureVerdict {
   const hint = failure.retryAfterHint ? { retryAfterHint: failure.retryAfterHint } : {};
-  const contextReason = modelContextFailureReason(failure);
+  const contextReason = contextCapacityFailureReason(failure);
   if (contextReason) return { action: "pause", reason: contextReason, retryAfterMs: 0, ...hint };
   switch (failure.kind) {
     case "quota":

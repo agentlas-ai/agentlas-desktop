@@ -3,7 +3,7 @@ import { isMobileBridgeOneDecisionDto } from "../../shared/mobile-question-decis
 import { Buffer } from "node:buffer";
 import { listUiInstances } from "../harness/ui-instances";
 import { fitInlineUiTranscriptText } from "../../shared/inline-ui-transcript";
-import { mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
+import { MOBILE_SNAPSHOT_VISUAL_BYTES, mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
 import { withoutArchivedAgents } from "../archive/auto-archive";
 import { isHousekeepingHostNotice, normalizeChatHostNotice } from "../../shared/chat-host-notice";
 import { oneDispatchRoomUpdatedAt } from "../one/dispatch-presentation";
@@ -158,6 +158,7 @@ import {
   MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
   MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
   MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
+  MOBILE_BRIDGE_INLINE_UI_TEXT_BYTES,
   mobileBridgeDecisionTextCurrent,
   mobileBridgeDecisionTextUnchanged,
   mobileBridgeJsonBytes,
@@ -1055,14 +1056,17 @@ export function projectMobileBridgeHistory(
       : sanitizeMobileBridgeText(stripMobileBridgeControlFences(inlineFallback), MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES);
     const inlineMessageText = safeInlineFallback === undefined ? undefined
       : `${safeInlineFallback}\n\n${messageText.slice(inlineFallback!.length + 2)}`;
+    const typedUnchanged = inlineMessageText !== undefined
+      && sanitizeMobileBridgeText(inlineMessageText, Buffer.byteLength(inlineMessageText, "utf8") + 64) === inlineMessageText;
     const inlineText = inlineMessageText !== undefined
       ? fitInlineUiTranscriptText(
-          sanitizeMobileBridgeText(inlineMessageText, Buffer.byteLength(inlineMessageText, "utf8") + 64) === inlineMessageText
-            ? inlineMessageText : safeInlineFallback!,
+          typedUnchanged ? inlineMessageText : safeInlineFallback!,
           safeInlineFallback!,
-          MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
+          MOBILE_BRIDGE_INLINE_UI_TEXT_BYTES,
           remaining,
         ) : undefined;
+    // A card that does not fit what is left of this page waits for the next one whole: the older page reads it first, never as a bare label.
+    if (typedUnchanged && inlineText !== inlineMessageText && out.length > 0) break;
     const candidate: MobileBridgeChatMessageDto = {
       ...shell,
       // 제어 블록 제거는 **모델의 답**에만 적용한다.
@@ -1107,7 +1111,7 @@ async function messagesDto(
   let entries = 0;
   for (const chatId of ids) {
     const inline = await mergeMobileInlineUiTranscript(chatId,
-      listChatMessages(chatId, maxMessagesPerChat), await listUiInstances(chatId));
+      listChatMessages(chatId, maxMessagesPerChat), await listUiInstances(chatId), { maxVisualBytes: MOBILE_SNAPSHOT_VISUAL_BYTES });
     const projected = projectMobileBridgeHistory(
       inline.history,
       maxMessagesPerChat,

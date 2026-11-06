@@ -763,15 +763,17 @@ export function rolePriorityRuntimes(
  * Where a step that runs at read permission and may use tools starts: the runtime it was going to use when that runtime reads
  * with tools (shared/runtime-capabilities.ts readWithTools), else the first runtime of `pool` (the caller's own ordered
  * candidates, rolePriorityRuntimes) that does and can take a dispatch. Capability rows decide; no runtime is named here.
- * `pinned` keeps the owner's exact pick, and a pool with nobody capable keeps the runtime: both run answer-only on it
+ * `pinned` keeps the owner's exact pick, `browserOnly` (toolMode "browser") keeps the runtime, and a pool with nobody capable keeps the runtime: both run answer-only on it
  * (antigravity.ts antigravityAnswerOnlyRequest), so no read step ends refused.
  */
 export function routeReadStepRuntime(
   active: RuntimeStatus,
   pool: readonly RuntimeStatus[],
-  options: { permission: string | undefined; pinned?: boolean },
+  options: { permission: string | undefined; pinned?: boolean; browserOnly?: boolean },
 ): RuntimeStatus {
-  if (options.permission !== "read" || options.pinned || runtimeReadsWithTools(active.kind)) return active;
+  // A browser-only run reaches its page through the runtime's own browser surface, not the read tool surface this routing is about
+  // (antigravity.ts antigravityAnswerOnlyRequest leaves it alone too): it keeps the runtime it was going to use.
+  if (options.permission !== "read" || options.pinned || options.browserOnly || runtimeReadsWithTools(active.kind)) return active;
   return pool.find((candidate) => runtimeReadsWithTools(candidate.kind) && pickRunner(candidate)) ?? active;
 }
 

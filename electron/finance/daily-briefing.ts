@@ -2,6 +2,9 @@ import type { FinanceScope } from './store';
 import { createHash,randomUUID } from 'node:crypto';
 import { composeDeclaredPrompt, registerDeclaredPromptModule } from '../runtime/prompt-order';
 import { wasManagedOneConfigured } from '../managed-one/auth';
+import fs from 'node:fs';
+import { registerHostCheckinInstruction } from '../one/host-checkin-instructions';
+import { userDataPath } from '../runtime-paths';
 
 export interface FinanceDailyBinding { oneId:string|null; checkinId:string|null; commandId:string|null }
 const instructionModule={id:'finance.daily-checkin.instruction',revision:2,stability:'fixed-policy' as const,changeTriggers:['release' as const],order:0};
@@ -15,13 +18,16 @@ const LEGACY_DAILY_INSTRUCTION_SHA256='d54913d7f87f7e6196d4683be6696512b3019ce77
 export function isFinanceDailyInstruction(instruction:string):boolean {
   return instruction===financeDailyInstruction()||createHash('sha256').update(instruction).digest('hex')===LEGACY_DAILY_INSTRUCTION_SHA256;
 }
+// The check-in cap bounds the model's check-ins; this host-authored instruction (current and legacy text) is exempt (one/host-checkin-instructions.ts).
+registerHostCheckinInstruction(createHash('sha256').update(financeDailyInstruction()).digest('hex'));
+registerHostCheckinInstruction(LEGACY_DAILY_INSTRUCTION_SHA256);
 /**
  * A call to the One supervisor answers in milliseconds: the check-in itself is one synchronous database write, in this process or in the
  * daemon. It can only stall when the daemon or the channel to it stops answering, and the channel then gives up after minutes. Turning
- * monitoring on or off waits for this call, so it stops waiting after this long and reports the failure (the caller rolls the setting back).
+ * monitoring on waits for this call, so it stops waiting after this long: the registration stays pending and the One check-in sweep retries it.
  * A call that still lands afterwards (or is refused after the daemon already ran it) is undone by `onLate`, which must be safe to run again.
  */
-const SUPERVISOR_CALL_BACKSTOP_MS=30_000;
+const SUPERVISOR_CALL_BACKSTOP_MS=5_000;
 function withBackstop<F extends ()=>unknown>(call:F,onLate?:()=>void):Promise<Awaited<ReturnType<F>>>{
   return new Promise<Awaited<ReturnType<F>>>((resolve,reject)=>{
     let over=false;const pending=Promise.resolve().then(call) as Promise<Awaited<ReturnType<F>>>;
@@ -44,7 +50,7 @@ export async function registerFinanceDailyCheckin(scope:FinanceScope,binding:Fin
   try {
     const {commandId,oneId}=binding;
     const result=await withBackstop(()=>supervisor.checkin({commandId,oneId,action:'create',instruction:financeDailyInstruction(),dailyAt:localTime,notify:'always'}),()=>{void revokeFinanceDailyCheckin({...scope,assertCurrent(){}},binding).catch(()=>undefined);});scope.assertCurrent();
-    if(result.receipt?.state!=='completed'||result.checkin?.id!==binding.checkinId||result.checkin.cadence.kind!=='daily'||result.checkin.cadence.time!==localTime||!Number.isFinite(Date.parse(result.checkin.nextAt)))throw new Error('finance_daily_registration_unconfirmed');
+    if(result.receipt?.state!=='completed'||result.checkin?.id!==binding.checkinId||result.checkin.cadence.kind!=='daily'||result.checkin.cadence.time!==localTime||!Number.isFinite(Date.parse(result.checkin.nextAt)))throw Object.assign(new Error('finance_daily_registration_unconfirmed'),{cause:result.receipt?.reason});
     return {nextRunAt:result.checkin.nextAt};
   } catch(error) {
     // Only revocation of this previously prepared exact registration may outlive account admission.
@@ -58,6 +64,8 @@ export async function revokeFinanceDailyCheckin(scope:FinanceScope,binding:Finan
   if(!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_checkins'").get())return;
   db.transaction(()=>{
     scope.assertCurrent();
+    // The create receipt of a released briefing is read by nothing (every attempt has its own command id): it goes with the registration.
+    db.prepare("DELETE FROM one_supervisor_requests WHERE command_id=? AND one_id=? AND kind='checkin'").run(binding.commandId,binding.oneId);
     const row=db.prepare('SELECT id FROM one_supervisor_checkins WHERE id=? AND one_id=? AND command_id=?').get(binding.checkinId,binding.oneId,binding.commandId);
     if(!row)return;
     db.prepare('UPDATE one_supervisor_checkins SET active=0 WHERE id=? AND one_id=? AND command_id=?').run(binding.checkinId,binding.oneId,binding.commandId);
@@ -101,6 +109,9 @@ const MANAGED_DAILY_IDENTITY_UNAVAILABLE:ReadonlySet<string>=new Set([
  * neither revoked nor fired, and the next 30 s sweep asks again. A laptop that just woke before its Wi-Fi is back keeps its schedule.
  */
 export async function wakeFinanceDailyBriefing():Promise<string[]> {
+  // A briefing that is on but not registered yet (the supervisor was not answering) is finished here, in the sweep that already runs; it never blocks this tick.
+  // Only an owner who ever used Finance has this folder; everyone else loads nothing here.
+  if(fs.existsSync(userDataPath('finance','experience'))){try{const {captureFinanceScope}=await import('./service');const scope=await captureFinanceScope();const {reconcileFinanceDailyPending}=await import('./experience');reconcileFinanceDailyPending(scope);}catch{/* signed out or no Finance settings: nothing to finish */}}
   const [{getDb},{getOneProfile}]=await Promise.all([import('../store/db'),import('../store/one-profile')]);const db=getDb();
   if(!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_checkins'").get())return [];
   const oneId=getOneProfile().oneId;
@@ -123,7 +134,8 @@ export async function wakeFinanceDailyBriefing():Promise<string[]> {
     }
   }catch(error){
     const code=error instanceof Error?error.message:'finance_daily_wake_unknown';
-    if(!FINANCE_DAILY_DEFINITE_DENIALS.has(code)||(wasManagedOneConfigured()&&MANAGED_DAILY_IDENTITY_UNAVAILABLE.has(code))){console.warn('[finance-daily] sweep deferred',code);return bindings.map(binding=>binding.checkinId);}
+    // Signed out is the owner's to lift: the registration is held, not revoked (another account that signs in still revokes it, because its own settings name no such binding).
+    if(!FINANCE_DAILY_DEFINITE_DENIALS.has(code)||code==='finance_sign_in_required'||(wasManagedOneConfigured()&&MANAGED_DAILY_IDENTITY_UNAVAILABLE.has(code))){console.warn('[finance-daily] sweep deferred',code);return bindings.map(binding=>binding.checkinId);}
     allowed=null;
   }
   // Revocation is limited to previously registered Finance instructions in this One.
@@ -241,7 +253,7 @@ export async function assertFinanceDailyReview(runId:string):Promise<void>{
     // A managed admission error does not by itself prove which account owns
     // this registration. Keep it held until a later owner-scoped sweep can
     // decide; an exact already-admitted notice was held above instead.
-    if((error instanceof Error&&error.message==='finance_monitoring_access_unavailable')||
+    if((error instanceof Error&&['finance_monitoring_access_unavailable','finance_monitoring_sign_in_required','finance_sign_in_required'].includes(error.message))||
         (wasManagedOneConfigured()&&!(error instanceof Error&&error.message==='finance_daily_already_admitted')))throw new Error('finance_daily_access_unavailable',{cause:error});
     if(!(error instanceof Error&&error.message==='finance_daily_already_admitted'))for(const binding of bindings)await revokeFinanceDailyCheckin({assertCurrent(){}} as FinanceScope,binding,true);
     throw new Error('finance_daily_review_denied',{cause:error});
