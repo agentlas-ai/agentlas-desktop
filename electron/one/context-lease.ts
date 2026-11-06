@@ -41,6 +41,34 @@ const HUMAN_INPUT_SETTLE_MS = 8_000;
 export const HUMAN_INPUT_ACTION_WAIT_MS = 25_000;
 export const HUMAN_INPUT_ARRANGE_WAIT_MS = 10_000;
 
+/**
+ * A screen-lock file is stale by its age, one rule for every way a holder can be gone: a dead pid, a pid the system gave to another
+ * process, a file cut short by a crash, a leftover repair marker. A holder keeps the lock for one action (lease 30 s, request budget
+ * 40 s), so a live-looking pid past this age no longer owns it; its lease expired and its next checkpoint refuses.
+ */
+const LOCK_MAX_AGE_MS = 120_000;
+/** A file a crash left empty or cut short is stale after this; a younger one may still be being written by another process. */
+const LOCK_PARTIAL_GRACE_MS = 2_000;
+/** A repair marker older than this was left by a process that died mid-repair. */
+const LOCK_REPAIR_MAX_AGE_MS = 30_000;
+function judgeLockFile(file: string): { verdict: "gone" | "busy" | "stale"; raw: string } {
+  let raw: string, ageMs: number;
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile()) return { verdict: "busy", raw: "" };
+    raw = fs.readFileSync(file, "utf8"); ageMs = Date.now() - stat.mtimeMs;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { verdict: "gone", raw: "" };
+    throw error;
+  }
+  let pid: unknown;
+  try { pid = (JSON.parse(raw) as { pid?: unknown } | null)?.pid; } catch { pid = undefined; }
+  // A clock that moved back gives a negative age: the file counts as young, never as stale.
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid < 1) return { verdict: ageMs > LOCK_PARTIAL_GRACE_MS ? "stale" : "busy", raw };
+  try { process.kill(pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return { verdict: "stale", raw }; if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error; }
+  return { verdict: ageMs > LOCK_MAX_AGE_MS ? "stale" : "busy", raw };
+}
+
 export class OneOsResourceLeaseBroker {
   private executions = new Map<string, Execution>();
   private holder: { leaseId: string; executionId: string; target: OneOsActionTarget; until: number; controller: AbortController; reason?: string } | null = null;
@@ -51,24 +79,30 @@ export class OneOsResourceLeaseBroker {
     const directory=path.dirname(file);fs.mkdirSync(directory, {recursive:true,mode:0o700});
     const directoryStat=fs.lstatSync(directory);if(!directoryStat.isDirectory()||directoryStat.isSymbolicLink()||process.getuid && directoryStat.uid!==process.getuid())fail("one-os-resource-lock-unavailable");
     const nonce = randomUUID();
-    for(let attempt=0;attempt<2;attempt++) {
+    for(let attempt=0;attempt<3;attempt++) {
       try { fs.writeFileSync(file,JSON.stringify({pid:process.pid,nonce}),{flag:"wx",mode:0o600});
         return () => { try { const row=JSON.parse(fs.readFileSync(file,"utf8"));if(row.pid===process.pid && row.nonce===nonce)fs.unlinkSync(file); } catch {} };
       } catch(error) {
         if((error as NodeJS.ErrnoException).code!=="EEXIST")fail("one-os-resource-lock-unavailable");
-        try { const row=JSON.parse(fs.readFileSync(file,"utf8"));if(!Number.isSafeInteger(row.pid)||row.pid<1)fail("one-os-resource-lock-unavailable");
-          try { process.kill(row.pid,0);fail("one-os-resource-busy"); } catch(check) { if((check as NodeJS.ErrnoException).code!=="ESRCH")throw check; }
-          // Serialize stale cleanup across competing processes. A live/new owner
-          // cannot be unlinked by another contender that observed an older PID.
-          const repair=`${file}.repair`;let repaired=false;
-          try {fs.writeFileSync(repair,String(process.pid),{flag:"wx",mode:0o600});repaired=true;
-            const latest=JSON.parse(fs.readFileSync(file,"utf8"));
-            if(latest.pid!==row.pid||latest.nonce!==row.nonce)fail("one-os-resource-busy");
-            try {process.kill(latest.pid,0);fail("one-os-resource-busy");}catch(check){if((check as NodeJS.ErrnoException).code!=="ESRCH")throw check;}
-            fs.unlinkSync(file);
-          } finally {if(repaired)fs.unlinkSync(repair);}
-        } catch(check) { if(check instanceof OneOsLeaseError)throw check;fail("one-os-resource-lock-unavailable"); }
       }
+      try {
+        const first=judgeLockFile(file);
+        if(first.verdict==="gone")continue;
+        if(first.verdict==="busy")fail("one-os-resource-busy");
+        // Serialize stale cleanup across competing processes. The file is re-read under the repair marker, and only the very
+        // text that was judged stale is removed, so a lock another process created in between is never unlinked.
+        const repair=`${file}.repair`;
+        try { if(Date.now()-fs.lstatSync(repair).mtimeMs>LOCK_REPAIR_MAX_AGE_MS)fs.unlinkSync(repair); } catch(check) { if((check as NodeJS.ErrnoException).code!=="ENOENT")throw check; }
+        let repaired=false;
+        try {
+          try { fs.writeFileSync(repair,String(process.pid),{flag:"wx",mode:0o600});repaired=true; }
+          catch(check) { if((check as NodeJS.ErrnoException).code==="EEXIST")fail("one-os-resource-busy");throw check; }
+          const latest=judgeLockFile(file);
+          if(latest.verdict==="gone")continue;
+          if(latest.verdict==="busy"||latest.raw!==first.raw)fail("one-os-resource-busy");
+          try { fs.unlinkSync(file); } catch(check) { if((check as NodeJS.ErrnoException).code!=="ENOENT")throw check; }
+        } finally { if(repaired){ try { fs.unlinkSync(repair); } catch { /* a stale-marker sweep may have removed it */ } } }
+      } catch(check) { if(check instanceof OneOsLeaseError)throw check;fail("one-os-resource-lock-unavailable"); }
     }
     return fail("one-os-resource-busy");
   }

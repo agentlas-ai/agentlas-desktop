@@ -38,7 +38,7 @@ const WAKE_HEADROOM = 8;
 export const PARKED_RELAY_MIN_AGE_MS = 45_000;
 /** Older than this is stale teammate data: it waits for the next turn that happens anyway. */
 const PARKED_RELAY_MAX_AGE_MS = 3 * 24 * 3_600_000;
-/** Spacing of the wake attempts of one room after a refusal; the series is over after the last one (a new relay restarts it). */
+/** Spacing of the wake attempts of one room after a refusal; the last spacing repeats until the relay is delivered (only the stale cut ends it). */
 export const NUDGE_DELAYS_MS: readonly number[] = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
 const NUDGE_TEXT_BUDGET = 12_000;
 /** The relays the room is woken for: a room note (room-chat.ts wakeOne) and an owner-wait notice (team-dispatch.ts). Both are
@@ -251,7 +251,7 @@ export function onSystemRelayParked(chatId: string): void {
   });
 }
 
-export interface ParkedRelayScanResult { chatId: string; action: "pulled_forward" | "goal_owns" | "sent" | "waiting" | "retry_later" | "gave_up" | "skipped"; detail: string }
+export interface ParkedRelayScanResult { chatId: string; action: "pulled_forward" | "goal_owns" | "sent" | "waiting" | "retry_later" | "skipped"; detail: string }
 
 /** One pass over the chats that hold parked relays. Pure of timers; the caller chooses the cadence. */
 export function scanParkedRelays(ports: ParkedRelayScanPorts = productionScanPorts(), now: number = Date.now()): ParkedRelayScanResult[] {
@@ -277,7 +277,6 @@ export function scanParkedRelays(ports: ParkedRelayScanPorts = productionScanPor
       continue;
     }
     const series = nudgeSeries.get(item.chatId) ?? { attempts: 0, notBefore: 0 };
-    if (series.attempts >= NUDGE_DELAYS_MS.length + 1) { out.push({ chatId: item.chatId, action: "gave_up", detail: String(series.attempts) }); continue; }
     if (now < series.notBefore) { out.push({ chatId: item.chatId, action: "retry_later", detail: new Date(series.notBefore).toISOString() }); continue; }
     let outcome: NudgeOutcome;
     try { outcome = nudgeParkedRelays(item.chatId, ports.nudge); }

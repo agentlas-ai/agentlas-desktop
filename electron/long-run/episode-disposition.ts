@@ -12,7 +12,7 @@ import { formatAutomationNextRun } from "../../shared/automation-next-run";
 import { parseGoalWaitIntent, type GoalWaitIntent } from "./wait-emitter";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { captureEpisodeQuietBaseline, type AgiGoalFactsDeps } from "../agi/goal-facts";
-import { latestGoalWaitSubscription } from "./wait-subscriptions";
+import { effectiveWaitCheckAt, latestGoalWaitSubscription } from "./wait-subscriptions";
 import type { GoalWaitSubscription } from "./wait-subscriptions";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
 import { captureGoalExecutionControlGeneration, assertGoalExecutionControlGeneration, isGoalDispatchRefusal } from "../automation-execution-control";
@@ -508,14 +508,15 @@ export function drainGoalEpisodeNotices(limit = 20): void {
   }
 }
 
-/** Only this exact future pending wait owns the next repair. Cursor churn is irrelevant. */
+/** Only this exact future pending wait owns the next repair (by its effective next check, so a quiet poll keeps it future). Cursor churn is irrelevant. */
 export function readEpisodeQuietBaseline(goalId: string, now: number, db = getDb()): string | null {
   // The facts API also supports independent SQLite projections. They must not
   // accidentally read a different Main store or require Main initialization.
   try { if (db !== getDb()) return null; } catch { return null; }
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='goal_episode_dispositions'").get()) return null;
   const wait = latestGoalWaitSubscription(goalId);
-  if (!wait?.episodeRequestId || wait.state !== "pending" || !wait.nextCheckAt || Date.parse(wait.nextCheckAt) <= now
+  const nextAt = wait ? effectiveWaitCheckAt(wait, now) : null;
+  if (!wait?.episodeRequestId || wait.state !== "pending" || !nextAt || Date.parse(nextAt) <= now
     || getLongRunByGoalId(goalId)?.status !== "waiting_tool" || episodeWaitFenceReason(wait, now)) return null;
   const receipt = readGoalEpisodeDisposition(wait.episodeRequestId);
   return typeof receipt?.quietBaseline === "string" ? receipt.quietBaseline : null;

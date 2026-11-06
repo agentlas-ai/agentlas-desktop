@@ -91,7 +91,8 @@ export async function createWorkStart(raw: WorkStartInput, detect = detectRuntim
     const afterRefresh=existing();if(afterRefresh)return afterRefresh;
     runtime=choose(runtimes);
   }
-  if (!runtime || runtime.credentialAccess?.status === 'unavailable' || runtime.signInRequired) throw new Error('work_start_runtime_unavailable');
+  // A "signed out" fact does not stop a start the owner chose: the first run is the probe and a real login failure shows its own card.
+  if (!runtime || runtime.credentialAccess?.status === 'unavailable') throw new Error('work_start_runtime_unavailable');
   const selection=pin(runtime,input.runtimeSelection);
   const controller=listInstalledAgentsReadOnly().find(a=>a.slug==='agentlas-orchestrator');if (!controller) throw new Error('work_start_orchestrator_unavailable');
   let createdFolder: string | null = null;

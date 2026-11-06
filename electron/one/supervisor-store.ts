@@ -317,21 +317,38 @@ export class OneSupervisorStore {
     return Number(this.db.prepare(`UPDATE one_supervisor_notices SET review_state='reviewed',reviewed_at=?,review_reason=?
       WHERE review_run_id=? AND review_state='claimed'`).run(new Date().toISOString(), reason, reviewRunId).changes);
   }
-  /** A review run that produced no report (never started, or failed) returns its results to the queue, at most three
-   * attempts per result; after that the result stays visible in Activity and is not retried. */
-  retryReview(reviewRunId: string, reason: string): number {
-    return this.retryReviewReporting(reviewRunId, reason).changes;
+  /**
+   * A review run that produced no report returns its results to the queue. Only a review that STARTED counts as an attempt (it
+   * spent a model call); one with the ledger's no-start proof (`started: false`) gives its attempt back, so a refusal or a restart
+   * can never use up a result's tries. A result whose third started review failed is not "reviewed": it is "unreviewed" (said so
+   * truthfully, still readable in Activity, never retried and never reported as done). review_reason keeps the cause.
+   */
+  retryReview(reviewRunId: string, reason: string, started = true): number {
+    return this.retryReviewReporting(reviewRunId, reason, started).changes;
   }
-  /** retryReview, also naming the results this retry closed for good (their third attempt), grouped by the One chat. */
-  retryReviewReporting(reviewRunId: string, reason: string): { changes: number; exhausted: Array<{ originChatId: string; count: number }> } {
+  /** retryReview, also naming the results this retry left unreviewed for good (their third started attempt), grouped by the One chat. */
+  retryReviewReporting(reviewRunId: string, reason: string, started = true): { changes: number; exhausted: Array<{ originChatId: string; count: number }> } {
+    if (!started) {
+      const changes = Number(this.db.prepare(`UPDATE one_supervisor_notices SET review_state='pending', review_run_id=NULL, reviewed_at=NULL,
+          review_attempts=MAX(review_attempts-1,0), review_reason=?
+        WHERE review_run_id=? AND review_state='claimed'`).run(reason.slice(0, 240), reviewRunId).changes);
+      return { changes, exhausted: [] };
+    }
     const exhausted = this.db.prepare(`SELECT origin_chat_id AS originChatId, COUNT(*) AS count FROM one_supervisor_notices
       WHERE review_run_id=? AND review_state='claimed' AND review_attempts>=3 GROUP BY origin_chat_id`).all(reviewRunId) as Array<{ originChatId: string; count: number }>;
     const changes = Number(this.db.prepare(`UPDATE one_supervisor_notices SET
-        review_state=CASE WHEN review_attempts<3 THEN 'pending' ELSE 'reviewed' END,
+        review_state=CASE WHEN review_attempts<3 THEN 'pending' ELSE 'unreviewed' END,
         review_run_id=CASE WHEN review_attempts<3 THEN NULL ELSE review_run_id END,
         reviewed_at=CASE WHEN review_attempts<3 THEN NULL ELSE ? END, review_reason=?
       WHERE review_run_id=? AND review_state='claimed'`).run(new Date().toISOString(), reason.slice(0, 240), reviewRunId).changes);
     return { changes, exhausted };
+  }
+  /** Review runs whose results are claimed but whose review request is no longer alive (a restart between claim and start). */
+  orphanClaimedReviewRuns(oneId: string): string[] {
+    return (this.db.prepare(`SELECT DISTINCT n.review_run_id AS runId FROM one_supervisor_notices n
+      WHERE n.one_id=? AND n.review_state='claimed' AND n.review_run_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM one_supervisor_requests r WHERE r.run_id=n.review_run_id AND r.state IN ('stored','dispatching','accepted','held'))
+      LIMIT 50`).all(oneId) as Array<{ runId: string }>).map(row => row.runId);
   }
   notices(oneId: string): SupervisorNotice[] {
     return this.db.prepare("SELECT id,task_id AS taskId,origin_chat_id AS originChatId,run_id AS runId,state,created_at AS createdAt FROM one_supervisor_notices WHERE one_id=? ORDER BY rowid DESC LIMIT 100").all(oneId) as SupervisorNotice[];

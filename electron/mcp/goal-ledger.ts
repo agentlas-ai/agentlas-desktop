@@ -23,7 +23,7 @@ import {
   tryCompleteVerifiedLongRun,
 } from "../store/long-runs";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { goalScopeCriterion } from "../../shared/goal-scope";
+import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 import type { GoalPlanView } from "../../shared/goal-shape";
 import { goalPlanView } from "../long-run/goal-shaping";
 
@@ -108,7 +108,8 @@ export async function getGoalLedgerGoal(
       goalId: run.goalId,
       ...(revision ? { goalRevision: revision.revision, lifecycle: revision.lifecycle } : {}),
       objective: run.objective,
-      acceptanceCriteria: run.acceptanceCriteria,
+      // Goals stored before still carry the host scope sentence; models are never shown it.
+      acceptanceCriteria: effectiveAcceptanceCriteria(run.acceptanceCriteria),
       status: snapshotStatus(run.status),
       runId: run.id,
       runStatus: run.status,
@@ -126,22 +127,24 @@ export async function getGoalLedgerGoal(
 }
 
 /**
- * An explicit goal's contract: the requested outcome and the permission boundary — nothing else.
+ * An explicit goal's contract: the requested outcome, nothing else.
  *
- * ★Owner 2026-09-25: "기준 5개 하드코딩 이런 거 없어야지." This used to append three fixed templates to every
- * goal (tests/type checks/builds, app-UI launch QA, "every criterion needs evidence"), whatever the task — a
- * text-file goal could never pass the build criterion. What "done" means now comes from the AI's own
- * decomposition (goal-shaping: tactics with done_when, key results) and the verifier rolls the outcome up from
- * those leaves (shared/goal-rollup.ts). The evidence standard is enforced by code (pinned proof contracts and
- * admissible host refs), not by a criterion sentence. The scope criterion stays: it is the permission and
- * working-folder boundary the host audits (safety invariant, not task semantics).
+ * ★"기준 5개 하드코딩 이런 거 없어야지." What "done" means comes from the AI's own decomposition
+ * (goal-shaping: tactics with done_when, key results) and the verifier rolls the outcome up from those leaves
+ * (shared/goal-rollup.ts). The evidence standard is enforced by code (pinned proof contracts and admissible host
+ * refs), not by a criterion sentence.
+ *
+ *the permission/working-folder scope criterion is gone too. It asked a model to check the run receipt,
+ * which no model receives (48 of 48 verifications inconclusive); the tool and runtime layer enforces permission and
+ * folder, and the request's explicit constraints stay in the outcome sentence. `permission` is kept for callers.
  */
 export function deriveGoalAcceptanceCriteria(objective: string, locale: "ko" | "en", permission?: "read" | "write" | "full"): string[] {
+  void permission;
   const normalized = objective.replace(/\s+/g, " ").trim();
   const requestedOutcome = locale === "ko"
     ? `요청 결과가 실제 대상 표면에서 확인 가능하게 완성되어야 합니다: ${normalized}`
     : `The requested outcome must be complete and observable on the real target surface: ${normalized}`;
-  return [requestedOutcome, goalScopeCriterion({ permission, originalRequest: objective, locale })];
+  return [requestedOutcome];
 }
 
 export function ensureGoalLedgerGoal(input: {

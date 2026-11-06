@@ -54,9 +54,10 @@ import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { EMPTY_NO_TOOL_RAN_CODE, normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import {
-  serverFailure, serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, SERVER_FAILURE_RESENDS,
+  serverFailure, serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, serverFailureResendLimit,
   waitForServerResend,
 } from "./provider-overload";
+import { fetchWithReconnect } from "./reconnecting-fetch";
 import {
   ANTHROPIC_1M_BETA,
   anthropicCompatProvider,
@@ -592,7 +593,7 @@ async function runAnthropicMessagesInner(
   let answerOnlyPass = false;
   /** Tool calls the host ran in this turn: settleNormalEnd evidence (R-065). */
   let toolCallsRun = 0;
-  /** G24: resends spent on an overloaded endpoint before anything streamed or ran in this invocation (provider-overload.ts). */
+  /** G24: consecutive resends spent on an endpoint that answered 5xx at the response header (restarts when a response opens; provider-overload.ts). */
   let serverResends = 0;
   const ownerControl = createOwnerControlBoundary(req);
   try {
@@ -677,7 +678,11 @@ async function runAnthropicMessagesInner(
       const networkNow = requestCompressionNetworkState();
       const dispatchRequest = networkNow.ready && !networkNow.proxyConfigured && !networkNow.additionalCaCertificates ? preparedRequest : originalRequest;
       ownerControl.dispatched();
-      return fetch(endpoint, dispatchRequest);
+      // Once the run did work, an unreachable server is waited out (reconnecting-fetch.ts); the first request is refused at once.
+      return fetchWithReconnect(fetch, endpoint, dispatchRequest, {
+        workStarted: () => turn > 0 || toolTurnsTaken > 0, signal: req.signal,
+        onWait: (waitedMs) => events.onStatus(reconnectStatus(req.locale, waitedMs)),
+      });
     });
 
     if (!resp.ok) {
@@ -694,14 +699,16 @@ async function runAnthropicMessagesInner(
           ...(outputTokens > 0 ? { tokens: outputTokens } : {}), workforcePermissionEnforcement: broker?.finish(false) });
       }
       const errText = await resp.text().catch(() => "");
-      // G24: 5xx / 529 is a typed failure; overloaded earns one resend while nothing streamed and no tool ran.
+      // G24: 5xx / 529 is a typed failure. It comes at the response header, so this response streamed nothing: an overloaded
+      // server is sent the same request again (consecutive, exponential wait), whatever earlier turns of the run did.
       const serverCode = serverFailureCodeForStatus(resp.status);
       if (serverCode) {
-        const resendDelayMs = serverFailureResendDelayMs(resp.headers.get("retry-after"));
-        if (serverFailureResendable(serverCode) && serverResends < SERVER_FAILURE_RESENDS && turn === 0 && toolTurnsTaken === 0
-          && !acc && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
+        const resendDelayMs = serverFailureResendDelayMs(resp.headers.get("retry-after"), serverResends);
+        const resendLimit = serverFailureResendLimit(serverCode);
+        if (serverFailureResendable(serverCode) && serverResends < resendLimit
+          && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
           serverResends += 1;
-          events.onStatus(req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
+          events.onStatus(serverResendStatus(req.locale, serverResends, resendLimit));
           await waitForServerResend(resendDelayMs, req.signal);
           if (req.signal?.aborted) throw abortReasonError(req);
           turn -= 1; // the same request again, not a new tool turn
@@ -715,6 +722,7 @@ async function runAnthropicMessagesInner(
       }
       throw new Error(`Anthropic API ${resp.status}: ${errText.slice(0, 300)}`);
     }
+    serverResends = 0;
 
     // 이번 턴에 모인 tool_use 블록. index 로 들어와 조각조각 쌓인다.
     const pendingToolUse = new Map<number, { id: string; name: string; json: string }>();
@@ -955,7 +963,7 @@ async function runAnthropicMessagesInner(
   } else if (normalEnd?.outcome === "empty") {
     failure = { ...byokFailure("empty", `BYOK returned an empty answer for ${model}.`), providerCode: EMPTY_NO_TOOL_RAN_CODE };
   } else if (answer) {
-    const refusal = detectRuntimeRefusal(answer);
+    const refusal = detectRuntimeRefusal(answer, "model-text");
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
   const observedUsage = measuredUsage.total();
@@ -1338,7 +1346,7 @@ export const runGoogleByok: Runner = async (
   const ownerControl = createOwnerControlBoundary(req);
   // Explicit cachedContents only when the owner turned it on (doc 13 §7); off, nothing below changes the request.
   const geminiCacheSetting = await readGeminiCacheSetting().catch(() => ({ ...GEMINI_CACHE_DEFAULT }));
-  /** G24: resends spent on an overloaded endpoint before anything streamed or ran in this invocation (provider-overload.ts). */
+  /** G24: consecutive resends spent on an endpoint that answered 5xx at the response header (restarts when a response opens; provider-overload.ts). */
   let serverResends = 0;
   try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
@@ -1418,7 +1426,12 @@ export const runGoogleByok: Runner = async (
       sentEffectProof = delivery.googleProof(sentEffectBody, contents);
       return sentEffectBody;
     };
-    let resp = await withCurrentHistoryProvider(()=>fetch(url, {
+    // Once the run did work, an unreachable server is waited out (reconnecting-fetch.ts); the first request is refused at once.
+    const sendFetch = (target: string, init: RequestInit): Promise<Response> => fetchWithReconnect(fetch, target, init, {
+      workStarted: () => turn > 0, signal: req.signal,
+      onWait: (waitedMs) => events.onStatus(reconnectStatus(req.locale, waitedMs)),
+    });
+    let resp = await withCurrentHistoryProvider(()=>sendFetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: req.signal,
@@ -1429,7 +1442,7 @@ export const runGoogleByok: Runner = async (
       forgetGeminiCachedContent(cachedContentName);
       reportCachePlan(() => geminiCachePlan(requestBody, { status: "skipped", reason: "gemini_cache_missing_resent_plain" }));
       usageAttempt = measuredUsage.start();
-      resp = await withCurrentHistoryProvider(()=>fetch(url, {
+      resp = await withCurrentHistoryProvider(()=>sendFetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
@@ -1463,7 +1476,7 @@ export const runGoogleByok: Runner = async (
       reportModelEffort(geminiEffort());
       reportCachePlan(() => geminiCachePlan(outgoingBody()));
       usageAttempt = measuredUsage.start();
-      resp = await withCurrentHistoryProvider(()=>fetch(url, {
+      resp = await withCurrentHistoryProvider(()=>sendFetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
@@ -1485,7 +1498,7 @@ export const runGoogleByok: Runner = async (
       reportModelPayload(() => ledgerFromApiBody(outgoingBody(), { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
       reportCachePlan(() => geminiCachePlan(outgoingBody()));
       usageAttempt = measuredUsage.start();
-      resp = await withCurrentHistoryProvider(()=>fetch(url, {
+      resp = await withCurrentHistoryProvider(()=>sendFetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
@@ -1496,14 +1509,16 @@ export const runGoogleByok: Runner = async (
       const terminal = httpFailureResult(resp.status, resp.headers.get("retry-after"));
       if (terminal) return terminal;
       const errText = await resp.text().catch(() => "");
-      // G24: 5xx / 529 is a typed failure; overloaded earns one resend while nothing streamed and no tool ran.
+      // G24: 5xx / 529 is a typed failure. It comes at the response header, so this response streamed nothing: an overloaded
+      // server is sent the same request again (consecutive, exponential wait), whatever earlier turns of the run did.
       const serverCode = serverFailureCodeForStatus(resp.status);
       if (serverCode) {
-        const resendDelayMs = serverFailureResendDelayMs(resp.headers.get("retry-after"));
-        if (serverFailureResendable(serverCode) && serverResends < SERVER_FAILURE_RESENDS && turn === 0
-          && !acc && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
+        const resendDelayMs = serverFailureResendDelayMs(resp.headers.get("retry-after"), serverResends);
+        const resendLimit = serverFailureResendLimit(serverCode);
+        if (serverFailureResendable(serverCode) && serverResends < resendLimit
+          && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
           serverResends += 1;
-          events.onStatus(req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
+          events.onStatus(serverResendStatus(req.locale, serverResends, resendLimit));
           await waitForServerResend(resendDelayMs, req.signal);
           if (req.signal?.aborted) throw abortReasonError(req);
           turn -= 1; // the same request again, not a new tool turn
@@ -1517,6 +1532,7 @@ export const runGoogleByok: Runner = async (
       }
       throw new Error(`Google API ${resp.status}: ${errText.slice(0, 300)}`);
     }
+    serverResends = 0;
 
     const modelParts: GooglePart[] = [];
     /** Where this response's text starts in `acc` (a text-cut reply keeps the earlier pieces in `acc`). */
@@ -1681,7 +1697,7 @@ export const runGoogleByok: Runner = async (
   } else if (normalEnd?.outcome === "empty") {
     failure = { ...byokFailure("empty", `Google returned an empty answer for ${model}.`), providerCode: EMPTY_NO_TOOL_RAN_CODE };
   } else if (answer) {
-    const refusal = detectRuntimeRefusal(answer);
+    const refusal = detectRuntimeRefusal(answer, "model-text");
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
   const observedUsage = measuredUsage.total();
@@ -1705,3 +1721,13 @@ export const runGoogleByok: Runner = async (
   });
   } finally { ownerControl.finish(); }
 };
+
+
+/** Owner status lines of the transport retries (owner UI text, not model input). */
+function serverResendStatus(locale: string | undefined, attempt: number, limit: number): string {
+  return locale === "ko" ? `모델 서버가 바빠 잠시 뒤 같은 요청을 다시 보냅니다(${attempt}/${limit})…`
+    : `The model server is busy; sending the same request again shortly (${attempt}/${limit})…`;
+}
+function reconnectStatus(locale: string | undefined, waitedMs: number): string {
+  return locale === "ko" ? `서버에 다시 연결하는 중… ${Math.round(waitedMs / 1000)}초` : `Reconnecting to the server… ${Math.round(waitedMs / 1000)}s`;
+}

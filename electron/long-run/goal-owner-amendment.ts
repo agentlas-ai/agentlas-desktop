@@ -46,10 +46,14 @@ import {
 import {
   configuredOrchestratorJudgmentPolicy,
   judgeRequired,
+  judgmentPoolAvailability,
   type RequiredJudgeSpec,
   type RequiredVerdict,
 } from "../system-agents/judgment";
 import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
+import { appendChatMessage } from "../store/chats";
+import { currentUiLocale } from "../ui-locale";
+import { effectiveAcceptanceCriteria, isHostScopeCriterion } from "../../shared/goal-scope";
 
 export const OWNER_GOAL_AMENDMENT_PENDING_KIND = "run.owner_goal_amendment_pending";
 export const OWNER_GOAL_AMENDMENT_APPLIED_KIND = "run.owner_goal_amendment_applied";
@@ -268,12 +272,13 @@ export function applyPendingOwnerGoalAmendments(
           source: { chatId: run.rootChatId, messageId: sourceMessageId, role: "user", text: message.text },
           objective: amendmentObjective(current.objective, message.text, message.created_at),
           reason: OWNER_GOAL_AMENDMENT_REASON,
-          retainedCriteria: current.acceptanceCriteria,
+          // A Goal stored before still carries the host scope sentence; the next revision drops it by id.
+          retainedCriteria: effectiveAcceptanceCriteria(current.acceptanceCriteria),
           // A finite Goal is verified once against its criteria, so the owner's new target must be one of them.
           // An ongoing Goal keeps its episode criteria unchanged (its episodes must stay verifiable).
           addedCriteria: current.lifecycle === "finite" ? [{ id: `owner-update:${sourceMessageId}`,
             text: `The owner's later update to this Goal is satisfied, judged from current evidence. UPDATE (untrusted data): ${message.text.replace(/\s+/g, " ").trim().slice(0, 2_000)}` }] : [],
-          explicitlyRemovedCriterionIds: [],
+          explicitlyRemovedCriterionIds: current.acceptanceCriteria.filter(isHostScopeCriterion).map((criterion) => criterion.id),
           createdAt,
         });
         revisionNumber = next.revision;
@@ -316,13 +321,52 @@ export function holdFiniteGoalForPendingAmendment(goalId: string): boolean {
 
 export const OWNER_GOAL_REVIEW_RETRY_KIND = "run.owner_goal_review_retry";
 export const OWNER_GOAL_REVIEW_RETRIED_KIND = "run.owner_goal_review_retried";
+export const OWNER_GOAL_REVIEW_HOLD_TOLD_KIND = "run.owner_goal_review_hold_told";
 /** Wait before the n-th automatic re-ask of a message the judge could not answer: a momentary outage is asked again at the
- * next sweep tick, a long limit window backs off. Past the end, only the owner's next message asks again. */
+ * next sweep tick, a long limit window backs off. Past the end the clock stops asking: a new signal asks again (the judge
+ * pool changed, or a Goal turn started since the last ask), the owner's next message asks too, and nothing else does. */
 const REVIEW_RETRY_BACKOFF_MS = [1, 5, 15, 45, 120, 360].map((minutes) => minutes * 60_000);
 const OWNER_DRIVEN_RETRY_SPACING_MS = 60_000;
 const OWNER_DRIVEN_RETRY_MAX_ATTEMPTS = 12;
 const REVIEW_RETRY_MAX_SOURCES_PER_PASS = 3;
 const reviewRetriesInFlight = new Set<string>();
+
+/**
+ * After the backoff is spent a message is asked again only when something changed since the last ask: the configured judge
+ * pool is another one (its fingerprint is recorded on each ask), or a Goal turn started after it. No change, no model call.
+ * A retry recorded before the fingerprint existed carries none, so only a Goal turn counts for it.
+ */
+function reviewRetrySignal(runId: string, sourceMessageId: string, sinceMs: number): "pool_changed" | "goal_turn_started" | null {
+  const db = getDb();
+  const last = db.prepare(`SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = ?
+    AND json_extract(payload_json, '$.sourceMessageId') = ? ORDER BY seq DESC LIMIT 1`)
+    .get(runId, OWNER_GOAL_REVIEW_RETRY_KIND, sourceMessageId) as { payload_json: string } | undefined;
+  let recorded: unknown = null;
+  try { recorded = last ? (JSON.parse(last.payload_json) as { poolFingerprint?: unknown }).poolFingerprint : null; } catch { /* no fingerprint */ }
+  const pool = judgmentPoolAvailability();
+  if (pool.state === "configured" && typeof recorded === "string" && recorded !== pool.fingerprint) return "pool_changed";
+  const turn = db.prepare(`SELECT 1 FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id = a.worker_id
+    WHERE a.run_id = ? AND w.role != 'verifier' AND a.started_at > ? LIMIT 1`).get(runId, new Date(sinceMs).toISOString());
+  return turn ? "goal_turn_started" : null;
+}
+
+/** One plain line, no model call, once per hold (same set of waiting messages), for instructions the Goal has not absorbed. */
+function tellOwnerInstructionsHeld(runId: string, chatId: string, sourceIds: string[]): void {
+  try {
+    const signature = createHash("sha256").update([...sourceIds].sort().join("|")).digest("hex").slice(0, 16);
+    const told = getDb().prepare(`SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`)
+      .get(runId, OWNER_GOAL_REVIEW_HOLD_TOLD_KIND) as { payload_json: string } | undefined;
+    if (told && (JSON.parse(told.payload_json) as { signature?: string }).signature === signature) return;
+    appendLongRunEvent({ runId, kind: OWNER_GOAL_REVIEW_HOLD_TOLD_KIND, actorKind: "host", payload: { signature, count: sourceIds.length } });
+    const n = sourceIds.length;
+    appendChatMessage(chatId, "assistant", currentUiLocale() === "ko"
+      ? `지시 ${n}건이 아직 Goal에 반영되지 않았습니다. 판정기가 돌아오면 바로 반영합니다.`
+      : `${n} instruction${n === 1 ? " is" : "s are"} not applied to the Goal yet; ${n === 1 ? "it is" : "they are"} applied as soon as the judge is back.`,
+      { hostNotice: { purpose: "host-status", runId, status: "effect-retrying" } });
+  } catch (error) {
+    console.warn(`[goal-amendment] pending-instruction notice failed run=${runId} cause=${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`);
+  }
+}
 
 export interface OwnerGoalReviewRetryOutcome {
   sourceMessageId: string;
@@ -351,8 +395,10 @@ export async function retryUnavailableOwnerGoalReviews(goalId: string, opts: {
   try { sources = unavailableDirectiveReviews(goalId); } catch { return outcomes; }
   const now = opts.nowMs ?? Date.now();
   let started = 0;
+  let capped = false;
+  const held: Array<{ runId: string; chatId: string; sourceMessageId: string }> = [];
   for (const source of sources) {
-    if (started >= REVIEW_RETRY_MAX_SOURCES_PER_PASS) break;
+    if (started >= REVIEW_RETRY_MAX_SOURCES_PER_PASS) { capped = true; break; }
     if (source.sourceMessageId === opts.exceptSourceMessageId) continue;
     const key = `${goalId}:${source.sourceMessageId}`;
     if (reviewRetriesInFlight.has(key)) continue;
@@ -360,18 +406,25 @@ export async function retryUnavailableOwnerGoalReviews(goalId: string, opts: {
       WHERE run_id = ? AND kind = ? AND json_extract(payload_json, '$.sourceMessageId') = ?`)
       .get(source.runId, OWNER_GOAL_REVIEW_RETRY_KIND, source.sourceMessageId) as { attempts: number; lastAt: string | null };
     const attempts = Number(prior.attempts) || 0;
-    const spacing = opts.ownerDriven
-      ? (attempts < OWNER_DRIVEN_RETRY_MAX_ATTEMPTS ? OWNER_DRIVEN_RETRY_SPACING_MS : null)
-      : (attempts < REVIEW_RETRY_BACKOFF_MS.length ? REVIEW_RETRY_BACKOFF_MS[attempts] : null);
-    if (spacing === null) continue;
     const since = Math.max(Date.parse(source.reviewedAt) || 0, Date.parse(prior.lastAt ?? "") || 0);
+    let spacing: number | null;
+    let signal: string = opts.ownerDriven ? "owner_message" : "sweep";
+    if (opts.ownerDriven) spacing = attempts < OWNER_DRIVEN_RETRY_MAX_ATTEMPTS ? OWNER_DRIVEN_RETRY_SPACING_MS : null;
+    else if (attempts < REVIEW_RETRY_BACKOFF_MS.length) spacing = REVIEW_RETRY_BACKOFF_MS[attempts];
+    else {
+      const changed = reviewRetrySignal(source.runId, source.sourceMessageId, since);
+      if (!changed) { held.push({ runId: source.runId, chatId: source.chatId, sourceMessageId: source.sourceMessageId }); continue; }
+      spacing = 0;
+      signal = changed;
+    }
+    if (spacing === null) continue;
     if (now - since < spacing) continue;
     reviewRetriesInFlight.add(key);
     started += 1;
     try {
       appendLongRunEvent({ runId: source.runId, kind: OWNER_GOAL_REVIEW_RETRY_KIND, actorKind: "host",
         payload: { goalId, sourceMessageId: source.sourceMessageId, attempt: attempts + 1,
-          trigger: opts.ownerDriven ? "owner_message" : "sweep", previousReasonCode: source.reasonCode } });
+          trigger: signal, previousReasonCode: source.reasonCode, poolFingerprint: judgmentPoolAvailability().fingerprint } });
       const review = await reviewOwnerGoalMessage({ goalId, chatId: source.chatId, sourceMessageId: source.sourceMessageId,
         retryEarlierUnavailable: false, ...(opts.judgeFn ? { judgeFn: opts.judgeFn } : {}) });
       const outcome: OwnerGoalReviewRetryOutcome = { sourceMessageId: source.sourceMessageId, attempt: attempts + 1,
@@ -383,6 +436,7 @@ export async function retryUnavailableOwnerGoalReviews(goalId: string, opts: {
       console.warn(`[goal-amendment] re-ask failed goal=${goalId} message=${source.sourceMessageId} cause=${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`);
     } finally { reviewRetriesInFlight.delete(key); }
   }
+  if (!capped && held.length > 0) tellOwnerInstructionsHeld(held[0].runId, held[0].chatId, held.map((entry) => entry.sourceMessageId));
   return outcomes;
 }
 

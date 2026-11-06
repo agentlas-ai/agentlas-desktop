@@ -34,7 +34,7 @@ import { appendLongRunEvent, getLongRunByGoalId, bindCurrentGoalRevisionToLongRu
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { adoptExplicitGoalGrant, ensureExplicitGoalContract } from "./long-run/explicit-goal-authority";
 import { resumeGoalAsOwner } from "./long-run/goal-owner-resume";
-import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
+import { effectiveWaitCheckAt, latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 import { ONE_DECISION_JUDGE_TIMEOUT_MS } from "../shared/one-decision";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
 import { acknowledgeAutomationGoalExecutionReview, getAutomationGoalExecutionReview } from "./automation-goal-owner-review";
@@ -76,7 +76,7 @@ import {
   setActiveRuntime,
 } from "./runtime/detect";
 import { seedFirstRunRoles } from "./runtime/first-run-roles";
-import { disposeAcpSessionPool } from "./runtime/acp";
+import { disposeAcpSessionPool, forgetFailedAcpModelProbes } from "./runtime/acp";
 import { disposeClaudeSessionPool } from "./runtime/claude-session";
 import { disposeCodexSessionPool } from "./runtime/codex-session";
 import { disposeAntigravitySessionPool } from "./runtime/antigravity-session";
@@ -96,6 +96,7 @@ import { clearModelCache, listRuntimeModels } from "./runtime/providers";
 import { readCustomBaseUrl } from "./runtime/custom-base-url";
 import { fireRunAlert, getRunAlerts, setRunAlerts, windowWatched } from "./run-alerts";
 import { installCli, openCliLogin, updateCli, type InstallableCli, type ManageableCli } from "./runtime/install-cli";
+import { forgetRuntimeSignIn } from "./runtime/runtime-cooldown";
 import { defaultRuntimeConnector, probeAllRuntimeAuth, probeRuntimeAuthCached, setRuntimeConnectEmitter } from "./runtime/runtime-connect";
 import { CONNECTABLE_RUNTIMES, type ConnectableRuntime } from "../shared/runtime-connect";
 import { listRuntimeCommands } from "./runtime/commands";
@@ -562,7 +563,7 @@ import { PROJECT_TEAM_ROLES_JUDGMENT, PROJECT_TEAM_ROLE_FILL_JUDGMENT } from "..
 import { normalizeRuntimeSelectionInput, RuntimeSelectionContractError } from "../shared/runtime-selection";
 import { withInvocationAccounting } from "./long-run/accounting-context";
 import { forgetOneRecoveryJudgment, judgeOneAutoRecovery, oneRecoveryRuntimeSelection } from "./one/auto-recovery";
-import { desktopOneRecoveryContext, desktopOneRecoveryOriginalRunId, desktopOneRecoveryScope, pendingDesktopOneRecovery, reserveDesktopOneRecovery } from "./one/desktop-recovery-admission";
+import { desktopOneRecoveryAttemptsForFingerprint, desktopOneRecoveryContext, desktopOneRecoveryOriginalRunId, desktopOneRecoveryScope, pendingDesktopOneRecovery, reserveDesktopOneRecovery } from "./one/desktop-recovery-admission";
 import { oneRunFailureFingerprint } from "../shared/one-auto-recovery";
 import { registerWorkStartIpc } from "./work-start";
 import { registerBrowserAutofillIpc } from "./browser/autofill-ipc";
@@ -3212,7 +3213,11 @@ export function registerIpcHandlers(): void {
   });
 
   // ── runtime ─────────────────────────────────────────────
-  registerAppControlDomainIpc(ipcMain, "runtime:detect", (force?: boolean) => observeRuntimes(force === true));
+  registerAppControlDomainIpc(ipcMain, "runtime:detect", (force?: boolean) => {
+    // A forced check is the person asking again: a failed ACP listing is retried now instead of after its backoff.
+    if (force === true) forgetFailedAcpModelProbes();
+    return observeRuntimes(force === true);
+  });
   registerAppControlDomainIpc(ipcMain, "runtime:setActive", (selection: RuntimeSelection) =>
     setActiveRuntime(selection),
   );
@@ -3237,6 +3242,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("runtime:openCliLogin", async (_e, kind: ManageableCli) => {
     // 로그인 터미널을 여는 시점에 감지/사용량 캐시를 즉시 무효화 — 로그인 완료가
     // watchRecovery 폴링(및 그 이후 일반 폴링)에 재시작 없이 바로 반영되게 한다.
+    // The owner pressing "Log in" is the signal that the old "signed out" fact is stale; if the login is abandoned the next run writes it again.
+    forgetRuntimeSignIn({ kind });
+    forgetFailedAcpModelProbes();
     clearDetectCache();
     if (kind === "claude-code" || kind === "codex") invalidateUsage(kind);
     const runtimes = await detectRuntimes();
@@ -3253,6 +3261,9 @@ export function registerIpcHandlers(): void {
   const runtimeConnector = defaultRuntimeConnector(
     (url) => { if (/^https:\/\//i.test(url)) void shell.openExternal(url); },
     (kind) => {
+      // A finished connect popup is a live sign-in: the old "signed out" fact and login cooldown for this CLI are out of date.
+      forgetRuntimeSignIn({ kind });
+      forgetFailedAcpModelProbes();
       clearDetectCache();
       if (kind === "claude-code" || kind === "codex") invalidateUsage(kind);
       emitDesktopStoreChange({ entity: "runtime" });
@@ -3285,6 +3296,7 @@ export function registerIpcHandlers(): void {
         ?? runtimes.find((runtime) => runtime.kind === kind);
       const result = await updateCli(kind, selected?.source);
       if (result.ok) {
+        forgetFailedAcpModelProbes();
         clearDetectCache();
         // CLI 교체는 이미 떠 있는 상주 프로세스의 바이너리를 바꾸지 않는다. 자동 업데이트
         // 경로와 같은 정리 계약을 수동 업데이트에도 적용해, 다음 턴이 새 CLI로 시작하게 한다.
@@ -3344,6 +3356,7 @@ export function registerIpcHandlers(): void {
   // ── secrets (macOS Keychain) ────────────────────────────
   registerAppControlDomainIpc(ipcMain, "secrets:saveApiKey", async (backend: RuntimeBackend, key: string) => {
     await saveApiKey(backend, key);
+    forgetRuntimeSignIn({ kind: "byok", backend });
     clearModelCache();
     clearDetectCache();
     emitDesktopStoreChange({ entity: "runtime" });
@@ -3351,6 +3364,7 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "secrets:hasApiKey", (backend: RuntimeBackend) => hasApiKey(backend));
   registerAppControlDomainIpc(ipcMain, "secrets:deleteApiKey", async (backend: RuntimeBackend) => {
     await deleteApiKey(backend);
+    forgetRuntimeSignIn({ kind: "byok", backend });
     clearModelCache();
     clearDetectCache();
     emitDesktopStoreChange({ entity: "runtime" });
@@ -4746,7 +4760,7 @@ export function registerIpcHandlers(): void {
     const wait = latestGoalWaitSubscription(chat.goalId);
     if (!context || !wait || wait.chatId !== id) return context;
     return { ...context, wait: { waitId: wait.waitId, state: wait.state, subjectKind: wait.intent.subject.kind,
-      nextCheckAt: wait.nextCheckAt, deadline: wait.deadline, executionAvailability: wait.executionAvailability } };
+      nextCheckAt: effectiveWaitCheckAt(wait, Date.now()), deadline: wait.deadline, executionAvailability: wait.executionAvailability } };
   });
   registerAppControlDomainIpc(ipcMain, "chats:defineGoal", async (id: string, objective: string, requestedLocale?: "ko" | "en") => {
     const chat = getChat(id);
@@ -5290,8 +5304,9 @@ export function registerIpcHandlers(): void {
         controlScope: scope.controlScope,
         locale: currentUiLocale(),
         goal: typeof input?.goal === "string" ? input.goal.slice(0, 4_000) : "",
-        attemptsSpent: Math.max(recoveryContext.attemptsSpent,
-          Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0),
+        // Same rule as Main's admission (reserveDesktopOneRecovery): the spent count is that of this failure fingerprint.
+        // The saved chain is the authority; the view's own count (its attempt ordinal) would carry an older problem's attempts over.
+        attemptsSpent: desktopOneRecoveryAttemptsForFingerprint(recoveryContext.originalRunId, oneRunFailureFingerprint(scope.receipt)),
         previousFingerprint: typeof input?.previousFingerprint === "string" ? input.previousFingerprint : null,
       }));
       // A result is advice for the captured authority, never a grant that can

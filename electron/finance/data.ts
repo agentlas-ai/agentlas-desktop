@@ -196,7 +196,7 @@ export async function refreshFinanceQuotes(workspace: FinanceWorkspace, route?: 
   }
   if(route?.sourceId.startsWith('toolchain:')){
     const operations:FinanceOperation[]=[],warnings:string[]=[];
-    const limit=yahooRefreshLimit(options.limit);
+    const limit=yahooRefreshLimit(options.limit,5);
     for(const asset of workspace.watchlist.slice(0,limit)){
       route.signal?.throwIfAborted();const result=await queryFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'current'},workspace.watchlist,route);
       const row=result.rows[0],column=(name:string)=>result.columns.indexOf(name),price=row?.[column('Price')],currency=row?.[column('Currency')],asOf=row?.[column('Observed at')];

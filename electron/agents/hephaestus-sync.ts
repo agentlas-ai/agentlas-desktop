@@ -21,6 +21,14 @@ import { listRoutes } from "./routes";
 const PACKAGE_MARKERS = ["agentlas.json", "AGENT.md", "AGENTS.md", "TEAM.md", "CLAUDE.md"];
 const CARD_SUBDIRS = ["agents", "teams"];
 const WATCH_DEBOUNCE_MS = 2_000;
+/** Ceiling for the watcher reconnect delay: a watch that cannot attach costs one mkdir and one watch per minute, never a stop. */
+const WATCH_RETRY_MAX_DELAY_MS = 60_000;
+/** An import that failed stays queued; this many failures in one process move it to failed/ (a permanent failure). */
+const IMPORT_FAILURES_BEFORE_FAILED = 3;
+const IMPORT_RETRY_DELAY_MS = 30_000;
+/** Most recent entries kept in failed/ (the engine reads done/ as its per-card idempotency marker, so done/ is not pruned). */
+const KEEP_FAILED_ENTRIES = 50;
+const MAX_TRACKED_IMPORT_FAILURES = 200;
 
 function networkingHome(): string {
   const override = process.env.AGENTLAS_NETWORKING_HOME;
@@ -153,7 +161,7 @@ function collectItems(): SyncItem[] {
     const ref = entry ? validPackageRef(String(entry.ref ?? "")) : null;
     if (!ref) {
       // ref가 사라졌거나 손상된 항목 — 재시도 무의미, failed로 치운다.
-      moveEntry(file, failedDir(), { ...(entry ?? {}), error: "invalid or missing ref" });
+      moveEntry(file, failedDir(), { ...(entry ?? {}), error: "invalid or missing ref", reason: "permanent" });
       continue;
     }
     const existing = byRef.get(ref);
@@ -178,7 +186,68 @@ function moveEntry(file: string, targetDir: string, payload: Record<string, unkn
     fs.rmSync(file, { force: true });
   } catch (err) {
     console.error("[hephaestus-sync] queue move failed:", err);
+    return;
   }
+  if (targetDir === failedDir()) pruneOldEntries(targetDir, KEEP_FAILED_ENTRIES);
+}
+
+/** Keeps the newest `keep` files by mtime. Only a directory listing is read until the count is over the limit. */
+function pruneOldEntries(dir: string, keep: number): void {
+  try {
+    const names = fs.readdirSync(dir).filter((f) => f.endsWith(".json"));
+    if (names.length <= keep) return;
+    const aged = names.flatMap((name) => {
+      try { return [{ name, mtime: fs.statSync(path.join(dir, name)).mtimeMs }]; } catch { return []; }
+    }).sort((a, b) => b.mtime - a.mtime || (a.name < b.name ? 1 : -1));
+    for (const old of aged.slice(keep)) fs.rmSync(path.join(dir, old.name), { force: true });
+  } catch (err) {
+    console.error("[hephaestus-sync] queue prune failed:", err);
+  }
+}
+
+const LEGACY_PERMANENT_ERROR = "invalid or missing ref";
+
+/**
+ * Once per process start (the app booting is the signal): failed/ entries whose reason is not permanent go back to pending/ so
+ * the start drain imports them again. The engine enqueues only when a card is saved, so an unchanged card that failed three times
+ * on a transient fault would otherwise never come back. An entry written before reasons were recorded has none: it is retried once,
+ * unless it carries the one error that was always permanent or its folder is no longer a valid package. An existing pending entry
+ * of the same name is never overwritten. At most KEEP_FAILED_ENTRIES are read; failed/ is not read again until the next start.
+ */
+function requeueTransientFailures(): void {
+  let names: string[] = [];
+  try { names = fs.readdirSync(failedDir()).filter((f) => f.endsWith(".json")).slice(0, KEEP_FAILED_ENTRIES); } catch { return; }
+  for (const name of names) {
+    const file = path.join(failedDir(), name);
+    const target = path.join(pendingDir(), name);
+    try {
+      const entry = readJson(file);
+      if (!entry || entry.reason === "permanent" || entry.error === LEGACY_PERMANENT_ERROR) continue;
+      if (!validPackageRef(String(entry.ref ?? "")) || fs.existsSync(target)) continue;
+      const { error: _error, reason: _reason, drained_at: _drainedAt, status: _status, ...original } = entry;
+      fs.mkdirSync(pendingDir(), { recursive: true });
+      fs.writeFileSync(target, `${JSON.stringify(original, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+      fs.rmSync(file, { force: true });
+    } catch (err) {
+      console.error("[hephaestus-sync] failed entry requeue skipped:", name, err);
+    }
+  }
+}
+
+// Failures are counted in this process only. Writing the count back into pending/ would wake the watcher on our own write and
+// retry in a loop; a restart simply starts counting again over the same pending file.
+const importFailures = new Map<string, number>();
+
+function noteImportFailure(pendingFile: string): number {
+  const count = (importFailures.get(pendingFile) ?? 0) + 1;
+  importFailures.delete(pendingFile);
+  importFailures.set(pendingFile, count);
+  while (importFailures.size > MAX_TRACKED_IMPORT_FAILURES) {
+    const oldest = importFailures.keys().next().value;
+    if (oldest === undefined) break;
+    importFailures.delete(oldest);
+  }
+  return count;
 }
 
 function alreadyImported(ref: string): boolean {
@@ -215,6 +284,7 @@ export function drainHephaestusSync(): Promise<HephaestusSyncResult> {
 
 async function drainOnce(): Promise<HephaestusSyncResult> {
   const result: HephaestusSyncResult = { imported: [], skipped: 0, failed: [] };
+  let retryPending = false;
   for (const item of collectItems()) {
     try {
       // A pending entry is the engine saying this card changed (it re-queues only on a new content_hash), so an
@@ -229,6 +299,7 @@ async function drainOnce(): Promise<HephaestusSyncResult> {
         console.log("[hephaestus-sync] imported:", item.ref);
       }
       if (item.pendingFile) {
+        importFailures.delete(item.pendingFile);
         moveEntry(item.pendingFile, doneDir(), { ...(item.pendingEntry ?? {}), status: "imported" });
       }
     } catch (err) {
@@ -236,10 +307,18 @@ async function drainOnce(): Promise<HephaestusSyncResult> {
       result.failed.push({ ref: item.ref, error: message });
       console.error("[hephaestus-sync] import failed:", item.ref, message);
       if (item.pendingFile) {
-        moveEntry(item.pendingFile, failedDir(), { ...(item.pendingEntry ?? {}), error: message });
+        // A failure may be transient (a folder still being written, a locked file): the entry stays in pending/ and is tried
+        // again. Only the third failure in this process makes it permanent.
+        if (noteImportFailure(item.pendingFile) >= IMPORT_FAILURES_BEFORE_FAILED) {
+          importFailures.delete(item.pendingFile);
+          moveEntry(item.pendingFile, failedDir(), { ...(item.pendingEntry ?? {}), error: message, reason: "transient" });
+        } else {
+          retryPending = true;
+        }
       }
     }
   }
+  if (retryPending) scheduleImportRetry();
   return result;
 }
 
@@ -249,7 +328,20 @@ let retryTimer: NodeJS.Timeout | null = null;
 let syncStarted = false;
 let syncGeneration = 0;
 let retryCount = 0;
-const MAX_WATCH_RETRIES = 3;
+let importRetryTimer: NodeJS.Timeout | null = null;
+let requeuedThisProcess = false;
+
+/** One short-lived timer re-drains entries whose import failed; it is not re-armed by the drain it starts unless one failed again. */
+function scheduleImportRetry(): void {
+  if (!syncStarted || importRetryTimer) return;
+  const generation = syncGeneration;
+  importRetryTimer = setTimeout(() => {
+    importRetryTimer = null;
+    if (!syncStarted || generation !== syncGeneration) return;
+    void drainHephaestusSync().catch((err) => console.error("[hephaestus-sync] import retry drain failed:", err));
+  }, IMPORT_RETRY_DELAY_MS);
+  importRetryTimer.unref();
+}
 
 function clearWatchDebounce(): void {
   if (debounceTimer) clearTimeout(debounceTimer);
@@ -257,8 +349,8 @@ function clearWatchDebounce(): void {
 }
 
 function scheduleWatchRetry(generation: number): void {
-  if (!syncStarted || generation !== syncGeneration || retryTimer || retryCount >= MAX_WATCH_RETRIES) return;
-  const delay = WATCH_DEBOUNCE_MS * 2 ** retryCount++;
+  if (!syncStarted || generation !== syncGeneration || retryTimer) return;
+  const delay = Math.min(WATCH_RETRY_MAX_DELAY_MS, WATCH_DEBOUNCE_MS * 2 ** Math.min(retryCount++, 10));
   retryTimer = setTimeout(() => {
     if (!syncStarted || generation !== syncGeneration) return;
     retryTimer = null;
@@ -273,6 +365,8 @@ function connectSyncWatcher(generation: number): void {
     fs.mkdirSync(pendingDir(), { recursive: true });
     const current = fs.watch(pendingDir(), () => {
       if (!syncStarted || generation !== syncGeneration || watcher !== current) return;
+      // The watch is delivering events again: the next failure starts from the short delay.
+      retryCount = 0;
       clearWatchDebounce();
       debounceTimer = setTimeout(() => {
         if (!syncStarted || generation !== syncGeneration || watcher !== current) return;
@@ -313,6 +407,7 @@ export function startHephaestusSync(): void {
   syncStarted = true;
   retryCount = 0;
   const generation = ++syncGeneration;
+  if (!requeuedThisProcess) { requeuedThisProcess = true; requeueTransientFailures(); }
   void drainHephaestusSync().catch((err) => console.error("[hephaestus-sync] initial drain failed:", err));
   connectSyncWatcher(generation);
 }
@@ -323,6 +418,8 @@ export function stopHephaestusSync(): void {
   clearWatchDebounce();
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = null;
+  if (importRetryTimer) clearTimeout(importRetryTimer);
+  importRetryTimer = null;
   const current = watcher;
   watcher = null;
   try { current?.close(); } catch { /* already closed */ }

@@ -5498,6 +5498,15 @@ app.whenReady().then(async () => {
       void pollGoalWaitSubscriptions().catch((error) => console.error("[goal-wait] startup observation failed", error));
       const { resumeSettledGoalCheckpoints, resumeLegacyOngoingBlockedGoals,
         scheduleUnverifiedOngoingGoalCycles } = await import("./long-run/startup-checkpoints");
+      // Goals an earlier build paused as `budget` when their runtime retry account ran out go back onto a retry schedule
+      // (idempotent query, Main only: Goal custody is Desktop-only).
+      const { rescheduleExhaustedRuntimeRetryGoals } = await import("./store/long-runs");
+      const reopened = rescheduleExhaustedRuntimeRetryGoals();
+      if (reopened) console.info("[long-run] spent runtime retry goals rescheduled", reopened);
+      // Goals an earlier build held for the host's own idle-stop card go back onto a retry schedule (idempotent query).
+      const { releaseIdleStopCardHolds } = await import("./long-run/goal-no-progress-wait");
+      const releasedCards = releaseIdleStopCardHolds();
+      if (releasedCards) console.info("[long-run] idle-stop card holds released", releasedCards);
       const resumed = await resumeSettledGoalCheckpoints(invocationService);
       if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
       const scheduled = scheduleUnverifiedOngoingGoalCycles();

@@ -17,6 +17,8 @@ import { aliveActionKindsForDomain, aliveActionRegistration } from "./action-reg
 import { AliveLifetimeStore } from "./lifetime-store";
 import { aliveResumeAuthorized, aliveWakeRequiresOwnerResume } from "./owner-resume";
 
+/** Unblock-attempt failure codes that are a passing host condition, not an outcome (electron/alive-organisms/index.ts unblockAttempt). */
+export const ALIVE_TRANSIENT_UNBLOCK_CODES: ReadonlySet<string> = new Set(["agi.monitor-starting", "agi.admission-closed"]);
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export interface AliveLifetimeBeat { agentId: string; outcome: "wait" | "dispatched" | "failed"; reasonCode: string }
 export interface AliveLifetimeServiceOptions {
@@ -106,6 +108,7 @@ export class AliveLifetimeService {
     const needsOwner = waiting.filter(({ result }) => result.ownerWait === "needs-owner");
     if (needsOwner.length) {
       const outcomes: AliveUnblockOutcome[] = [];
+      const pending: Array<{ attachmentId: string; blockedBy: string; outcome: AliveUnblockOutcome; code: string | null }> = [];
       for (const { attachment, result } of needsOwner) {
         let outcome: AliveUnblockOutcome = "no-handler";
         let code: string | null = null;
@@ -120,8 +123,15 @@ export class AliveLifetimeService {
           code = typeof answer?.code === "string" && /^[a-z][a-z0-9._-]{2,119}$/.test(answer.code) ? answer.code : null;
         }
         outcomes.push(outcome);
-        this.store.event(agent.agentId, "agent.unblock-attempt-due", { stateSha, attachmentId: attachment.attachmentId,
-          blockedBy: result.blockedBy, outcome, code }, nowMs);
+        pending.push({ attachmentId: attachment.attachmentId, blockedBy: String(result.blockedBy), outcome, code });
+      }
+      // A passing host condition (monitor still starting, admission closed for this tick) is not a verdict on the owner wait:
+      // nothing is written (no event, no ownerWait record), so the next tick attempts this state again at zero model cost.
+      if (pending.some((row) => row.outcome === "failed" && row.code !== null && ALIVE_TRANSIENT_UNBLOCK_CODES.has(row.code))
+        && !outcomes.includes("acted") && !outcomes.includes("needs-human")) return agent;
+      for (const row of pending) {
+        this.store.event(agent.agentId, "agent.unblock-attempt-due", { stateSha, attachmentId: row.attachmentId,
+          blockedBy: row.blockedBy, outcome: row.outcome, code: row.code }, nowMs);
       }
       unblock = outcomes.includes("acted") ? "acted" : outcomes.includes("needs-human") ? "needs-human"
         : outcomes.includes("failed") ? "failed" : "no-handler";

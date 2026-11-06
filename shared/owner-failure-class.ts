@@ -154,36 +154,43 @@ export function classifyOwnerFailure(failure: OwnerFailureFacts): OwnerFailureCl
  *  - recovering: the app starts the same request once more by itself (nothing had acted).
  *  - recovered: the retry finished the request (a quiet line under the answer).
  *  - uncertain: something may already have run, so the app did not run it again.
- *  - exhausted: the one automatic retry also failed inside the app.
+ *  - exhausted: the one automatic retry also failed inside the app, nothing was sent, and the request is kept: the next app start or update tries once more.
+ *  - repeated: that attempt after a restart failed the same way on the same app version; the app tries again only after an update.
  *  - newer: the owner has already written something newer; nothing is re-run on their behalf.
  *  - goal: the owner's Goal carries the request on by itself.
  *  - checking: something may have run, and the send queue sends the message once more by itself after telling the model so.
- *  - manual: nothing ran, but the request cannot be replayed by the host (a one-use attachment); it is saved.
+ *  - manual: nothing ran and the host does NOT start it again by itself (a one-use attachment cannot be replayed, or the start was refused for a reason
+ *    that does not clear); it is saved. The line states that fact and does not promise a retry that will not come.
+ *  - interrupted: nothing ran and the app quit before its own retry started, and that claim kept no restart data (an older row or a request that cannot be rebuilt).
  *  - background: a turn the host started itself (not the owner's words); the problem is logged.
  */
-export type InternalFailurePlan = "recovering" | "recovered" | "uncertain" | "checking" | "exhausted" | "newer" | "goal" | "manual" | "background";
+export type InternalFailurePlan = "recovering" | "recovered" | "uncertain" | "checking" | "exhausted" | "repeated" | "newer" | "goal" | "manual" | "interrupted" | "background";
 
 const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
   ko: {
     recovering: "앱 안쪽 문제로 이번 시도가 끝나지 못했습니다. 아무것도 실행되지 않았고, 앱이 같은 요청을 한 번 더 자동으로 처리합니다.",
     recovered: "앱 안쪽 문제로 한 번 막혔지만 자동으로 다시 시도해 완료했습니다.",
     uncertain: "앱 안쪽 문제로 이번 시도가 중간에 멈췄습니다. 일부 작업이 이미 실행됐을 수 있어 자동으로 다시 실행하지 않았습니다. 이어서 하려면 말씀해 주세요. 앱이 먼저 어디까지 됐는지 확인하고 이어갑니다.",
-    exhausted: "앱 안쪽 문제로 이 요청을 끝내지 못했고, 자동 재시도도 같은 문제로 멈췄습니다. 문제는 기록으로 남겼습니다. 요청은 저장되어 있어 같은 내용을 다시 보내시면 이어서 처리합니다.",
+    exhausted: "앱 안쪽 문제로 이 요청을 끝내지 못했고, 자동 재시도도 같은 문제로 멈췄습니다. 문제는 기록으로 남겼습니다. 아무것도 보내지 않았고 요청은 저장되어 있습니다. 앱이 다시 시작되거나 업데이트되면 한 번 더 처리합니다.",
+    repeated: "앱 안쪽 문제로 이 요청을 끝내지 못했고, 앱을 다시 시작한 뒤의 자동 재시도도 같은 문제로 멈췄습니다. 문제는 기록으로 남겼습니다. 아무것도 보내지 않았고 요청은 저장되어 있습니다. 같은 앱 버전에서는 더 시도하지 않으며, 앱이 업데이트되면 한 번 더 처리합니다.",
     newer: "앱 안쪽 문제로 이전 요청이 끝나지 못했습니다. 더 최근 메시지를 보내셨으므로 이전 요청은 자동으로 다시 실행하지 않았습니다.",
     goal: "앱 안쪽 문제로 이번 시도가 끝나지 못했습니다. 이 방의 목표가 다음 차례에 이어서 처리합니다.",
     checking: "앱 안쪽 문제로 이번 시도가 중간에 멈췄습니다. 일부 작업이 이미 실행됐을 수 있어, 앱이 먼저 어디까지 됐는지 확인한 뒤 한 번 이어서 처리합니다.",
-    manual: "앱 안쪽 문제로 이 요청을 시작하지 못했습니다. 아무것도 실행되지 않았고 요청은 저장되어 있습니다. 문제는 기록으로 남겼으니 같은 내용을 다시 보내 주세요.",
+    manual: "앱 안쪽 문제로 이 요청을 시작하지 못했습니다. 아무것도 실행되지 않았고 요청은 저장되어 있습니다. 문제는 기록으로 남겼고, 앱이 자동으로 다시 시작하지는 않습니다. 이어서 하려면 말씀해 주세요.",
+    interrupted: "앱이 종료되면서 자동 재시도가 시작되지 못했습니다. 아무것도 실행되지 않았고 요청은 저장되어 있습니다. 문제는 기록으로 남겼습니다. 이어서 하려면 말씀해 주세요.",
     background: "앱 안쪽 문제로 이번 자동 실행이 끝나지 못했습니다. 문제는 기록으로 남겼습니다.",
   },
   en: {
     recovering: "An app-side problem stopped this attempt. Nothing had run, and the app is handling the same request once more by itself.",
     recovered: "An app-side problem stopped it once, and the app retried by itself and finished the request.",
     uncertain: "An app-side problem stopped this attempt midway. Some work may already have run, so the app did not run it again. Tell me to continue and the app first checks how far it got.",
-    exhausted: "An app-side problem stopped this request, and the automatic retry stopped the same way. The problem is logged. Your request is saved; send the same words again to continue.",
+    exhausted: "An app-side problem stopped this request, and the automatic retry stopped the same way. The problem is logged. Nothing was sent and your request is saved. When the app restarts or updates, it handles the request once more.",
+    repeated: "An app-side problem stopped this request, and the automatic retry after a restart stopped the same way. The problem is logged. Nothing was sent and your request is saved. The app does not try again on this same version; when it updates, it handles the request once more.",
     newer: "An app-side problem stopped the earlier request. You have written something newer since, so the earlier request was not re-run for you.",
     goal: "An app-side problem stopped this attempt. This room's Goal carries the work on at its next turn.",
     checking: "An app-side problem stopped this attempt midway. Some work may already have run, so the app first checks how far it got and then continues once.",
-    manual: "An app-side problem kept this request from starting. Nothing ran and your request is saved. The problem is logged; please send the same words again.",
+    manual: "An app-side problem kept this request from starting. Nothing ran and your request is saved. The problem is logged, and the app does not start it again by itself. Tell me to continue and I will pick it up.",
+    interrupted: "The app quit before its automatic retry could start. Nothing ran and your request is saved. The problem is logged. Tell me to continue and I will pick it up.",
     background: "An app-side problem stopped this automatic run. The problem is logged.",
   },
 };

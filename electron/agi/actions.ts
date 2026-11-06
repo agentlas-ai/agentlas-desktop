@@ -113,13 +113,26 @@ const NEVER_ESCALATED = new Set<string>(["file_defect", "rest", "start_work_turn
 
 /** The next deterministic move for an action that already repeated or failed on this incident. */
 export function repeatEscalation(incident: Pick<AgiIncident, "reasonCode" | "diagnosis">, action: string,
-  history: ReadonlyArray<{ action: string }>, options: { nativeHarness?: boolean; runtimeSwitch?: boolean } = {}): { action: AgiActionKind; args: Record<string, unknown> } {
+  history: ReadonlyArray<{ action: string }>, options: {
+    nativeHarness?: boolean; runtimeSwitch?: boolean;
+    /** The work turn that ran last on this incident failed to move it: same reasonCode and same state digest as now. */
+    sameFailure?: boolean;
+    /** A tactic node plus an installed alternative path that was not tried yet (host facts); null/absent = none to offer. */
+    retry?: { nodeId: string; capability: string; path: string } | null;
+    ruledOut?: ReadonlySet<string>;
+  } = {}): { action: AgiActionKind; args: Record<string, unknown> } {
   // A read-only Goal is never handed the runtime's own write-capable tools; its ladder goes on to another runtime and the work turn.
   const capability = options.nativeHarness === false ? null : agiHarnessCapability(incident.diagnosis);
   if (capability) return { action: "use_native_harness", args: { capability, defect: incident.reasonCode } };
   const switched = history.filter((entry) => entry.action === "switch_runtime").length;
   // runtimeSwitch false: the host has nothing a switch could move for this Goal (recordMove refuses it every time).
   if (action !== "switch_runtime" && options.runtimeSwitch !== false && switched < MAX_SAME_MOVE_PER_CAUSE) return { action: "switch_runtime", args: { reason: incident.reasonCode } };
+  // The same work turn on the same cause and the same state moved nothing: before it runs a third time, the tactic goes
+  // another way (an installed alternative path). replan_tree is not offered here: it needs ops a model writes, and the
+  // host does not invent them. A spent or ruled-out retry, or no untried path, ends the ladder at the work turn as before.
+  const retrySpent = action === "retry_node_with" || options.ruledOut?.has("retry_node_with")
+    || history.filter((entry) => entry.action === "retry_node_with").length >= MAX_SAME_MOVE_PER_CAUSE;
+  if (options.sameFailure && options.retry && !retrySpent) return { action: "retry_node_with", args: { ...options.retry } };
   return { action: "start_work_turn", args: { nodeId: incident.diagnosis.eligibleTactics?.[0] ?? null } };
 }
 
@@ -332,6 +345,32 @@ export class AgiActionExecutor {
     return this.history(incidentId).filter((entry) => entry.at > since);
   }
 
+  /** Did the last work turn on this incident leave it where it was (same reasonCode, same state digest)? Host facts, no model. */
+  private lastWorkTurnFailedSame(incident: AgiIncident): boolean {
+    const row = this.deps.db.prepare(`SELECT result_json FROM agi_action_receipts WHERE incident_id = ? AND action = 'start_work_turn'
+      AND status = 'settled' AND attempt >= 1 ORDER BY COALESCE(settled_at_ms, created_at_ms) DESC LIMIT 1`).get(incident.id) as { result_json: string | null } | undefined;
+    if (!row?.result_json) return false;
+    try {
+      const detail = (JSON.parse(row.result_json) as AgiActionReceipt).detail;
+      return detail?.reasonCode === incident.reasonCode && detail?.stateDigest === incident.stateDigest;
+    } catch { return false; }
+  }
+
+  /** The next untried installed path for the tactic that failed, or null. */
+  private untriedRetryPath(incident: AgiIncident): { nodeId: string; capability: string; path: string } | null {
+    const nodeId = incident.diagnosis.eligibleTactics?.[0];
+    if (!nodeId || !this.deps.installedPaths) return null;
+    const capability = agiHarnessCapability(incident.diagnosis) ?? "tool";
+    const tried = new Set<string>();
+    for (const row of this.deps.db.prepare("SELECT result_json FROM agi_action_receipts WHERE incident_id = ? AND action = 'retry_node_with' AND ok = 1")
+      .all(incident.id) as Array<{ result_json: string | null }>) {
+      try { const path = (JSON.parse(row.result_json ?? "null") as AgiActionReceipt | null)?.detail?.path; if (typeof path === "string") tried.add(path); } catch { /* skip */ }
+    }
+    // The Agentlas browser is the tool that broke for a browser incident; every other installed path is an alternative.
+    const path = this.deps.installedPaths(capability).find((candidate) => !tried.has(candidate) && !(capability === "browser" && candidate === "agentlas-browser"));
+    return path ? { nodeId, capability, path } : null;
+  }
+
   captureEpisode(captureId: string, goalId: string): void { this.deps.captureEpisode?.(captureId, goalId); }
 
   /** Two existing actions, one Main transaction. Preparation never executes either action. */
@@ -476,8 +515,10 @@ export class AgiActionExecutor {
     const repeated = recent.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE;
     const failedHere = this.incidents.ruledOut(incident.id).has(request.action);
     if ((repeated || failedHere) && !NEVER_ESCALATED.has(request.action)) {
+      const sameFailure = this.lastWorkTurnFailedSame(incident);
       const next = repeatEscalation(incident, request.action, recent, { nativeHarness: goal.permission === "write" || goal.permission === "full",
-        runtimeSwitch: this.deps.canSwitchRuntime?.(goal.goalId) });
+        runtimeSwitch: this.deps.canSwitchRuntime?.(goal.goalId), sameFailure,
+        retry: sameFailure ? this.untriedRetryPath(incident) : null, ruledOut: this.incidents.ruledOut(incident.id) });
       request = { ...request, action: next.action, args: { ...next.args, escalatedFrom: request.action } };
     }
     // 5. Tokens (D1): the AGI caps govern the unblocker's own model calls (model-attempt.ts admits each one). A work turn
@@ -715,11 +756,14 @@ export class AgiActionExecutor {
         return ok("agi.plan.applied", { ops: ops.map((op) => op.op) });
       }
       case "start_work_turn": {
+        // What this turn was started against: the next attempt compares it to the incident to tell "still the same" from "moved".
+        const turnIncident = this.incidents.get(incidentId);
+        const turnFingerprint = turnIncident ? { reasonCode: turnIncident.reasonCode, stateDigest: turnIncident.stateDigest } : {};
         const outcome = this.deps.continueGoal(goal.runId, goal.version);
         if (outcome.action === "resumed" || outcome.action === "observation_dispatched") {
-          return ok(outcome.action === "resumed" ? "agi.turn.started" : "agi.turn.observing", { invocationRunId: outcome.detail, nodeId: text(args.nodeId, 80) });
+          return ok(outcome.action === "resumed" ? "agi.turn.started" : "agi.turn.observing", { invocationRunId: outcome.detail, nodeId: text(args.nodeId, 80), ...turnFingerprint });
         }
-        return no(`agi.turn.${outcome.action}`, { detail: outcome.detail });
+        return no(`agi.turn.${outcome.action}`, { detail: outcome.detail, ...turnFingerprint });
       }
       case "run_login_recovery": {
         const domain = text(args.domain, 200);

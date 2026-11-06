@@ -2,10 +2,12 @@ import type { FinanceAsset, FinanceDataRequest, FinanceDataResult, FinanceOperat
 import type { FinanceQuoteCoverage, FinanceQuoteRefreshResult } from '../quote-coverage';
 import { findIsharesFund } from './ishares-catalog';
 import { ReadCache, Slots, mapLimit } from './read-cache';
+import { blockHost, hostBlockedSeconds } from './http';
+import { latestFinanceQuote } from '../../../shared/finance';
 
 export interface YahooMarketOptions {
   signal?: AbortSignal;
-  /** How many selected assets one quote refresh reads. Five unless a caller that needs every position priced (portfolio valuation) asks for more; capped. */
+  /** How many selected assets one quote refresh reads. Thirty unless a caller that needs every position priced (portfolio valuation) asks for more; capped. */
   limit?: number;
   includeQuoteCoverage?: boolean;
   /** An explicit owner refresh: read the provider again instead of answering from the last read of the same URL. */
@@ -19,10 +21,9 @@ const RANGES:Record<string,string>={'1M':'1mo','3M':'3mo','1Y':'1y','5Y':'5y',al
 export const YAHOO_DISCOVERY_PRESETS=['undervalued_large_caps','undervalued_growth_stocks','growth_technology_stocks'] as const;
 export type YahooDiscoveryPreset=typeof YAHOO_DISCOVERY_PRESETS[number];
 const LIMIT=2*1024*1024,ROW_LIMIT=5000;
-const REFRESH_DEFAULT=5,REFRESH_MAX=100;
-/** A refresh reads at most this many assets: the caller's whole-number request within 1..100 (the most positions a reviewed holdings draft carries), otherwise five. */
-export function yahooRefreshLimit(value?:number):number{return typeof value==='number'&&Number.isInteger(value)&&value>=1?Math.min(value,REFRESH_MAX):REFRESH_DEFAULT;}
-let blockedUntil=0;
+const REFRESH_DEFAULT=30,REFRESH_MAX=100,YAHOO_HOST='query1.finance.yahoo.com';
+/** A refresh reads at most this many assets: the caller's whole-number request within 1..100 (the most positions a reviewed holdings draft carries), otherwise `fallback`. The first rate-limit answer blocks the host for every reader, so a long list stops by itself. */
+export function yahooRefreshLimit(value?:number,fallback:number=REFRESH_DEFAULT):number{return typeof value==='number'&&Number.isInteger(value)&&value>=1?Math.min(value,REFRESH_MAX):fallback;}
 /** Four requests at once at most; the rest wait their turn. A short-lived copy of each answer serves the next ask for the same URL (search hit check, then price, then history), and an owner refresh always reads again. */
 const slots=new Slots(4);
 const CHART_SNAPSHOT_TTL=60_000,CHART_HISTORY_TTL=5*60_000,SEARCH_TTL=5*60_000,NEWS_TTL=2*60_000,CHECK_CONCURRENCY=3,REFRESH_CONCURRENCY=3;
@@ -46,21 +47,30 @@ export function isYahooMarketUrlAllowed(url:URL):boolean{
   try{const encoded=url.pathname.slice(prefix.length),symbol=decodeURIComponent(encoded);return SYMBOL.test(symbol)&&encodeURIComponent(symbol)===encoded&&keys.length===2&&keys.every(key=>['range','interval'].includes(key))&&['5d',...Object.values(RANGES)].includes(url.searchParams.get('range')??'')&&url.searchParams.get('interval')==='1d';}catch{return false;}
 }
 async function fetchText(url:URL,signal?:AbortSignal):Promise<string>{
-  abort(signal);if(!isYahooMarketUrlAllowed(url))throw new Error('finance_yahoo_url_rejected');if(Date.now()<blockedUntil)throw new Error('finance_yahoo_rate_limited');
+  abort(signal);if(!isYahooMarketUrlAllowed(url))throw new Error('finance_yahoo_url_rejected');if(hostBlockedSeconds(YAHOO_HOST)>0)throw new Error('finance_yahoo_rate_limited');
   let release:()=>void;try{release=await slots.acquire(signal);}catch{throw new Error('finance_yahoo_cancelled');}
   const controller=new AbortController(),cancel=()=>controller.abort(),timer=setTimeout(()=>controller.abort(),12_000);signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)cancel();
-  try{if(Date.now()<blockedUntil)throw new Error('finance_yahoo_rate_limited');
+  try{if(hostBlockedSeconds(YAHOO_HOST)>0)throw new Error('finance_yahoo_rate_limited');
     const response=await fetch(url,{redirect:'error',signal:controller.signal,headers:{Accept:'application/json','User-Agent':'Agentlas Finance/1.0 (local public market reader)'}});
-    if(response.status===429){const retry=response.headers.get('retry-after'),seconds=retry&&/^\d+$/.test(retry)?Number(retry):60;blockedUntil=Date.now()+Math.max(1000,Math.min(seconds*1000,15*60_000));throw new Error('finance_yahoo_rate_limited');}
-    if(!response.ok)throw new Error('finance_yahoo_source_http_error');if(!response.body||Number(response.headers.get('content-length'))>LIMIT)throw new Error('finance_yahoo_output_too_large');
+    if(response.status===429){const retry=response.headers.get('retry-after'),seconds=retry&&/^\d+$/.test(retry)?Number(retry):60;blockHost(YAHOO_HOST,seconds*1000);throw new Error('finance_yahoo_rate_limited');}
+    if(!response.ok)throw new Error(response.status>=500?'finance_yahoo_source_unavailable':'finance_yahoo_source_http_error');if(!response.body||Number(response.headers.get('content-length'))>LIMIT)throw new Error('finance_yahoo_output_too_large');
     const reader=response.body.getReader(),chunks:Uint8Array[]=[];let size=0;try{for(;;){const part=await reader.read();if(part.done)break;size+=part.value.length;if(size>LIMIT)throw new Error('finance_yahoo_output_too_large');chunks.push(part.value);}}finally{await reader.cancel().catch(()=>undefined);}
     abort(signal);return Buffer.concat(chunks).toString('utf8');
   }catch(error){abort(signal);if(controller.signal.aborted)throw new Error('finance_yahoo_timeout');throw error;}finally{clearTimeout(timer);signal?.removeEventListener('abort',cancel);release();}
 }
+/** A server error or a dropped connection is read once more a moment later (the slot is free in between and the block is checked again); a refusal, a timeout and a 4xx are not. */
+async function fetchTextAgain(url:URL,signal?:AbortSignal):Promise<string>{
+  try{return await fetchText(url,signal);}
+  catch(error){
+    if(!(error instanceof TypeError)&&!(error instanceof Error&&error.message==='finance_yahoo_source_unavailable'))throw error;
+    abort(signal);await new Promise<void>(resolve=>{const timer=setTimeout(resolve,1500);signal?.addEventListener('abort',()=>{clearTimeout(timer);resolve();},{once:true});});
+    return fetchText(url,signal);
+  }
+}
 /** One read of `url`: the last answer for the same URL while it is younger than `ttlMs`, one shared read when several callers ask at once, otherwise a request. */
 async function readJson(url:URL,options:YahooMarketOptions,ttlMs:number):Promise<{json:unknown;at:string}>{
   abort(options.signal);if(!isYahooMarketUrlAllowed(url))throw new Error('finance_yahoo_url_rejected');
-  let reply:{body:string;at:string};try{reply=await replies.get(url.href,async signal=>({body:await fetchText(url,signal),at:new Date().toISOString()}),{signal:options.signal,fresh:options.fresh,ttlMs});}catch(error){abort(options.signal);throw error;}
+  let reply:{body:string;at:string};try{reply=await replies.get(url.href,async signal=>({body:await fetchTextAgain(url,signal),at:new Date().toISOString()}),{signal:options.signal,fresh:options.fresh,ttlMs});}catch(error){abort(options.signal);throw error;}
   abort(options.signal);try{return{json:JSON.parse(reply.body),at:reply.at};}catch{throw new Error('finance_yahoo_source_shape');}
 }
 async function fetchJson(url:URL,options:YahooMarketOptions,ttlMs:number):Promise<unknown>{return (await readJson(url,options,ttlMs)).json;}
@@ -135,14 +145,21 @@ export async function queryYahooFinanceData(input:FinanceDataRequest,assets:Fina
     if(!code)result.warnings.push('Currency/unit metadata is unknown or unsupported; no country-based currency guess or cent-unit conversion.');result.warnings.push(RIGHTS);result.status='partial';return provenance(result,readAt);
   }catch(error){abort(options.signal);return provenance({...result,status:'error',rows:[],asOf:null,warnings:[...result.warnings,failure(error)]});}
 }
+/** Up to `limit` assets: all of them in watchlist order, or, when the list is longer, the ones whose saved price is oldest (none saved first), still in watchlist order. Reads the workspace only. */
+function refreshSelection(workspace:FinanceWorkspace,limit:number):FinanceAsset[]{
+  if(workspace.watchlist.length<=limit)return workspace.watchlist;
+  const age=(asset:FinanceAsset)=>{const quote=latestFinanceQuote(workspace,asset.id);const at=quote?Date.parse(quote.asOf):NaN;return Number.isFinite(at)?at:-Infinity;};
+  const chosen=new Set(workspace.watchlist.map((asset,index)=>({asset,index,at:age(asset)})).sort((a,b)=>a.at-b.at||a.index-b.index).slice(0,limit).map(item=>item.index));
+  return workspace.watchlist.filter((_,index)=>chosen.has(index));
+}
 export async function refreshYahooFinanceQuotes(workspace:FinanceWorkspace,options:YahooMarketOptions={}):Promise<FinanceQuoteRefreshResult>{
   const limit=yahooRefreshLimit(options.limit),operations:FinanceOperation[]=[],warnings:string[]=[];
   // An owner's refresh reads every asset again (never the copy of an earlier ask), several at once; the quotes below are still built in watchlist order.
-  const selected=workspace.watchlist.slice(0,limit),reads=await mapLimit(selected,REFRESH_CONCURRENCY,asset=>queryYahooFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'1M'},workspace.watchlist,{...options,fresh:true}),options.signal);
+  const selected=refreshSelection(workspace,limit),reads=await mapLimit(selected,REFRESH_CONCURRENCY,asset=>queryYahooFinanceData({query:asset.symbol,assetIds:[asset.id],metrics:['price'],period:'1M'},workspace.watchlist,{...options,fresh:true}),options.signal);
   for(const [index,asset] of selected.entries()){abort(options.signal);const result=reads[index],row=result.rows[0];if(!row||typeof row[1]!=='number'||typeof row[2]!=='string'||row[2]!==asset.currency||typeof row[3]!=='string'){const why=result.warnings.find(warning=>/^finance_yahoo_[a-z_]+$/.test(warning));warnings.push(`${asset.symbol}: verified price, currency or observation timestamp unavailable${why?` (${why})`:''}.`);continue;}
     if(row[1]<0){warnings.push(`${asset.symbol}: negative provider price is preserved in query results; the nonnegative quote ledger cannot import this instrument observation.`);continue;}
     const sourceId=`yahoo-chart:${encodeURIComponent(asset.symbol)}`;operations.push({type:'source.upsert',source:{id:sourceId,name:`Yahoo chart · ${asset.symbol}`,kind:'provider',status:'connected',asOf:row[3],retrievedAt:result.retrievedAt,url:result.sourceUrls[0]??null,note:[...result.warnings,COVERAGE].join('\n')}},{type:'quotes.import',quotes:[{assetId:asset.id,price:row[1],currency:row[2],asOf:row[3],sourceId,priceBasis:'price'}]});
-  }abort(options.signal);if(workspace.watchlist.length>limit)warnings.push(`Refresh is bounded to the first ${limit===5?'five':limit} selected assets.`);
+  }abort(options.signal);if(workspace.watchlist.length>limit)warnings.push(`Refresh is bounded to ${limit} selected assets, the ones with the oldest saved prices first.`);
   const attempted=Math.min(workspace.watchlist.length,limit),succeeded=operations.length/2;
   const quoteCoverage:FinanceQuoteCoverage={version:1,total:workspace.watchlist.length,attempted,succeeded,failed:attempted-succeeded,unattempted:workspace.watchlist.length-attempted};
   return{baseRevision:workspace.revision,status:operations.length?'ok':'unavailable',operations,message:`${operations.length/2} provider market snapshots retrieved. ${warnings.join(' ')}`.trim(),...(options.includeQuoteCoverage?{quoteCoverage}:{})};

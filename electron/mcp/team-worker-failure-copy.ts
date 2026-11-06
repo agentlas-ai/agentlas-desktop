@@ -13,6 +13,7 @@
  *
  * Pure: no Electron, no store. Main, the daemon and a re-vendored copy word the same sentence.
  */
+import { formatRuntimeQuotaReset } from "../../shared/runtime-quota";
 import { HOST_FAILURE_CODE_CLASSES, boundedFailureDetail, runFailureNoticeCause, type RunFailureNoticeCause } from "../../shared/run-failure-notice";
 
 export type TeamWorkerFailureLocale = "ko" | "en";
@@ -71,17 +72,21 @@ const HOST_SENTENCE: Record<HostClass, { ko: (name: string) => string; en: (name
     en: (name) => `The model chosen for this room is not available for ${name} right now, so this step was not started. No other model was used instead.`,
   },
   browser_unavailable: {
-    ko: (name) => `${name}에 필요한 로그인된 Agentlas Browser를 지금 쓸 수 없어 이 단계를 시작하지 못했습니다. Agentlas Browser를 열어 로그인한 뒤 다시 시도해 주세요.`,
-    en: (name) => `${name} needs the signed-in Agentlas Browser, which is not available right now, so this step could not start. Open Agentlas Browser, sign in and try again.`,
+    ko: (name) => `${name}에 필요한 로그인된 Agentlas Browser를 지금 쓸 수 없어 이 단계를 시작하지 못했습니다. Agentlas Browser를 열어 로그인하면 이후 단계부터 쓸 수 있습니다.`,
+    en: (name) => `${name} needs the signed-in Agentlas Browser, which is not available right now, so this step could not start. Opening Agentlas Browser and signing in makes it usable for later steps.`,
   },
 };
 
 /** The provider-owned classes of shared/run-failure-notice.ts, worded for one worker of a team (not for the whole run). */
-const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, { ko: (name: string) => string; en: (name: string) => string }>> = {
-  quota: { ko: (name) => `${name}이(가) 쓰는 모델의 사용 한도가 소진되어 이 단계를 마치지 못했습니다. 한도가 풀린 뒤 다시 보내거나 다른 모델을 선택해 보세요.`,
-    en: (name) => `The usage limit of the model ${name} uses is used up, so this step could not finish. Send it again once the limit lifts, or choose another model.` },
-  rate_limit: { ko: (name) => `${name}이(가) 쓰는 모델 공급자가 요청 속도를 제한해 이 단계를 마치지 못했습니다. 잠시 뒤 다시 보내 보세요.`,
-    en: (name) => `The provider of the model ${name} uses rate-limited the request, so this step could not finish. Send it again in a moment.` },
+// `when` is the provider-reported reset sentence (formatRuntimeQuotaReset) when the typed failure carries a valid retryAfterAt. This function
+// cannot tell a Goal turn (which the host reschedules) from a plain one, so no sentence here promises an automatic continuation.
+type ProviderSentence = { ko: (name: string, when?: string | null) => string; en: (name: string, when?: string | null) => string };
+const withWhen = (sentence: string, when?: string | null): string => (when ? `${sentence} ${when}` : sentence);
+const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, ProviderSentence>> = {
+  quota: { ko: (name, when) => withWhen(`${name}이(가) 쓰는 모델의 사용 한도가 소진되어 이 단계를 마치지 못했고 실패로 기록했습니다. 다른 모델을 고르면 그 모델로 진행할 수 있습니다.`, when),
+    en: (name, when) => withWhen(`The usage limit of the model ${name} uses is used up, so this step could not finish and was recorded as failed. Choosing another model lets it proceed on that model.`, when) },
+  rate_limit: { ko: (name, when) => withWhen(`${name}이(가) 쓰는 모델 공급자가 요청 속도를 제한해 이 단계를 마치지 못했고 실패로 기록했습니다.`, when),
+    en: (name, when) => withWhen(`The provider of the model ${name} uses rate-limited the request, so this step could not finish and was recorded as failed.`, when) },
   auth: { ko: (name) => `${name}이(가) 쓰는 모델의 로그인이 필요하거나 만료되어 이 단계를 마치지 못했습니다. 설정에서 다시 연결해 주세요.`,
     en: (name) => `The sign-in of the model ${name} uses is needed or expired, so this step could not finish. Reconnect it in Settings.` },
   refused: { ko: (name) => `${name}이(가) 쓰는 모델 공급자가 이 단계의 응답을 거절했습니다.`,
@@ -94,8 +99,8 @@ const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, { ko: (name: stri
     en: (name) => `Every tool call ${name} made failed and no answer followed, so this step could not finish.` },
   unavailable: { ko: (name) => `${name}이(가) 쓰는 Agentlas 모델 서비스를 지금 사용할 수 없어 이 단계를 마치지 못했습니다.`,
     en: (name) => `The Agentlas model service ${name} uses is unavailable right now, so this step could not finish.` },
-  provider_unavailable: { ko: (name) => `${name}이(가) 쓰는 모델 공급자가 지금 요청을 받을 수 없어(서비스 장애 또는 수용 한도 초과) 이 단계를 마치지 못했습니다. 잠시 뒤 다시 보내거나 다른 모델을 선택해 보세요.`,
-    en: (name) => `The provider of the model ${name} uses could not take the request right now (an outage or no free capacity), so this step could not finish. Send it again in a moment, or choose another model.` },
+  provider_unavailable: { ko: (name) => `${name}이(가) 쓰는 모델 공급자가 지금 요청을 받을 수 없어(서비스 장애 또는 수용 한도 초과) 이 단계를 마치지 못했고 실패로 기록했습니다. 다른 모델을 고르면 그 모델로 진행할 수 있습니다.`,
+    en: (name) => `The provider of the model ${name} uses could not take the request right now (an outage or no free capacity), so this step could not finish and was recorded as failed. Choosing another model lets it proceed on that model.` },
   provider_connection: { ko: (name) => `${name}이(가) 쓰는 모델 공급자에 연결하지 못해 이 단계를 마치지 못했습니다.`,
     en: (name) => `The model provider ${name} uses could not be reached, so this step could not finish.` },
   runtime_unavailable: { ko: (name) => `${name}에 배정된 모델을 지금 쓸 수 없어 이 단계를 마치지 못했습니다.`,
@@ -163,7 +168,7 @@ export interface TeamWorkerFailureFacts {
   /** The thrown error: only its typed code and cause chain are read. */
   error?: unknown;
   /** The typed provider failure behind the error, when the runner reported one. */
-  runtimeFailure?: { kind: string; source: "marker" | "exit" | "heuristic"; providerCode?: string; message?: string } | null;
+  runtimeFailure?: { kind: string; source: "marker" | "exit" | "heuristic"; providerCode?: string; message?: string; retryAfterAt?: string } | null;
 }
 
 /** The sentence for one failed worker: a host code's class, else the typed provider class, else one neutral line. */
@@ -182,7 +187,8 @@ export function teamWorkerFailureText(facts: TeamWorkerFailureFacts): string {
       runtimeFailure: { kind: failure.kind as "quota" | "rate_limit" | "auth" | "refused" | "empty", source: failure.source,
         ...(failure.providerCode ? { providerCode: failure.providerCode } : {}) },
     });
-    const sentence = cause ? PROVIDER_SENTENCE[cause]?.[locale](name) : undefined;
+    const when = cause === "quota" || cause === "rate_limit" ? formatRuntimeQuotaReset(failure.retryAfterAt, locale) : null;
+    const sentence = cause ? PROVIDER_SENTENCE[cause]?.[locale](name, when) : undefined;
     if (sentence && cause) {
       const detail = QUOTES_PROVIDER_REASON.has(cause) ? boundedFailureDetail(failure.message) : null;
       return detail ? `${sentence} ${locale === "ko" ? "보고된 사유" : "Reported reason"}: “${detail}”` : sentence;

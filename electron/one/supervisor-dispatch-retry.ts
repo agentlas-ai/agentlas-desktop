@@ -1,6 +1,6 @@
 import type { RuntimeSelection } from "../../shared/types";
 import { supervisorError } from "../../shared/one-supervisor";
-import { TRANSIENT_SEND_DEADLINE_MS, UNDISPATCHED_START_MAX_ATTEMPTS, transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { transientSendBackoffMs } from "../../shared/transient-send-refusal";
 import type { OneSupervisorStore, SupervisorRequestRow } from "./supervisor-store";
 import { sendRefusalCode } from "../../shared/transient-send-refusal";
 import { undispatchedInternalFailure } from "../../shared/run-failure-cause";
@@ -87,9 +87,13 @@ export function supervisorDispatchFrame(store: OneSupervisorStore, row: Supervis
     return value.frame;
   }).immediate();
 }
-export function supervisorRetryExhausted(row: SupervisorRequestRow, now = Date.now()): boolean {
-  const retry = supervisorDispatchRetry(row);
-  return !!retry && (retry.attempts >= UNDISPATCHED_START_MAX_ATTEMPTS || now - retry.firstAt > TRANSIENT_SEND_DEADLINE_MS);
+/**
+ * A command the host received stays alive until it is delivered: neither an attempt count nor an age ends a start that was refused
+ * before dispatch (owner rule). Only a refusal the owner alone can clear (startRefusalNeedsOwner) and the capped backoff
+ * (supervisorRefusalDelay) still apply. Kept as a function because the work executor reads it; the attempts counter stays as a log.
+ */
+export function supervisorRetryExhausted(_row: SupervisorRequestRow, _now = Date.now()): boolean {
+  return false;
 }
 /** A failed host check before queue.begin() is an admission attempt too, even though it cannot have dispatched native work. */
 export function countSupervisorPreBeginRefusal(store: OneSupervisorStore, row: SupervisorRequestRow, now = Date.now()): void {

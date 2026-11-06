@@ -101,6 +101,35 @@ export function nativeInputDriverAvailable(): boolean {
   return nativeInputDriverPath() !== null;
 }
 
+/** Actions whose repetition stacks effects: a second click, key, scroll or text is a second input. */
+const REPEAT_STACKS = new Set<NativeInputAction["action"]>(["click", "drag", "scroll", "typeText", "key", "elementAction"]);
+/** Actions that change app or window state but land on the same state when repeated. */
+const REPEAT_IDEMPOTENT = new Set<NativeInputAction["action"]>(["focusApp", "setWindowFrame", "move", "selectText"]);
+/**
+ * A failure the host produced after the driver process was started. Whether the driver already sent its input cannot be known
+ * (it is a one-shot process that shares no state with the host), so the result says what is true: an input action may have reached
+ * the app and the caller reads the screen before repeating it; a read or idempotent action is safe to repeat. The host never
+ * repeats an action itself.
+ */
+function afterStart(request: NativeInputAction, base: NativeInputResult): NativeInputResult {
+  const action = request.action;
+  if (REPEAT_STACKS.has(action)) {
+    return {
+      ...base,
+      effectPossible: true,
+      retrySafe: false,
+      message: `${base.message ?? "Native input driver failed."} The input may already have reached the app. Read the app first (get_app_state or get_screen) and repeat it only if the screen shows it did not happen.`,
+    };
+  }
+  const stateChanging = REPEAT_IDEMPOTENT.has(action);
+  return {
+    ...base,
+    effectPossible: stateChanging,
+    retrySafe: true,
+    message: `${base.message ?? "Native input driver failed."} ${stateChanging ? "Repeating it leaves the app in the same state." : "Nothing was pressed."}`,
+  };
+}
+
 export function invokeNativeInputDriver(
   request: NativeInputAction,
   timeoutMs = request.action === "drag" ? 8_000 : 4_000,
@@ -163,7 +192,7 @@ function invokeNativeInputDriverUnlocked(
       if (stdoutBytes <= 256 * 1024) stdout.push(chunk);
       else {
         stdout.length = 0;
-        stop({ ok: false, error: "driver-response-too-large", message: "Native input driver response was rejected." });
+        stop(afterStart(request, { ok: false, error: "driver-response-too-large", message: "Native input driver response was rejected." }));
       }
     });
     // Node emits close after a failed spawn's error too. An error with no PID
@@ -178,21 +207,23 @@ function invokeNativeInputDriverUnlocked(
         finish(parsed);
       } catch {
         if (code === 77) reportSystemPermissionIssue("accessibility", "computer-use");
-        finish({ ok: false, error: code === 77 ? "accessibility-permission-required" : "driver-invalid-response", message: "Native input driver returned an invalid response." });
+        if (code === 77) finish({ ok: false, error: "accessibility-permission-required", message: "Native input driver returned an invalid response." });
+        else finish(afterStart(request, { ok: false, error: "driver-invalid-response", message: "Native input driver returned an invalid response." }));
       }
     });
-    child.stdout!.on("error", () => stop({ ok: false, error: "driver-response-failed", message: "Native input driver output failed." }));
+    child.stdout!.on("error", () => stop(afterStart(request, { ok: false, error: "driver-response-failed", message: "Native input driver output failed." })));
     // Drain stderr without retaining/logging raw output. A bounded diagnostic
     // stream cannot backpressure the child forever or bypass its drain barrier.
     let stderrBytes = 0;
     child.stderr!.on("data", (chunk: Buffer) => {
       if (stopped || settled) return;
       stderrBytes += chunk.length;
-      if (stderrBytes > 256 * 1024) stop({ ok: false, error: "driver-response-too-large", message: "Native input driver response was rejected." });
+      if (stderrBytes > 256 * 1024) stop(afterStart(request, { ok: false, error: "driver-response-too-large", message: "Native input driver response was rejected." }));
     });
-    child.stderr!.on("error", () => stop({ ok: false, error: "driver-response-failed", message: "Native input driver output failed." }));
+    child.stderr!.on("error", () => stop(afterStart(request, { ok: false, error: "driver-response-failed", message: "Native input driver output failed." })));
     child.stdin!.on("error", () => {});
-    timer = setTimeout(() => stop({ ok: false, error: "driver-timeout", message: "Native input driver timed out." }), Math.max(250, Math.min(timeoutMs, 10_000)));
+    const limitMs = Math.max(250, Math.min(timeoutMs, 10_000));
+    timer = setTimeout(() => stop(afterStart(request, { ok: false, error: "driver-timeout", message: `Native input driver gave no answer within ${Math.round(limitMs / 100) / 10} s.` })), limitMs);
     signal?.addEventListener("abort", onAbort, { once: true });
     // Abort may have happened during spawn, before the listener was installed.
     if (signal?.aborted) onAbort();

@@ -18,6 +18,8 @@ interface PreparationDependencies {
   select: (input: { task: string; candidates: McpNeedCandidate[]; goal: { objective: string; acceptanceCriteria: readonly string[] }; signal?: AbortSignal; timeoutMs: number }) => Promise<ResolvedMcpNeeds>;
   materialize: (input: WorkerCapabilityInput, ids: string[], generation: string) => Promise<WorkerCapabilityLease>;
   receipt: (value: Record<string, unknown>) => void;
+  /** Test seam: the backoff wait (default waits on a timer and ends early on Stop). */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /**
    * The worker runs with fewer tools than were asked for (a tool the task named could not attach: not connected, or its key is
    * missing). Telemetry for the owner's transcript only; it cannot grant or revoke anything.
@@ -39,7 +41,9 @@ class WorkerCapabilityInventoryDrift extends WorkerCapabilityError {
 }
 // One bounded asynchronous pool attempt accommodates measured cold CLI judgments.
 export const WORKER_CAPABILITY_SELECTION_TIMEOUT_MS = 300_000;
-const WORKER_PREPARATION_RETRY_MS = 300;
+/** Backoff between preparation retries (a tool host still starting): 0.3+1+3+8+15 = 27.3 s, inside the 30 s ceiling. */
+export const WORKER_PREPARATION_BACKOFF_MS: readonly number[] = [300, 1_000, 3_000, 8_000, 15_000];
+export const WORKER_PREPARATION_MAX_WAIT_MS = 30_000;
 const permissionRank = { read: 0, write: 1, full: 2 } as const;
 const scopeKey = (scope: ActiveGoalToolScope) => JSON.stringify([scope.goalId, scope.revision, scope.permission, scope.objective, scope.acceptanceCriteria]);
 
@@ -61,7 +65,6 @@ const scopeKey = (scope: ActiveGoalToolScope) => JSON.stringify([scope.goalId, s
 export function createWorkerCapabilityPreparer(deps: PreparationDependencies): PrepareWorkerCapabilities {
   const expectedScope = scopeKey(deps.scope);
   const selectionMemo = new Map<string, string[]>();
-  const announced = new Set<string>();
   const emit = (receipt: Record<string, unknown>) => { try { deps.receipt(receipt); } catch { /* Receipt failure cannot widen authority. */ } };
   /** The hard checks: the parent run, the Goal scope, the permission and the folder. They refuse; nothing below softens them. */
   const assertScope = (input: WorkerCapabilityInput) => {
@@ -80,11 +83,12 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
       throw new WorkerCapabilityError("worker-capability-scope-changed");
     }
   };
-  /** Tools the worker could not get, told once per distinct set to the owner (a missing key is never silent). */
+  /**
+   * Tools the worker could not get, told to the owner every time a degradation happens (a missing key is never silent). There is no
+   * "already told" memory: a set that never empties would silence every later degradation of the same tool set.
+   */
   const announceTools = (input: WorkerCapabilityInput, tools: ReadonlyArray<{ id: string; name: string; needsCredential: boolean }>) => {
-    const key = tools.map((tool) => tool.id).sort().join("\u0000");
-    if (tools.length === 0 || announced.has(key)) return;
-    announced.add(key);
+    if (tools.length === 0) return;
     try { deps.degraded?.({ workerId: input.workerId, attemptId: input.attemptId, agentName: input.agentName, tools }); }
     catch { /* The notice cannot grant or revoke tools. */ }
   };
@@ -253,19 +257,20 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
    * owner is told which tools it is missing, instead of ending the step with a code. Only ever removes tools; a Stop, a changed Goal
    * revision, permission or folder, or an ended parent still refuse.
    */
-  const runWithoutTools = (input: WorkerCapabilityInput, reasonCode: string, cause: unknown): WorkerCapabilityLease => {
+  const runWithoutTools = (input: WorkerCapabilityInput, reasonCode: string, cause: unknown): WorkerCapabilityLease & { degraded: true } => {
     assertScope(input);
     const ids = [...new Set([...deps.baselineIds, ...(cause instanceof WorkerCapabilityMaterializationError ? cause.unavailableIds : [])])];
     emit({ schemaVersion: 1, workerId: input.workerId, attemptId: input.attemptId, generation: "", runtimeKind: input.runtime.kind,
-      permission: input.permission, ceiling: input.ceiling, status: "retained", reasonCode, selectedIds: [], evidenceType: "capability-binding-only" });
+      permission: input.permission, ceiling: input.ceiling, status: "retained", reasonCode, selectedIds: [], degraded: true,
+      evidenceType: "capability-binding-only" });
     announceTools(input, ids.map((id) => ({ id, name: id, needsCredential: false })));
-    return { runner: {}, assertCurrent() { assertScope(input); }, release() {} };
+    return { runner: {}, degraded: true, assertCurrent() { assertScope(input); }, release() {} };
   };
-  const waitUnlessStopped = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+  const waitUnlessStopped = deps.sleep ?? ((ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
     const done = () => { clearTimeout(timer); signal?.removeEventListener("abort", done); resolve(); };
     const timer = setTimeout(done, ms);
     if (signal?.aborted) done(); else signal?.addEventListener("abort", done, { once: true });
-  });
+  }));
   /** Codes that are a boundary or a Stop: asking again or running without tools would only widen or ignore them. */
   const isBoundary = (error: unknown) => error instanceof WorkerCapabilityError && !(error instanceof WorkerCapabilityMaterializationError)
     && (error.code === "worker-capability-scope-changed" || error.code === "worker-capability-selection-cancelled"
@@ -281,12 +286,19 @@ export function createWorkerCapabilityPreparer(deps: PreparationDependencies): P
       }
     } catch (first) {
       if (isBoundary(first) || input.signal?.aborted) throw wrapFailure(input, first);
-      // An internal cause: once more after a breath (a tool host still starting), then the worker runs without tools.
+      // An internal cause (a tool host still starting): retry with backoff up to 30 s in total (the node/turn deadline reaches here as
+      // input.signal), then run the worker without extra tools (the exact-grant steps, which must not run without their tools, never reach this path: their ceiling is not "host"). One more failure is final here; any later try belongs to the
+      // existing schedule slot or the owner's trigger, never to a loop in this function.
       try {
         if (!(first instanceof WorkerCapabilityError) || first instanceof WorkerCapabilityMaterializationError) {
-          await waitUnlessStopped(WORKER_PREPARATION_RETRY_MS, input.signal);
-          if (input.signal?.aborted) throw first;
-          try { return await prepare(input); } catch (second) { if (isBoundary(second)) throw second; }
+          let waited = 0;
+          for (const delay of WORKER_PREPARATION_BACKOFF_MS) {
+            if (waited + delay > WORKER_PREPARATION_MAX_WAIT_MS) break;
+            waited += delay;
+            await waitUnlessStopped(delay, input.signal);
+            if (input.signal?.aborted) throw first;
+            try { return await prepare(input); } catch (next) { if (isBoundary(next)) throw next; }
+          }
         }
         return runWithoutTools(input, "worker-capability-preparation-unavailable-no-tools", first);
       } catch (refused) {

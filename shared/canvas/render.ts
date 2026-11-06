@@ -1,50 +1,16 @@
-import { type CanvasBlock, type CanvasChart, type CanvasView } from "./schema";
+import { type CanvasAssetBlock, type CanvasBlock, type CanvasChart, type CanvasView, isBaseCanvasBlock } from "./schema";
+import { assetByType, assetCssFor, assetHtml } from "./blocks/core";
+import { CURRENCY, LINE_COLORS, PALETTE, bold, canvasDay, canvasFormat, esc, icon, labelWidth, niceAxis, scaled, signed } from "./kit";
 
 // ---------------------------------------------------------------- HTML (desktop transcript and phone share it)
 
 /** The card speaks the language its content is written in (Korean when the title or blocks are in Hangul), unless the caller says otherwise. */
 let KO = false;
 const T = (en: string, ko: string) => (KO ? ko : en);
+export function canvasValue(value: number, unit: string = "usd"): string { return canvasFormat(value, unit, KO); }
+const day = (iso: string) => canvasDay(iso, KO);
 export function canvasKorean(view: CanvasView): boolean { return /[\uac00-\ud7a3]/.test(`${view.title} ${view.meta ?? ""} ${JSON.stringify(view.blocks).slice(0, 4000)}`); }
-function korean(value: number) {
-  const a = Math.abs(value), sign = value < 0 ? "−" : "";
-  if (a >= 1e12) return `${sign}${(a / 1e12).toFixed(a >= 1e14 ? 0 : 1).replace(/\.0$/, "")}조원`;
-  if (a >= 1e8) return `${sign}${Math.round(a / 1e8).toLocaleString("ko-KR")}억원`;
-  if (a >= 1e4) return `${sign}${Math.round(a / 1e4).toLocaleString("ko-KR")}만원`;
-  return `${sign}${Math.round(a).toLocaleString("ko-KR")}원`;
-}
 
-const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!));
-// A pair marks bold; a marker left alone (text cut at its length limit) is dropped, never shown.
-const bold = (value: string) => esc(value).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/\*\*/g, "");
-const CURRENCY: Record<string, string> = { usd: "$", krw: "₩", eur: "€", jpy: "¥", gbp: "£", cny: "¥" };
-function scaled(value: number, symbol: string, digits?: number) {
-  const a = Math.abs(value), sign = value < 0 ? "−" : "";
-  if (a >= 1e12) return `${sign}${symbol}${(a / 1e12).toFixed(digits ?? 2)}T`;
-  if (a >= 1e9) return `${sign}${symbol}${(a / 1e9).toFixed(digits ?? 2)}B`;
-  if (a >= 1e6) return `${sign}${symbol}${(a / 1e6).toFixed(digits ?? 1)}M`;
-  if (a >= 1e4) return `${sign}${symbol}${Math.round(a).toLocaleString("en-US")}`;
-  return `${sign}${symbol}${a.toLocaleString("en-US", { maximumFractionDigits: a < 10 ? 2 : 1, minimumFractionDigits: a < 10 && symbol ? 2 : 0 })}`;
-}
-export function canvasValue(value: number, unit: string = "usd"): string {
-  if (unit === "krw" && KO) return korean(value);
-  if (unit in CURRENCY) return scaled(value, CURRENCY[unit]);
-  if (unit === "usd_per_share") return `${value < 0 ? "−" : ""}$${Math.abs(value).toFixed(2)}`;
-  if (unit === "percent") return `${value < 0 ? "−" : ""}${Math.abs(value).toFixed(Math.abs(value) < 10 ? 1 : 0)}%`;
-  if (unit === "x") return `${value.toFixed(1)}×`;
-  if (unit === "bp") return `${value >= 0 ? "+" : "−"}${Math.abs(Math.round(value))}bp`;
-  return scaled(value, "");
-}
-const signed = (value: number, digits = 0) => `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(digits)}%`;
-const day = (iso: string) => { const d = new Date(`${iso}T00:00:00Z`); return KO ? `${d.getUTCMonth() + 1}월 ${d.getUTCDate()}일` : d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }); };
-/** Rough rendered width of a label at 12.5px: Hangul and other wide characters take about twice a Latin letter. */
-const labelWidth = (value: string) => [...value].reduce((w, c) => w + (/[\u1100-\u11ff\u3000-\u9fff\uac00-\ud7a3\uff00-\uffef]/.test(c) ? 12.6 : 6.9), 0) + 20;
-const ICONS: Record<string, string> = {
-  up: '<path d="M12 19V5M5 12l7-7 7 7"/>', down: '<path d="M12 5v14M19 12l-7 7-7-7"/>', clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
-  alert: '<path d="M12 3 2 21h20L12 3z"/><path d="M12 10v5M12 18h.01"/>', target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/>', check: '<path d="M5 12.5l4.5 4.5L19 7"/>',
-  doc: '<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/>', news: '<path d="M4 5h13v14H6a2 2 0 0 1-2-2z"/><path d="M17 9h3v8a2 2 0 0 1-2 2"/><path d="M8 9h5M8 13h5"/>', bank: '<path d="M3 10h18L12 4z"/><path d="M5 10v8M9 10v8M15 10v8M19 10v8M3 20h18"/>',
-};
-const icon = (name: string, size = 13, stroke = 2.2) => ICONS[name] ? `<svg class="i" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>` : "";
 /** One icon for every source: the host does not read a publisher's kind from words in its title (owner: no host word judgment). */
 const sourceIcon = (_title: string) => "doc";
 export function canvasSourceShortName(title: string): string {
@@ -55,14 +21,6 @@ export function canvasSourceShortName(title: string): string {
 const toneClass = (t?: string) => t === "up" ? "g" : t === "down" ? "r" : t === "warn" ? "a" : t === "info" ? "b" : "n";
 const chip = (textValue: string, t?: string, iconName?: string, extra = "") => `<span class="chip ${toneClass(t)}${extra}">${iconName && iconName !== "none" ? icon(iconName) : ""}${esc(textValue)}</span>`;
 
-function niceAxis(lowValue: number, highValue: number, steps = 3) {
-  const span = Math.max(highValue - lowValue, Math.abs(highValue) * 0.01 || 1);
-  const rawLo = lowValue - span * 1.8, rawHi = highValue + span * 1.8, raw = (rawHi - rawLo) / steps, mag = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 2.5, 5, 10].map(k => k * mag).reduce((best, k) => (Math.abs(k - raw) < Math.abs(best - raw) ? k : best), mag);
-  let lo = Math.floor(rawLo / step + 1e-9) * step, hi = lo + steps * step;
-  while (hi < highValue + span * 0.4) { lo += step; hi += step; }
-  return { lo, hi, step };
-}
 
 type B<T extends CanvasBlock["type"]> = Extract<CanvasBlock, { type: T }>;
 const head = (b: { title?: string }, fallback?: string, extra = "") => (b.title || fallback ? `<div class="sec">${esc(b.title ?? fallback)}${extra}</div>` : "");
@@ -94,7 +52,6 @@ function rangesHtml(b: B<"ranges">) {
     return `<div class="range"><div class="rhead"><span>${esc(g.label)}</span><b>${esc(lab)}</b></div><div class="track"><i class="band" style="left:${x(g.low).toFixed(2)}%;width:${(x(g.high) - x(g.low)).toFixed(2)}%"></i><i class="mid" style="left:${x(mid).toFixed(2)}%"></i>${g.markerLabel ? `<em style="left:${x(mid).toFixed(2)}%">${esc(g.markerLabel)}</em>` : ""}</div><div class="ticks">${[0, 1, 2, 3].map(k => `<span>${esc(tick(lo + ((hi - lo) * k) / 3))}</span>`).join("")}</div></div>`;
   }).join("")}`;
 }
-const LINE_COLORS = ["#2f5fd6", "#0e9f6e", "#f08a24", "#d6336c"];
 function chartHtml(b: CanvasChart, uid: string) {
   if (!b.lines.length) return `${head(b)}<p class="muted">${esc(T("The price history could not be read for this chart.", "이 차트의 가격 자료를 읽지 못했습니다."))}</p>`;
   const W = 446, H = 210, change = b.mode === "change" || b.lines.length > 1;
@@ -148,7 +105,6 @@ function heatmapHtml(b: B<"heatmap">) {
   const fmt = (v: number) => (b.format === "correlation" ? v.toFixed(2) : b.format === "number" ? v.toLocaleString("en-US", { maximumFractionDigits: 1 }) : b.format === "percent" ? `${v.toFixed(1)}%` : signed(v, 1));
   return `${head(b)}<div class="heat" style="grid-template-columns:minmax(90px,1.3fr) repeat(${b.columns.length},minmax(0,1fr))"><span></span>${b.columns.map(c => `<span class="hc">${esc(c)}</span>`).join("")}${b.rows.map((r, i) => `<span class="hr">${esc(r)}</span>${b.columns.map((_, k) => { const v = b.values[i]?.[k]; return typeof v === "number" ? `<span class="hv" style="background:${heatColor(v, b.format, max)};color:${Math.abs(v / max) > 0.6 && b.format !== "correlation" ? "#fff" : "#101d24"}">${esc(fmt(v))}</span>` : '<span class="hv na">—</span>'; }).join("")}`).join("")}</div>`;
 }
-const PALETTE = ["#101d24", "#2f5fd6", "#7aa2ff", "#f08a24", "#38d39f", "#d6336c", "#8a7420", "#5c6870", "#b9c3be", "#0e9f6e", "#a855f7", "#cfd6d2"];
 function allocationHtml(b: B<"allocation">) {
   const total = b.items.reduce((s, it) => s + Math.max(0, it.weight), 0) || 1, C = 2 * Math.PI * 54; let acc = 0;
   const arcs = b.items.map((it, i) => { const w = Math.max(0, it.weight) / total, a = `<circle cx="70" cy="70" r="54" fill="none" stroke="${PALETTE[i % PALETTE.length]}" stroke-width="22" stroke-dasharray="${Math.max(0, w * C - 2).toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-acc * C).toFixed(2)}" transform="rotate(-90 70 70)"/>`; acc += w; return a; }).join("");
@@ -171,7 +127,8 @@ function noteHtml(b: B<"note">) {
   return `<div class="note"><div class="nh">${b.badge ? `<span class="tick mini">${esc(b.badge)}</span>` : ""}${b.title ? `<b>${esc(b.title)}</b>` : ""}<span class="grow"></span>${b.verdict ? chip(b.verdict.text, b.verdict.tone, "target") : ""}</div><p>${bold(b.text)}</p></div>`;
 }
 const DEFAULT_WIDTH: Record<string, string> = { kpis: "full", bars: "two_thirds", ranges: "third", chart: "half", leans: "half", table: "full", heatmap: "half", allocation: "half", timeline: "half", checklist: "half", gauge: "third", note: "half" };
-function blockHtml(b: CanvasBlock, uid: string) {
+function blockHtml(b: CanvasBlock | CanvasAssetBlock, uid: string) {
+  if (!isBaseCanvasBlock(b)) return assetHtml(b, uid, KO);
   switch (b.type) {
     case "kpis": return kpisHtml(b); case "bars": return barsHtml(b); case "ranges": return rangesHtml(b); case "chart": return chartHtml(b, uid);
     case "leans": return leansHtml(b); case "table": return tableHtml(b); case "heatmap": return heatmapHtml(b); case "allocation": return allocationHtml(b);
@@ -182,6 +139,8 @@ function blockHtml(b: CanvasBlock, uid: string) {
 /** The line above the answer: what the owner's words were matched to, or how many sources were read, with source chips. */
 export function canvasLeadHtml(view: CanvasView, locale?: "ko" | "en"): string {
   KO = locale ? locale === "ko" : canvasKorean(view);
+  // A card of assets alone (a diagram, a slide, a document) read no sources: it has no line above it.
+  if (!view.sources.length && !view.lead?.matched) return "";
   const matched = view.lead?.matched, asked = view.lead?.asked;
   const textHtml = matched ? (asked && matched.split(" · ")[0].trim().toLowerCase() !== asked.trim().toLowerCase() ? `${esc(asked)} → ${matched.split(" · ").map((part, i) => (i === 0 ? `<b>${esc(part)}</b>` : esc(part))).join(" · ")}` : matched.split(" · ").map((part, i) => (i === 0 ? `<b>${esc(part)}</b>` : esc(part))).join(" · "))
     : T(`Read ${view.sources.length} source${view.sources.length === 1 ? "" : "s"}`, `자료 ${view.sources.length}건을 읽었습니다`);
@@ -193,13 +152,18 @@ export function canvasLeadHtml(view: CanvasView, locale?: "ko" | "en"): string {
 export function canvasBodyHtml(view: CanvasView, uid = "0", locale?: "ko" | "en"): string {
   KO = locale ? locale === "ko" : canvasKorean(view);
   const header = `<header class="ch">${view.badge ? `<span class="tick">${esc(view.badge)}</span>` : ""}<span class="cname">${esc(view.title)}</span>${view.meta ? `<span class="cmeta">${esc(view.meta)}</span>` : ""}<span class="grow"></span>${view.chips.map(c => chip(c.text, c.tone, c.icon)).join("")}</header>`;
-  const blocks = view.blocks.map((b, i) => `<section class="blk w-${(b as { width?: string }).width ?? DEFAULT_WIDTH[b.type]} t-${b.type}">${blockHtml(b, `${uid}-${i}`)}</section>`).join("");
-  const sources = `<div class="foot">${T("Sources", "출처")}${view.sources.map(s => `<a class="s" href="${esc(s.url)}" target="_blank" rel="noreferrer">${icon(sourceIcon(s.title), 13)}${esc(s.title)}</a>`).join("")}</div>`;
+  const blocks = view.blocks.map((b, i) => `<section class="blk w-${(b as { width?: string }).width ?? DEFAULT_WIDTH[b.type] ?? assetByType(b.type)?.width ?? "full"} t-${b.type}">${blockHtml(b, `${uid}-${i}`)}</section>`).join("");
+  const sources = !view.sources.length ? "" : `<div class="foot">${T("Sources", "출처")}${view.sources.map(s => `<a class="s" href="${esc(s.url)}" target="_blank" rel="noreferrer">${icon(sourceIcon(s.title), 13)}${esc(s.title)}</a>`).join("")}</div>`;
   return `<div class="fpc-card"${view.guide ? ` data-guide="${esc(view.guide)}"` : ""}>${header}<div class="grid">${blocks}</div>${sources}</div>`;
 }
 
 /** Scoped styles (every rule under .fpc). Pretendard where the app bundles it, the system face elsewhere. */
 export const CANVAS_CSS = `
+/* design variables the assets draw with (the base blocks above keep their own literals) */
+.fpc{--ink:#101d24;--ink2:#34424a;--muted:#5c6870;--faint:#9aa2a7;--line:#e7e8e5;--surface:#f7f8f7;--green:#118558;--green2:#18b67e;--red:#cf3545;--amber:#b7791f;--amber2:#f0b429;--blue:#2f5fd6;--blue2:#7aa2ff;--orange:#f08a24;--pink:#d6336c;--violet:#a855f7;--teal:#0e9f6e}
+.fpc figure.asset{margin:0;min-width:0}.fpc .asset svg{max-width:100%}.fpc .asset svg text{font-family:inherit}
+.fpc .af{position:relative;overflow:hidden;container-type:inline-size;border-radius:14px;border:1px solid var(--line);background:#fff}
+.fpc .af-16x9{aspect-ratio:16/9}.fpc .af-4x3{aspect-ratio:4/3}.fpc .af-1x1{aspect-ratio:1/1}.fpc .af-9x16{aspect-ratio:9/16;max-width:360px}.fpc .af-a4{aspect-ratio:210/297}.fpc .af-thumb{aspect-ratio:4/3;border-radius:12px}
 .fpc{line-height:normal;word-break:keep-all;overflow-wrap:anywhere;font-family:"Pretendard Variable","Apple SD Gothic Neo","Noto Sans KR","Malgun Gothic",sans-serif;color:#101d24;font-feature-settings:"tnum" 1;-webkit-font-smoothing:antialiased}
 .fpc *{box-sizing:border-box}
 .fpc .i{display:inline-block;vertical-align:middle;flex:none}
@@ -281,9 +245,12 @@ export const CANVAS_CSS = `
   .fpc .yrow{grid-template-columns:110px minmax(0,1fr)}.fpc table{font-size:12.5px}.fpc th,.fpc td{padding-right:8px}.fpc .cname{font-size:18px}.fpc .alloc{flex-direction:column;align-items:stretch}.fpc .alloc svg{margin:0 auto}}
 `;
 
+/** The styles of the assets a card uses (the base styles are CANVAS_CSS); a page installs each asset's styles once, a phone's visual carries only its own. */
+export function canvasAssetCss(view: CanvasView): string { return assetCssFor(view.blocks.filter(b => !isBaseCanvasBlock(b)).map(b => b.type)); }
+
 /** A whole standalone document (the phone's sandboxed visual, the scenario renders): lead, card and styles. */
 export function canvasDocument(view: CanvasView, options: { lead?: boolean; background?: string } = {}): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:${options.background ?? "transparent"}}body{padding:2px}${CANVAS_CSS}</style></head><body><div class="fpc">${options.lead === false ? "" : canvasLeadHtml(view)}${canvasBodyHtml(view)}</div></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;background:${options.background ?? "transparent"}}body{padding:2px}${CANVAS_CSS}${canvasAssetCss(view)}</style></head><body><div class="fpc">${options.lead === false ? "" : canvasLeadHtml(view)}${canvasBodyHtml(view)}</div></body></html>`;
 }
 
 /** Cards stored before the canvas (finance.present kinds "earnings" and "impact") shown as the same blocks. */

@@ -15,21 +15,26 @@ export interface ReadOptions {
 }
 interface Flight<T> { promise: Promise<T>; controller: AbortController; waiters: number }
 const cancelled = () => new Error('finance_read_cancelled');
+const DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
+const bodyLength = (value: unknown): number => { const body = (value as { body?: unknown } | null)?.body; return typeof body === 'string' ? body.length : 0; };
 
 export class ReadCache<T> {
-  private readonly entries = new Map<string, { at: number; ttlMs: number; value: T }>();
+  private readonly entries = new Map<string, { at: number; ttlMs: number; value: T; bytes: number }>();
   private readonly flights = new Map<string, Flight<T>>();
-  constructor(private readonly options: { ttlMs: number; max: number; now?: () => number }) {}
+  private bytes = 0;
+  /** `max` bounds the entry count and `maxBytes` (32 MiB unless given) the text they hold; `sizeOf` measures a value (the length of its `body` text unless given). */
+  constructor(private readonly options: { ttlMs: number; max: number; maxBytes?: number; sizeOf?: (value: T) => number; now?: () => number }) {}
+  private drop(key: string): void { const entry = this.entries.get(key); if (entry) { this.bytes -= entry.bytes; this.entries.delete(key); } }
   private now(): number { return (this.options.now ?? Date.now)(); }
   /** What is stored for `key` and still fresh, without reading. */
   peek(key: string): T | undefined {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
-    if (this.now() - entry.at >= entry.ttlMs) { this.entries.delete(key); return undefined; }
+    if (this.now() - entry.at >= entry.ttlMs) { this.drop(key); return undefined; }
     return entry.value;
   }
   get size(): number { return this.entries.size; }
-  clear(): void { this.entries.clear(); }
+  clear(): void { this.entries.clear(); this.bytes = 0; }
   async get(key: string, load: (signal: AbortSignal) => Promise<T>, options: ReadOptions = {}): Promise<T> {
     const { signal } = options;
     if (signal?.aborted) throw cancelled();
@@ -43,8 +48,13 @@ export class ReadCache<T> {
           const ttlMs = options.ttlMs ?? this.options.ttlMs;
           // A read that was cancelled for lack of waiters stores nothing.
           if (ttlMs > 0 && !controller.signal.aborted) {
-            this.entries.delete(key); this.entries.set(key, { at: this.now(), ttlMs, value });
-            while (this.entries.size > this.options.max) this.entries.delete(this.entries.keys().next().value!);
+            const bytes = (this.options.sizeOf ?? bodyLength)(value), maxBytes = this.options.maxBytes ?? DEFAULT_MAX_BYTES;
+            this.drop(key);
+            // One answer larger than the whole byte bound is returned to its callers and not kept.
+            if (bytes <= maxBytes) {
+              this.entries.set(key, { at: this.now(), ttlMs, value, bytes }); this.bytes += bytes;
+              while (this.entries.size > this.options.max || this.bytes > maxBytes) this.drop(this.entries.keys().next().value!);
+            }
           }
           return value;
         } finally { if (this.flights.get(key) === created) this.flights.delete(key); }

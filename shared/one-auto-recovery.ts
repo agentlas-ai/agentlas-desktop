@@ -178,6 +178,18 @@ export function oneRunFailureFingerprint(
 }
 
 /**
+ * A different failure fingerprint is a different problem: the attempt budget (model cost) restarts at 0. The same
+ * fingerprint keeps the spent count, and the gate below stops it as no-progress anyway.
+ */
+export function oneRecoveryAttemptsForFingerprint(
+  attemptsSpent: number,
+  previous: OneRunFailureFingerprint | null | undefined,
+  current: OneRunFailureFingerprint,
+): number {
+  return previous && previous !== current ? 0 : Math.max(0, attemptsSpent);
+}
+
+/**
  * Closed-form gate that runs before the judge is consulted at all.
  * `null` means "nothing decidable from form alone — ask the judge".
  */
@@ -204,7 +216,8 @@ export function oneAutoRecoveryFormGate(input: {
     // The approach did not actually change, so a further attempt will not either.
     return { retry: false, reason: "no-progress" };
   }
-  if (input.attemptsSpent >= (input.maxAttempts ?? ONE_AUTO_RECOVERY_MAX_ATTEMPTS)) {
+  const spent = oneRecoveryAttemptsForFingerprint(input.attemptsSpent, input.previousFingerprint, input.currentFingerprint);
+  if (spent >= (input.maxAttempts ?? ONE_AUTO_RECOVERY_MAX_ATTEMPTS)) {
     return { retry: false, reason: "exhausted" };
   }
   return null;

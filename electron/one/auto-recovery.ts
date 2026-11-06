@@ -25,6 +25,7 @@ import {
   oneAutoRecoveryFromLabel,
   oneRecoveryOutcomeFromLabel,
   oneRunFailureFingerprint,
+  oneRecoveryAttemptsForFingerprint,
   type OneAutoRecoveryDecision,
   type OneRecoveryLabel,
   type OneRecoveryOutcomeLabel,
@@ -35,6 +36,7 @@ import type { InvocationRunReceipt, RunEventUi, RuntimeSelection } from "../../s
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import { automationRunToolCounts } from "../automation-progress-facts";
 import { currentUiLocale } from "../ui-locale";
+import { hostFactLine } from "../../shared/host-fact-copy";
 
 /** Host receipts: tool calls of this run that could have acted outside. Null when the ledger is unreadable. */
 export interface OneRecoveryHostFacts {
@@ -178,8 +180,32 @@ export async function judgeOneAutoRecovery(
   return result;
 }
 
+/**
+ * The owner-visible account when no model wrote one (judge unreachable, ledger unreadable, budget spent): a fact
+ * sentence from host state, never empty. An empty diagnosis hides the stop card (OneAdaptiveResult), so the owner
+ * would see a run that just ended.
+ */
+export function oneRecoveryFactDiagnosis(input: { attemptsSpent: number; reason: string; locale?: RuntimeLocale }): string {
+  const locale = (input.locale ?? currentUiLocale()) === "ko" ? "ko" : "en";
+  const cause = input.reason === "unsafe-to-repeat"
+    ? { ko: "이 실행은 바깥에 이미 한 일이 있을 수 있어 같은 작업을 다시 실행하면 중복될 수 있습니다",
+      en: "this run may already have changed something outside the app, so repeating it could duplicate that" }
+    : input.reason === "no-progress"
+      ? { ko: "같은 실패가 되풀이되어 방식이 바뀌지 않았습니다", en: "the same failure repeated without a change of approach" }
+      : { ko: "실패 원인을 분류하는 판정 모델이 응답하지 않았습니다", en: "the model that classifies the failure did not answer" };
+  return hostFactLine({
+    what: { ko: "자동 복구를 시도", en: "Automatic recovery tried" },
+    times: input.attemptsSpent > 0 ? input.attemptsSpent : undefined,
+    cause,
+    next: { ko: "같은 방식의 자동 재시도는 더 하지 않고 이 실행의 결과를 그대로 남겨 둡니다",
+      en: "The host makes no further automatic attempt of the same kind and keeps this run's result as it is" },
+  }, locale);
+}
+
 async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promise<OneAutoRecoveryResult> {
   const fingerprint = oneRunFailureFingerprint(input.receipt);
+  // A changed fingerprint is a new problem: its attempt budget starts again (same fingerprint keeps the count).
+  input = { ...input, attemptsSpent: oneRecoveryAttemptsForFingerprint(input.attemptsSpent, input.previousFingerprint, fingerprint) };
   const terminalStop = oneAutoRecoveryTerminalStop(input.receipt);
   if (terminalStop) {
     return { decision: terminalStop, fingerprint, diagnosis: terminalStopDiagnosis(terminalStop.reason, input.locale), decidedBy: "form" };
@@ -210,7 +236,8 @@ async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promis
     return {
       decision: gated,
       fingerprint,
-      diagnosis: presentation.verdict ? presentation.reason : "",
+      diagnosis: presentation.verdict ? presentation.reason
+        : oneRecoveryFactDiagnosis({ attemptsSpent: input.attemptsSpent, reason: gated.retry ? "" : gated.reason, locale: input.locale }),
       decidedBy: presentation.verdict ? "llm" : "unavailable",
     };
   }
@@ -244,7 +271,7 @@ async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promis
       return {
         decision: { retry: false, reason: "undecided" },
         fingerprint,
-        diagnosis: "",
+        diagnosis: oneRecoveryFactDiagnosis({ attemptsSpent: input.attemptsSpent, reason: "undecided", locale: input.locale }),
         decidedBy: "unavailable",
       };
     }
@@ -254,7 +281,9 @@ async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promis
       fingerprint,
       diagnosis: hostDecision.approach === "observe_first"
         ? "Check what actually happened first, without changing anything, then continue from what is still missing."
-        : label === null ? "" : verdict.reason,
+        : label !== null ? verdict.reason
+        : hostDecision.decision.retry ? ""
+        : oneRecoveryFactDiagnosis({ attemptsSpent: input.attemptsSpent, reason: hostDecision.decision.reason, locale: input.locale }),
       decidedBy: "form",
     };
   }

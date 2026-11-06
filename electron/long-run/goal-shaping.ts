@@ -350,6 +350,9 @@ function guidanceLine(tactic: LiveTactic): string | null {
   if (!g) return null;
   switch (g.move) {
     case "replan": return `This tactic was blocked (${g.cause}). Try a clearly different approach, or split it with a replace_tactic plan-op.`;
+    // UNCERTAIN_EFFECT_POLICY stays here on purpose: this is a per-tactic block ("observe" = cause unknown, inspect first), with no
+    // earlier invocation to read an effect boundary from, so the Goal-resume condition (previous controller turn settled/quiesced)
+    // cannot be applied. The sentence is conditional guidance ("check ... if the result is there, use it"), not a claim about one turn.
     case "observe": return `This tactic was blocked (${g.cause}). First inspect the current state. ${UNCERTAIN_EFFECT_POLICY}`;
     case "retry_backoff": return `This tactic was blocked (${g.cause}); retry${g.at ? ` after ${g.at}` : ""}; meanwhile work another open tactic.`;
     case "escalate_boundary": return `This tactic waits on the owner for a ${g.boundary ?? "boundary"} decision. Ask once; continue other tactics.`;

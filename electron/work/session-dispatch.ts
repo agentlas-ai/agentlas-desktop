@@ -48,8 +48,6 @@ export interface WorkSessionDispatchPorts {
   notDispatched(error: unknown): boolean;
   /** Close the idle resident CLI seat of a finished child chat. `busy` means a turn still holds it (try again shortly). */
   releaseChildSeat?(chatId: string): { busy: boolean } | undefined;
-  /** Write an ordinary assistant reply into the parent conversation (the last-resort delivery of a result). */
-  postParentMessage?(chatId: string, text: string): void;
 }
 type State = "queued" | "starting" | "running" | "waiting_input" | "completed" | "failed" | "cancelled" | "interrupted" | "uncertain";
 interface DispatchRow {
@@ -67,12 +65,16 @@ const TERMINAL: readonly State[] = ["completed", "failed", "cancelled", "interru
  * open (not yet finished) children per conversation, enforced when a delegation is accepted. */
 const MAX_PENDING = 64;
 /** A report to the parent is pushed as a durable owner steer. When that steer ends without being consumed (failed or cancelled), or
- * the send itself throws, the report is sent again under a new identity with growing waits, then abandoned: the child's result
- * stays complete and readable (work_session_status), the parent's completion notification stops waiting for it, and the cause is
- * logged. The abandoned prefix is a typed marker in report_error; the notification query (workSessionParentHasPendingChildren)
- * reads it without needing the attempt columns. */
-const REPORT_MAX_ATTEMPTS = 6, REPORT_RETRY_MS = [15_000, 60_000, 180_000, 600_000, 1_800_000] as const;
+ * the send itself throws, the report is sent again under a new identity, never given up on: the wait grows only as a backoff for the
+ * timer (REPORT_RETRY_MS, the fallback), and the parent leaving its turn (onSettled, idle-retry.ts) sends it at once. Only the owner's
+ * stop closes a report; that is a typed marker in report_error (REPORT_ABANDONED + ":owner_stopped"), read by the notification query
+ * (workSessionParentHasPendingChildren) without needing the attempt columns. */
+const REPORT_RETRY_MS = [15_000, 60_000, 180_000, 600_000, 1_800_000] as const;
 const REPORT_ABANDONED = "work_session_report_abandoned";
+/** A finished child's unaccepted report keeps the parent's completion notification waiting only this long; the report itself keeps being tried. */
+const REPORT_NOTIFY_WAIT_MS = 10 * 60_000;
+/** Fallback look for rooms with an unaccepted report when neither process saw a settle (the signals are idle-retry.ts). */
+const REPORT_IDLE_FALLBACK_MS = 10 * 60_000;
 /** Reports share the parent's steer queue (depth 8 in the invocation service) with the owner's own messages, and each queued steer
  * becomes one parent turn. So at most REPORT_INFLIGHT_MAX reports wait there at a time (the owner's input always has room), and
  * results that are ready together travel in one report, up to REPORT_BATCH_MAX: twenty children finishing at once reach the parent
@@ -464,11 +466,13 @@ export function createWorkSessionDispatcher(ports: WorkSessionDispatchPorts) {
       db().prepare("UPDATE work_session_dispatches SET effect_uncertain=1,uncertain_run_id=COALESCE(uncertain_run_id,?) WHERE id=?").run(item.child_run_id,item.id);
     }).immediate();
   }
+  let idleRetryHandle: { arm(): void } | null = null, abandonedRevived = false;
   const reportTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; at: number }>();
   /** Nothing else in this dispatcher is timer-driven: without this a waiting retry would only run at the next settlement or heartbeat.
    * One timer per parent, always the earliest due; a recovery already in flight is awaited first (recover is single-flight, so a
    * call made meanwhile would be handed that run and never look at this parent). */
   function scheduleReportRetry(parentChatId: string, delayMs: number) {
+    idleRetryHandle?.arm();
     const at = Date.now() + Math.max(delayMs, 1_000), current = reportTimers.get(parentChatId);
     if (current && current.at <= at) return;
     if (current) clearTimeout(current.timer);
@@ -482,27 +486,10 @@ export function createWorkSessionDispatcher(ports: WorkSessionDispatchPorts) {
     timer.unref?.();
     reportTimers.set(parentChatId, { timer, at });
   }
-  /** The last way a finished child's answer still reaches the owner when its report never could be delivered: its text goes into the
-   * parent conversation as an ordinary reply (no status wording, never a Goal answer). Best effort; the row stays readable either way. */
-  function postResultToParent(item: DispatchRow) {
-    try {
-      if (item.state !== "completed" || !ports.postParentMessage) return;
-      const text = ports.result(item.child_chat_id, item.child_run_id)?.text?.trim();
-      if (text) ports.postParentMessage(item.parent_chat_id, Buffer.byteLength(text, "utf8") > 12_000 ? `${text.slice(0, 4_000)}…` : text);
-    } catch (error) { console.warn("[work-session] result could not be posted to the parent conversation", causeCode(error)); }
-  }
   /** Count one failed delivery of this result. `newIdentity`: the report's steer is terminal (or its binding changed), so the next
    * attempt must be a new steer; a send that threw before any steer existed keeps its identity. */
   function retryReport(item: DispatchRow, cause: string, newIdentity: boolean) {
     const attempts = (item.report_attempts ?? 0) + 1, now = new Date().toISOString();
-    if (attempts >= REPORT_MAX_ATTEMPTS) {
-      db().prepare("UPDATE work_session_dispatches SET report_error=?,report_attempts=?,report_attempt_at=? WHERE id=? AND reported_at IS NULL")
-        .run(`${REPORT_ABANDONED}:${cause}`.slice(0, 200), attempts, now, item.id);
-      console.warn("[work-session] result report abandoned; the result stays readable through work_session_status", item.id, cause);
-      postResultToParent(item);
-      scheduleReportRetry(item.parent_chat_id, 1_000);   // results this one carried are released and go out on their own
-      return;
-    }
     db().prepare(`UPDATE work_session_dispatches SET report_error=?,report_attempts=?,report_attempt_at=?${newIdentity ? ",report_revision=report_revision+1,report_json=NULL" : ""} WHERE id=? AND reported_at IS NULL`)
       .run(cause.slice(0, 200), attempts, now, item.id);
     scheduleReportRetry(item.parent_chat_id, reportRetryDelay(attempts));
@@ -657,8 +644,32 @@ export function createWorkSessionDispatcher(ports: WorkSessionDispatchPorts) {
       if (released?.busy && attempt < 3) { const timer = setTimeout(() => reclaimChildSeat(childChatId, attempt + 1), 5_000); timer.unref?.(); }
     } catch { /* the shared seat budget and the idle sweep reclaim it at the latest */ }
   }
+  /** Parents with a finished child whose report the parent has not accepted: what keeps the fallback timer on (none: no timer). */
+  function parentsWithUnacceptedReports(): string[] {
+    ensure();
+    return (db().prepare(`SELECT DISTINCT parent_chat_id AS id FROM work_session_dispatches WHERE owner_scope=? AND cancel_requested=0 AND reported_at IS NULL
+      AND state IN ('completed','failed','cancelled','interrupted','uncertain','waiting_input') AND (report_error IS NULL OR report_error NOT LIKE '${REPORT_ABANDONED}%')`)
+      .all(ports.ownerScope()) as { id: string }[]).map(entry => entry.id);
+  }
+  /** The parent left its turn (or the account returned): its waiting reports go now, not after their backoff. Always through the single-flight recover. */
+  function wakeParentReports(parentChatId: string) {
+    try { db().prepare("UPDATE work_session_dispatches SET report_attempt_at=NULL WHERE parent_chat_id=? AND reported_at IS NULL AND report_attempt_at IS NOT NULL").run(parentChatId); }
+    catch (error) { console.warn("[work-session] report backoff not cleared", causeCode(error)); }
+    void (async () => {
+      while (recovering) { try { await recovering; } catch { /* that run's own failure is its own */ } }
+      await recover(parentChatId);
+    })().catch(() => undefined);
+  }
+  function installIdleRetry() {
+    try {
+      const helper = require("../invocation/idle-retry") as typeof import("../invocation/idle-retry");
+      idleRetryHandle = helper.registerIdleRetry({ name: "work-session-report", pendingChats: parentsWithUnacceptedReports, retry: wakeParentReports, fallbackMs: REPORT_IDLE_FALLBACK_MS });
+      helper.bindIdleRetrySignals(ports.service);
+    } catch (error) { console.warn("[work-session] idle retry unavailable", causeCode(error)); }
+  }
   function install() {
     if (installed) return; installed = true;
+    installIdleRetry();
     ports.service.onSettled((event: InvocationSettledEnvelope) => {
       // The parent this event concerns, once known: where the settlement is looked at again if it could not be completed.
       let concerned: string | undefined;
@@ -787,6 +798,18 @@ export function createWorkSessionDispatcher(ports: WorkSessionDispatchPorts) {
     ensure(); install();
     if (recovering) return recovering;
     recovering = (async () => {
+      // Reports given up on by the old six-try limit are waiting reports again (the child's result is complete and the report's key is
+      // idempotent, so a second delivery of the same revision is the same steer). Only the owner's stop stays closed. Once per process.
+      if (!abandonedRevived) {
+        try {
+          db().transaction(() => {
+            const revived = db().prepare(`UPDATE work_session_dispatches SET report_error=NULL,report_attempts=0,report_attempt_at=NULL,report_json=NULL,report_revision=report_revision+1
+              WHERE reported_at IS NULL AND cancel_requested=0 AND report_error LIKE '${REPORT_ABANDONED}:%' AND report_error<>'${REPORT_ABANDONED}:owner_stopped'`).run();
+            if (revived.changes) console.info("[work-session] revived reports the old limit had abandoned:", revived.changes);
+          }).immediate();
+          abandonedRevived = true;
+        } catch (error) { console.warn("[work-session] abandoned reports not revived yet", causeCode(error)); }
+      }
       // A report counts as delivered once its steer is accepted. If that steer then ends without being consumed (failed or
       // cancelled) the parent never received the result, so the report goes back to undelivered and is sent again.
       try {
@@ -1132,7 +1155,6 @@ function production() {
     },
     failureReports: (chatId,runId) => readWorkSessionFailureReports(store.getDb(),chatId,runId),
     notDispatched: error => (require("../runtime/runner") as typeof import("../runtime/runner")).runnerRefusedBeforeDispatch(error),
-    postParentMessage: (chatId, text) => { chats.appendChatMessage(chatId, "assistant", text, { noGoalResult: true }); },
     releaseChildSeat: chatId => {
       const { busy } = (require("../runtime/agent-residency") as typeof import("../runtime/agent-residency")).releaseIdleAgentResidencyForChat(chatId);
       return { busy };
@@ -1186,7 +1208,8 @@ export function workSessionParentHasPendingChildren(chatId: string, runId: strin
   // A session the owner stopped (cancel_requested) is not work the parent is still waiting for, however long its run takes to wind down.
   if (db.prepare(`SELECT 1 FROM work_session_dispatches WHERE parent_chat_id=? AND owner_scope=? AND cancel_requested=0
     AND (state IN ('queued','starting','running','waiting_input','uncertain')
-      OR (reported_at IS NULL AND (report_error IS NULL OR report_error NOT LIKE '${REPORT_ABANDONED}%'))) LIMIT 1`).get(chatId, owner)) return true;
+      OR (reported_at IS NULL AND updated_at>=? AND (report_error IS NULL OR report_error NOT LIKE '${REPORT_ABANDONED}%'))) LIMIT 1`)
+    .get(chatId, owner, new Date(Date.now() - REPORT_NOTIFY_WAIT_MS).toISOString())) return true;
   return !!db.prepare(`SELECT 1 FROM work_session_dispatches d JOIN invocation_steers s
     ON s.id='owner:work-report:' || d.id || ':' || d.report_revision
     WHERE d.parent_chat_id=? AND d.owner_scope=? AND d.cancel_requested=0

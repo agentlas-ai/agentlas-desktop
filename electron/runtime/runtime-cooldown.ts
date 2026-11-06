@@ -38,6 +38,15 @@ const RATE_LIMIT_DEFAULT_COOLDOWN_MS = 60_000;
  */
 const HOST_LOCAL_REFUSAL_CODES: ReadonlySet<string> = new Set(["byok_credential_unavailable"]);
 
+/** Most records either map keeps. Keys carry the model name, so a user who rotates models would otherwise grow them without end. */
+const MAX_RECORDS = 256;
+/**
+ * How long a "signed out" fact blocks a start the owner chose by hand (a Goal pick, Science availability). Past this the start
+ * goes through and that run is the probe: a success clears the fact, a real auth failure writes it again. The fact itself never
+ * expires, so the dashboard badge does not turn green on a guess.
+ */
+export const SIGN_IN_START_GATE_MS = 10 * 60_000;
+
 export interface RuntimeCooldown {
   until: number;
   kind: RunnerFailureKind;
@@ -110,10 +119,16 @@ export function parseRetryHint(hint: string | undefined, now: number): number | 
  */
 export function noteRuntimeFailure(
   runtime: RuntimeIdentity,
-  failure: Pick<RunnerFailure, "kind" | "message" | "retryAfterHint"> & Partial<Pick<RunnerFailure, "providerCode">>,
+  failure: Pick<RunnerFailure, "kind" | "message" | "retryAfterHint"> & Partial<Pick<RunnerFailure, "providerCode" | "source">>,
   now = Date.now(),
 ): RuntimeCooldown | null {
   if (!COOLDOWN_KINDS.has(failure.kind)) return null;
+  /*
+   * A kind read out of an error's wording (source "exit": runnerFailureFromError) is a guess, not a verdict. Only a marker or a
+   * measured notice (a CLI's own words, source "heuristic") may lock a runtime or write "signed out"; a guess would lock a working
+   * runtime out of every start until a success it can no longer get.
+   */
+  if (failure.source === "exit") return null;
   if (failure.providerCode && HOST_LOCAL_REFUSAL_CODES.has(failure.providerCode)) return null;
   const hinted = parseRetryHint(failure.retryAfterHint, now);
   const until = Math.min(hinted ?? now + (failure.kind === "rate_limit" ? RATE_LIMIT_DEFAULT_COOLDOWN_MS : DEFAULT_COOLDOWN_MS), now + MAX_COOLDOWN_MS);
@@ -122,7 +137,9 @@ export function noteRuntimeFailure(
     kind: failure.kind,
     message: String(failure.message ?? "").slice(0, 400),
   };
+  pruneCooldowns(now);
   cooldowns.set(entryKey(runtime), entry);
+  capOldest(cooldowns, record => record.until);
   /*
    * ★로그인 만료는 기다린다고 낫지 않는다.
    *
@@ -138,8 +155,28 @@ export function noteRuntimeFailure(
       since: now,
       message: String(failure.message ?? "").slice(0, 400),
     });
+    capOldest(signedOut, record => record.since);
   }
   return entry;
+}
+
+/** Drops every expired cooldown, not only the one being asked about. */
+function pruneCooldowns(now: number): void {
+  for (const [key, entry] of cooldowns) if (entry.until <= now) cooldowns.delete(key);
+}
+
+/** Keeps a map at its cap by dropping the records that matter least (earliest expiry or oldest fact). */
+function capOldest<T>(map: Map<string, T>, rank: (record: T) => number): void {
+  while (map.size > MAX_RECORDS) {
+    let oldest: string | null = null;
+    let oldestRank = Infinity;
+    for (const [key, record] of map) {
+      const value = rank(record);
+      if (value < oldestRank) { oldestRank = value; oldest = key; }
+    }
+    if (oldest === null) return;
+    map.delete(oldest);
+  }
 }
 
 export interface RuntimeSignedOut {
@@ -159,6 +196,28 @@ export function noteRuntimeSucceeded(runtime: RuntimeIdentity): void {
   for (const key of candidateKeys(signedOut, runtime)) signedOut.delete(key);
 }
 
+/**
+ * A person signed in again or changed the key, so the "signed out" fact and any login cooldown for that runtime are out of date.
+ * Quota and rate-limit cooldowns stay: a new login does not lift a usage limit. Matches every model and seat of the kind
+ * (and of the backend when one is given), because the facts are keyed per model.
+ */
+export function forgetRuntimeSignIn(match: { kind: string; backend?: string }): void {
+  const matches = (key: string): boolean => {
+    try {
+      const identity: unknown = JSON.parse(key);
+      return Array.isArray(identity) && identity[0] === match.kind && (match.backend === undefined || identity[1] === match.backend);
+    } catch { return false; }
+  };
+  for (const key of [...signedOut.keys()]) if (matches(key)) signedOut.delete(key);
+  for (const [key, entry] of [...cooldowns]) if (entry.kind === "auth" && matches(key)) cooldowns.delete(key);
+}
+
+/** True while a "signed out" fact is newer than the start gate. `since` is the fact's time (epoch ms or the ISO string the listing carries). */
+export function signInFactBlocksOwnerStart(since: number | string, now = Date.now()): boolean {
+  const at = typeof since === "number" ? since : Date.parse(since);
+  return !Number.isFinite(at) || now - at < SIGN_IN_START_GATE_MS;
+}
+
 /** 지금 이 런타임이 시한부로 막혀 있나. 만료된 기록은 그 자리에서 지운다(스스로 돌아온다). */
 export function runtimeCooldown(runtime: RuntimeIdentity, now = Date.now()): RuntimeCooldown | null {
   let durable: RuntimeCooldown | null = null;
@@ -169,11 +228,8 @@ export function runtimeCooldown(runtime: RuntimeIdentity, now = Date.now()): Run
     // Candidate enumeration also runs before store bootstrap. It grants no dispatch:
     // withDurableRuntimeRetry re-reads strictly, including corrupt/unavailable metadata.
   }
+  pruneCooldowns(now);
   const keys = candidateKeys(cooldowns, runtime);
-  for (const key of keys) {
-    const entry = cooldowns.get(key);
-    if (entry && entry.until <= now) cooldowns.delete(key);
-  }
   const picked = pickRecord(cooldowns, runtime, keys);
   if (!picked || seatOf(runtime) === NO_SEAT) return durable && (!picked || durable.until > picked.until) ? durable : picked;
   // A named seat can have its own record and a record made without a seat: the one that holds longer answers, so a short throttle never hides a quota.

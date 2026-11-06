@@ -12,7 +12,7 @@ import { assertChatRuntimeSelectionTicketCurrent, reserveChatRuntimeSelectionTic
 import { captureLongRunRuntimeSelection } from "./exact-runtime-binding";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
 import { pickRunner, rolePriorityRuntimes, runtimeModelUnavailable, selectExactRuntime } from "../runtime/selection";
-import { runtimeCooldownForSelection } from "../runtime/runtime-cooldown";
+import { runtimeCooldownForSelection, signInFactBlocksOwnerStart } from "../runtime/runtime-cooldown";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 
 type HandoffEvent = {
@@ -157,7 +157,8 @@ export function resolveRequestedGoalRuntimeSelection(requested: RuntimeSelection
   const runtime = candidates[0];
   if (!pickRunner(runtime)) throw goalRuntimeSelectionError("goal_runtime_selection_unavailable");
   if (runtime.credentialAccess?.status === "unavailable") throw goalRuntimeSelectionError("goal_runtime_credential_unavailable");
-  if (runtime.signInRequired) throw goalRuntimeSelectionError("goal_runtime_sign_in_required");
+  // The owner's own pick goes through once the fact is old enough (that run is the probe); a fallback nobody confirmed keeps the hard stop.
+  if (runtime.signInRequired && !(owner && !signInFactBlocksOwnerStart(runtime.signInRequired.since))) throw goalRuntimeSelectionError("goal_runtime_sign_in_required");
   // The effective model, effort and long-context are what the episode's own runtime resolution will compute for this
   // pin (selectExactRuntime). Recording them here keeps the handoff equal to what really runs: an effort the model
   // does not offer, or a model-less "Default" pick, is settled now instead of failing the episode later.

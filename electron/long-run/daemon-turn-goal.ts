@@ -52,7 +52,7 @@ import { getDb } from "../store/db";
 import { createRuntimeRetryStore } from "../store/runtime-retry";
 import {
   appendLongRunEvent, getLongRunByGoalId, holdGoalForOwnerAnswer, liveLongRunAttemptCount, longRunOwnerHold, pendingBlockedGoalRetry,
-  scheduleBlockedGoalRetry, transitionLongRun, closeGoalRuntimeRetryBudget, type LongRunRecord,
+  scheduleBlockedGoalRetry, transitionLongRun, scheduleGoalRuntimeRetryReopen, type LongRunRecord,
 } from "../store/long-runs";
 
 export const DAEMON_TURN_GOAL_SETTLED_EVENT = "run.daemon_turn_settled";
@@ -344,9 +344,11 @@ function followDaemonTurnGoalInTransaction(goalId: string): DaemonTurnGoalResult
   const terminal = terminalOf(source.runId);
   if (!terminal) return result(goalId, "skipped", "no_terminal_event");
   if (terminal.budgetClosed) {
-    if (!closeGoalRuntimeRetryBudget(run.id, source.runId)) return result(goalId, "skipped", "budget_close_state_changed");
-    recordSettlement(run, source.runId, "runtime_retry_budget_exhausted");
-    return result(goalId, "paused", "runtime_retry_budget_exhausted");
+    // The connection kept failing: the Goal rests on a host retry (one probe after the retry store's reopen window), it is not paused.
+    const reopen = scheduleGoalRuntimeRetryReopen(run.id, source.runId);
+    if (!reopen) return result(goalId, "skipped", "runtime_retry_reopen_state_changed");
+    recordSettlement(run, source.runId, "runtime_retry_reopen_scheduled", { nextAt: reopen.nextAt });
+    return result(goalId, "scheduled", reopen.nextAt);
   }
   if (terminal.retryAfterMs && terminal.retryAfterMs > 0) {
     const revision = getChatGoalRevision(goalId);

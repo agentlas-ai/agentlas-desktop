@@ -53,6 +53,8 @@ import { cumulativeSurfaceGateText, httpRetryAfterHint, markRefusedBeforeDispatc
 import { tStatus } from "./status-i18n";
 import { createToolLoopProgress, createToolLoopUsage, prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { fetchWithReconnect } from "./reconnecting-fetch";
+import { serverFailureResendDelayMs, SERVER_FAILURE_CONSECUTIVE_RESENDS, waitForServerResend } from "./provider-overload";
 
 const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
 
@@ -390,10 +392,15 @@ function reportDeliveredCapabilities(req: RunnerRequest, events: RunnerEvents, d
   }
 }
 
-async function postServing(body: string, cookie: string, req: RunnerRequest): Promise<Response> {
+/**
+ * One request to the serving endpoint. `workStarted` is true once an earlier round of this call reached the model (a tool
+ * round, a continued cut reply): only then is an unreachable server waited out (reconnecting-fetch.ts); the first request is
+ * refused at once, as before.
+ */
+async function postServing(body: string, cookie: string, req: RunnerRequest, workStarted = false, events?: RunnerEvents): Promise<Response> {
   const managed = managedOneHeaders("serving");
   if (managedOneConfigured() && !managed) throw new Error("managed_one_credential_expired");
-  return withCurrentHistoryProvider(()=>fetch(`${webBaseUrl()}/api/one/serving/chat`, {
+  return withCurrentHistoryProvider(()=>fetchWithReconnect(fetch, `${webBaseUrl()}/api/one/serving/chat`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -405,7 +412,40 @@ async function postServing(body: string, cookie: string, req: RunnerRequest): Pr
     },
     body,
     ...(req.signal ? { signal: req.signal } : {}),
+  }, {
+    workStarted: () => workStarted, signal: req.signal,
+    onWait: (waitedMs) => events?.onStatus(req.locale === "ko" ? `서버에 다시 연결하는 중… ${Math.round(waitedMs / 1000)}초` : `Reconnecting to the server… ${Math.round(waitedMs / 1000)}s`),
   }));
+}
+
+/**
+ * postServing plus the one 5xx the endpoint itself vouches for: its own `503 serving_unavailable` is sent before it reserved
+ * credits or called a model (see servingRefusalBeforeDispatch), so the same request goes out again on consecutive failures
+ * (SERVER_FAILURE_CONSECUTIVE_RESENDS, exponential wait). A proxy's 502 / 504 is not the endpoint's word, the request may
+ * have been processed and charged, so it is never resent. `failure` is set exactly when the response is not ok.
+ */
+async function postServingChecked(body: string, cookie: string, req: RunnerRequest, events: RunnerEvents, workStarted: boolean):
+  Promise<{ response: Response; failure: RunnerFailure | null }> {
+  for (let resends = 0; ; resends += 1) {
+    const response = await postServing(body, cookie, req, workStarted, events);
+    if (response.ok) return { response, failure: null };
+    const failure = await servingHttpFailure(response, req.locale);
+    const delay = response.status === 503 && failure.providerCode === "serving_unavailable" && resends < SERVER_FAILURE_CONSECUTIVE_RESENDS && !req.signal?.aborted
+      ? serverFailureResendDelayMs(response.headers.get("retry-after"), resends) : null;
+    if (delay === null) return { response, failure };
+    events.onStatus(req.locale === "ko"
+      ? `Agentlas 서버가 잠시 요청을 받지 못해 같은 요청을 다시 보냅니다(${resends + 1}/${SERVER_FAILURE_CONSECUTIVE_RESENDS})…`
+      : `The Agentlas server could not take the request for a moment; sending the same request again (${resends + 1}/${SERVER_FAILURE_CONSECUTIVE_RESENDS})…`);
+    await waitForServerResend(delay, req.signal);
+    if (req.signal?.aborted) return { response, failure };
+  }
+}
+
+/** The cut-reply continuation bound is spent and the reply is still cut: said as it is, with the received text kept by the caller. */
+function servingOutputLimitFailure(locale: RunnerRequest["locale"]): RunnerFailure {
+  return { kind: "refused", runtime: "agentlas", source: "marker", providerCode: "serving_output_limit_exceeded",
+    message: locale === "ko" ? "Agentlas 모델이 출력 한도 안에서 답을 끝내지 못했습니다. 받은 부분은 보존했습니다."
+      : "The Agentlas model could not finish its answer within the output limit. The part received is kept." };
 }
 
 async function runAgentlasServingWithTools(
@@ -530,11 +570,11 @@ async function runAgentlasServingWithTools(
     reportCachePlan(() => servingCachePlan({ system: context.system, tools: definitions, turns: wireTurns }));
     reportModelEndpoint({ url: webBaseUrl() });
     const usageAttempt = usage.start();
-    const response = await postServing(requestBody, cookie, req);
     // The first request of the call: nothing earlier in it reached a model (no tool round, no cut reply continued).
     const firstRequest = round === 0 && cutRounds === 0;
-    if (!response.ok) {
-      const failure = await servingHttpFailure(response, req.locale);
+    const { response, failure: httpFailure } = await postServingChecked(requestBody, cookie, req, events, !firstRequest);
+    if (httpFailure) {
+      const failure = httpFailure;
       return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain",
         ...(servingRefusalBeforeDispatch(response, failure, firstRequest) ? { turnDelivery: "not-dispatched" as const } : {}),
         failure, ...usage.settle() });
@@ -580,7 +620,8 @@ async function runAgentlasServingWithTools(
       // text answer is kept. Either way one host turn continues the same conversation, a bounded number of times.
       const partial = cutPartial + text;
       if (cutRounds >= OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
-        return assertCurrentHistoryRunnerResult({ text: accumulatedText + partial, ownerControlTerminal: "uncertain", ...usage.settle() });
+        return assertCurrentHistoryRunnerResult({ text: accumulatedText + partial, ownerControlTerminal: "uncertain",
+          failure: servingOutputLimitFailure(req.locale), ...usage.settle() });
       }
       cutRounds += 1;
       cutKind = Array.isArray(done.toolUses) && done.toolUses.length > 0 ? "tool-call" : "text";
@@ -698,17 +739,17 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
     reportModelEffort(req.effort ? { status: "unsupported", requested: req.effort, reason: "serving_protocol_has_no_effort_field" } : { status: "not_requested" });
     reportModelEndpoint({ url: webBaseUrl() });
     const usageAttempt = usage.start();
-    const response = await postServing(JSON.stringify({
+    // The first request of the call: no cut reply was continued before it.
+    const firstRequest = cutRounds === 0;
+    const { response, failure: httpFailure } = await postServingChecked(JSON.stringify({
       model,
       system,
       messages: roundTurns,
       maxTokens: outputReserve,
       ...servingRequestFields(req),
-    }), cookie, req);
-    // The first request of the call: no cut reply was continued before it.
-    const firstRequest = cutRounds === 0;
-    if (!response.ok) {
-      const failure = await servingHttpFailure(response, req.locale);
+    }), cookie, req, events, !firstRequest);
+    if (httpFailure) {
+      const failure = httpFailure;
       return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain",
         ...(servingRefusalBeforeDispatch(response, failure, firstRequest) ? { turnDelivery: "not-dispatched" as const } : {}),
         failure, ...(joined ? usage.settle() : {}) });
@@ -754,6 +795,10 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       message: req.locale === "ko"
         ? "Agentlas 모델이 빈 답을 돌려주었습니다. 다시 시도해 주세요."
         : "The Agentlas model returned an empty answer. Try again." } });
+  }
+  // Still cut after the continuation bound: not a finished answer. The failure says so and the received text stays.
+  if (done.stopReason === "max_tokens" && !req.signal?.aborted) {
+    return assertCurrentHistoryRunnerResult({ text, ownerControlTerminal: "uncertain", failure: servingOutputLimitFailure(req.locale), ...usage.settle() });
   }
   const completedTerminal = !req.signal?.aborted && (done.stopReason === "end_turn" || done.stopReason === "stop_sequence")
     && (done.toolUses === undefined || Array.isArray(done.toolUses) && done.toolUses.length === 0);

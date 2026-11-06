@@ -236,7 +236,7 @@ export function isRefusedBeforeDispatch(error: unknown): boolean {
   return !!error && typeof error === "object" && (error as { turnDelivery?: unknown }).turnDelivery === "not-dispatched";
 }
 
-/** Bounded retries of a start refused before dispatch for a reason that is not on the allowlist, before the message is held (kept, never lost). */
+/** Retries after which other surfaces hold a start refused before dispatch; the send queue only says its calm line once here and keeps retrying. */
 export const UNDISPATCHED_START_MAX_ATTEMPTS = 12;
 
 /**
@@ -293,7 +293,11 @@ export function transientSendBackoffMs(attempt: number): number {
   return steps[Math.max(0, Math.min(steps.length - 1, Math.floor(attempt)))];
 }
 
-/** A message that has waited this long without ever starting is given up on (the row stays in the transcript). */
+/**
+ * The window after which a continuous refusal's clock restarts and other surfaces (service.ts intake, agent mail, the Work executor) still
+ * stop waiting. The send queue, the supervisor's reply/chat-send dispatch and the parked-relay nudge no longer give up on it (owner rule
+ *a message the host received lives until it is delivered).
+ */
 export const TRANSIENT_SEND_DEADLINE_MS = 2 * 60 * 60 * 1000;
 
 /** Start once; only the caller's typed refusal admission may turn a rejection into a durable acceptance. */

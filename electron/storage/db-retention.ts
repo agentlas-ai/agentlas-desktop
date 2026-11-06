@@ -5,7 +5,9 @@ import { ONE_DOMAIN_EVENT_TYPE_SQL } from "../store/one-domain-event-indexes";
 import { compactToolPayload, compactTurnContextPayload } from "../store/agent-context-compaction";
 import { keepRunToolSummary } from "./run-detail-summary";
 import { RUN_DETAIL_CALL_KINDS, RUN_DETAIL_TEXT_KINDS, RUN_TERMINAL_KINDS } from "./run-detail-retention";
+import { newClosedPurgeState, purgeClosedBatch } from "./db-retention-closed";
 import {
+  DB_RETENTION_CLOSED_KEY,
   DB_RETENTION_CURSOR_KEY,
   DB_RETENTION_HOST,
   DB_RETENTION_LEASE_KEY,
@@ -41,6 +43,8 @@ export interface DbRetentionReport {
   turnContextEntries: { compacted: number };
   sessionCheckpoints: { deleted: number };
   sourceVersions: { deleted: number };
+  /** Delivery/ledger rows whose work is over (policy rules `*.closed`): rows deleted per table, tables left alone (older shape). */
+  closedRows: { deleted: number; byTable: Record<string, number>; skipped: string[]; ran: boolean };
   complete: boolean;
   checkpointedWal: boolean;
   vacuum: { ran: boolean; reason: string; fileBytesBefore: number; fileBytesAfter: number; ms: number };
@@ -384,7 +388,8 @@ function writeCursors(db: Database.Database, cursors: Cursors): void {
 export async function runDbRetentionPass(options: DbRetentionOptions): Promise<DbRetentionReport> {
   const report: DbRetentionReport = {
     ran: false, skipped: "none", chatDetail: { runs: 0, deleted: 0 }, stepEvents: { entities: 0, deleted: 0 },
-    toolEntries: { compacted: 0 }, turnContextEntries: { compacted: 0 }, sessionCheckpoints: { deleted: 0 }, sourceVersions: { deleted: 0 }, complete: false,
+    toolEntries: { compacted: 0 }, turnContextEntries: { compacted: 0 }, sessionCheckpoints: { deleted: 0 }, sourceVersions: { deleted: 0 },
+    closedRows: { deleted: 0, byTable: {}, skipped: [], ran: false }, complete: false,
     checkpointedWal: false, vacuum: { ran: false, reason: "not-run", fileBytesBefore: 0, fileBytesAfter: 0, ms: 0 }, workMs: 0, errors: [],
   };
   const skipped = (reason: DbRetentionReport["skipped"]): DbRetentionReport => ({ ...report, skipped: reason });
@@ -398,7 +403,7 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
   const cursors = readCursors(db);
   const chatState: ChatSweepState = { goalChats: null, decisions: new Map(), summarized: new Set() };
   const stepQueue: { entities: Array<{ run_id: string }> | null; at: number } = { entities: null, at: 0 };
-  const done = { chat: false, steps: false, journal: false, checkpoints: false, sourceVersions: false };
+  const done = { chat: false, steps: false, journal: false, checkpoints: false, sourceVersions: false, closed: false };
   try {
     report.ran = true;
     const memory = options.memoryDb ? (() => { try { return options.memoryDb!(); } catch { return null; } })() : null;
@@ -423,6 +428,24 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
     done.sourceVersions = !hasSourceVersions || await sliceLoop("memory_source_versions", () => purgeSourceVersions(memory!, budget), (value) => { report.sourceVersions.deleted += value.deleted; });
     done.chat = await sliceLoop("run_events.chat-call-detail", () => sweepChatDetail(db, now, cursors.chat, chatState), (value) => { report.chatDetail.runs += value.runs; report.chatDetail.deleted += value.deleted; });
     done.steps = await sliceLoop("run_events.one_domain_event.run.step_changed", () => trimStepEvents(db, now, budget, stepQueue), (value) => { report.stepEvents.entities += value.entities; report.stepEvents.deleted += value.deleted; });
+    // Delivery rows: scans wide tables, so a drained pass is remembered and the next one waits (closedRescanMs). A pass that ran out of
+    // time or hit a busy store is not remembered: the next 30-minute pass continues, every batch is its own transaction.
+    const closedDue = (): boolean => {
+      try {
+        const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(DB_RETENTION_CLOSED_KEY) as { value: string } | undefined;
+        const last = Number(row ? (JSON.parse(row.value) as { drainedAt?: number }).drainedAt : 0);
+        return !Number.isFinite(last) || now - last >= DB_RETENTION_LIMITS.closedRescanMs || last > now;
+      } catch { return true; }
+    };
+    if (closedDue()) {
+      const closedState = newClosedPurgeState();
+      report.closedRows.ran = true;
+      done.closed = await sliceLoop("delivery.closed-rows", () => purgeClosedBatch(db, now, closedState), (value) => { report.closedRows.deleted += value.deleted; });
+      report.closedRows.byTable = closedState.deleted;
+      report.closedRows.skipped = closedState.skipped;
+      if (done.closed) options.shortBusy(() => db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .run(DB_RETENTION_CLOSED_KEY, JSON.stringify({ drainedAt: now })));
+    } else done.closed = true;
     done.journal = await sliceLoop("agent_context_entries", () => compactJournal(db, now, cursors.agentContext), (value) => {
       report.toolEntries.compacted += value.tools; report.turnContextEntries.compacted += value.turnContexts;
     });
@@ -430,9 +453,9 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
     if (done.journal) cursors.agentContext.rowid = 0;
     options.shortBusy(() => writeCursors(db, cursors));
     // The memory-store version purge does not hold back the main store's reclaim: its rows live in the other file.
-    report.complete = done.chat && done.steps && done.journal && done.checkpoints && report.errors.length === 0;
+    report.complete = done.chat && done.steps && done.journal && done.checkpoints && done.closed && report.errors.length === 0;
     const changed = report.chatDetail.deleted + report.stepEvents.deleted + report.toolEntries.compacted
-      + report.turnContextEntries.compacted + report.sessionCheckpoints.deleted + report.sourceVersions.deleted;
+      + report.turnContextEntries.compacted + report.sessionCheckpoints.deleted + report.sourceVersions.deleted + report.closedRows.deleted;
     if (changed > 0) {
       const checkpoint = options.shortBusy(() => db.pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }>);
       report.checkpointedWal = Boolean(checkpoint && !checkpoint[0]?.busy);

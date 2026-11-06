@@ -25,7 +25,31 @@ export type DbRetentionAction =
   | { type: "compact-payload"; days: number; /** Rows without a clock: old when this many entries behind their journal head. */ behindHeadEntries?: number }
   | { type: "keep-newest-per-key"; keepRows: number; days?: number }
   | { type: "delete-all" }
+  | { type: "delete-closed"; spec: ClosedRowSpec }
   | { type: "vacuum"; minFreeBytes: number; minFreeRatio: number };
+
+/**
+ * Rows of a delivery/ledger table whose work is over: removed `days` after their last clock value, in batches, children first.
+ * A row is deleted only when ALL of these hold: its state is in `closedStates`, `closedWhen` holds, none of `keepWhen` holds and
+ * every `timeColumns` value is older than the cutoff (NULL counts as old). The same predicate is the WHERE of the DELETE, so a
+ * row that a daemon or Main moved back to work between the look and the delete is not touched.
+ */
+export interface ClosedRowSpec {
+  days: number;
+  /** "iso": TEXT ISO-8601 timestamps; "ms": INTEGER epoch milliseconds. */
+  timeUnit: "iso" | "ms";
+  stateColumn: string;
+  closedStates: readonly string[];
+  /** Extra SQL over the table alias `t` that says the row is reported/closed (not just in a final state). */
+  closedWhen?: string;
+  /** Rows kept while one of these holds (SQL over `t`); a clause whose `table` is missing from the store is skipped. */
+  keepWhen?: ReadonlyArray<{ table: string; sql: string }>;
+  timeColumns: readonly string[];
+  /** Rows of other tables that belong to the doomed row; deleted first, in the same transaction. */
+  children?: ReadonlyArray<{ table: string; column: string; parentColumn: string }>;
+  /** Columns of the table the spec reads; a store that lacks one is an older shape and the table is left alone. */
+  requires: readonly string[];
+}
 
 export interface DbRetentionRule {
   /** Stable id; the maintenance report and the lease use it. */
@@ -110,6 +134,20 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     readers: "terminal receipts, effect ledger (outward-effect), accounting, resume, phone sync, Goal evidence",
     evidence: "automation_scheduler_terminal payload is the run's terminal receipt with its output; runtime_effect_boundary lists every outward effect "
       + "of a run (operations[].outcome). Both are cited by receipts. The remaining kinds are each under 8 MB.",
+  },
+  {
+    id: "run_events.host-recovery-claim",
+    table: "run_events",
+    kinds: ["host_recovery_requested", "host_recovery_start", "host_recovery_link", "host_recovery_outcome"],
+    observedMb: 0,
+    action: { type: "keep-forever" },
+    writer: "invocation/host-recovery.ts: one claim row per internal failure that is retried (host_recovery_requested, with a restart-data object `replay` of at most 16 KB: "
+      + "settings, hashes and attachment ids, never a copy of the owner's words or image bytes), one start claim and one link/outcome row",
+    readers: "the claim is the at-most-once marker (hostRecoveryRequested); the boot sweep (sweepOrphanedHostRecoveries) reads `replay` to start the retry again after a restart; "
+      + "supersession of the failed attempt reads the link and outcome rows",
+    evidence: "The rows themselves are a few hundred bytes and one set per failed owner turn. `replay` is removed by dropHostRecoveryReplay when the recovery closes "
+      + "(outcome row) and by the boot sweep for any claim older than HOST_RECOVERY_KEEP_DAYS, so the large part lives for as long as the claim is actionable. "
+      + "A retry that failed inside the app with nothing sent keeps it (parked) so the next start or update tries once more, at most twice per app version.",
   },
   {
     id: "agent_context_entries.tool",
@@ -215,6 +253,98 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     evidence: "run.task_checkpoint 13.9 MB, run.usage_recorded 8 MB, the rest under 5 MB each: Goal evidence.",
   },
   {
+    id: "pending_chat_sends.closed",
+    table: "pending_chat_sends",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 14 * DAY, timeUnit: "ms", stateColumn: "state",
+      closedStates: ["started", "failed", "gave_up", "abandoned", "uncertain", "held"],
+      keepWhen: [
+        { table: "invocation_followup_custody", sql: "EXISTS (SELECT 1 FROM invocation_followup_custody c WHERE c.queue_id = t.id AND c.state = 'stopped')" },
+        { table: "queued_owner_inputs", sql: "EXISTS (SELECT 1 FROM queued_owner_inputs o WHERE o.queue_id = t.id AND o.state = 'active')" },
+      ],
+      timeColumns: ["updated_at"], requires: ["id", "state", "updated_at"],
+    } },
+    writer: "invocation/pending-chat-sends.ts: one row per owner message the chat could not take at once; every state change sets updated_at (epoch ms)",
+    readers: "queued/starting rows only: the drain, resend-forecast, queue-retry-fact, host-recovery. held/uncertain/failed/gave_up rows are read back only through "
+      + "queued-owner-input-custody.ts (active queued_owner_inputs.queue_id) and followup-custody-core.ts (stopped invocation_followup_custody.queue_id), both kept",
+    evidence: "invocation/pending-chat-sends.ts:58 states; queued and starting are the only states the drain acts on (headOf, startingOf). gave_up, held (not under custody), "
+      + "abandoned and uncertain are never re-queued by the queue itself (the owner may have re-sent by hand), so they are history; 14 days after their last update they go.",
+  },
+  {
+    id: "work_session_dispatches.closed",
+    table: "work_session_dispatches",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 30 * DAY, timeUnit: "iso", stateColumn: "state",
+      closedStates: ["completed", "failed", "cancelled", "interrupted", "uncertain"],
+      closedWhen: "(t.reported_at IS NOT NULL OR t.cancel_requested = 1 OR t.report_error = 'work_session_report_abandoned:owner_stopped')",
+      keepWhen: [
+        { table: "work_session_dispatches", sql: "t.effect_uncertain = 1" },
+        { table: "work_session_dispatches", sql: "EXISTS (SELECT 1 FROM json_each(t.steering_json) WHERE json_extract(value, '$.runId') IS NULL AND COALESCE(json_extract(value, '$.endStatus'), 'held') = 'held')" },
+      ],
+      timeColumns: ["updated_at", "reported_at"],
+      requires: ["state", "reported_at", "cancel_requested", "report_error", "effect_uncertain", "steering_json", "updated_at"],
+    } },
+    writer: "work/session-dispatch.ts: one row per child session a Work conversation delegated; the row is reused when the child is steered again (reported_at reset, updated_at moved)",
+    readers: "work/session-dispatch.ts view/recover/report queries (all gated on state, reported_at, cancel_requested), workSessionChildrenOf, findWorkSessionChildRun "
+      + "(only for runs the dispatcher itself started, long over)",
+    evidence: "work/session-dispatch.ts:509-511 reported_at, :530 owner_stopped marker, :807 other abandoned markers are revived (so only owner_stopped closes), :837 the "
+      + "pending-parent query that must keep a row (unreported terminal, held steer), effect_uncertain rows await owner reconciliation. The row is deleted whole: "
+      + "result_json goes with it, so no separate compaction pass is needed.",
+  },
+  {
+    id: "one_team_dispatches.closed",
+    table: "one_team_dispatches",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 30 * DAY, timeUnit: "iso", stateColumn: "status",
+      closedStates: ["completed", "failed", "cancelled", "interrupted"],
+      closedWhen: "(t.reported_at IS NOT NULL OR t.report_error = 'owner_stopped')",
+      // The row is the only thing that hides a teammate chat made before the kind=division marker (dispatch-presentation.ts
+      // oneDispatchSidebarPredicate) and the only thing that admits that chat's working folder (fs/access.ts), so it stays as long as the chat does.
+      keepWhen: [{ table: "chats", sql: "EXISTS (SELECT 1 FROM chats c WHERE c.id = t.child_chat_id)" }],
+      timeColumns: ["updated_at", "reported_at"],
+      children: [{ table: "one_team_dispatch_results", column: "id", parentColumn: "id" }],
+      requires: ["id", "status", "reported_at", "report_error", "updated_at", "child_chat_id"],
+    } },
+    writer: "one/team-dispatch.ts: one row per teammate session One started; one_team_dispatch_results keeps the result of each earlier run of the same dispatch (retainDispatchResult)",
+    readers: "one/team-dispatch.ts report retry (reported_at IS NULL), graph-team-step (graph_owner), dispatch-presentation.ts, session-handoff.ts and invocation/service.ts lookups by id",
+    evidence: "one/team-dispatch.ts:798/816/1044 reported_at, :846 ONE_TEAM_REPORT_OWNER_STOPPED is a closed 'withdrawn' report (:682), :1163 no-progress codes; "
+      + "queued/running are not final states. one_team_dispatch_results rows have no clock of their own and are read by dispatch id only (presentation, handoff), so they go with their dispatch.",
+  },
+  {
+    id: "one_supervisor_work_jobs.closed",
+    table: "one_supervisor_work_jobs",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 30 * DAY, timeUnit: "ms", stateColumn: "phase",
+      closedStates: ["completed", "failed", "cancelled"],
+      timeColumns: ["updated_at"], requires: ["command_id", "phase", "updated_at"],
+    } },
+    writer: "one/supervisor-work-queue.ts (phase moves through queued, claimed, starting, running, held to a final phase; updated_at epoch ms)",
+    readers: "the executor reads queued/claimed/starting/running/held only (one_supervisor_work_dispatch and _live indexes)",
+    evidence: "one/supervisor-work-queue.ts:20 TERMINAL = completed, failed, cancelled. one_supervisor_requests itself is kept: main.ts requestedWorkerChat (assertOneContextTask) reads it as One's authority to open a worker chat it asked for, so removing it would refuse One reading that work later.",
+  },
+  {
+    id: "one_supervisor_notices.closed",
+    table: "one_supervisor_notices",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 30 * DAY, timeUnit: "iso", stateColumn: "review_state",
+      closedStates: ["reviewed", "skipped", "unreviewed"],
+      timeColumns: ["created_at", "reviewed_at"], requires: ["review_state", "created_at", "reviewed_at"],
+    } },
+    writer: "one/supervisor-store.ts notice inserts (INSERT OR IGNORE on one_id, task_id, run_id) and the review loop",
+    readers: "the review loop reads pending and claimed rows only (supervisor-store.ts:293-349)",
+    evidence: "supervisor-store.ts:317 reviewed, :340 unreviewed (three attempts spent) and 'skipped' are never claimed again; pending and claimed stay.",
+  },
+  {
     id: "store.vacuum",
     table: "*",
     kinds: [],
@@ -238,12 +368,17 @@ export const DB_RETENTION_LIMITS = {
   domainEventReadWindow: 500,
   /** Compacted tool/arguments text keeps this many characters (the replay shows 160). */
   toolArgumentChars: 2048,
+  /** Rows one delete-closed batch removes (and the most it looks at when it picks them). */
+  closedBatchRows: 500,
+  /** The closed-row purge scans wide tables, so a finished pass waits this long before the next one. */
+  closedRescanMs: 6 * 3_600_000,
   /** A lease not refreshed for this long is stale. */
   leaseStaleMs: 120_000,
   leaseHeartbeatMs: 15_000,
 } as const;
 
 export const DB_RETENTION_LEASE_KEY = "storage.dbRetention.lease.v1";
+export const DB_RETENTION_CLOSED_KEY = "storage.dbRetention.closed.v1";
 export const DB_RETENTION_CURSOR_KEY = "storage.dbRetention.cursors.v1";
 
 export function retentionRule(id: string): DbRetentionRule {

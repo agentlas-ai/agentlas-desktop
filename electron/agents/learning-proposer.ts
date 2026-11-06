@@ -34,8 +34,14 @@ interface ProposerState { day: string; attempts: number; lastCode: string | null
  * "[learning-proposer] failed memory_ineligible"; the agent kept consolidating and tried again only the next day).
  */
 const MEMORY_MOVED_ON_CODES: ReadonlySet<string> = new Set(["memory_ineligible", "memory_changed"]);
+/**
+ * Failures that say nothing about the lesson: no model connected at that moment (compiler_unavailable), the files or the lock
+ * moved during generation (base_changed, update_busy), a model timeout or an answer that was not JSON (no code: proposal_failed).
+ * They give the attempt back like the memory codes, so one bad moment does not spend the day.
+ */
+const TRANSIENT_FAILURE_CODES: ReadonlySet<string> = new Set(["compiler_unavailable", "base_changed", "update_busy", "proposal_failed"]);
 /** Attempts a day are given back this many times, so a lesson that really is ineligible cannot spend the model all day. */
-const MOVED_ON_RETRIES_PER_DAY = 3;
+const GIVE_BACK_RETRIES_PER_DAY = 3;
 let timer: NodeJS.Timeout | null = null;
 let running = false;
 
@@ -67,10 +73,11 @@ export async function proposeLearningsForAgent(agentId: string, now = new Date()
   } catch (error) {
     const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "proposal_failed";
     const movedOn = state?.day === day ? state.movedOn ?? 0 : 0;
-    if (MEMORY_MOVED_ON_CODES.has(code) && movedOn < MOVED_ON_RETRIES_PER_DAY) {
-      // The memories moved on while the compiler read them. Give the attempt back: the next tick proposes from the current lessons.
+    const memoryMovedOn = MEMORY_MOVED_ON_CODES.has(code);
+    if ((memoryMovedOn || TRANSIENT_FAILURE_CODES.has(code)) && movedOn < GIVE_BACK_RETRIES_PER_DAY) {
+      // The memories moved on, or the attempt failed for a reason unrelated to the lesson. Give the attempt back: the next tick proposes from the current lessons.
       try { writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts, lastCode: code, movedOn: movedOn + 1 } satisfies ProposerState); } catch { /* The attempt stays counted. */ }
-      return { outcome: "skipped", code: "memory_moved_on" };
+      return { outcome: "skipped", code: memoryMovedOn ? "memory_moved_on" : "attempt_given_back" };
     }
     try { writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts: attempts + 1, lastCode: code, ...(movedOn ? { movedOn } : {}) } satisfies ProposerState); } catch { /* The attempt was already counted. */ }
     // "No change" and "needs more evidence" are normal answers, not failures worth reporting.

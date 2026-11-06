@@ -1,3 +1,5 @@
+import { VERIFICATION_NO_PROGRESS_REASON } from "./long-run-checkpoint";
+
 /** The Goal's next host wake, as Main reports it (electron/long-run/goal-next-wake.ts). */
 export interface GoalNextWake {
   at: string;
@@ -25,6 +27,10 @@ export function goalNextWakeLabel(wake: GoalNextWake, locale: "ko" | "en", now =
   const clock = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
   const sameDay = new Date(now).toDateString() === at.toDateString();
   const when = sameDay ? clock : locale === "ko" ? `${at.getMonth() + 1}월 ${at.getDate()}일 ${clock}` : `${at.getMonth() + 1}/${at.getDate()} ${clock}`;
+  // The same result again: a rest, not a stop; a new instruction or Goal change looks at once.
+  if (wake.cause === VERIFICATION_NO_PROGRESS_REASON) return locale === "ko"
+    ? `같은 결과가 반복돼 ${when}에 다시 시도합니다. 새 지시가 있으면 바로 이어갑니다.`
+    : `Same result again; next try at ${when}, or right away on a new instruction.`;
   const by = locale === "ko"
     ? { model: "모델 요청", host: "자동 재시도", monitor: "감시 결과 변화 시", budget: "하루 한도 도달" }[wake.requestedBy]
     : { model: "requested by the model", host: "automatic retry", monitor: "when the monitor changes", budget: "daily limit reached" }[wake.requestedBy];

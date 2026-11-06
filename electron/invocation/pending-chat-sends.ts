@@ -121,6 +121,8 @@ export interface PendingChatSendsDeps<Sender> {
   /** Durable owner input waits for its original authenticated account. */
   /** Main still owns exact original input; elapsed time never consumes it. */
   persistentInput?(sendId: string, request: McpInvocationRequest): boolean;
+  /** A refused-before-dispatch message is still waiting after UNDISPATCHED_START_MAX_ATTEMPTS tries (once per message; its row stays queued). */
+  onWaitingLong?(event: { chatId: string; request: McpInvocationRequest; sendId: string; code?: string }): void;
   onHeld?(sendId: string, code: string): void;
   inputReady?(sendId: string, request: McpInvocationRequest): boolean;
   senderAlive(sender: Sender): boolean;
@@ -181,9 +183,17 @@ export interface PendingChatSendsDeps<Sender> {
   /**
    * The settled run ended without placement evidence and may have done nothing: true when the message should be sent once more
    * (earlier-attempt.ts unconfirmedRunShouldBeSentAgain, read from the run's receipt; `runId` is null when no run took the message).
-   * Called at most UNCONFIRMED_MAX_RESENDS times per message and never for a custody-owned input. Absent = never sent again.
+   * Called at most UNCONFIRMED_MAX_RESENDS times per message when its effect is unknown (a tool may have run: the second unknown outcome is
+   * closed as "uncertain", a separate end reason from a delivery given up), without that cap when resendIsUnbounded says the run never
+   * started; never for a custody-owned input. Absent = never sent again.
    */
   resendWhenUnconfirmed?(runId: string | null): boolean;
+  /**
+   * True when the run left no receipt at all (it never started, nothing ran): such a message is sent again without the
+   * UNCONFIRMED_MAX_RESENDS cap, at the capped backoff. A run that may have run a tool (interrupted, unsettled, an app exception) stays capped.
+   * Absent = always capped.
+   */
+  resendIsUnbounded?(runId: string | null): boolean;
   /**
    * Whether the owner pressed Stop on this chat after `sinceMs` (a steering interrupt is not a Stop). Checked before a message that is
    * being sent again starts: Stop always wins over a resend. Absent = no check.
@@ -541,18 +551,22 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
       deps.onChange?.(chatId);
     };
     // A message with no proof the runtime took it, whose run was lost without a stated cause, is sent once more (earlier-attempt.ts).
-    // Never for a custody-owned input (its one-use refs have their own re-reservation), never past the cap, never when the run ended by
+    // Never for a custody-owned input (its one-use refs have their own re-reservation), never past the cap (unless the run never started: resendIsUnbounded), never when the run ended by
     // the owner's Stop, a steering interrupt or a host stop (the wiring answers from the run's receipt).
     const sendAgain = (code: string): boolean => {
       const resends = row.uncertain_resends ?? 0;
-      if (!deps.resendWhenUnconfirmed || resends >= UNCONFIRMED_MAX_RESENDS || persistent(row, request)) return false;
+      if (!deps.resendWhenUnconfirmed || persistent(row, request)) return false;
+      // The cap protects against one external effect running twice. A run that never started has no effect to repeat.
+      let unbounded = false;
+      try { unbounded = deps.resendIsUnbounded?.(row.run_id) === true; } catch { unbounded = false; }
+      if (resends >= UNCONFIRMED_MAX_RESENDS && !unbounded) return false;
       let again = false;
       try { again = deps.resendWhenUnconfirmed(row.run_id) === true; } catch { again = false; }
       if (!again) return false;
       const now = deps.now();
       const moved = deps.db.prepare(`UPDATE pending_chat_sends SET state = 'queued', run_id = NULL, uncertain_resends = uncertain_resends + 1,
         last_code = ?, refused_since = NULL, not_before = ?, resend_since = ?, updated_at = ? WHERE id = ? AND state = 'starting'`)
-        .run(code, now + transientSendBackoffMs(0), now, now, row.id) as { changes?: number } | undefined;
+        .run(code, now + transientSendBackoffMs(resends), now, now, row.id) as { changes?: number } | undefined;
       if (moved && moved.changes === 0) return false;
       deps.log?.("pending send unconfirmed, sent once more", { chatId, sendId: row.id, runId: row.run_id, code });
       deps.onChange?.(chatId);
@@ -718,19 +732,11 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
             continue;
           }
         }
-        // Only continuous refusals count: a message waiting for a busy chat, a window or a restart never gives up.
+        // A host-received input stays alive until it is delivered (owner rule): no refusal window ends it. The window only
+        // restarts its clock; the row stays queued and is retried with the capped backoff below.
         if (row.refused_since !== null && row.refused_since !== undefined && deps.now() - row.refused_since > TRANSIENT_SEND_DEADLINE_MS) {
-          if (persistent(row,request)) {
-            clearRefusedSince.run(row.id);
-            deps.log?.("pending owner input retained after refusal window",{chatId,sendId:row.id,code:row.last_code});
-          } else {
-            setState.run("gave_up", "deadline", deps.now(), row.id);
-            senders.delete(row.id);
-            deps.log?.("pending send gave up", { chatId, sendId: row.id, attempts: row.attempts, code: row.last_code });
-            deps.onEnded?.({ chatId, request, reason: "deadline", ...(row.last_code ? { code: row.last_code } : {}), sendId: row.id });
-            deps.onChange?.(chatId);
-            continue;
-          }
+          clearRefusedSince.run(row.id);
+          deps.log?.("pending input retained after refusal window", { chatId, sendId: row.id, code: row.last_code });
         }
         // Recorded by the host of the turn under this very intent: delivered there, never started again here. Checked before any
         // wait (a window, a busy chat) so the duplicate leaves at once; the row stays for the receipt that answers by intent id.
@@ -861,16 +867,12 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
           let undispatched = false;
           if (!transient) { try { undispatched = deps.waitsBeforeDispatch?.(cause, attemptedRunId ?? null) === true; } catch { undispatched = false; } }
           if ((transient || undispatched) && (!deps.canRetryStart || deps.canRetryStart(request, (byId.get(row.id) as Row).run_id ?? ""))) {
-            if (undispatched && row.attempts + 1 >= UNDISPATCHED_START_MAX_ATTEMPTS) {
-              // The refusal outlasted every bounded retry. The message was never sent anywhere and stays in the transcript: it is
-              // held (not failed, no code on screen), and the one calm line below says so. The ledger keeps the code.
-              setState.run("held", code ?? "start_refused_before_dispatch", deps.now(), row.id);
-              senders.delete(row.id);
-              deps.log?.("pending send held after repeated refusal before dispatch", { chatId, sendId: row.id, attempts: row.attempts + 1, code });
-              deps.onHeld?.(row.id, code ?? "start_refused_before_dispatch");
-              deps.onEnded?.({ chatId, request, reason: "held", ...(code ? { code } : {}), sendId: row.id });
-              deps.onChange?.(chatId);
-              continue;
+            // A start refused before dispatch has the host's proof that nothing went out, so it is retried at the capped backoff (15 s)
+            // for as long as it takes; no attempt count holds or ends the message. The owner hears the calm "received" line once, at
+            // the old cap, because a wait this long should not be silent. The row stays queued.
+            if (undispatched && row.attempts + 1 === UNDISPATCHED_START_MAX_ATTEMPTS) {
+              deps.log?.("pending send still waiting after repeated refusal before dispatch", { chatId, sendId: row.id, attempts: row.attempts + 1, code });
+              try { deps.onWaitingLong?.({ chatId, request, sendId: row.id, ...(code ? { code } : {}) }); } catch { /* a line that cannot be written changes nothing */ }
             }
             deps.db.prepare("UPDATE pending_chat_sends SET run_id=NULL WHERE id=?").run(row.id);
             setState.run("queued", null, deps.now(), row.id);

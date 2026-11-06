@@ -1,6 +1,7 @@
 import type { ContinuityCapsule } from "./long-run";
 import type { OngoingEpisodeStrategy } from "./runtime-plan";
 import type { JsonObject, RuntimeKind } from "./types";
+import { effectiveAcceptanceCriteria } from "./goal-scope";
 
 export type RuntimeExecutionClass = "native_cli" | "managed_api" | "local_inference";
 
@@ -33,17 +34,17 @@ export interface CheckpointCriterion {
 }
 
 /** Owner 2026-10-12: no retry COUNT stops a Goal (a count cap on a failure the agent could never fix turned a Goal into a
- * permanent dead end). Only idle spin does: this many consecutive retries whose turn executed zero tool calls and left
- * the same failed-criteria set as before. The result is "blocked", which stays on the AGI repair path (blocked-goal
- * sweep + AGI incident), not a terminal stop. */
+ * permanent dead end). Only idle spin does: this many consecutive verifications whose outcome digest (electron/long-run/verifier.ts
+ * verificationOutcomeDigest) equals the previous checkpoint's. The Goal then rests on a host retry schedule that doubles (30 min to
+ * 6 h), not a terminal stop and not a minute-by-minute wake. */
 export const NO_PROGRESS_RETRY_LIMIT = 2;
-/** Blocked reason the verifier records for the idle-spin stop; distinguishable from a prerequisite or an unfixable failure. */
+/** Reason of the idle-spin rest (the ledger retry's fromReason and the verifier's requested blocked reason). Carries no counter. */
 export const VERIFICATION_NO_PROGRESS_REASON = "verification_no_progress";
 
 export function goalVerificationDisposition(input: {
   completed: boolean;
   verdicts: readonly CheckpointCriterion[];
-  /** Consecutive retries with zero tool calls and an unchanged failed-criteria set (host facts; 0 when unknown). */
+  /** Consecutive verifications with an unchanged outcome digest (host facts; 0 when unknown). */
   noProgressRetries?: number;
 }): GoalVerificationDisposition {
   if (input.completed) return "completed";
@@ -76,8 +77,10 @@ export interface LongRunTaskCheckpoint {
    * model wording and invocation ids. A changed failing set resets the streak. */
   recoveryFingerprint?: string | null;
   recoveryStreak?: number;
-  /** Consecutive retries with zero tool calls and an unchanged failed-criteria set, ending at this checkpoint. */
+  /** Consecutive verifications with an unchanged outcomeDigest, ending at this checkpoint. */
   noProgressRetries?: number;
+  /** Hash of what the verification found (verificationOutcomeDigest); null/absent = unknown, which never counts as "same". */
+  outcomeDigest?: string | null;
   /** This is not an exactly-once cursor: unknown native effects require inspection. */
   sideEffects: { state: "settled" | "uncertain"; attemptRefs: string[];
     /** Exact host effect receipt; absence is legacy evidence, not safe replay authority. */
@@ -173,7 +176,12 @@ export function compileLongRunCheckpoint(
   const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
   const known = options?.goalContext;
   const sameObjective = Boolean(known) && flat(known!.objective) === flat(checkpoint.objective);
-  const criteriaList = checkpoint.acceptanceCriteria ?? [];
+  // The stored checkpoint keeps every criterion (continuation validates it against the ledger); the packet a model
+  // reads never carries the host scope criterion of an older Goal. `criterionIndex` stays the stored index so it still
+  // names the verifier's criterionIndex in nextActions and the fullCriterionRef.
+  const storedCriteria = checkpoint.acceptanceCriteria ?? [];
+  const shownCriteria = effectiveAcceptanceCriteria(storedCriteria);
+  const criteriaList = shownCriteria;
   const sameCriteria = Boolean(known) && known!.criteria.length === criteriaList.length
     && criteriaList.every((text, index) => flat(known!.criteria[index]) === flat(text));
   const sameConstraints = sameObjective && flat(checkpoint.capsule.originalConstraints ?? "") === flat(checkpoint.objective);
@@ -195,10 +203,10 @@ export function compileLongRunCheckpoint(
     ...(sameObjective ? {} : { objective: checkpoint.objective }),
     // Previously passed constraints still bind the next attempt. Carry the
     // bounded ledger contract intact; only diagnostic history is compacted.
-    ...(sameCriteria ? { criteriaInContract: criteriaList.length } : { criteria: criteriaList.map((text, criterionIndex) => ({
-      criterionIndex,
+    ...(sameCriteria ? { criteriaInContract: criteriaList.length } : { criteria: criteriaList.map((text) => ({
+      criterionIndex: storedCriteria.indexOf(text),
       text,
-      fullCriterionRef: `${checkpoint.capsule.goalContractRef}:criterion:${criterionIndex}`,
+      fullCriterionRef: `${checkpoint.capsule.goalContractRef}:criterion:${storedCriteria.indexOf(text)}`,
     })) }),
     originalConstraintsRef: checkpoint.capsule.originalConstraintsRef ?? null,
     ...(sameConstraints ? {} : { originalConstraints: checkpoint.capsule.originalConstraints ?? null }),

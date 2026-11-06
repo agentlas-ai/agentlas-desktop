@@ -3281,11 +3281,16 @@ function taskForceHostReportRows(results: readonly BorrowedAgentResult[], locale
  * named package ids, repeated a worker and said nothing about what to do. Minimal text, the app's UI language, no codes.
  */
 /**
- * Whether this task-force turn carries the owner's own instruction: the owner wrote it (not a host-started Goal
- * continuation, a teammate report or an automation). Typed request fields only, never the words.
+ * Whether this task-force turn carries the owner's own instruction: the owner wrote it, or the host continues a Goal the
+ * owner handed over (goalBound: the turn is tied to a Goal). A teammate report and an automation do not. Typed fields only,
+ * never the words. Without this a Goal continuation turn gated its review/final steps on an unverified earlier report.
  */
-export function taskForceOwnerAuthoredTurn(req: Pick<McpInvocationRequest, "promptOrigin" | "oneTeamReportTurn" | "automationId">): boolean {
-  return req.promptOrigin !== "system" && req.oneTeamReportTurn !== true && !req.automationId;
+export function taskForceOwnerAuthoredTurn(
+  req: Pick<McpInvocationRequest, "promptOrigin" | "oneTeamReportTurn" | "automationId">,
+  goalBound = false,
+): boolean {
+  if (req.oneTeamReportTurn === true || req.automationId) return false;
+  return req.promptOrigin !== "system" || goalBound;
 }
 
 /**
@@ -3312,6 +3317,8 @@ export function taskForceIncompleteMessage(input: {
   locale: "ko" | "en";
   remaining: TaskForceRemainingRow[];
   requiredSurfaceMissing: boolean;
+  /** The turn is tied to a Goal: the host continues it, so the message neither promises nor asks the owner to say "continue". */
+  goalBound: boolean;
 }): string {
   const ko = input.locale === "ko";
   // A reported item that is one code-, id- or path-shaped token is machine state, not owner copy.
@@ -3358,6 +3365,7 @@ export function taskForceIncompleteMessage(input: {
     ? ko ? "작성창에서 권한을 올린 뒤 \"계속해줘\"라고 하시면 남은 일부터 계속합니다." : "Raise the permission in the composer, then say \"continue\" and the remaining work picks up from here."
     : accessExpired
       ? ko ? "\"계속해줘\"라고 하시면 권한을 다시 묻고 계속합니다." : "Say \"continue\" and it asks for the access again and picks up from here."
+    : input.goalBound ? (decisionPending ? (ko ? "결정을 알려주세요." : "Please answer the decision above.") : "")
     : onlyLiftedAccess
       ? ko ? "필요한 권한으로 한 번 더 실행했지만 끝나지 않아 여기서 멈췄습니다." : "It ran once more with the access it needed and still did not finish, so it stopped here."
       : decisionPending
@@ -3373,11 +3381,20 @@ export function taskForceIncompleteMessage(input: {
   ].filter(Boolean).join("\n\n");
 }
 
+/**
+ * Steps that actually ran and left usable text (not "not-run", not withheld, text left after the execution-failure
+ * appendix is removed), whatever their verification verdict: unverified work is still shown to the owner.
+ */
+export function taskForceRanStepCount(results: Array<Pick<BorrowedAgentResult, "model" | "withheldBy" | "text"> | undefined>): number {
+  return results.filter((result) => Boolean(result) && result!.model !== "not-run" && !(result!.withheldBy?.length)
+    && withoutExecutionFailureReport(stripTaskForceControlEnvelopes(result!.text ?? "")).trim().length > 0).length;
+}
+
 /** Whether an unverified room still shows its synthesis (above the host's remaining-work note). */
 export function taskForceKeepsPartialSynthesis(input: {
-  fixedContract: boolean; completedSteps: number; synthesisReplacedByHost: boolean; synthesis: string;
+  fixedContract: boolean; ranSteps: number; synthesisReplacedByHost: boolean; synthesis: string;
 }): boolean {
-  return !input.fixedContract && input.completedSteps > 0 && !input.synthesisReplacedByHost && input.synthesis.trim().length > 0;
+  return !input.fixedContract && input.ranSteps > 0 && !input.synthesisReplacedByHost && input.synthesis.trim().length > 0;
 }
 
 export function hostDerivedWorkspaceAccess(
@@ -8181,7 +8198,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   const resultByStepId = new Map<string, BorrowedAgentResult>();
   const resultMessageByStepId = new Map<string, string>();
   const pending = new Set(executionPackets.map((_, index) => index));
-  const ownerAuthoredTurn = taskForceOwnerAuthoredTurn(p.req);
+  const ownerAuthoredTurn = taskForceOwnerAuthoredTurn(p.req, Boolean(p.goalContext?.goalId || p.chat.goalId));
   const advisoryDependency = (dependency: string): boolean =>
     taskForceDependencyAdvisory({ ownerAuthored: ownerAuthoredTurn, dependency: resultByStepId.get(dependency) });
   // The owner's own language for what the host tells them in this room (the run locale is the app's).
@@ -9163,13 +9180,14 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       locale: ownerLocale,
       remaining: taskForceRemainingForOwner(ownerLocale, results, unclearedBlockers),
       requiredSurfaceMissing: Boolean(requiredSurfaceMissing),
+      goalBound: Boolean(p.goalContext?.goalId || p.chat.goalId),
     });
     // Real work finished: the owner gets the room's synthesis over it, then the host's short note of what is left (typed
     // per step, room names). Production 1.3.49 run 5d37e4cc: four finished steps were replaced by a failure line. A fixed
     // contract (prepared Workforce, benchmark, Agent App) or a synthesis the host already replaced keeps the note alone.
     displayText = taskForceKeepsPartialSynthesis({
       fixedContract: Boolean(p.workforceSelectionReceipt || p.benchmarkMode || p.req.agentAppMode),
-      completedSteps: results.filter((result) => result?.ok).length,
+      ranSteps: taskForceRanStepCount(results),
       synthesisReplacedByHost,
       synthesis: displayText,
     }) ? `${displayText.trim()}\n\n${incomplete}` : incomplete;
@@ -9211,7 +9229,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     done: true,
     status: taskForceExecutionVerified
       ? taskForceCompleteStatus(p)
-      : (p.locale === "ko" ? "TF 미완료 — 남은 작업 확인 필요" : "Task force incomplete — remaining work required"),
+      : (p.locale === "ko" ? "TF 미완료 — 남은 작업 있음" : "Task force incomplete — work remains"),
     agentId: orchestratorId,
     agentName: orchestratorName,
     role: "orchestrator",

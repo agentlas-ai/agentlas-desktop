@@ -8,11 +8,13 @@ import { isPackagedRuntime, optionalElectronAppPath } from "../runtime-paths";
 import { killCliTree } from "../runtime/exec";
 import {
   CHROMIUM_PRINT_HELPER_FLAG, CHROMIUM_PRINT_RESULT_PREFIX, CHROMIUM_PRINT_SCHEMA,
-  chromiumPrintFailureReason, type ChromiumHelperResult, type ChromiumPdfOptions, type ChromiumPrintResult,
+  CHROMIUM_PNG_LIMITS, chromiumPrintFailureReason, type ChromiumHelperResult, type ChromiumPdfOptions, type ChromiumPngOptions, type ChromiumPrintResult,
 } from "./chromium-print-protocol";
 
 interface PrintJob {
   html: string;
+  /** Set for a picture request; absent for a PDF. */
+  png?: { width: number; scale: 1 | 2 };
   requestId: string;
   resolve: (result: ChromiumPrintResult) => void;
   cancelled: string | null;
@@ -134,9 +136,17 @@ async function execute(job: PrintJob): Promise<ChromiumPrintResult> {
         if (job.cancelled || processError) { resolve({ ok: false, engine: "chromium", reason: job.cancelled || processError! }); return; }
         if (code !== 0 || !receipt?.ok) { resolve({ ok: false, engine: "chromium", reason: receipt?.reason || `science_chromium_helper_exited:${code ?? "signal"}` }); return; }
         try {
-          const outputPath = path.join(directory!, "output.pdf");
-          if (!fs.lstatSync(outputPath).isFile() || fs.lstatSync(outputPath).isSymbolicLink()) throw new Error("science_chromium_pdf_invalid");
+          const outputPath = path.join(directory!, job.png ? "output.png" : "output.pdf");
+          if (!fs.lstatSync(outputPath).isFile() || fs.lstatSync(outputPath).isSymbolicLink()) throw new Error(job.png ? "science_chromium_png_invalid" : "science_chromium_pdf_invalid");
           const bytes = fs.readFileSync(outputPath);
+          if (job.png) {
+            // A PNG: the signature, the IHDR size the helper reported, and the byte limit (a picture is never taken on the helper's word alone).
+            if (bytes.length > CHROMIUM_PNG_LIMITS.maxBytes || bytes.length < 67 || !bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) throw new Error("science_chromium_png_invalid");
+            const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
+            if (!receipt.readiness || !child.pid) throw new Error("science_chromium_helper_receipt_missing");
+            resolve({ ok: true, engine: "chromium", bytes, width, height, chromium: { ...receipt.readiness, helperPid: child.pid, javascript: false, sandbox: true, network: "blocked" } });
+            return;
+          }
           if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("science_chromium_pdf_invalid");
           if (!receipt.readiness || !child.pid) throw new Error("science_chromium_helper_receipt_missing");
           resolve({ ok: true, engine: "chromium", bytes, chromium: {
@@ -144,7 +154,7 @@ async function execute(job: PrintJob): Promise<ChromiumPrintResult> {
           } });
         } catch (error) { resolve({ ok: false, engine: "chromium", reason: chromiumPrintFailureReason(error) }); }
       });
-      child.stdin.write(`${JSON.stringify({ schema: CHROMIUM_PRINT_SCHEMA, type: "render", requestId: job.requestId })}\n`);
+      child.stdin.write(`${JSON.stringify({ schema: CHROMIUM_PRINT_SCHEMA, type: "render", requestId: job.requestId, ...(job.png ? { mode: "png", width: job.png.width, scale: job.png.scale } : {}) })}\n`);
       if (job.cancelled) {
         const reason = job.cancelled; job.cancelled = null; cancel(job, reason);
       }
@@ -185,6 +195,25 @@ export function printHtmlInChromiumHelper(html: string, options: ChromiumPdfOpti
   if (options.signal?.aborted) return Promise.resolve({ ok: false, engine: "chromium", reason: "science_chromium_cancelled" });
   return new Promise(resolve => {
     const job: PrintJob = { html, requestId: randomUUID(), resolve, cancelled: null, detachSignal: () => {} };
+    const abort = () => cancel(job, "science_chromium_cancelled");
+    options.signal?.addEventListener("abort", abort, { once: true });
+    job.detachSignal = () => options.signal?.removeEventListener("abort", abort);
+    if (timeout > 0) job.deadline = setTimeout(() => cancel(job, "science_chromium_deadline_exceeded"), timeout);
+    queue.push(job);
+    pump();
+  });
+}
+
+/** A still picture of an HTML page (a result card): its width in CSS pixels, drawn at 1x or 2x, motion off, no network, no script. Same serial queue and isolation as a PDF. */
+export function renderHtmlToPngInChromiumHelper(html: string, options: ChromiumPngOptions = {}): Promise<ChromiumPrintResult> {
+  if (closing) return Promise.resolve({ ok: false, engine: "chromium", reason: "science_chromium_host_closed" });
+  if (typeof html !== "string" || !html.trim()) return Promise.resolve({ ok: false, engine: "chromium", reason: "science_chromium_html_required" });
+  const width = options.width ?? 960, scale = options.scale ?? 2, timeout = options.timeoutMs ?? 0;
+  if (!Number.isInteger(width) || width < CHROMIUM_PNG_LIMITS.minWidth || width > CHROMIUM_PNG_LIMITS.maxWidth || (scale !== 1 && scale !== 2)) return Promise.resolve({ ok: false, engine: "chromium", reason: "science_chromium_png_size_invalid" });
+  if (!Number.isSafeInteger(timeout) || timeout < 0 || timeout > 2_147_483_647) return Promise.resolve({ ok: false, engine: "chromium", reason: "science_chromium_deadline_invalid" });
+  if (options.signal?.aborted) return Promise.resolve({ ok: false, engine: "chromium", reason: "science_chromium_cancelled" });
+  return new Promise(resolve => {
+    const job: PrintJob = { html, png: { width, scale }, requestId: randomUUID(), resolve, cancelled: null, detachSignal: () => {} };
     const abort = () => cancel(job, "science_chromium_cancelled");
     options.signal?.addEventListener("abort", abort, { once: true });
     job.detachSignal = () => options.signal?.removeEventListener("abort", abort);

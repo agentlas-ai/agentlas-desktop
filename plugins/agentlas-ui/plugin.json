@@ -1,20 +1,20 @@
 {
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-ui",
-  "name": "Chat UI Schema",
-  "version": "1.0.0",
+  "name": "Agentlas UI",
+  "version": "1.1.0",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
     "url": "https://agentlas.cloud"
   },
   "surface": {
-    "displayName": "Chat UI Schema",
-    "displayNameKo": "채팅 UI 스키마",
-    "tagline": "Native chat components, read on demand",
-    "taglineKo": "채팅 네이티브 컴포넌트 스키마를 필요할 때 읽습니다",
-    "description": "Agentlas built-in read-only server that returns the chat's native component schema (comparisons, tables, step flows, metrics, charts) the interactive surface spec and the recurring-automation spec when the model decides to use one. Nothing else.",
-    "descriptionKo": "모델이 비교표·단계 흐름·지표·차트, 인터랙티브 화면, 반복 자동화를 쓰기로 했을 때 그 형식만 돌려주는 Agentlas 내장 읽기 전용 서버입니다.",
+    "displayName": "Agentlas UI",
+    "displayNameKo": "Agentlas UI",
+    "tagline": "Result cards, charts, tables, diagrams, documents and slides in the chat",
+    "taglineKo": "채팅에 결과 카드·차트·표·다이어그램·문서·슬라이드를 그립니다",
+    "description": "Agentlas built-in UI library for every conversation (One, Work, Finance, Science): the chat's native component schema, the interactive surface spec and the recurring-automation spec, read on demand, and the result-card assets drawn by ui.canvas and listed by ui.asset.catalog: documents, file thumbnails, charts and tables, flowcharts and diagrams, motion-graphic stills and slides.",
+    "descriptionKo": "모든 대화(One·Work·Finance·Science)에서 쓰는 Agentlas 내장 UI 라이브러리입니다. 채팅 컴포넌트·인터랙티브 화면·반복 자동화 형식은 필요할 때 읽고, 결과 카드 에셋(문서·파일 썸네일·차트·표·순서도·다이어그램·모션그래픽 정지컷·슬라이드)은 ui.canvas가 그리고 ui.asset.catalog가 목록을 돌려줍니다.",
     "category": "data",
     "brandColor": "#0F766E",
     "defaultPrompts": []
@@ -34,10 +34,10 @@
         "envKeys": [],
         "form": "inline",
         "surface": {
-          "name": "채팅 UI 스키마",
-          "nameEn": "Chat UI Schema",
-          "description": "채팅 컴포넌트 스키마를 읽기 전용으로 돌려주는 Agentlas 내장 MCP.",
-          "descriptionEn": "Agentlas built-in read-only MCP that returns the chat component schema.",
+          "name": "Agentlas UI",
+          "nameEn": "Agentlas UI",
+          "description": "채팅 컴포넌트 스키마를 읽기 전용으로 돌려주는 Agentlas 내장 MCP. 결과 카드 에셋은 ui.canvas·ui.asset.catalog 포트가 맡습니다.",
+          "descriptionEn": "Agentlas built-in read-only MCP that returns the chat component schema. Result-card assets belong to the ui.canvas and ui.asset.catalog ports.",
           "category": "data",
           "brandColor": "#0F766E",
           "mark": "UI"

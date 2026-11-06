@@ -1,15 +1,19 @@
 /**
  * The JSON schema of the result-card input, shared by every port that draws a card (ui.canvas and its alias finance.present). The 12 block
  * types are the canvas's (shared/canvas/schema.ts); only the `guide` property differs by port, so the caller passes it.
+ * `assets` (ui.canvas only) adds the open entry for asset blocks (shared/canvas/blocks, read from ui.asset.catalog) and makes `sources`
+ * optional: a card of assets alone names none. Without it the schema is byte for byte the one finance.present has always sent.
  */
+const BASE_TYPES = ['kpis', 'bars', 'ranges', 'chart', 'leans', 'table', 'heatmap', 'allocation', 'timeline', 'checklist', 'gauge', 'note'];
 const schema = (required: string[], properties: Record<string, unknown>) => ({ type: 'object', additionalProperties: false, required, properties });
 const key = { type: 'string', minLength: 1, maxLength: 200 };
 
-export function canvasInputJsonSchema(guide: Record<string, unknown>): Record<string, unknown> {
+export function canvasInputJsonSchema(guide: Record<string, unknown>, options: { assets?: boolean } = {}): Record<string, unknown> {
     const s = (maxLength: number) => ({ type: 'string', maxLength }), amount = { type: ['number', 'string'] }, units = { enum: ['usd', 'usd_per_share', 'percent', 'count', 'x', 'bp', 'krw', 'eur', 'jpy', 'gbp', 'cny', 'text'] }, tones = { enum: ['up', 'down', 'warn', 'info', 'neutral'] };
     const common = { title: s(80), width: { enum: ['full', 'two_thirds', 'half', 'third'] } }, day = { type: 'string', format: 'date' };
     const blockOf = (type: string, required: string[], properties: Record<string, unknown>) => ({ type: 'object', additionalProperties: false, required: ['type', ...required], properties: { type: { const: type }, ...common, ...properties } });
-    return { type: 'object', additionalProperties: false, required: ['title', 'blocks', 'sources'], properties: {
+    const assetBlock = { type: 'object', additionalProperties: true, required: ['type'], properties: { type: { type: 'string', not: { enum: BASE_TYPES }, description: 'An asset type from ui.asset.catalog (documents, file thumbnails, charts, tables, diagrams, motion stills, slides); its fields are the sample there.' }, ...common } };
+    return { type: 'object', additionalProperties: false, required: options.assets ? ['title', 'blocks'] : ['title', 'blocks', 'sources'], properties: {
       title: s(80), badge: { ...s(12), description: 'A ticker or region.' }, meta: s(120),
       chips: { type: 'array', maxItems: 4, items: schema(['text'], { text: s(60), tone: tones, icon: { enum: ['up', 'down', 'clock', 'alert', 'target', 'check', 'none'] } }) },
       guide,
@@ -27,7 +31,8 @@ export function canvasInputJsonSchema(guide: Record<string, unknown>): Record<st
         blockOf('checklist', ['items'], { items: { type: 'array', minItems: 1, maxItems: 10, items: schema(['text', 'state'], { text: s(90), state: { enum: ['pass', 'fail', 'watch', 'unknown'] }, detail: s(140) }) } }),
         blockOf('gauge', ['label', 'value', 'min', 'max'], { label: s(40), value: amount, min: amount, max: amount, unit: units, low: s(20), high: s(20), note: s(120) }),
         blockOf('note', ['text'], { badge: s(12), verdict: schema(['text'], { text: s(30), tone: tones }), text: { ...s(400), description: '**bold** marks a key phrase.' } }),
+        ...(options.assets ? [assetBlock] : []),
       ] } },
-      sources: { type: 'array', minItems: 1, maxItems: 8, items: schema(['title', 'url'], { title: s(160), url: { type: 'string', format: 'uri' } }) },
+      sources: { type: 'array', ...(options.assets ? {} : { minItems: 1 }), maxItems: 8, items: schema(['title', 'url'], { title: s(160), url: { type: 'string', format: 'uri' } }) },
     } };
 }

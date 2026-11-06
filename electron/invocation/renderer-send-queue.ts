@@ -30,7 +30,7 @@ import { getInvocationRunReceipt } from "../store/run-events";
 import { isOwnerEndedInvocation } from "../../shared/invocation-host-stop";
 import { queuedSendInternalFailure } from "./queue-retry-fact";
 import { readRunTurnPlacement } from "./turn-placement";
-import { hasEarlierAttempt, ownerStoppedChatSince, unconfirmedRunShouldBeSentAgain } from "./earlier-attempt";
+import { hasEarlierAttempt, ownerStoppedChatSince, unconfirmedResendIsUnbounded, unconfirmedRunShouldBeSentAgain } from "./earlier-attempt";
 import { forgetDirectStartKept, noteDirectStartKept } from "./resend-forecast";
 import { queuedSendUnansweredNotice } from "./queued-send-notices";
 export { queuedSendUnansweredNotice };
@@ -177,11 +177,11 @@ export function undispatchedStartWaits(cause: unknown, runId: string | null | un
   try { return getInvocationAdmission(runId)?.status === "rejected"; } catch { return false; }
 }
 
-/** One calm line for a message that was saved and retried but still could not start: no code, and nothing was sent anywhere. */
+/** The line for a message the host holds until its chat is free or ready: no code, nothing ran, nothing to resend. */
 export function queuedSendHeldNotice(locale: "ko" | "en"): string {
   return locale === "ko"
-    ? "메시지는 저장됐지만 아직 시작하지 못했어요. 아무것도 실행되지 않았으니 같은 내용을 한 번 더 보내 주세요."
-    : "Your message is saved, but it has not started yet. Nothing ran, so please send it once more.";
+    ? "받았습니다. 이 방이 비거나 준비되면 시작합니다. 아직 아무것도 실행되지 않았습니다."
+    : "Received. It starts when this chat is free or ready; nothing has run yet.";
 }
 
 /**
@@ -343,6 +343,10 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       if (!runId) return unconfirmedRunShouldBeSentAgain(null);
       try { return !hostRecoveryRequested(getDb(), runId) && unconfirmedRunShouldBeSentAgain(getInvocationRunReceipt(runId)); } catch { return false; }
     },
+    resendIsUnbounded: (runId) => {
+      if (!runId) return true;
+      try { return unconfirmedResendIsUnbounded(getInvocationRunReceipt(runId)); } catch { return false; }
+    },
     ownerStoppedSince: (chatId, sinceMs) => ownerStoppedChatSince(getDb(), chatId, sinceMs),
     failureCode: (runId) => getInvocationRunReceipt(runId)?.errorCode ?? null,
     // The owner's Stop, a direction steered over the run, a Goal they paused or deleted: that run's message is never started again.
@@ -407,6 +411,13 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       try {
         appendChatMessage(chatId, "assistant", queuedSendEndedNotice(pickLocale(request)),
           { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(runId, sendId), status: "needs-owner" } });
+      } catch { /* the saved message and the log remain */ }
+    },
+    // Still waiting after the old attempt cap: the row stays queued; the owner hears the calm line once, without the code.
+    onWaitingLong: ({ chatId, request, sendId }) => {
+      try {
+        appendChatMessage(chatId, "assistant", queuedSendHeldNotice(pickLocale(request)),
+          { hostNotice: { purpose: "host-status", runId: queuedSendNoticeRunId(null, sendId), status: "needs-owner" } });
       } catch { /* the saved message and the log remain */ }
     },
     onChange: (chatId) => { try { emitDesktopStoreChange({ entity: "chat", id: chatId }); } catch { /* cosmetic */ } },

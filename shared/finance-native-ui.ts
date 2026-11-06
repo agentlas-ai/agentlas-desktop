@@ -6,6 +6,9 @@ import { FinanceEarningsViewSchema, FinanceImpactViewSchema } from "./finance-pr
 import { FinanceCanvasViewSchema } from "./finance-canvas";
 
 export const FINANCE_NATIVE_VIEW = "finance.result.v1";
+/** A result card (ui.canvas, finance.present), known before its result is read: the renderer, the Science page and the exporter all use this one rule. */
+export const isResultCardInstance = (instance: { presentation: { viewId: string; fallbackText?: string } }): boolean => instance.presentation.viewId === FINANCE_NATIVE_VIEW && /^Finance (canvas|earnings|impact)$/.test(instance.presentation.fallbackText ?? "");
+
 const asset = z.unknown().transform((value, ctx): FinanceAsset => {
   try { const op = validateFinanceOperation({ type: "watchlist.add", asset: value }); if (op.type === "watchlist.add") return op.asset; } catch { /* Invalid retained data is never promoted to a card. */ }
   ctx.addIssue({ code: "custom", message: "Invalid Finance asset" }); return z.NEVER;

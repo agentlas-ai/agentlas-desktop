@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ProductExtensionStatus, ProductExtensionViewBounds, ProductExtensionViewStatus } from "@shared/product-extension";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { ipc, ipcEvents } from "@/lib/ipc";
@@ -8,7 +8,11 @@ import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { TaskSidePanel } from "@/components/workspace/TaskSidePanel";
 import { useChatOutputs } from "@/lib/one-earlier-outputs";
+import { InlineUiInstances, isResultCardInstance, useInlineUiInstances } from "@/components/UiInstances";
 import styles from "./ScienceHost.module.css";
+
+/** A result card is drawn for the chat column's width; the panel keeps at least this much when it holds one. */
+const CARD_PANEL_WIDTH = 440;
 
 function elementBounds(element: HTMLElement): ProductExtensionViewBounds {
   const rect = element.getBoundingClientRect();
@@ -36,6 +40,13 @@ export default function ScienceHostPage() {
   const { artifacts, earlierOutputs: earlier } = useChatOutputs({
     chatId: outputScope?.chatId, historyEnabled: Boolean(outputScope), poll: true, pollIntervalMs: 1500,
   });
+  // The result cards (ui.canvas) the conversation's turns showed. Science draws its own transcript and cannot show a Desktop card inline,
+  // so the cards sit in this panel, drawn by the very renderer every other conversation uses.
+  const cardInstances = useInlineUiInstances(outputScope?.chatId);
+  const cards = useMemo(() => cardInstances.filter(isResultCardInstance), [cardInstances]);
+  const hasOutputs = Boolean(outputScope) && (artifacts.length > 0 || Boolean(earlier?.count));
+  // With cards the whole panel keeps room for them; the outputs below take the same width.
+  const panelWidth = cards.length > 0 ? Math.max(outputWidth, CARD_PANEL_WIDTH) : outputWidth;
 
   useEffect(() => {
     let disposed = false;
@@ -206,11 +217,14 @@ export default function ScienceHostPage() {
             </div>
           )}
         </div>
-        {outputScope && (artifacts.length > 0 || Boolean(earlier?.count)) && <aside className={styles.outputs}
-          style={{ width: outputEmpty ? 0 : outputWidth }} aria-label={ko ? "결과" : "Outputs"}>
-          <TaskSidePanel screenChatId={outputScope.chatId} locale={ko ? "ko" : "en"} items={artifacts}
-            earlierOutputs={earlier} visible width={outputWidth} onResize={setOutputWidth} onEmptyChange={setOutputEmpty}
-            onRequestReadableWidth={setOutputWidth} onRestorePreferredWidth={() => setOutputWidth(324)} />
+        {outputScope && (hasOutputs || cards.length > 0) && <aside className={styles.outputs}
+          style={{ width: cards.length > 0 ? panelWidth : outputEmpty ? 0 : outputWidth }} aria-label={ko ? "결과" : "Outputs"}>
+          {cards.length > 0 && <section className={styles.cards} aria-label={ko ? "카드" : "Cards"} data-science-cards={cards.length}>
+            <InlineUiInstances chatId={outputScope.chatId} instances={cards} locale={ko ? "ko" : "en"} />
+          </section>}
+          {hasOutputs && <TaskSidePanel screenChatId={outputScope.chatId} locale={ko ? "ko" : "en"} items={artifacts}
+            earlierOutputs={earlier} visible width={panelWidth} onResize={setOutputWidth} onEmptyChange={setOutputEmpty}
+            onRequestReadableWidth={setOutputWidth} onRestorePreferredWidth={() => setOutputWidth(324)} />}
         </aside>}
         </div>
       </div>

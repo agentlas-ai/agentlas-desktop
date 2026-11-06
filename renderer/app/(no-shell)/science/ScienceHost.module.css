@@ -96,3 +96,11 @@
   line-height: 20px;
   letter-spacing: 0;
 }
+
+/* The conversation's result cards above its outputs: the cards bring their own frame; the panel only gives them room. */
+.cards {
+  display: grid;
+  gap: 4px;
+  padding: 4px 12px 12px;
+  min-width: 0;
+}

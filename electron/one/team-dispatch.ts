@@ -423,6 +423,7 @@ export function recoverOneTeamDispatches(): void {
   recovered = true;
   try {
     ensureTable();
+    reviveExhaustedReports();
     settleOrphanedDispatches(0);
     retryFailedReports();
     startQueuedDispatches();
@@ -444,10 +445,8 @@ const RESTART_INTERRUPTED = "restart_interrupted";
 const PARENT_BUSY_OTHER_PROCESS = "one_team_parent_busy_other_host";
 /** The report turn's start was refused for a reason that clears by itself (shared/transient-send-refusal.ts): nothing is wrong, the room is not ready yet. */
 const REPORT_START_NOT_READY = "one_team_report_start_not_ready";
-/** Reports waiting for a room that is busy elsewhere, for a restart's report, or for a room that is not ready yet: retried by the sweep, never failures. */
+/** Reports waiting for a room that is busy elsewhere, for a restart's report, or for a room that is not ready yet: pending, never failures, and never given up on by age (the idle-retry signals and its fallback carry them). */
 const HELD_REPORT_CODES = [RESTART_INTERRUPTED, PARENT_BUSY_OTHER_PROCESS, REPORT_START_NOT_READY] as const;
-/** The sweep polls a held report only this long after its session ended; the room's own settle and a sign-in return still retry it. */
-const HELD_REPORT_SWEEP_MAX_AGE_MS = 24 * 3_600_000;
 const CHAT_BUSY_OTHER_HOST = "invocation_chat_busy_other_host";
 /** A child no process holds is settled by the periodic sweep only after this quiet time: the owner's own listener
  * finalizes within 1.5 s, and a queued next run of the same chat claims it well inside it. Recovery uses 0. */
@@ -567,20 +566,45 @@ export function settleOrphanedDispatches(graceMs: number): void {
 }
 
 let orphanSweep: ReturnType<typeof setInterval> | null = null;
+let idleRetry: { arm(): void } | null = null;
+/**
+ * Waiting reports are the idle-retry helper's: it retries a room's report when that room's run ends, the room leaves the active
+ * set, the steer queue has room or the account returns, and keeps a fallback timer only while a report waits (Main and the
+ * background service cannot see each other's settle). Registered once per process, lazily so this file keeps its import set.
+ */
+function ensureIdleRetry(): void {
+  if (idleRetry) return;
+  try {
+    const helper = require("../invocation/idle-retry") as typeof import("../invocation/idle-retry");
+    idleRetry = helper.registerIdleRetry({ name: "one-team-report", pendingChats: pendingReportParents,
+      retry: (chatId) => retryFailedReports(chatId), fallbackMs: ORPHAN_SWEEP_MS });
+    try { helper.bindIdleRetrySignals(runtime().invocationService); } catch { /* a host without the service has the fallback only */ }
+  } catch (error) {
+    console.warn("[one-team] idle retry unavailable:", error instanceof Error ? error.message : error);
+  }
+}
 /**
  * A teammate whose run ended in the other process, or whose process died while this one lives, is never seen by this
- * process's settle listener; a report held for a room busy elsewhere waits for that room. Both are read from the shared
- * store once a minute in every process that recovered (cheap: running rows and held reports only).
+ * process's settle listener. The minute check reads those from the shared store, but only while a session is running or
+ * queued here; it stops itself when none is, and the next dispatch arms it again. Held and failed reports are not this timer's:
+ * they wait for the idle-retry signals (ensureIdleRetry).
  */
 function armOrphanSweep(): void {
+  ensureIdleRetry();
+  idleRetry?.arm();
   if (orphanSweep) return;
   orphanSweep = setInterval(() => {
     settleOrphanedDispatches(ORPHAN_GRACE_MS);
     void retryWantedStops().catch(() => undefined);
-    retryFailedReports(undefined, HELD_REPORT_CODES);
     // A queued job has no settle event of its own to wake it when the seat freed in the other process, when this sweep
     // just finalized the session in front of it, or when its start was refused for a reason that has since cleared.
     startQueuedDispatches();
+    try {
+      if (!getDb().prepare("SELECT 1 FROM one_team_dispatches WHERE status IN ('running','queued') LIMIT 1").get() && orphanSweep) {
+        clearInterval(orphanSweep);
+        orphanSweep = null;
+      }
+    } catch { /* an unreadable store keeps the check on */ }
   }, ORPHAN_SWEEP_MS);
   orphanSweep.unref?.();
 }
@@ -655,7 +679,8 @@ function view(dispatch: OneDispatchRow) {
     // report the owner's stop withdrew is "withdrawn": a "failed" state kept the model from starting that teammate again
     // (365aa37f, one_team_list), and the owner's stop is not the teammate's failure.
     ...(!running && !dispatch.reported_at && dispatch.report_error ? { report: { state: (HELD_REPORT_CODES as readonly string[]).includes(dispatch.report_error)
-      ? "pending" : dispatch.report_error === ONE_TEAM_REPORT_OWNER_STOPPED ? "withdrawn" : "failed", error: dispatch.report_error, attempts: dispatch.report_attempts ?? 0 } } : {}),
+      ? "pending" : dispatch.report_error === ONE_TEAM_REPORT_OWNER_STOPPED ? "withdrawn"
+      : (dispatch.report_attempts ?? 0) >= ONE_TEAM_REPORT_ATTEMPTS ? "failed" : "pending", error: dispatch.report_error, attempts: dispatch.report_attempts ?? 0 } } : {}),
     started_at: dispatch.created_at,
     updated_at: dispatch.updated_at,
   };
@@ -850,15 +875,16 @@ export function revertQueuedOneTeamReport(input: {
   if (later) return false;
   const error = input.ownerStopped ? ONE_TEAM_REPORT_OWNER_STOPPED : input.cause;
   const reverted = db.prepare(`UPDATE one_team_dispatches SET reported_at = NULL, report_error = ?,
-      report_attempts = CASE WHEN ? = 1 THEN report_attempts + 1 ELSE MAX(report_attempts, ?) END
+      report_attempts = CASE WHEN ? = 1 THEN MIN(report_attempts + 1, ? - 1) ELSE MAX(report_attempts, ?) END
     WHERE id = ? AND child_run_id = ? AND status NOT IN ('running','queued') AND reported_at IS NOT NULL AND reported_at >= ?`)
-    .run(error.slice(0, 240), input.retry ? 1 : 0, ONE_TEAM_REPORT_ATTEMPTS, dispatchId, childRunId, input.queuedAt).changes === 1;
+    .run(error.slice(0, 240), input.retry ? 1 : 0, ONE_TEAM_REPORT_ATTEMPTS, ONE_TEAM_REPORT_ATTEMPTS, dispatchId, childRunId, input.queuedAt).changes === 1;
   if (!reverted) return false;
   console.info(`[one-team] report ledger reverted dispatch=${dispatchId} steer=${input.steerId} cause=${input.cause} report_error=${error} retry=${input.retry}`);
   if (input.retry) {
     const parent = (db.prepare("SELECT parent_chat_id FROM one_team_dispatches WHERE id = ?").get(dispatchId) as { parent_chat_id: string } | undefined)?.parent_chat_id;
     if (parent) setTimeout(() => retryFailedReports(parent), 1_500).unref?.();
   }
+  armOrphanSweep(); // the idle-retry fallback now has a waiting row to watch
   return true;
 }
 
@@ -962,6 +988,16 @@ function transientRefusalCode(error: unknown): string | null {
   }
 }
 
+/** A start refusal only the owner can clear (shared/transient-send-refusal.ts startRefusalNeedsOwner), read lazily like the transient list. */
+function refusalNeedsOwner(error: unknown): boolean {
+  try {
+    const refusal = require("../../shared/transient-send-refusal") as typeof import("../../shared/transient-send-refusal");
+    return refusal.startRefusalNeedsOwner(refusal.sendRefusalCode(error));
+  } catch {
+    return false;
+  }
+}
+
 /** "started": the report turn started or was queued (or parked for a waiting Goal); "held": the room runs in the other
  * process; "failed": the start was refused; "skipped": nothing to report to. */
 type ReportOutcome = "started" | "held" | "failed" | "skipped";
@@ -1035,8 +1071,13 @@ function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markR
       return "held";
     }
     console.warn("[one-team] report turn not started:", message);
-    if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ?, report_attempts = report_attempts + 1 WHERE id = ? AND reported_at IS NULL")
-      .run(message.slice(0, 240), dispatch.id);
+    // No model ran, so this refusal does not use up the cap (only a report turn that may have run does, see revertQueuedOneTeamReport):
+    // the count stays below it and the report waits for the next signal. A refusal only the owner can clear (sign-in, payment,
+    // permission) is the one closed here: nothing the host does clears it.
+    const closedForOwner = refusalNeedsOwner(error);
+    if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ?, report_attempts = CASE WHEN ? = 1 THEN ? ELSE MIN(report_attempts + 1, ? - 1) END WHERE id = ? AND reported_at IS NULL")
+      .run(message.slice(0, 240), closedForOwner ? 1 : 0, ONE_TEAM_REPORT_ATTEMPTS, ONE_TEAM_REPORT_ATTEMPTS, dispatch.id);
+    armOrphanSweep();
     return "failed";
   }
 }
@@ -1112,26 +1153,67 @@ function settleParkedReports(parentChatId?: string): void {
   }
 }
 
-/** Reports that could not start are retried when the room is idle again, at most three attempts in all (22 O6). */
+/**
+ * Reports that could not start are retried whenever the room is idle again (idle-retry.ts signals), never given up by age or by
+ * a count of refusals that ran no model. The cap stays for a report turn that may already have run (revertQueuedOneTeamReport sets
+ * it, so that turn is never sent twice) and for a refusal only the owner can clear.
+ */
 export const ONE_TEAM_REPORT_ATTEMPTS = 3;
-/** `codes`: only reports held under these report_error codes (the sweep: held, not failed, reports). */
-function retryFailedReports(parentChatId?: string, codes?: readonly string[]): void {
+/** report_error values that no signal can make progress on: the owner's stop, a deleted room, a closed step. The fallback does not wait for them. */
+const REPORT_NO_PROGRESS_CODES = [ONE_TEAM_REPORT_OWNER_STOPPED, "one_team_report_room_gone", "one_team_report_owner_unbound", ONE_TEAM_GRAPH_STEP_ENDED] as const;
+const RETRY_PARENTS_PER_PASS = 10;
+const RETRY_ROWS_PER_PARENT = 10;
+const REPORT_WAITING_SQL = "status <> 'running' AND reported_at IS NULL AND report_error IS NOT NULL AND report_attempts < ?";
+
+/** Rooms that have a report waiting and a reason a signal or the fallback can still help: what keeps the fallback timer on. */
+export function pendingReportParents(): string[] {
+  ensureTable();
+  return (getDb().prepare(`SELECT DISTINCT parent_chat_id AS id FROM one_team_dispatches WHERE ${REPORT_WAITING_SQL}
+    AND report_error NOT IN (${REPORT_NO_PROGRESS_CODES.map(() => "?").join(",")})`)
+    .all(ONE_TEAM_REPORT_ATTEMPTS, ...REPORT_NO_PROGRESS_CODES) as Array<{ id: string }>).map((entry) => entry.id);
+}
+
+/** Rooms are picked first (oldest waiting report, room not live in either process), then that room's rows: ten stuck reports in one room cannot keep another room's report from going out. */
+function retryFailedReports(parentChatId?: string): void {
   try {
     ensureTable();
     settleParkedReports(parentChatId);
-    // The sweep (codes) polls held reports for a bounded time, so a report held for good cannot fill its ten slots forever.
-    const sweepSince = codes?.length ? new Date(Date.now() - HELD_REPORT_SWEEP_MAX_AGE_MS).toISOString() : null;
-    const rows = getDb().prepare(`SELECT * FROM one_team_dispatches WHERE status <> 'running' AND reported_at IS NULL AND report_error IS NOT NULL
-      AND report_attempts < ? ${parentChatId ? "AND parent_chat_id = ?" : ""} ${codes?.length ? `AND report_error IN (${codes.map(() => "?").join(",")}) AND updated_at >= ?` : ""}
-      ORDER BY updated_at LIMIT 10`)
-      .all(ONE_TEAM_REPORT_ATTEMPTS, ...(parentChatId ? [parentChatId] : []), ...(codes ?? []), ...(sweepSince ? [sweepSince] : [])) as OneDispatchRow[];
-    for (const dispatch of rows) {
-      // A room whose turn runs in either process gets the report after it, never a second turn beside it.
-      if (chatLiveAnywhere(dispatch.parent_chat_id)) continue;
-      reportToOne(dispatch);
+    const db = getDb();
+    const parents: string[] = [];
+    if (parentChatId) parents.push(parentChatId);
+    else {
+      for (const entry of db.prepare(`SELECT parent_chat_id AS id FROM one_team_dispatches WHERE ${REPORT_WAITING_SQL}
+        GROUP BY parent_chat_id ORDER BY MIN(updated_at)`).all(ONE_TEAM_REPORT_ATTEMPTS) as Array<{ id: string }>) {
+        if (chatLiveAnywhere(entry.id)) continue;
+        parents.push(entry.id);
+        if (parents.length >= RETRY_PARENTS_PER_PASS) break;
+      }
+    }
+    for (const parent of parents) {
+      const rows = db.prepare(`SELECT * FROM one_team_dispatches WHERE ${REPORT_WAITING_SQL} AND parent_chat_id = ?
+        ORDER BY report_attempts, updated_at LIMIT ${RETRY_ROWS_PER_PARENT}`).all(ONE_TEAM_REPORT_ATTEMPTS, parent) as OneDispatchRow[];
+      for (const dispatch of rows) {
+        // A room whose turn runs in either process gets the report after it, never a second turn beside it.
+        if (chatLiveAnywhere(dispatch.parent_chat_id)) break;
+        reportToOne(dispatch);
+      }
     }
   } catch (error) {
     console.warn("[one-team] report retry deferred:", error instanceof Error ? error.message : error);
+  }
+}
+
+/** Reports that ran out their three tries before reports stopped being capped by refusals that ran no model: the ones from the last day wait again. */
+function reviveExhaustedReports(): void {
+  try {
+    ensureTable();
+    const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
+    const keep = [...REPORT_NO_PROGRESS_CODES, "held-system-retired"];
+    getDb().prepare(`UPDATE one_team_dispatches SET report_attempts = 0 WHERE status <> 'running' AND reported_at IS NULL AND report_error IS NOT NULL
+      AND report_attempts >= ? AND updated_at >= ? AND report_error NOT IN (${keep.map(() => "?").join(",")})`)
+      .run(ONE_TEAM_REPORT_ATTEMPTS, since, ...keep);
+  } catch (error) {
+    console.warn("[one-team] exhausted reports not revived:", error instanceof Error ? error.message : error);
   }
 }
 
@@ -1738,6 +1820,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
     `).run(id, parentChatId, parentRunId, member.id, member.installedAgentId, member.displayName,
       chat.id, runId, brief, hash, now, now,ownerScope, input.graphOwner ?? null, delegation === "write" ? "write" : null);
   }
+  armOrphanSweep();
   try {
     // Owner 2026-10-04: what One hands to a teammate runs with full access and Always allow, so the teammate never
     // stops to ask. Only payment and an owner's explicit deny rule still stop it (connect.ts, the arbiter).
@@ -1821,6 +1904,7 @@ function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member:
     catch (error) { console.warn("[one-team] new_session isolation mark unavailable:", error instanceof Error ? error.message : error); }
   }
   installSettleListener();
+  armOrphanSweep();
   const queued = row(id)!;
   const ahead = (getDb().prepare(
     "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND (member_id = ? OR member_agent_id = ?) AND status = 'queued'",

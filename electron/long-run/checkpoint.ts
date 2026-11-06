@@ -73,6 +73,7 @@ export function recordTaskCheckpoint(input: {
   recoveryFingerprint?: string | null;
   recoveryStreak?: number;
   noProgressRetries?: number;
+  outcomeDigest?: string | null;
   evidenceRefs: string[];
   projectDir?: string | null;
 }): LongRunTaskCheckpoint {
@@ -161,6 +162,7 @@ export function recordTaskCheckpoint(input: {
       recoveryFingerprint: input.recoveryFingerprint ?? null,
       recoveryStreak: Math.max(0, Math.floor(input.recoveryStreak ?? 0)),
       noProgressRetries: Math.max(0, Math.floor(input.noProgressRetries ?? 0)),
+      outcomeDigest: input.outcomeDigest ?? null,
       sideEffects: { state: settledProducer ? "settled" : "uncertain", attemptRefs: [],
         ...(settledProducer && boundary?.terminalEventId && boundary.receiptEventId && boundary.snapshotDigest ? { boundary: {
           invocationRunId: boundary.invocationRunId, terminalEventId: boundary.terminalEventId,

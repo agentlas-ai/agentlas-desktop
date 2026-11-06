@@ -3,7 +3,8 @@ import { prepareGoalObligationContinuation, abandonGoalObligationContinuation } 
 import { appendGoalWaitObservation, createGoalWaitObservationData, goalWaitSubjectRef as identity } from "./goal-wait-observation";
 import { pollCanonicalGoalWaits, reconcileCanonicalGoalWaits } from "./canonical-owner-waits";
 import { normalizeGoalWaitTimer } from "./normalize-timer";
-import { claimWaitContinuation, dispatchWaitClaim, reconcileWaitClaim, waitObservationReady, nextWaitObservationAt } from "./wait-engine";
+import { claimWaitContinuation, dispatchWaitClaim, reconcileWaitClaim, waitObservationReady, nextWaitObservationAt, createQuietWaitChecks } from "./wait-engine";
+export { effectiveWaitCheckAt } from "./wait-engine";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { episodeWaitFenceReason, recordEpisodeWaitTransition, drainGoalEpisodeNotices } from "./episode-disposition";
 import { ownsHostGoalLoop } from "./host-goal-surface";
@@ -222,7 +223,14 @@ async function boundedWaitCheck<T>(operation: () => T | Promise<T>, timeoutMs = 
   } finally { if (timer) clearTimeout(timer); }
 }
 
+/**
+ * The last time this process checked a wait whose subject had not changed (such a check stores no row). One entry per wait, bound to
+ * the revision it was taken from, so any stored change wins. Process-local: a restart, or an evicted entry, checks once more, which is
+ * harmless. The stored nextCheckAt readers use is effectiveWaitCheckAt, not this map.
+ */
+const quietWaitChecks = createQuietWaitChecks();
 function persist(value: GoalWaitSubscription): void {
+  quietWaitChecks.drop(value.waitId);
   appendLongRunEvent({ runId: value.runId, kind: "run.wait_subscription", actorKind: "host",
     sourceEventId: `wait:${value.waitId}:${value.revision}`, payload: { subscription: value } });
   recordEpisodeWaitTransition(value);
@@ -720,7 +728,8 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     }
     if (wait.state !== "pending" || target.isChatBusy(wait.chatId)) return;
     if (candidate.status === "paused" && !["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")) return;
-    const due = !wait.nextCheckAt || Date.parse(wait.nextCheckAt) <= now || (wait.deadline !== null && Date.parse(wait.deadline) <= now);
+    const due = (wait.deadline !== null && Date.parse(wait.deadline) <= now)
+      || (!wait.nextCheckAt || Date.parse(wait.nextCheckAt) <= now) && !quietWaitChecks.pending(wait, now);
     if (!due && candidate.status !== "paused") return;
     let observation: GoalWaitObservation | null = null, failure: string | null = null;
     let storageBusy = false;
@@ -950,7 +959,12 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       }
       next.cursor = observation.cursor; next.lastObservedDigest = observation.digest;
       if (!ready) {
-        Object.assign(next, nextWaitObservationAt(wait.intervalMs, clock())); persist(next); return;
+        const scheduled = nextWaitObservationAt(wait.intervalMs, clock());
+        // At the longest interval an unchanged subject writes nothing: readers take effectiveWaitCheckAt from the stored row.
+        if (scheduled.intervalMs === wait.intervalMs && observation.cursor === wait.cursor && observation.digest === wait.lastObservedDigest) {
+          quietWaitChecks.note(wait, clock()); return;
+        }
+        Object.assign(next, scheduled); persist(next); return;
       }
       dispatch = claimWaitContinuation<GoalWaitSubscription, GoalWaitDispatch>({
         transaction: body => body(), read: () => latestGoalWaitSubscription(wait.goalId), persist,

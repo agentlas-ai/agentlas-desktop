@@ -15,7 +15,28 @@ type Scope = { id: string; token: string; ownerId: number; chatId: string; runId
 const scopes = new Map<string, Scope>();
 export function revokeNativeGuestComputerUseScopes(): void { for (const scope of [...scopes.values()]) scope.dispose(); }
 const UUID = /^[a-f0-9-]{36}$/i;
-function failure(error: string) { return { ok: false as const, error, message: error }; }
+/** What each refusal code means and the next step, in words: the model reads the message, not the code. */
+const GUEST_REFUSAL_TEXT: Readonly<Record<string, string>> = {
+  "native-guest-scope-denied": "This in-app browser turn is no longer valid (the run was stopped or ended, or the page was replaced). Call list_apps to see the pages that are open now.",
+  "native-guest-target-denied": "That name is not an open page of this run's in-app browser. Call list_apps and use a name it returns.",
+  "native-guest-route-denied": "That request is not available for an in-app browser page.",
+  "native-guest-action-unsupported": "That action is not available for an in-app browser page. Use click, drag, scroll, type_text or press_key.",
+  "native-guest-read-only": "This run may only look at the page, not press anything. Pressing needs the run's write permission.",
+  "native-guest-capture-stale": "The page changed since the last get_screen, or an input was already sent. Call get_screen for this app and use its new source_id.",
+  "native-guest-capture-unavailable": "The page has no measured frame yet (it may still be opening). Call get_screen for this app again.",
+  "native-guest-capture-geometry-mismatch": "The screenshot did not match the page's measured size, so it was not used. Call get_screen for this app again.",
+  "native-guest-capture-budget-exceeded": "The page's screenshot is larger than the size limit, so it was not returned.",
+  "native-guest-input-invalid": "That input is not valid here. Clicks are 1 or 2, coordinates are inside the last screenshot, scroll is within 4000 either way, keys are single keys with Shift only (no Cmd, Ctrl or Alt chords or clipboard shortcuts) repeated 1 to 20 times, and text is at most 16 KiB.",
+  "native-guest-input-stale": "The page changed while the input was being sent. Call get_screen to see the page now.",
+  "native-guest-input-outside-frame": "That point is outside the page's frame. Use coordinates inside the last screenshot.",
+  "native-guest-queue-full": "8 inputs are already waiting for this page. Wait for them to finish before sending more.",
+  "native-guest-operation-failed": "The in-app browser input failed. Call get_screen to see the page now.",
+};
+const GUEST_CAPTURE_TEXT = "The page could not be captured right now (it may still be loading, or another capture is running). Call get_screen for this app again.";
+function refusalText(code: string): string { return GUEST_REFUSAL_TEXT[code] ?? (code.startsWith("native-browser-capture-") ? GUEST_CAPTURE_TEXT : code); }
+function failure(error: string) { return { ok: false as const, error, message: refusalText(error) }; }
+/** The most keys one press_key call repeats (the computer-use tool schema allows 1 to 20). */
+const MAX_KEY_REPEAT = 20;
 function pageApp(scope: Scope, id: string): string { return `native-guest:${scope.id}:${id}`; }
 function live(scope: Scope): boolean { return scopes.get(scope.id) === scope && !scope.signal.aborted && scope.current(); }
 function exactPage(scope: Scope, app: unknown): Page | null {
@@ -139,9 +160,12 @@ export async function handleNativeGuestComputerUse(route: string, authorization:
       if (typeof body.key !== "string" || !allowed.test(key) || !Array.isArray(modifiers)
         || modifiers.some(value => !["shift"].includes(String(value)))) return failure("native-guest-input-invalid");
       // Global/app shortcuts and clipboard chords are not supported.
-      if (body.repeat !== undefined && body.repeat !== 1) return failure("native-guest-input-invalid");
-      await send({ kind: "key", phase: "down", key, modifiers });
-      await send({ kind: "key", phase: "up", key, modifiers });
+      const repeat = body.repeat === undefined ? 1 : body.repeat;
+      if (typeof repeat !== "number" || !Number.isInteger(repeat) || repeat < 1 || repeat > MAX_KEY_REPEAT) return failure("native-guest-input-invalid");
+      for (let count = 0; count < repeat; count++) {
+        await send({ kind: "key", phase: "down", key, modifiers });
+        await send({ kind: "key", phase: "up", key, modifiers });
+      }
     } else return failure("native-guest-action-unsupported");
     // The dispatched click/key may legitimately navigate. Never turn its effect into a retryable stale failure.
     scope.capture = null;
@@ -153,7 +177,8 @@ export async function handleNativeGuestComputerUse(route: string, authorization:
     try { return await operation(); } catch (error) {
       const code = error instanceof Error && /^native-(?:guest|browser)-[a-z-]+$/.test(error.message) ? error.message : "native-guest-operation-failed";
       if (effectPossible) scope.capture = null;
-      return { ...failure(code), effectPossible, retrySafe: !effectPossible };
+      const refused = failure(code);
+      return { ...refused, ...(effectPossible ? { message: `${refused.message} Part of the input may already have reached the page; call get_screen before repeating it.` } : {}), effectPossible, retrySafe: !effectPossible };
     } finally {
       scope.queued--;
       if (pressed) { try { releaseNativeBrowserGuestPressedInput(page.wc, pressed); } catch { /* terminal cleanup is best effort */ } }

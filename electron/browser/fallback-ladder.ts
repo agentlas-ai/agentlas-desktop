@@ -16,7 +16,7 @@
  *
  * Safety (unchanged by this module): no CAPTCHA solving, no bot-detection evasion, no paid actions. A human check
  * (CAPTCHA/anti-bot wall) is not a dead stop: the owner sees one card with the live browser brought forward, the
- * page is watched until the check clears, and the run resumes (reason code human_check_required).
+ * page is watched until the check clears and the clear is recorded (reason code human_check_required); the run does not resume by itself.
  */
 
 export const BROWSER_LADDER_SCHEMA = "agentlas.browser-fallback-ladder.v1" as const;

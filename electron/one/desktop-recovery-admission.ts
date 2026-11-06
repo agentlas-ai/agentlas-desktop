@@ -14,13 +14,18 @@ type Advice = OneAutoRecoveryJudgement | OneAutoRecoveryVerification;
 interface Reservation {
   originalRunId: string; parentRunId: string; nextRunId: string; ordinal: number; scopeDigest: string;
 }
+/**
+ * Storage sanity bound on the saved chain of one original run. The two-attempt budget is per failure fingerprint
+ * (oneRecoveryAttemptsForFingerprint): a different problem restarts it, so the chain may be longer than the budget.
+ */
+const DESKTOP_RECOVERY_CHAIN_LIMIT = ONE_AUTO_RECOVERY_MAX_ATTEMPTS * 16;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 function reservation(value: unknown): Reservation {
   const p = value as Partial<Reservation> | null;
   if (!p || [p.originalRunId, p.parentRunId, p.nextRunId].some(id => typeof id !== "string" || !id || id.length > 240)
     || p.nextRunId === p.parentRunId || p.nextRunId === p.originalRunId
-    || !Number.isSafeInteger(p.ordinal) || p.ordinal! < 1 || p.ordinal! > ONE_AUTO_RECOVERY_MAX_ATTEMPTS
+    || !Number.isSafeInteger(p.ordinal) || p.ordinal! < 1 || p.ordinal! > DESKTOP_RECOVERY_CHAIN_LIMIT
     || typeof p.scopeDigest !== "string" || !/^[0-9a-f]{64}$/.test(p.scopeDigest)) throw new Error("one_recovery_reservation_invalid");
   return { originalRunId: p.originalRunId!, parentRunId: p.parentRunId!, nextRunId: p.nextRunId!, ordinal: p.ordinal!, scopeDigest: p.scopeDigest };
 }
@@ -48,6 +53,24 @@ export function desktopOneRecoveryContext(runId: string, chatId: string): { orig
     if (p.originalRunId !== originalRunId || p.ordinal !== i + 1) throw new Error("one_recovery_counter_invalid");
   }
   return { originalRunId, attemptsSpent: rows.length };
+}
+
+/**
+ * Attempts spent on THIS failure fingerprint: the saved requests at the end of the chain that carry it. A request saved
+ * without a fingerprint (verification advice, rows from before it was kept) counts as the same problem, the conservative
+ * side. This is oneRecoveryAttemptsForFingerprint's rule applied per segment, so Main's admission and the judge agree.
+ */
+export function desktopOneRecoveryAttemptsForFingerprint(originalRunId: string, fingerprint: string | null | undefined): number {
+  const rows = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id=? AND kind=? ORDER BY seq DESC")
+    .all(originalRunId, REQUEST) as Array<{ payload_json: string }>;
+  let spent = 0;
+  for (const row of rows) {
+    let saved: unknown = null;
+    try { saved = (JSON.parse(row.payload_json) as { adviceFingerprint?: unknown }).adviceFingerprint; } catch { /* counts as the same problem */ }
+    if (fingerprint && typeof saved === "string" && saved && saved !== fingerprint) break;
+    spent += 1;
+  }
+  return spent;
 }
 
 /** A remounted view has no lineage in memory. Only a saved child link can
@@ -132,7 +155,8 @@ export function reserveDesktopOneRecovery(runId: string, chatId: string, capture
       // Every preceding request must have reached the exact now-terminal parent.
       if (old.nextRunId !== runId || !getInvocationRunReceipt(old.nextRunId)?.finishedAt) return null;
     }
-    if (context.attemptsSpent >= ONE_AUTO_RECOVERY_MAX_ATTEMPTS) return null;
+    const sameProblem = "fingerprint" in advice && typeof advice.fingerprint === "string" ? advice.fingerprint : null;
+    if (desktopOneRecoveryAttemptsForFingerprint(context.originalRunId, sameProblem) >= ONE_AUTO_RECOVERY_MAX_ATTEMPTS) return null;
     const next: Reservation = { originalRunId: context.originalRunId, parentRunId: runId, nextRunId: randomUUID(),
       ordinal: context.attemptsSpent + 1, scopeDigest: capturedScope };
     if (!parentMayContinue(next, chatId)) return null;

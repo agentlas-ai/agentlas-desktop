@@ -38,15 +38,21 @@ function portableSelection(value: RuntimeSelection | RuntimeStatus): RuntimeSele
  * DB-independent continuity mirror for One's startup recovery plane.
  * It stores only the exact selected runtime identity, never credentials,
  * prompts, chat content, or a substitute runtime.
+ * Written when the selection changes (or the file is missing or unreadable), not on every detect.
  */
 export function writeRuntimeSelectionMirror(value: RuntimeSelection | RuntimeStatus): void {
   const file = mirrorPath();
   const parent = path.dirname(file);
   const tmp = `${file}.${process.pid}.tmp`;
+  const selection = portableSelection(value);
+  // The detect cache expires every few seconds with the same selection. The file itself is the memory of what was written (another
+  // process may have changed it), so there is no in-process copy to go stale: same selection on disk, nothing to write.
+  const onDisk = readRuntimeSelectionMirror();
+  if (onDisk && JSON.stringify(onDisk) === JSON.stringify(selection)) return;
   const payload: RuntimeMirror = {
     contract: CONTRACT,
     updatedAt: new Date().toISOString(),
-    selection: portableSelection(value),
+    selection,
   };
   try {
     fs.mkdirSync(parent, { recursive: true, mode: 0o700 });

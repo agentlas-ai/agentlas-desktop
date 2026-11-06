@@ -4,6 +4,7 @@ import { getChat } from "../store/chats";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
 import { isAutoGoalOfRunMessage } from "../long-run/daemon-turn-goal";
+import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 
 /** Host-owned observation, not an execution grant. Nested sessions retain the
  * originating room's binding; they never adopt their hidden session's Goal. */
@@ -61,7 +62,7 @@ function readTeamGoalContext(rootChatId: string, projectId: string | null, withC
     throw new TeamGoalContextError("team_goal_revision_mismatch");
   }
   return { ...base, goalId, runId: run.id, goalRevision: revision?.revision ?? null,
-    objective: run.objective, acceptanceCriteria: [...run.acceptanceCriteria],
+    objective: run.objective, acceptanceCriteria: effectiveAcceptanceCriteria(run.acceptanceCriteria),
     ...(withCheckpoint ? { checkpoint: latestTaskCheckpoint(goalId) ?? undefined } : {}) };
 }
 

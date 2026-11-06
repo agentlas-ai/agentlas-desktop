@@ -1,9 +1,11 @@
 import { FinanceNativeResultSchema } from './finance-native-ui';
 import { financeCanvasDocument, financeCanvasFromLegacy } from './finance-canvas';
+import { canvasSummaryLines } from './canvas';
+import './canvas/blocks/registry'; // the phone's card is drawn here, so every asset block must be known (only the host imports this file)
 import { financePortfolioLineText } from './finance-portfolio';
 import { financeDatedSeries } from './finance-data-visual';
 import { financeReportCompositionSpec, financeReportComputeMetrics, financeReportLocale, financeReportProseBlocks, financeReportWarnings, selectFinanceReportSections } from './finance-report-presentation';
-import { validateInlineUiPresentationContent, type InlineUiPresentationContent } from './inline-ui-presentation';
+import { screenInlineVisualHtml, validateInlineUiPresentationContent, type InlineUiPresentationContent } from './inline-ui-presentation';
 import { INTELLECT_UI_LIMITS, type IntellectUiNode } from './intellect-ui';
 
 const text = (value: string): IntellectUiNode => ({ type: 'text', text: value });
@@ -94,7 +96,8 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
   } else if (view.kind === 'canvas' || view.kind === 'earnings' || view.kind === 'impact') {
     // The answer's own result card: the phone draws the very HTML the desktop draws (sandboxed visual), so both show the same card.
     const canvas = financeCanvasFromLegacy(view as { kind: string } & Record<string, unknown>);
-    if (canvas) blocks.push({ kind: 'visual', html: financeCanvasDocument(canvas) });
+    // A drawn card the phone's visual limits refuse is still shown, as the card's own plain-text lines, never as an empty "cannot be displayed".
+    if (canvas) { const html = financeCanvasDocument(canvas); blocks.push(screenInlineVisualHtml(html).ok ? { kind: 'visual', html } : native(canvasSummaryLines(canvas).map(line => text(clipText(line, INTELLECT_UI_LIMITS.textChars))), canvas.title)); }
   } else if (view.kind === 'report') {
     const locale = financeReportLocale(view.report, 'en');
     if (view.coverage?.missingPositions) blocks.push(native([text(`${view.coverage.pricedPositions}/${view.coverage.positions} priced holdings · ${view.coverage.missingPositions} unavailable`)]));

@@ -12,12 +12,15 @@ import {readGoalWaitProposal} from "./goal-wait-proposal";
 import {parseGoalWaitIntent,type GoalWaitIntent} from "./wait-emitter";
 import {observeGoalWaitSubject,type GoalWaitObservation,type GoalWaitHostOwner} from "./wait-subscriptions";
 import {claimWaitContinuation,dispatchWaitClaim,reconcileWaitClaim,sameWaitSnapshot,
-  waitObservationReady,nextWaitObservationAt,type WaitEngineStorage} from "./wait-engine";
+  waitObservationReady,nextWaitObservationAt,createQuietWaitChecks,WAIT_MAX_INTERVAL_MS,type WaitEngineStorage} from "./wait-engine";
 import type {CanonicalGoalWaitOwnerRef,CanonicalGoalWaitOwnerProvider,CanonicalGoalWaitIntake,
   CanonicalGoalWaitOwnerSnapshot,CanonicalGoalWaitPrepared} from "./canonical-owner-port";
 export type CanonicalGoalWaitScope=Pick<CanonicalGoalWaitOwnerRef,"domain"|"projectId"|"conversationId"|"chatId">;
 export const CANONICAL_GOAL_WAIT_KIND="goal_wait_subscription";
 const canonical=(value:unknown)=>JSON.stringify(value);
+/** A pending wait at the longest interval whose subject did not change stores no row per poll; this poller's last such check lives
+ * here (revision-bound, bounded). The stored nextCheckAt is read only by this adapter's due check, so no reader needs a derived time. */
+const quietChecks=createQuietWaitChecks();
 /** One broken source must not starve unrelated owners on every timer tick.
  * Keep exact wait state intact and log only a bounded machine cause. */
 function deferredCandidate(stage:"poll"|"reconcile"|"proposal",waitId:string,error:unknown):void {
@@ -37,6 +40,7 @@ function latest(ref:Readonly<CanonicalGoalWaitOwnerRef>):CanonicalGoalWaitRecord
   return wait;
 }
 function persist(value:CanonicalGoalWaitRecord):void {
+  quietChecks.drop(value.waitId);
   const checked=canonicalGoalWaitSnapshot(value);if(!checked) throw new Error("goal_wait_registration_invalid");
   recordRunEvent({runId:value.ref.sourceInvocationId,chatId:value.ref.chatId,kind:CANONICAL_GOAL_WAIT_KIND,
     sourceEventId:`goal-wait:${value.waitId}:${value.revision}`,payload:{canonicalGoalWait:checked}});
@@ -174,8 +178,11 @@ export function createCanonicalGoalWaitOwner(provider:CanonicalGoalWaitOwnerProv
             start:()=>provider.admitAndStart(packet!),onStarted:()=>{},failureState:"claimed",failureReason:"goal_wait_dispatch_unknown"});
           continue;
         }
-        if(expected.state!=="pending" || (expected.nextCheckAt && Date.parse(expected.nextCheckAt)>clock()
-          && !(expected.deadline && Date.parse(expected.deadline)<=clock()))) continue;
+        if(expected.state!=="pending") continue;
+        {const now=clock();
+          // A passed deadline is always due; otherwise a future stored time or a recent quiet check holds the poll.
+          if(!(expected.deadline && Date.parse(expected.deadline)<=now)
+            && ((expected.nextCheckAt && Date.parse(expected.nextCheckAt)>now) || quietChecks.pending(expected,now))) continue;}
         const adapter=storage(expected.ref,options.owner);
         let source:CanonicalGoalWaitOwnerSnapshot;
         try {source=snapshot(provider,expected.ref);
@@ -192,6 +199,12 @@ export function createCanonicalGoalWaitOwner(provider:CanonicalGoalWaitOwnerProv
         let packet:CanonicalGoalWaitPrepared|null=null;
         const ready=Boolean(expected.successorInvocationId && expected.readyObservation)||waitObservationReady(expected,observation);
         if(!ready) {
+          // At the longest interval an unchanged subject writes nothing; the stored time falls behind and this poller holds the next check.
+          if(expected.intervalMs>=WAIT_MAX_INTERVAL_MS && observation.cursor===expected.cursor
+            && observation.digest===expected.lastObservedDigest) {
+            if(adapter.current(expected))quietChecks.note(expected,clock());
+            continue;
+          }
           adapter.transaction(()=>{const live=adapter.read();if(!sameWaitSnapshot(live,expected)||!adapter.current(live!))return;
             adapter.persist({...live!,revision:live!.revision+1,cursor:observation.cursor,lastObservedDigest:observation.digest,
               ...nextWaitObservationAt(live!.intervalMs,clock())});});continue;

@@ -81,6 +81,12 @@ export function isCurrentDialogCapability(capability: Capability, context: Capab
   });
 }
 
+// A capability whose call looks its controls up again in the live app: a learned one (learn.ts) or an explored dialog (steps-runner.ts). A menu command
+// (structure) is decided by its menu entry, a published script does not look anything up.
+export function refindsLive(capability: Capability): boolean {
+  return capability.traits?.includes("learned") === true || (capability.tier === "explored" && capability.body?.kind === "steps");
+}
+
 // What an agent can rely on: stated by the source (published entries carry no status), or proven by an exercise, or a menu command the live
 // menu confirms at every call. A capability that was only seen (candidate) or has since failed (degraded) does not count.
 export function isUsable(capability: Capability, context: CapabilityPolicyContext = {}): boolean {
@@ -88,7 +94,9 @@ export function isUsable(capability: Capability, context: CapabilityPolicyContex
   // A learned capability (learn.ts) is callable once proven, and stays callable after an app update: its replay finds the controls again, checks the outcome and,
   // when it cannot go on, hands the caller back to the screen instead of refusing.
   if (capability.traits?.includes("learned")) return capability.status === "verified" || capability.status === "degraded";
-  if (capability.status === "degraded") return false;
+  // An explored dialog capability finds its controls in the live dialog at every call and closes the dialog again when one is gone, so a failed last use
+  // does not stop the next call - the call is what proves it works again.
+  if (capability.status === "degraded") return refindsLive(capability) && isCurrentDialogCapability(capability, context);
   if (capability.tier === "structure") return isDirectMenuCommand(capability, context);
   if (capability.tier === "explored" && !isCurrentDialogCapability(capability, context)) return false;
   if (capability.tier === "published" && capability.status === undefined) return true;

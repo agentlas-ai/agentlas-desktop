@@ -7,7 +7,7 @@
  *    visible frame URLs), classifies, runs the bounded ladder and returns how to answer the waiting call:
  *    replay a read-only call on the recovered surface, or annotate the error with a machine block + one line.
  *  - observeBrowserToolForHumanCheck: after a successful page-changing call, a human check on the page arms
- *    the human-check rung (card + live browser in front + watcher that resumes when the page clears).
+ *    the human-check rung (card + live browser in front + watcher that records when the page clears).
  *  - bindBrowserLadderRun: the run (client.ts) lends its chat/run ids, locale and notice sink.
  *  - browserLadderOwnerAction: the owner card's single button.
  *
@@ -332,7 +332,10 @@ async function computerUseDedicated(scope: LadderScope): Promise<RungOutcome> {
   const { dedicatedBrowserWindowBounds } = await import("./login-recovery-runtime");
   const key = scope.binding?.chatId ?? "unbound";
   computerUseGrants.get(key)?.();
-  const release = grantComputerUseWindowScope({ pid: headed.pid, windows: () => dedicatedBrowserWindowBounds(), reason: "browser-ladder-rung-5" });
+  const binding = scope.binding;
+  // While the run lives the lock outlasts the grant's time limit; with no run to ask (unbound) the limit applies as before.
+  const release = grantComputerUseWindowScope({ pid: headed.pid, windows: () => dedicatedBrowserWindowBounds(), reason: "browser-ladder-rung-5",
+    ...(binding ? { alive: () => runStillLive(binding) } : {}) });
   computerUseGrants.set(key, release);
   scope.handoff = { kind: "computer-use", id: String(headed.pid) };
   return { result: "handed-off", detail: { pid: headed.pid, relaunched: headed.relaunched, scope: "window" } };
@@ -408,8 +411,8 @@ function answerFor(result: LadderRunResult, input: { mutating: boolean; neverRan
       : `Agentlas browser ladder: the browser path failed (${state.code}). The dedicated Agentlas browser is now visible; use computer use with app "pid:${scope.handoff?.id}". Computer use is locked to that window until this run ends — other apps, the owner's own Chrome, OS dialogs and password prompts are refused.`;
   } else if (state.final === "waiting-owner") {
     text = state.code === "human-check-required"
-      ? "Agentlas browser ladder: human_check_required — the site shows a human check. The owner was shown one card with the browser in front; the run resumes when the page clears. Do not try to solve or bypass it; continue other work."
-      : "Agentlas browser ladder: the site needs the owner's sign-in; one card is open and the run resumes when the session appears. Continue other work.";
+      ? "Agentlas browser ladder: human_check_required — the site shows a human check. The owner was shown one card with the browser in front. This run does not resume by itself: continue with other work, and if nothing else is left, tell the owner what is waiting and stop. The next browser call after the owner has dealt with it goes straight through. Do not try to solve or bypass it."
+      : "Agentlas browser ladder: the site needs the owner's sign-in; one card is open. This run does not resume by itself: continue with other work, and if nothing else is left, tell the owner what is waiting and stop. The next browser call after the owner has signed in goes straight through.";
   } else {
     const suggestion = scope.suggestions.length ? ` Try the tool resolver: agentlas_resolve_plugins with need "${scope.suggestions[0].replace(/ \(agentlas_resolve_plugins\)$/, "")}"; installing stays the owner's decision.` : "";
     // Plain words: this text is what the model repeats to the owner. The machine code and the per-rung results stay in meta (above).

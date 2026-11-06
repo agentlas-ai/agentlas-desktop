@@ -1,6 +1,7 @@
 import type { FinanceDataResult } from '../../../shared/finance';
 import { fetchFinanceText } from './http';
 import { ReadCache, Slots } from './read-cache';
+import { queryYahooFinanceNews } from './yahoo-market';
 
 /**
  * Three public sources that need no account, key or payment, each reachable by a plain HTTPS GET to a fixed host:
@@ -250,5 +251,14 @@ export async function queryFreeSource(metric: FreeSourceMetric, query: string, p
     // The service answers a refused request with plain text and status 200, not JSON.
     const reply = await read(url, 5 * 60_000, signal, body => { try { JSON.parse(body); } catch { throw new Error(/limit requests|one every/i.test(body) ? 'finance_source_rate_limited' : 'finance_source_shape'); } }, true);
     return parseGdelt(JSON.parse(reply.body), text, url.href, reply.at);
-  } catch (error) { return failed([url.href], error, 'gdelt-doc'); }
+  } catch (error) { return yahooNewsWhenGdeltFails(text, signal, failed([url.href], error, 'gdelt-doc')); }
+}
+/** GDELT answers about half of well-spaced requests with a refusal. The same keyword is then asked of Yahoo Finance news (mostly English, no period filter), and the answer says so. Without Yahoo rows GDELT's own failure is returned, so its cause stays visible. */
+async function yahooNewsWhenGdeltFails(text: string, signal: AbortSignal | undefined, original: FinanceDataResult): Promise<FinanceDataResult> {
+  if (signal?.aborted || original.warnings[0] === 'finance_source_cancelled') return original;
+  try {
+    const yahoo = await queryYahooFinanceNews(text, { signal });
+    if (yahoo.rows.length) return { ...yahoo, status: 'partial', warnings: [`finance_news_search_fallback: GDELT unavailable (${original.warnings[0]}); these are Yahoo Finance keyword headlines, mostly English, and the period was not applied.`, ...yahoo.warnings] };
+  } catch { /* the GDELT failure below stands */ }
+  return original;
 }

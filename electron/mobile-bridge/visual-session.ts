@@ -75,6 +75,15 @@ function sourceEqual(a: MobileBridgeVisualSourceDto, b: MobileBridgeVisualSource
     && a.scaleFactor === b.scaleFactor;
 }
 
+/**
+ * A refusal the host input path raises with the existing refusal code that describes it. The phone parses a closed code set, so a
+ * new code is never introduced here. Every one of these is thrown before the first input event is sent, so the input sequence is
+ * not consumed and nothing reached the window.
+ */
+export class VisualInputError extends Error {
+  constructor(readonly code: MobileBridgeVisualSessionRefusalCode, message: string) { super(message); this.name = "VisualInputError"; }
+}
+
 function refusal(
   code: MobileBridgeVisualSessionRefusalCode,
   message: string,
@@ -356,8 +365,11 @@ export class MobileVisualSessionManager {
     }
     try {
       if (hostAction) await this.control.input(hostAction);
-    } catch {
-      return refusal("visual_input_unsupported", "Desktop could not apply this visual input kind.", session);
+    } catch (error) {
+      // A window that is gone or a point outside the layout the phone saw says so (the phone refreshes quietly). Anything else is
+      // not "unsupported": the input was refused or failed for a reason the phone cannot act on.
+      if (error instanceof VisualInputError) return refusal(error.code, error.message, session);
+      return refusal("visual_unavailable", "Desktop could not apply this visual input.", session);
     }
     session.nextInputSeq += 1;
     session.leaseExpiresAtMs = Date.now() + VISUAL_INPUT_LEASE_MS;
@@ -574,7 +586,7 @@ export function createAgentlasWindowVisualSessionControl(
     async input(action) {
       const window = getWindow();
       const source = describe();
-      if (!window || !source) throw new Error("Agentlas main window is unavailable");
+      if (!window || !source) throw new VisualInputError("visual_source_changed", "The Desktop window is not available for input.");
       const contents = window.webContents;
       const modifiers = "modifiers" in action ? action.modifiers : undefined;
       switch (action.kind) {
@@ -585,7 +597,7 @@ export function createAgentlasWindowVisualSessionControl(
           return;
         case "pointer": {
           if (action.x >= source.width || action.y >= source.height) {
-            throw new Error("Pointer coordinate is outside the observed layout");
+            throw new VisualInputError("visual_layout_changed", "The pointer coordinate is outside the Desktop layout. Capture a new frame.");
           }
           const x = Math.round(action.x);
           const y = Math.round(action.y);
@@ -600,7 +612,7 @@ export function createAgentlasWindowVisualSessionControl(
         }
         case "scroll":
           if (action.x >= source.width || action.y >= source.height) {
-            throw new Error("Scroll coordinate is outside the observed layout");
+            throw new VisualInputError("visual_layout_changed", "The scroll coordinate is outside the Desktop layout. Capture a new frame.");
           }
           contents.sendInputEvent({
             type: "mouseWheel",
@@ -620,9 +632,9 @@ export function createAgentlasWindowVisualSessionControl(
           await contents.insertText(action.text);
           return;
         case "composition":
-          throw new Error("Composition must be resolved by the visual session manager");
+          throw new VisualInputError("visual_input_unsupported", "Composition is resolved by the visual session manager, not sent to the window.");
         default:
-          throw new Error("Unsupported visual input action");
+          throw new VisualInputError("visual_input_unsupported", "This visual input kind is not supported.");
       }
     },
   };

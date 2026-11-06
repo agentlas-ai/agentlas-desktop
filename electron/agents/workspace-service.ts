@@ -804,6 +804,10 @@ function noteUnverifiedEntries(agentId: string, unverified: readonly WorkspaceUn
  * (proveRunLeaseGone) instead of reading `run_active` forever when the holder died.
  */
 export function acquireAgentWorkspaceRunLease(agentId: string, runId: string, holder: { ownerId?: string } = {}): { revisionId: string; treeDigest: string } {
+  // Every host's run start passes here, so a journal left by an interrupted apply is settled before the guard reads it. It runs
+  // outside withLock (recovery takes the same lock). A journal it cannot settle (bytes that are neither side) stays, and the guard
+  // below reports that state; a race with another host that already settled it is a missing file, which the guard then passes.
+  try { recoverAgentWorkspaceOperation(agentId); } catch { /* the guard reports the actual state */ }
   return withLock(agentId, () => {
     assertAgentWorkspaceActivationReady(agentId);
     const { root } = rootFor(agentId);

@@ -5,7 +5,7 @@
  */
 import type { GoalNextWake } from "../../shared/goal-wake";
 import { getLongRunByGoalId, pendingBlockedGoalRetry } from "../store/long-runs";
-import { latestGoalWaitSubscription } from "./wait-subscriptions";
+import { effectiveWaitCheckAt, latestGoalWaitSubscription } from "./wait-subscriptions";
 import { GOAL_WAKE_DAILY_BUDGET, goalWakeWindow } from "./wake-arbiter";
 
 export function goalNextWake(goalId: string, now = Date.now()): GoalNextWake | null {
@@ -21,8 +21,9 @@ export function goalNextWake(goalId: string, now = Date.now()): GoalNextWake | n
       requestedBy: retry.fromReason === "wake_budget_reached" ? "budget" : retry.requestedBy === "model" ? "model" : "host" });
   }
   const wait = latestGoalWaitSubscription(goalId);
-  if (wait && wait.state === "pending" && wait.nextCheckAt) {
-    candidates.push({ at: wait.nextCheckAt, cause: `wait:${wait.intent.subject.kind}`,
+  const waitAt = wait && wait.state === "pending" ? effectiveWaitCheckAt(wait, now) : null;
+  if (wait && waitAt) {
+    candidates.push({ at: waitAt, cause: `wait:${wait.intent.subject.kind}`,
       requestedBy: wait.intent.subject.kind === "automation" ? "monitor" : "model" });
   }
   if (!candidates.length) return null;

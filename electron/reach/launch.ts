@@ -41,14 +41,20 @@ export async function launchApp(exec: ExecFn, target: LaunchTarget, platform: No
   } catch { return false; }
 }
 
-/** Polls until `check` holds or the time is spent; `sleep` is injectable so a gate runs instantly. */
+/**
+ * Polls until `check` holds or the time is spent; `sleep` is injectable so a gate runs instantly. The gap between looks grows (300 ms, x1.5, at most 1 s) so a long wait
+ * starts the driver's process far fewer times; `withinMs` is still the total wait. An explicit `everyMs` is a fixed gap.
+ */
 export async function waitUntil(check: () => Promise<boolean>, options: { withinMs?: number; everyMs?: number; sleep?: (ms: number) => Promise<void>; signal?: AbortSignal } = {}): Promise<boolean> {
-  const within = options.withinMs ?? 6_000, every = options.everyMs ?? 300;
+  const within = options.withinMs ?? 6_000;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  for (let waited = 0; ; waited += every) {
+  let every = options.everyMs ?? 300, waited = 0;
+  for (;;) {
     if (options.signal?.aborted) return false;
     if (await check()) return true;
     if (waited >= within) return false;
     await sleep(every);
+    waited += every;
+    if (options.everyMs === undefined) every = Math.min(1_000, Math.round(every * 1.5));
   }
 }

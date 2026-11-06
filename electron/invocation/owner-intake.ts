@@ -82,18 +82,18 @@ export function ownerMessageSurface(
  *    transient code, so a code-only test threw it out of the intake (the phone got authority_error, which it does not retry);
  *  - any other start the host refused BEFORE anything was dispatched (`turnDelivery: "not-dispatched"`), unless the owner has to act on
  *    it (a cost cap, a Goal state, a settings change: startRefusalNeedsOwner). A handshake, ledger or preparation step of the app is not
- *    the owner's to fix, so the message is kept and started again, bounded (UNDISPATCHED_START_MAX_ATTEMPTS), then held, never shown as a code.
+ *    the owner's to fix, so the message is kept and started again at the capped backoff until it is delivered, never shown as a code.
  * A refusal with no proof that nothing was dispatched is still not held.
  */
 export function ownerIntakeWaits(error: unknown): boolean {
   return isTransientSendRefusal(error) || startRefusedBeforeDispatchWaits(error);
 }
 
-/** The one calm line for an owner message the intake kept, retried and still could not start: no code, nothing ran. Same words as the composer's. */
+/** The line for an owner message the intake keeps until it can start: no code, nothing ran, nothing to resend. Same words as the composer's. */
 export function ownerIntakeHeldNotice(locale: "ko" | "en"): string {
   return locale === "ko"
-    ? "메시지는 저장됐지만 아직 시작하지 못했어요. 아무것도 실행되지 않았으니 같은 내용을 한 번 더 보내 주세요."
-    : "Your message is saved, but it has not started yet. Nothing ran, so please send it once more.";
+    ? "받았습니다. 이 방이 비거나 준비되면 시작합니다. 아직 아무것도 실행되지 않았습니다."
+    : "Received. It starts when this chat is free or ready; nothing has run yet.";
 }
 
 /** Before this long the message usually started on its own; a received line then would only be noise. */

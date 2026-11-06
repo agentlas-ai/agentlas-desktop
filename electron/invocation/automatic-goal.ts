@@ -20,6 +20,8 @@ import { buildAutomaticGoalCriteria } from "../../shared/automatic-goal-criteria
 import { goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { currentUiLocale } from "../ui-locale";
 import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
+import { composeDeclaredPrompt } from "../runtime/prompt-order";
+import { readInvocationEffectBoundary, type InvocationEffectBoundary } from "./effect-boundary-reader";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import { createHash, randomUUID } from "node:crypto";
@@ -357,7 +359,70 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),
-    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. ${UNCERTAIN_EFFECT_POLICY} Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${stripStaffGuidance(revision.objective)}${(() => { const owner = unansweredOwnerMessage(chatId); return owner ? `\n\nOwner's latest message, not answered yet. It comes first: answer or act on it before continuing the plan, and change the plan if it asks:\n${owner}` : ""; })()}` };
+    userPrompt: goalResumePrompt({
+      uncertainEffect: priorControllerTurnMayHaveUnsettledEffects(run.id, chatId),
+      receipts: channelPublishReceiptsPromptBlockFor(revision.objective),
+      objective: stripStaffGuidance(revision.objective),
+      ownerMessage: unansweredOwnerMessage(chatId) }) };
+}
+
+/**
+ * The newest controller attempt's invocation of this Goal run (same ordering as automaticGoalReplayBarrier), or null when
+ * the run has no controller attempt or the attempt never started an invocation.
+ */
+function latestControllerInvocationRunId(runId: string): string | null {
+  const row = getDb().prepare(`SELECT a.invocation_run_id FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id = a.worker_id
+    WHERE a.run_id = ? AND w.role = 'controller'
+    ORDER BY (SELECT MAX(e.seq) FROM long_run_events e WHERE e.run_id = a.run_id
+      AND e.kind = 'worker.attempt_started'
+      AND json_extract(e.payload_json, '$.attemptId') = a.id) DESC, a.started_at DESC, a.id DESC
+    LIMIT 1`).get(runId) as { invocation_run_id: string | null } | undefined;
+  return row?.invocation_run_id ?? null;
+}
+
+/**
+ * Whether the resume prompt must carry UNCERTAIN_EFFECT_POLICY. That sentence says an earlier turn ended early and an outside
+ * action of it may not have finished; after a turn whose effect boundary closed it is false, and teammates reported "a past
+ * outside effect cannot be verified" as a blocker on every round (X Marketing: 38 rounds). Left out only when the previous
+ * controller invocation's boundary is `effects === "settled"` or `quiesced === true`. `quiesced` is a prompt-sentence gate
+ * only, not restore or replay authority (the replay barrier above still decides that). No previous invocation, an unreadable
+ * boundary or any read error keeps the sentence (conservative).
+ */
+export function resumeNeedsUncertainEffectCheck(read: () => Pick<InvocationEffectBoundary, "effects" | "quiesced"> | null): boolean {
+  try {
+    const boundary = read();
+    return !boundary || !(boundary.effects === "settled" || boundary.quiesced === true);
+  } catch { return true; }
+}
+
+function priorControllerTurnMayHaveUnsettledEffects(runId: string, chatId: string): boolean {
+  return resumeNeedsUncertainEffectCheck(() => {
+    const invocationRunId = latestControllerInvocationRunId(runId);
+    return invocationRunId ? readInvocationEffectBoundary({ invocationRunId, expectedChatId: chatId }) : null;
+  });
+}
+
+/**
+ * Goal resume user prompt (composition formulas `desktop.goal.automatic-resume.rules` joined by a space, then
+ * `desktop.goal.automatic-resume.user` joined by a blank line). Fixed rules on top, Goal data in the middle, the owner's
+ * unanswered message last. The sentences are unchanged; only UNCERTAIN_EFFECT_POLICY is conditional.
+ */
+export function goalResumePrompt(input: { uncertainEffect: boolean; receipts: string | null; objective: string; ownerMessage: string | null }): string {
+  const rules = composeDeclaredPrompt([
+    { id: "goal.resume.rules.lead", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
+      text: "Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal." },
+    { id: "goal.resume.rules.uncertain-effect", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 10,
+      text: input.uncertainEffect ? UNCERTAIN_EFFECT_POLICY : null },
+    { id: "goal.resume.rules.criteria", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 20,
+      text: "Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion." },
+  ], " ");
+  return composeDeclaredPrompt([
+    { id: "goal.resume.rules", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: rules },
+    { id: "goal.resume.channel-publish-receipts", revision: 1, stability: "task-context", changeTriggers: ["goal-revision"], order: 0, text: input.receipts },
+    { id: "goal.resume.objective", revision: 1, stability: "task-context", changeTriggers: ["goal-revision"], order: 10, text: input.objective },
+    { id: "goal.resume.owner-unanswered", revision: 1, stability: "turn-context", changeTriggers: ["owner-input"], order: 0,
+      text: input.ownerMessage ? `Owner's latest message, not answered yet. It comes first: answer or act on it before continuing the plan, and change the plan if it asks:\n${input.ownerMessage}` : null },
+  ]);
 }
 
 /** 사람이 누른 재개 — 요청을 만들고 재개하는 것이 한 트랜잭션이다. */

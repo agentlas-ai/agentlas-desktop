@@ -10,7 +10,12 @@ export interface RetryResource {
 }
 export interface RetryGoal { goalId: string; revision: number }
 export interface RetryWindow { until: number; kind: RunnerFailureKind }
-interface Episode { version: 1; failures: number; generation: number; lastCall: string; closed?: boolean }
+interface Episode { version: 1; failures: number; generation: number; lastCall: string; closed?: boolean; lastFailureAt?: number }
+/** A spent budget is not permanent: this long after the last failure the next call is admitted once as a probe. A probe that
+ * fails closes the episode again (and restarts the clock); a success resets it. Rows without a timestamp (written before this
+ * field existed) count as expired, so an old closure opens on its own at the next admission. */
+export const RUNTIME_RETRY_REOPEN_AFTER_MS = 2 * 60 * 60 * 1000;
+const reopenExpired = (row: Episode, now: number) => row.lastFailureAt === undefined || row.lastFailureAt + RUNTIME_RETRY_REOPEN_AFTER_MS <= now;
 interface GoalFloor extends RetryWindow { version: 1; revision: number; resource: string }
 export interface TeamRetryFacts { version: 1; selfRecoverable: boolean; notBefore: number | null }
 const MAX_TIME = 8_640_000_000_000_000;
@@ -63,7 +68,8 @@ export function createRuntimeRetryStore(database: () => Database.Database) {
   const episode = (resource: RetryResource, goal: RetryGoal): Episode => {
     const row = read<Episode>(episodeKey(resource, goal));
     if (row && (row.version !== 1 || !counter(row.failures) || !counter(row.generation) || typeof row.lastCall !== "string"
-      || row.closed !== undefined && typeof row.closed !== "boolean")) {
+      || row.closed !== undefined && typeof row.closed !== "boolean"
+      || row.lastFailureAt !== undefined && !validTime(row.lastFailureAt))) {
       throw new Error("runtime_retry_episode_invalid");
     }
     return row ?? { version: 1, failures: 0, generation: 0, lastCall: "" };
@@ -122,22 +128,37 @@ export function createRuntimeRetryStore(database: () => Database.Database) {
       }).immediate();
     },
     failures: (resource: RetryResource, goal: RetryGoal) => episode(resource, goal).failures,
-    budgetExhausted: (resource: RetryResource, goal: RetryGoal): boolean => episode(resource, goal).closed === true,
+    /** Closed and not yet due for its probe. An expired closure is not exhausted: the next admit() lets one call through. */
+    budgetExhausted: (resource: RetryResource, goal: RetryGoal, now = Date.now()): boolean => {
+      const row = episode(resource, goal);
+      return row.closed === true && !reopenExpired(row, now);
+    },
+    /** When a spent budget next allows a probe; null while the budget is not spent. */
+    retryReopenAt(resource: RetryResource, goal: RetryGoal): number | null {
+      const row = episode(resource, goal);
+      if (row.closed !== true) return null;
+      return row.lastFailureAt === undefined ? Date.now() : row.lastFailureAt + RUNTIME_RETRY_REOPEN_AFTER_MS;
+    },
     /** Reserve before dispatch, atomically across hosts. A crash cannot replenish
      * the allowance; success settles only its own generation below. */
     admit(resource: RetryResource, goal: RetryGoal, callId: string, maxFailures: number, validate?: () => void): number | null {
       if (!callId || !Number.isSafeInteger(maxFailures) || maxFailures < 1) throw new Error("runtime_retry_admission_invalid");
       return database().transaction(() => {
         validate?.();
-        const previous=episode(resource,goal);
-        if (previous.closed || previous.failures >= maxFailures) return null;
+        const now = Date.now();
+        let previous=episode(resource,goal);
+        if (previous.closed || previous.failures >= maxFailures) {
+          if (!reopenExpired(previous, now)) return null;
+          // Probe: one more call is allowed; its reservation below closes the episode again unless it succeeds.
+          previous = {...previous, failures: Math.max(0, maxFailures-1), closed: undefined};
+        }
         if (previous.generation >= Number.MAX_SAFE_INTEGER) throw new Error("runtime_retry_counter_exhausted");
         if (read<unknown>(attemptKey(resource,goal,callId)) !== null) throw new Error("runtime_retry_call_identity_reused");
         const closed = previous.failures+1>=maxFailures;
         // closedByAdmit lets refund() reopen exactly the closure this reservation caused (an older host's receipt simply lacks it).
         write(attemptKey(resource,goal,callId), {state:"admitted",...(closed?{closedByAdmit:true}:{})});
         write(episodeKey(resource,goal), {...previous,failures:previous.failures+1,generation:previous.generation+1,
-          lastCall:callId,closed});
+          lastCall:callId,closed,lastFailureAt:now});
         return previous.generation+1;
       }).immediate();
     },
@@ -196,7 +217,7 @@ export function createRuntimeRetryStore(database: () => Database.Database) {
           write(receiptKey, 1);
           write(episodeKey(resource, input.goal), { version: 1, failures,
             generation: Math.min(Number.MAX_SAFE_INTEGER, previous.generation + 1), lastCall: input.callId,
-            ...(closed ? { closed: true } : {}) });
+            lastFailureAt: Date.now(), ...(closed ? { closed: true } : {}) });
           return previous.generation + 1;
         }
       }).immediate();
@@ -204,7 +225,7 @@ export function createRuntimeRetryStore(database: () => Database.Database) {
     success(resource: RetryResource, goal: RetryGoal, generation: number): void {
       database().transaction(() => {
         const previous = episode(resource, goal);
-        if (previous.generation === generation) write(episodeKey(resource, goal), { ...previous, failures: 0, closed: undefined });
+        if (previous.generation === generation) write(episodeKey(resource, goal), { ...previous, failures: 0, closed: undefined, lastFailureAt: undefined });
         const floor = goalFloor(goal, 0);
         // An actually selected different resource is authorized by its existing host selection,
         // not by this store. It may continue independent work; the failed provider window stays.

@@ -953,6 +953,15 @@ export function forgetSignedOutAcpModelProbes(): void {
   for (const [key, hit] of acpProbeCache) if (hit.outcome.reason === "acp:auth-required") acpProbeCache.delete(key);
 }
 
+/**
+ * Drop every cached ACP listing that failed, so the next detection spawns the agent again. Only a person's act may call this
+ * (a forced "check again", a login, a manual CLI update): the detect-cache clear that internal callers use must not, or a
+ * failing agent (`npx -y @github/copilot`) would be spawned on every detect tick. Successful listings keep their TTL.
+ */
+export function forgetFailedAcpModelProbes(): void {
+  for (const [key, hit] of acpProbeCache) if (hit.outcome.status !== "ok") acpProbeCache.delete(key);
+}
+
 /** Test hook. */
 export function resetAcpProbeCacheForTests(): void {
   acpProbeCache.clear();

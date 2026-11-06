@@ -11,6 +11,7 @@ import { optionalElectronAppPath, runtimeResourcesPath } from '../runtime-paths'
 import { withPythonRuntimeBoundary } from '../runtime/python-cache';
 import { withCliPath, killCliTree } from '../runtime/exec';
 import { parseTreasury } from './providers/public-data';
+import { blockHost, hostBlockedSeconds } from './providers/http';
 
 export const FINANCE_WORLD_SOURCE_ID = 'finance-yfinance';
 const TTL = 5 * 60_000, LIMIT = 2 * 1024 * 1024;
@@ -85,8 +86,9 @@ async function readPublic(url:URL,signal:AbortSignal):Promise<string>{
   const chart=url.origin==='https://query1.finance.yahoo.com'&&FINANCE_WORLD_REGISTRY.some(row=>url.pathname===`/v8/finance/chart/${encodeURIComponent(row[4])}`)&&url.search==='?range=5d&interval=1d';
   const treasury=url.origin==='https://home.treasury.gov'&&url.pathname==='/resource-center/data-chart-center/interest-rates/pages/xml'&&url.searchParams.get('data')==='daily_treasury_yield_curve'&&/^20\d{2}(?:0[1-9]|1[0-2])$/.test(url.searchParams.get('field_tdr_date_value_month')??'')&&[...url.searchParams].length===2;
   if((!chart&&!treasury)||url.username||url.password||url.port||url.hash)throw new Error('finance_world_url_rejected');
+  if(hostBlockedSeconds(url.hostname)>0)throw new Error('finance_world_rate_limited');
   const local=new AbortController(),cancel=()=>local.abort(abortError(signal));const timer=setTimeout(()=>local.abort(new Error('finance_world_request_timeout')),8_000);signal.addEventListener('abort',cancel,{once:true});if(signal.aborted)cancel();
-  try{const response=await fetch(url,{redirect:'error',signal:local.signal,headers:{Accept:chart?'application/json':'application/xml','User-Agent':'Agentlas Finance/1.0 (local public market reader)'}});if(response.status===429)throw new Error('finance_world_rate_limited');if(!response.ok)throw new Error('finance_world_source_http_error');if(Number(response.headers.get('content-length'))>LIMIT||!response.body)throw new Error('finance_world_source_shape');const reader=response.body.getReader(),chunks:Uint8Array[]=[];let size=0;try{for(;;){const part=await reader.read();if(part.done)break;size+=part.value.length;if(size>LIMIT)throw new Error('finance_world_output_too_large');chunks.push(part.value);}}finally{await reader.cancel().catch(()=>undefined);}return Buffer.concat(chunks).toString('utf8');}finally{clearTimeout(timer);signal.removeEventListener('abort',cancel);}
+  try{const response=await fetch(url,{redirect:'error',signal:local.signal,headers:{Accept:chart?'application/json':'application/xml','User-Agent':'Agentlas Finance/1.0 (local public market reader)'}});if(response.status===429){const retry=response.headers.get('retry-after');blockHost(url.hostname,(retry&&/^\d+$/.test(retry)?Number(retry):60)*1000);throw new Error('finance_world_rate_limited');}if(!response.ok)throw new Error('finance_world_source_http_error');if(Number(response.headers.get('content-length'))>LIMIT||!response.body)throw new Error('finance_world_source_shape');const reader=response.body.getReader(),chunks:Uint8Array[]=[];let size=0;try{for(;;){const part=await reader.read();if(part.done)break;size+=part.value.length;if(size>LIMIT)throw new Error('finance_world_output_too_large');chunks.push(part.value);}}finally{await reader.cancel().catch(()=>undefined);}return Buffer.concat(chunks).toString('utf8');}finally{clearTimeout(timer);signal.removeEventListener('abort',cancel);}
 }
 async function yahooObservations(signal:AbortSignal):Promise<Observation[]>{
   const rows:Observation[]=[];let cursor=0,limited=false;

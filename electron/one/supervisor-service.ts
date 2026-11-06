@@ -177,6 +177,8 @@ export class OneSupervisorService {
   /** Held commands whose "refused before dispatch" proof may still arrive from the admission ledger (a daemon's rejection lands after its reply). */
   private readonly lateProof = new Set<string>();
   private reviewHoldOffUntil = 0;
+  /** Consecutive reviews that never started; grows the backoff because they spend no attempt. In memory only: a restart starts it over. */
+  private reviewUnstartedStreak = 0;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   /** The retry of a chat-send refused before dispatch has its own timer, so it never replaces (or is replaced by) a reply's or a review's. */
   private chatSendTimer: ReturnType<typeof setTimeout> | undefined;
@@ -326,7 +328,7 @@ export class OneSupervisorService {
     supervisorDispatchFrame(this.deps.store, row, () => ({locale:this.deps.locale(),runtimeSelection:undefined}), now);
     row = this.deps.store.get(row.command_id)!;
     if (row.kind === "reply" && this.replyWasStopped(row)) { this.withdrawStoppedReply(row); return; }
-    if (supervisorRetryExhausted(row, now) || now - Date.parse(row.created_at) > TRANSIENT_SEND_DEADLINE_MS) {
+    if (supervisorRetryExhausted(row, now)) {
       this.deps.store.db.transaction(() => {
         this.deps.store.update(row, {state: "failed", acknowledgement: "settled", reason: code});
         if (row.kind === "chat-send" || row.kind === "follow-up") this.deps.store.notice(row, "failed");
@@ -441,7 +443,10 @@ export class OneSupervisorService {
       if(isReview(saved)){
         // A review that never reached the native start has no outcome to wonder about: its results return to the queue
         // (three attempts, with backoff) instead of closing as review_outcome_unknown with the alert already suppressed.
-        if(denied&&saved.state==='dispatching'){this.holdOffReviews(saved.run_id!);this.retryReviewTellingOwner(saved.run_id!,error instanceof Error?error.message:'supervisor_start_denied');}
+        if(denied&&saved.state==='dispatching'){this.holdOffReviews(saved.run_id!);
+          // A spent budget is the owner's to lift, so that denial keeps counting its three attempts (no endless review rows while it stands);
+          // a deferred host check never decided anything and gives its attempt back.
+          this.retryReviewTellingOwner(saved.run_id!,error instanceof Error?error.message:'supervisor_start_denied',error instanceof OneBudgetAdmissionDenied?true:undefined);}
         else this.unconfirmedReview(saved.run_id!);
       }
     };
@@ -612,7 +617,7 @@ export class OneSupervisorService {
       if (isReview(row)) {
         // Only this run (the claim's generation) closes its results; an owner stop is not retried.
         if (this.runBlocksNextAutomaticTurn(receipt.runId,receipt.chatId,receipt)) this.closeUnknownReviewTellingOwner(row.run_id!);
-        else if (receipt.status === "completed") this.deps.store.closeReview(row.run_id!, this.deps.quietRun?.(row.run_id!) ? "quiet" : null);
+        else if (receipt.status === "completed") { this.reviewUnstartedStreak = 0; this.deps.store.closeReview(row.run_id!, this.deps.quietRun?.(row.run_id!) ? "quiet" : null); }
         else if (receipt.status === "cancelled") this.deps.store.closeReview(row.run_id!, "review_stopped_by_owner");
         else this.retryReviewTellingOwner(row.run_id!, `review_${receipt.status}`);
       }
@@ -708,9 +713,29 @@ export class OneSupervisorService {
       else if ((!receipt || this.deps.runtime.attach(receipt.chatId)?.runId !== row.run_id) && row.state !== "held") {
         this.deps.store.update(row, {state:"held",acknowledgement:"unknown",reason:"dispatch_liveness_unconfirmed"});
       }
-      if (isReview(row) && !this.lateProof.has(row.command_id) && this.deps.store.get(row.command_id)?.state === "held") this.unconfirmedReview(row.run_id);
+      if (isReview(row) && !this.lateProof.has(row.command_id) && this.deps.store.get(row.command_id)?.state === "held") {
+        // The ledger proves this review never started: nothing was reviewed, so its results return without spending an attempt.
+        const held = this.deps.store.get(row.command_id)!;
+        if (!this.deps.runtime.receipt(row.run_id) && this.deps.runtime.noStartProof?.(row.run_id) === true) this.expireNeverStarted(held);
+        else this.unconfirmedReview(row.run_id);
+      }
     }
+    this.restoreOrphanedReviewClaims(oneId);
     this.drain();
+  }
+  /**
+   * Results claimed by a review whose request is no longer alive (the app restarted between the claim and the start; awaitLateProof is a
+   * memory timer and is gone). When the ledger proves the review never started and left no receipt, the claim is released as pending
+   * without spending an attempt. Anything else is left to the rules above.
+   */
+  private restoreOrphanedReviewClaims(oneId: string): void {
+    let runs: string[] = [];
+    try { runs = this.deps.store.orphanClaimedReviewRuns(oneId); } catch { return; }
+    for (const runId of runs) {
+      try {
+        if (!this.deps.runtime.receipt(runId) && this.deps.runtime.noStartProof?.(runId) === true) this.retryReviewTellingOwner(runId, "review_claim_restored", false);
+      } catch { /* the next recover() looks again */ }
+    }
   }
   /**
    * An ordinary native turn is settled by its in-memory observation (ordinaryNativeTurn onSettled). When the process that held
@@ -923,31 +948,45 @@ export class OneSupervisorService {
         payload:{commandId,text:this.reviewPrompt(oneId,notices),notices:notices.map(notice=>notice.id),purpose}});
     }).immediate();
   }
-  /** A result whose review failed three times is closed for good; the owner hears it once in the One chat instead of never. */
-  /** A review whose outcome cannot be known is closed (replaying it could report twice); the owner hears it once instead of never. */
+  /**
+   * A review whose outcome cannot be known goes back to the queue as pending (it is never closed as "reviewed" without a report); the attempt
+   * already claimed counts as one. A replay is told apart by the request key review:<runId>, and a result whose third started review failed
+   * is "unreviewed" and the owner hears it once.
+   */
   private closeUnknownReviewTellingOwner(reviewRunId: string): void {
-    const { closed } = this.deps.store.closeReviewReporting(reviewRunId, "review_outcome_unknown");
-    if (!this.deps.noticeOwner) return;
-    const ko = this.deps.locale() === "ko";
-    for (const group of closed) {
-      try {
-        this.deps.noticeOwner(group.originChatId, reviewRunId, ko
-          ? `작업 결과 ${group.count}건은 One이 검토했는지 확인하지 못했습니다. 결과는 활동 기록에서 볼 수 있습니다.`
-          : `One could not confirm it reviewed ${group.count} work result${group.count === 1 ? "" : "s"}. You can read ${group.count === 1 ? "it" : "them"} in Activity.`);
-      } catch { /* best effort; the results stay in Activity */ }
-    }
+    this.retryReviewTellingOwner(reviewRunId, "review_outcome_unknown", true);
   }
-  retryReviewTellingOwner(reviewRunId: string, reason: string): void {
-    const { exhausted } = this.deps.store.retryReviewReporting(reviewRunId, reason);
+  /**
+   * A review run that produced no report returns its results to the queue. `started` defaults to "the ledger has no proof that nothing
+   * started": only a started review spends one of a result's three attempts. A result left unreviewed after its third started attempt
+   * is stated as a fact, in the One chat, once.
+   */
+  retryReviewTellingOwner(reviewRunId: string, reason: string, started?: boolean): void {
+    let began = started;
+    if (began === undefined) {
+      try { began = !(!this.deps.runtime.receipt(reviewRunId) && this.deps.runtime.noStartProof?.(reviewRunId) === true); } catch { began = true; }
+    }
+    const { exhausted } = this.deps.store.retryReviewReporting(reviewRunId, reason, began);
+    if (!began) this.holdOffUnstartedReviews();
+    else this.reviewUnstartedStreak = 0;
     if (!this.deps.noticeOwner) return;
     const ko = this.deps.locale() === "ko";
     for (const group of exhausted) {
       try {
         this.deps.noticeOwner(group.originChatId, reviewRunId, ko
-          ? `작업 결과 ${group.count}건을 검토하지 못했습니다. 결과는 활동 기록에서 볼 수 있습니다.`
-          : `${group.count} work result${group.count === 1 ? "" : "s"} could not be reviewed. You can read ${group.count === 1 ? "it" : "them"} in Activity.`);
+          ? `작업 결과 ${group.count}건을 아직 검토하지 못했습니다. 활동 기록에서 읽을 수 있습니다.`
+          : `${group.count} work result${group.count === 1 ? " has" : "s have"} not been reviewed yet. You can read ${group.count === 1 ? "it" : "them"} in Activity.`);
       } catch { /* the notice is best effort; the result itself stays in Activity */ }
     }
+    // The results are pending again: look for them once the hold-off (if any) ends.
+    this.armDrain(Math.max(0, this.reviewHoldOffUntil - Date.now()));
+  }
+  /** Reviews that never started cost no attempt, so their only brake is time: the capped backoff grows with the streak. */
+  private holdOffUnstartedReviews(): void {
+    const delayMs = transientSendBackoffMs(this.reviewUnstartedStreak);
+    this.reviewUnstartedStreak += 1;
+    this.reviewHoldOffUntil = Math.max(this.reviewHoldOffUntil, Date.now() + delayMs);
+    this.armDrain(delayMs);
   }
   private reviewPrompt(oneId: string, notices: SupervisorNotice[]): string {
     const tasks = new Map(this.deps.tasks().map(task => [task.taskId, task]));

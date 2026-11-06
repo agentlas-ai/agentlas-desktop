@@ -49,6 +49,7 @@ import {
   type WorkforceBrokerProviderCallLocation,
 } from "./workforce-broker";
 import { detectRuntimeRefusal } from "./runtime-refusal";
+import { fetchNeverConnected, fetchWithReconnect } from "./reconnecting-fetch";
 import { tStatus } from "./status-i18n";
 import { openAiStrictSchemaOrNull } from "./strict-output-schema";
 import { abortReasonError } from "./abort-reason";
@@ -61,7 +62,7 @@ import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } fro
 import { resolveShortToolName, resolveToolNameAlias, unknownToolMessage } from "./tool-name-alias";
 import {
   LOCAL_MODEL_UNLOADED_CODE, localModelResident, refineServerFailureCode, RUNTIME_SERVER_ERROR_CODE, serverFailure,
-  serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, SERVER_FAILURE_RESENDS, waitForServerResend,
+  serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, serverFailureResendLimit, waitForServerResend,
 } from "./provider-overload";
 import {
   defaultRuntimeToolPermission,
@@ -97,17 +98,8 @@ export function noModelSelectedResult(runtimeKind: string, message: string): Run
   return refusedBeforeDispatch({ kind: "unsupported", runtime: runtimeKind, source: "marker", providerCode: NO_MODEL_SELECTED_CODE, message });
 }
 
-/** Socket-level codes that prove the request never reached the server (no TCP connection, no name). Typed, not prose. */
-const NOT_CONNECTED_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
-export function fetchNeverConnected(error: unknown): boolean {
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
-    const code = (current as { code?: unknown }).code;
-    if (typeof code === "string" && NOT_CONNECTED_CODES.has(code)) return true;
-    current = (current as { cause?: unknown }).cause;
-  }
-  return false;
-}
+// The socket-code check lives with the reconnecting transport (reconnecting-fetch.ts); re-exported for the callers that import it here.
+export { fetchNeverConnected };
 
 export type LocalChatContent =
   | { type: "text"; text: string }
@@ -1854,7 +1846,7 @@ async function runLocalOpenAiChatInner(
   let outputCuts = 0;
   let continuedText = "";
   let toolParseRetries = 0;
-  /** G24: resends spent on a server that answered 5xx before anything streamed or ran in this invocation. */
+  /** G24: consecutive resends spent on a server that answered 5xx at the response header (restarts when a response opens). */
   let serverResends = 0;
   /** Reasoning behind each tool call, replayed to Ollama's native route (gpt-oss loses its plan between calls without it). */
   const thinkingByCallId = new Map<string, string>();
@@ -1944,8 +1936,9 @@ async function runLocalOpenAiChatInner(
       workforcePermissionEnforcement: broker?.finish(false) });
   };
   /**
-   * G24: a 5xx is a typed failure (provider-overload.ts). Overloaded, or a local server that no longer has the model loaded,
-   * earns one resend after a short wait, but only while nothing streamed and no tool ran in this invocation.
+   * G24: a 5xx is a typed failure (provider-overload.ts). Overloaded earns consecutive resends with an exponential wait, a
+   * local server that no longer has the model loaded earns one. A 5xx comes at the response header, so this response
+   * streamed nothing: the resend repeats no output and no tool effect of earlier turns.
    */
   const serverFailureOutcome = async (response: Response, body: string, allowResend: boolean): Promise<"resend" | RunnerResult | null> => {
     const plain = serverFailureCodeForStatus(response.status);
@@ -1953,13 +1946,14 @@ async function runLocalOpenAiChatInner(
     const resident = plain === RUNTIME_SERVER_ERROR_CODE ? await localModelResident({ runtimeKind, host, model, signal: req.signal }) : null;
     const code = refineServerFailureCode(plain, resident);
     const retryAfter = response.headers.get("retry-after");
-    const resendDelayMs = serverFailureResendDelayMs(retryAfter);
-    if (allowResend && serverFailureResendable(code) && serverResends < SERVER_FAILURE_RESENDS && !sawAnyToolCall
-      && !finalText.trim() && !continuedText && !ownerControlPending && !req.signal?.aborted && resendDelayMs !== null) {
+    const resendDelayMs = serverFailureResendDelayMs(retryAfter, serverResends);
+    const resendLimit = serverFailureResendLimit(code);
+    if (allowResend && serverFailureResendable(code) && serverResends < resendLimit
+      && !ownerControlPending && !req.signal?.aborted && resendDelayMs !== null) {
       serverResends += 1;
       events.onStatus(code === LOCAL_MODEL_UNLOADED_CODE
-        ? req.locale === "ko" ? "모델 서버가 오류 뒤 모델을 내렸습니다. 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server dropped the model after an error; sending the same request once more shortly…"
-        : req.locale === "ko" ? "모델 서버가 바빠 잠시 뒤 같은 요청을 한 번 더 보냅니다…" : "The model server is busy; sending the same request once more shortly…");
+        ? req.locale === "ko" ? "모델 서버가 오류 뒤 모델을 내렸습니다. 잠시 뒤 같은 요청을 다시 보냅니다…" : "The model server dropped the model after an error; sending the same request again shortly…"
+        : req.locale === "ko" ? `모델 서버가 바빠 잠시 뒤 같은 요청을 다시 보냅니다(${serverResends}/${resendLimit})…` : `The model server is busy; sending the same request again shortly (${serverResends}/${resendLimit})…`);
       await waitForServerResend(resendDelayMs, req.signal);
       if (req.signal?.aborted) throw abortReasonError(req);
       return "resend";
@@ -2193,6 +2187,11 @@ async function runLocalOpenAiChatInner(
     assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
     if (opts.beforeProviderCall) await opts.beforeProviderCall();
     let resp: Response;
+    // Once the run did work, a server that is unreachable for a moment is waited out (reconnecting-fetch.ts); the first request is refused at once.
+    const sendFetch: typeof fetch = (target, init) => fetchWithReconnect(turnFetch, target, init, {
+      workStarted: () => turn > 0 || sawAnyToolCall, signal: req.signal,
+      onWait: (waitedMs) => events.onStatus(req.locale === "ko" ? `서버에 다시 연결하는 중… ${Math.round(waitedMs / 1000)}초` : `Reconnecting to the server… ${Math.round(waitedMs / 1000)}s`),
+    });
     reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
     reportModelEffort(effortApplication());
     sentRequestTokens = estimateTransportTokens(JSON.stringify(requestBody));
@@ -2219,7 +2218,7 @@ async function runLocalOpenAiChatInner(
       if (req.signal?.aborted) throw abortReasonError(req);
       deliveryBody = snapshotDeliveryRequest();
       ownerControlDispatched = ownerControlPending !== null;
-      resp = await withCurrentHistoryProvider(()=>{ requestHandedToFetch = true; return turnFetch(chatEndpoint, {
+      resp = await withCurrentHistoryProvider(()=>{ requestHandedToFetch = true; return sendFetch(chatEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json", ...opts.headers },
         signal: req.signal,
@@ -2267,7 +2266,7 @@ async function runLocalOpenAiChatInner(
         try {
           if (req.signal?.aborted) throw abortReasonError(req);
           deliveryBody = snapshotDeliveryRequest();
-          resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
+          resp = await withCurrentHistoryProvider(()=>sendFetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
             signal: req.signal,
@@ -2327,7 +2326,7 @@ async function runLocalOpenAiChatInner(
             { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
           usageAttempt = usage.start();
           if (opts.beforeProviderCall) await opts.beforeProviderCall();
-          const fallback = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
+          const fallback = await withCurrentHistoryProvider(()=>sendFetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
             signal: req.signal,
@@ -2361,6 +2360,7 @@ async function runLocalOpenAiChatInner(
         throw new Error(`${providerLabel} API ${resp.status}: ${errText.slice(0, 300)}`);
       }
     }
+    serverResends = 0;
 
     const result = await streamChatTurn(resp, (partial) => events.onPartial(continuedText + partial), events.onThinking,
       localCompatibleTerminal ? { turn } : undefined);
@@ -2515,7 +2515,7 @@ async function runLocalOpenAiChatInner(
   } else if (answer) {
     // 표식 없이 완주했는데 산출물이 거절/한도 고지문인 경우 — 판별 규칙은
     // runtime-refusal.ts 한 곳에만 살고, 출처는 heuristic으로 남긴다.
-    const refusal = detectRuntimeRefusal(answer);
+    const refusal = detectRuntimeRefusal(answer, "model-text");
     if (refusal) failure = localFailure(refusal.kind, refusal.message, runtimeKind, "heuristic");
   }
 

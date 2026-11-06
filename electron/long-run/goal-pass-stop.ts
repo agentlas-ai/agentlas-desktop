@@ -25,7 +25,7 @@ import {
   getLongRunByGoalId,
   nextBlockedGoalRetrySlot,
   pendingBlockedGoalRetry,
-  closeGoalRuntimeRetryBudget,
+  scheduleGoalRuntimeRetryReopen,
   scheduleBlockedGoalRetry,
   transitionLongRun,
 } from "../store/long-runs";
@@ -83,7 +83,7 @@ function goalDecisionHistory(chatId: string, nowMs: number) {
 }
 
 export interface ParkGoalResult {
-  status: "scheduled" | "escalated" | "skipped" | "closed";
+  status: "scheduled" | "escalated" | "skipped";
   detail: string;
   decision?: PersistenceDecision;
   nextAt?: string;
@@ -107,8 +107,12 @@ export function parkGoalAfterPassStop(input: {
   if (!run || run.surface === "science") return { status: "skipped", detail: "goal_run_missing" };
   if (run.status !== "running") return { status: "skipped", detail: `goal_run_${run.status}` };
   if (input.stop.retryBudgetExhausted) {
-    return closeGoalRuntimeRetryBudget(run.id,input.invocationRunId)
-      ? {status:"closed",detail:"runtime_retry_budget_exhausted"} : {status:"skipped",detail:"budget_close_state_changed"};
+    // The connection kept failing: rest on the host schedule until the retry store admits one probe, never give up, never
+    // keep calling the failing executor (store/runtime-retry.ts RUNTIME_RETRY_REOPEN_AFTER_MS).
+    const reopen = scheduleGoalRuntimeRetryReopen(run.id, input.invocationRunId, { nowMs, ...(input.random ? { random: input.random } : {}) });
+    if (!reopen) return { status: "skipped", detail: "runtime_retry_reopen_state_changed" };
+    notifyRuntimeRetryReopen(input.chatId, run.id, Date.parse(reopen.nextAt));
+    return { status: "scheduled", detail: "runtime_retry_reopen", nextAt: reopen.nextAt };
   }
   const cause = goalPassStopCause(input.stop);
   const history = goalDecisionHistory(input.chatId, nowMs).map(persistenceAttemptOf);
@@ -182,6 +186,18 @@ function appendStop(runId: string, input: { stop: GoalPassStop; invocationRunId:
       nextAt,
     },
   });
+}
+
+function notifyRuntimeRetryReopen(chatId: string, longRunId: string, nextAtMs: number): void {
+  const time = new Date(nextAtMs).toLocaleTimeString(currentUiLocale() === "ko" ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const text = currentUiLocale() === "ko"
+    ? `모델 연결이 계속 실패해 ${time}에 다시 시도합니다.`
+    : `The model connection kept failing, so the app will try again at ${time}.`;
+  try {
+    appendChatMessage(chatId, "assistant", text, { hostNotice: { purpose: "host-status", runId: longRunId, status: "goal-paused" } });
+  } catch (error) {
+    console.warn("[goal-pass-stop] chat notice failed:", error);
+  }
 }
 
 function notifyOnce(input: { chatId: string; stop: GoalPassStop }, longRunId: string, decision: PersistenceDecision, nextAtMs: number, nowMs: number): void {

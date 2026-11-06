@@ -6,6 +6,7 @@ import { callConnectedModelDetailed, type JudgmentRuntimeReceipt } from "../syst
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { prepareCheckpointContinuation } from "./continuation";
 import { isPersistenceBoundaryKind, type PersistenceBoundaryKind } from "../../shared/persistence-policy";
+import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 
 type Action = OngoingStallReplan["action"];
 const ACTIONS = new Set<Action>(["inspect_read_only", "wait_backoff", "needs_person"]);
@@ -103,7 +104,7 @@ export async function reflectOngoingStall(input: {
     goalId: checkpoint.goalId, goalRevision: checkpoint.goalRevision,
     originalConstraints: redactOperationalSecrets(checkpoint.capsule.originalConstraints ?? ""),
     objective: redactOperationalSecrets(checkpoint.objective),
-    criteria: checkpoint.acceptanceCriteria.map(redactOperationalSecrets),
+    criteria: effectiveAcceptanceCriteria(checkpoint.acceptanceCriteria).map(redactOperationalSecrets),
     checkpointId: checkpoint.checkpointId, progressKey: input.progressKey,
     stallStreak: input.stallStreak, previousAction: input.previousAction,
     previousAlternative: previousAlternative ? redactOperationalSecrets(previousAlternative) : null,

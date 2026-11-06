@@ -273,6 +273,8 @@ const OS_REFUSAL_TEXT: Readonly<Record<string, string>> = {
   "one-os-execution-revoked": "This screen turn has ended (the run was stopped, finished or restarted), so nothing was pressed. Continue without the screen, or start the step again from a new turn.",
   "one-os-execution-capability-invalid": "This screen turn could not be confirmed, so nothing was pressed. Repeat the call once; if it fails again, continue without the screen.",
   "one-os-authority-unavailable": "Screen control could not be confirmed for this run. Repeat the call once; if it fails again, continue without the screen.",
+  "one-os-resource-lock-unavailable": "The screen-lock file in this computer's temporary folder cannot be used by this account, so nothing was pressed. Say so plainly: the owner has to fix that folder's ownership or permissions; repeating the call does not change it.",
+  "one-os-lease-host-unavailable": "Screen control is not connected in this Agentlas process (the app host that grants it is not running), so nothing was pressed. Continue without the screen.",
 };
 function osFailure(error: unknown): NativeInputResult {
   const code = error && typeof error === "object" && "code" in error ? String(error.code) : "one-os-authority-unavailable";
@@ -287,6 +289,8 @@ function withOpenHint<T extends { ok?: unknown; error?: unknown; message?: unkno
 }
 const BUNDLE_LIKE = /^[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9][A-Za-z0-9_-]*)+$/;
 const APP_OPEN_WAIT_MS = 6_000;
+/** Longest wait for the window of an app this call just opened; a slow cold start draws it late, a menu-bar app never does. */
+const APP_WINDOW_WAIT_MS = 10_000;
 /**
  * focus_app on an app that is not running opens it first (macOS). An app the owner asked to "open" had no tool that could open it:
  * "No running application matched" (14 times in 14 days, Calculator) and the run fell back to typing into Spotlight. Only focus_app does
@@ -319,8 +323,8 @@ async function openAppIfNotRunning(appName: string, body: Record<string, unknown
   const sleep = deps.sleep;
   const running = async () => { const now = await listApps(); return Array.isArray(now.apps) && (now.apps as Row[]).some(ours); };
   if (!await waitUntil(running, { withinMs: APP_OPEN_WAIT_MS, signal, ...(sleep ? { sleep } : {}) })) return false;
-  // a window to act on: most apps draw theirs within a second; a menu-bar app has none and is acted on as it is
-  await waitUntil(async () => { const now = await windows(); return Array.isArray(now.targets) && (now.targets as Row[]).some(ours); }, { withinMs: 3_000, signal, ...(sleep ? { sleep } : {}) });
+  // a window to act on: most apps draw theirs within a few seconds; a menu-bar app has none and is acted on as it is after the wait
+  await waitUntil(async () => { const now = await windows(); return Array.isArray(now.targets) && (now.targets as Row[]).some(ours); }, { withinMs: APP_WINDOW_WAIT_MS, signal, ...(sleep ? { sleep } : {}) });
   return true;
 }
 /** Waits (bounded) for another run's screen turn to end instead of refusing; the owner's own input is judged by settleHumanInput, not here. */

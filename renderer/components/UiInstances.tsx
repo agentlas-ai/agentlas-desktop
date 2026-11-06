@@ -4,7 +4,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "r
 import { foldUiInstances, type UiActionView, type UiInstanceView } from "@shared/ui-instances";
 import { mergeInlineUiTranscript } from "@shared/inline-ui-transcript";
 import { validateInlineUiPresentationContent } from "@shared/inline-ui-presentation";
-import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema } from "@shared/finance-native-ui";
+import { FINANCE_NATIVE_VIEW, FinanceNativeResultSchema, isResultCardInstance } from "@shared/finance-native-ui";
 import { IntellectUiActions } from "@/lib/intellect-ui-actions";
 import { readUiResult } from "@/lib/ui-result-read";
 import { VisualChatScope } from "@/lib/visual-artifacts";
@@ -15,8 +15,7 @@ import {
 import { McpResultPreview } from "./McpResultPreview";
 import { FinanceNativeResult, financePresentView, financeReadSourceRows } from "./finance/FinanceNativeResult";
 
-/** A Finance answer's own result card (finance.present), known before its result is read. */
-const presentCard = (instance: UiInstanceView) => instance.presentation.viewId === FINANCE_NATIVE_VIEW && /^Finance (canvas|earnings|impact)$/.test(instance.presentation.fallbackText ?? "");
+export { isResultCardInstance };
 import { IntellectUI } from "./IntellectUI";
 import { ChartBlock } from "./ChartBlock";
 import { HtmlVisualBlock } from "./HtmlVisualBlock";
@@ -76,7 +75,7 @@ export function InlineUiInstances({ chatId, turnIds, locale, instances, part }: 
   const visible = (instances ?? loaded).filter(instance => instance.chatId === chatId && instance.state !== "closed"
     && (!turnIds || turnIds.includes(instance.turnId)));
   if (part === "lead") {
-    const leads = visible.filter(presentCard);
+    const leads = visible.filter(isResultCardInstance);
     return leads.length ? <>{leads.map(instance => <UiInstanceCard key={`lead:${instance.instanceId}`} instance={instance} locale={locale} part="lead" />)}</> : null;
   }
   if (visible.length === 0) return null;

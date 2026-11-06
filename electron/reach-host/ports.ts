@@ -1,6 +1,6 @@
 import { runAppleScript } from "../reach/applescript";
 import { isPublishedOffLimits, isSensitiveApp } from "../reach/explore-policy";
-import { isDirectMenuCommand, isCurrentDialogCapability, type CapabilityPolicyContext } from "../reach/map";
+import { isDirectMenuCommand, isCurrentDialogCapability, refindsLive, type CapabilityPolicyContext } from "../reach/map";
 import { findLiveCandidates, firstWithWindow } from "../reach/app-match";
 import { launchApp, waitUntil } from "../reach/launch";
 import { exploreApp } from "../reach/explorer";
@@ -39,6 +39,7 @@ type Outcome =
 interface Ctx { chatId: string; runId: string; dryRun?: boolean; permission?: "read" | "write" | "full"; signal?: AbortSignal }
 
 const str = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+const MAP_NOT_READY_NEXT = "the app map has not been built yet; Agentlas builds it in the background after it starts (the first build takes about a minute)";
 const refused = (reason: string, next?: string, data?: unknown): Outcome => ({ status: "refused", reason, ...(next ? { next } : {}), ...(data !== undefined ? { data } : {}) });
 const stopped = (ctx: Ctx): boolean => ctx.signal?.aborted === true;
 const aborted = (): Outcome => refused("aborted", "the run was stopped; the app was left as it was");
@@ -54,7 +55,7 @@ const MAX_RESULT_CHARS = 24_000;
 // ---- helpers ---------------------------------------------------------------------------------------------------------------------------
 async function resolveApp(rt: ReachRuntime, ref: string): Promise<{ ok: true; app: AppRecord } | { ok: false; outcome: Outcome }> {
   const map = await rt.readMap();
-  if (!map) return { ok: false, outcome: unavailable("map_not_ready", "the app map is built in the background shortly after Agentlas starts; try again in a minute") };
+  if (!map) return { ok: false, outcome: unavailable("map_not_ready", MAP_NOT_READY_NEXT) };
   const exact = map.apps.find((app) => app.key === ref);
   if (exact) return { ok: true, app: exact };
   const wanted = ref.toLowerCase();
@@ -110,7 +111,8 @@ function usableNow(capability: Capability, context: CapabilityPolicyContext = {}
   if (capability.generic || publishedOffLimits(capability, context)) return false;
   // learned work stays callable after an update (its replay finds the controls again, or hands the caller back to the screen); only a candidate is not callable
   if (isLearned(capability)) return capability.status === "verified" || capability.status === "degraded";
-  if (capability.status === "degraded") return false;
+  // an explored dialog finds its controls again in the live dialog at every call, so a failed last use does not stop the next call (the call is what proves it works again)
+  if (capability.status === "degraded") return refindsLive(capability) && isCurrentDialogCapability(capability, context);
   if (capability.tier === "structure") return isDirectMenuCommand(capability, context); // the live menu confirms each command
   if (capability.tier === "explored" && !isCurrentDialogCapability(capability, context)) return false;
   if (capability.tier === "published" && capability.status === undefined) return true;
@@ -166,7 +168,7 @@ function row(capability: Capability, context: CapabilityPolicyContext): Record<s
 export async function reachMap(args: Record<string, unknown>): Promise<Outcome> {
   const rt = await getReachRuntime();
   const map = await rt.readMap();
-  if (!map) return unavailable("map_not_ready", "the app map is built in the background shortly after Agentlas starts; try again in a minute");
+  if (!map) return unavailable("map_not_ready", MAP_NOT_READY_NEXT);
   const query = str(args.query).toLowerCase();
   const level = str(args.level);
   const limit = clamp(args.limit, 1, 60, 30);
@@ -215,10 +217,18 @@ export async function reachApp(args: Record<string, unknown>): Promise<Outcome> 
   };
 }
 
+// What a failed call says about the app: steps that already ran have touched it, so the screen is read before anything is done again (a model that repeats
+// the work from the screen would double it). `lead` is what is known about the failure itself.
+function ranNote(stepsRun: number, lead: string): string {
+  if (stepsRun <= 0) return lead || "no step ran in the app";
+  return `${lead ? `${lead}; ` : ""}${stepsRun} step(s) already ran in the app; read the app's screen (get_app_state) to see whether the change happened before doing anything again`;
+}
+
+const DEGRADED_NOT_CALLABLE = "it failed when last used and is not callable until Reach re-reads it";
+
 function runnableReason(capability: Capability, rt: ReachRuntime, context: CapabilityPolicyContext): string | null {
   if (publishedOffLimits(capability, context)) return "Reach does not script this app: it holds credentials, money, messages or the system";
-  if (capability.status === "degraded") return "it failed when last used; Reach re-reads it when the owner is away";
-  if (!usableNow(capability, context)) return "only seen so far: it becomes callable once an exploration has opened and closed its dialog";
+  if (!usableNow(capability, context)) return capability.status === "degraded" ? DEGRADED_NOT_CALLABLE : "only seen so far: it becomes callable once an exploration has opened and closed its dialog";
   if (capability.body?.kind === "steps") return rt.gui || desktopDriverReachable() ? null : "this process has no driver for the app's screen, and the Agentlas app window is not connected to hand it to";
   if (capability.source.kind === "sdef") return rt.platform === "darwin" ? null : "AppleScript runs only on macOS";
   return `${capability.source.kind} capabilities cannot be called yet`;
@@ -274,7 +284,8 @@ function bundleOf(key: string): string | null {
 
 type KnownApp = { key: string; name: string; path?: string };
 const OPEN_WAIT_MS = 8_000;
-const WINDOW_WAIT_MS = 4_000;
+// A window that is still opening (a cold start of a large app takes this long); the process itself shows up much sooner (OPEN_WAIT_MS).
+const WINDOW_WAIT_MS = 15_000;
 
 /**
  * Opens the app when it is not running, for a run that may act (write permission). "Reach only drives an app that is already running" ended
@@ -311,11 +322,14 @@ async function liveTarget(rt: ReachRuntime, app: KnownApp, actuator: import("../
  * Brings the app forward and runs the work. An app opened a moment ago (or one coming back from a Space switch) is refused once or twice before it can take
  * the front; the refusal comes before the work starts, so asking again cannot run anything twice.
  */
+const FOREGROUND_RETRY_DELAYS_MS = [700, 1_500, 3_000];
+
 async function withForegroundAgain<T>(rt: ReachRuntime, actuator: import("../reach/actuator").Actuator, where: { pid: number; windowId: number }, work: () => Promise<T>, signal?: AbortSignal): ReturnType<typeof withForeground<T>> {
   const wait = rt.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   let front = await withForeground(actuator, where, work, signal, rt.sleep);
-  for (let attempt = 0; attempt < 2 && !front.ok && signal?.aborted !== true; attempt += 1) {
-    await wait(700);
+  for (const delayMs of FOREGROUND_RETRY_DELAYS_MS) {
+    if (front.ok || signal?.aborted === true) break;
+    await wait(delayMs);
     front = await withForeground(actuator, where, work, signal, rt.sleep);
   }
   return front;
@@ -331,14 +345,14 @@ async function useGui<T>(gui: NonNullable<ReachRuntime["gui"]>, ctx: Ctx, work: 
 
 function guiRefusal(error: string): Outcome {
   const next: Record<string, string> = {
-    app_not_running: "the app is not open and Reach could not open it here (it opens an app only for a run that may act); open the app, then call again",
-    app_has_no_window: "the app is open but shows no window Reach could use; open one of its windows, then call again",
+    app_not_running: "the app is not open and Reach could not open it here (it opens an app only for a run that may act)",
+    app_has_no_window: `the app is open but showed no window within ${WINDOW_WAIT_MS / 1000} s (it may still be loading, or it has no window)`,
     app_off_limits: "Reach never drives this app (it holds secrets, messages or settings)",
     gui_not_supported_for_this_app: "only macOS apps are driven through their screen in this version",
     cua_download_failed: "the driver could not be downloaded; the owner can retry from Settings > Explore this desktop's apps",
     driver_unavailable: "the driver could not be started",
     gui_busy: "another job kept the screen for over a minute (Reach drives one app at a time); try again in a moment",
-    cannot_bring_forward: "the app would not come to the front (macOS refused); try again when it is not busy",
+    cannot_bring_forward: "the app would not come to the front after several tries (another app kept the focus)",
   };
   return unavailable(error, next[error] ?? "the app's screen could not be driven");
 }
@@ -371,7 +385,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
     else await rt.registry.recordOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: false, code: "rule_tightened" }, rt.day());
     return refused("capability_not_usable", "the current exploration rule no longer allows this stored capability");
   }
-  if (!usableNow(capability, context)) return refused("capability_not_usable", capability.status === "degraded" ? "it failed when last used; Reach repairs it when the owner is away, or pick another" : "it has only been seen, not proven; reach.app with usable:true lists what is ready");
+  if (!usableNow(capability, context)) return refused("capability_not_usable", capability.status === "degraded" ? `${DEGRADED_NOT_CALLABLE}; pick another` : "it has only been seen, not proven; reach.app with usable:true lists what is ready");
   // A read the source itself declares can run under a read-only run; anything whose effect is not declared needs the run's write permission.
   const declaredRead = capability.effect.class === "read" && capability.effect.basis === "declared";
   if (!declaredRead && !writable(ctx)) return refused("permission_required", "this run may only read; what this capability does is not declared, so it needs write permission");
@@ -402,7 +416,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
       const left = run.handoff.remaining.map((step) => (step.target ? `${step.op} "${step.target}"` : step.op)).join(", ").slice(0, 400);
       return refused("handoff_to_screen", `the learned steps no longer match this app's screen at step ${run.handoff.atStep + 1} (${run.handoff.reason}); do the rest on the app's screen with the computer tools (get_app_state, click, type_text), then call reach.learn with the same name so this port is updated. Steps not reached: ${left}`, { stepsRun: run.stepsRun, atStep: run.handoff.atStep, reason: run.handoff.reason });
     }
-    return refused(run.code ?? "step_failed", run.code === "bad_parameters" ? "reach.describe lists the parameters this capability takes" : "the call did not complete", { stepsRun: run.stepsRun, outcome: run.outcome });
+    return refused(run.code ?? "step_failed", run.code === "bad_parameters" ? "reach.describe lists the parameters this capability takes" : ranNote(run.stepsRun, run.code === "outcome_unsatisfied" ? "the expected change was not seen on the screen after several looks" : ""), { stepsRun: run.stepsRun, outcome: run.outcome });
   }
 
   if (capability.body?.kind === "steps") {
@@ -427,7 +441,7 @@ export async function reachInvoke(args: Record<string, unknown>, ctx: Ctx): Prom
     await rt.service?.onInvokeOutcome(resolved.app.key, resolved.app.fingerprint, capability.id, { ok: run.ok, code: run.code, repairable: run.repairable });
     return run.ok
       ? { status: "ok", data: { ok: true, stepsRun: run.stepsRun, postcondition: run.postcondition ?? "unknown" } }
-      : { status: "refused", reason: run.code ?? "step_failed", next: run.repairable ? "the app's screen seems to have changed; Reach will re-read it when the owner is away and this works again afterwards" : "the call did not complete; the dialog it opened was closed", data: { ok: false, message: cut(run.message ?? "", 300), stepsRun: run.stepsRun } };
+      : { status: "refused", reason: run.code ?? "step_failed", next: ranNote(run.stepsRun, run.repairable ? "a menu item or control this capability needs was not found in the live app after a second look; a dialog it had opened was closed" : "the call stopped before it finished; a dialog it had opened was closed"), data: { ok: false, message: cut(run.message ?? "", 300), stepsRun: run.stepsRun } };
   }
 
   // a published capability: the app's own scripting interface

@@ -31,7 +31,6 @@ import { AGI_ACTION_SCHEMA, type AgiActionExecutor, type AgiActionReceipt } from
 import { admitAgiTokens, chargeAgiTokens, readAgiTokenLimits } from "./budget";
 import { AGI_READ_TOOL_NAMES, type AgiReadResult } from "./read-tools";
 import type { AgiUnblockInput, AgiUnblockResult } from "./monitor";
-import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 
 export const AGI_MODEL_ATTEMPT_SCHEMA = "agentlas.agi-unblock-decision.v1" as const;
 export const AGI_MAX_EXTRA_READS = 4;

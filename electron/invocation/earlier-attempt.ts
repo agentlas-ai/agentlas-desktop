@@ -24,8 +24,18 @@ export function hasEarlierAttempt(request: McpInvocationRequest | null | undefin
   return !!request && (request as EarlierAttemptRequest).earlierAttemptUncertain === true;
 }
 
-/** The queue sends an unconfirmed message again at most this many times. A second unknown outcome closes the row by itself. */
+/**
+ * The queue sends a message whose effect is unknown again at most this many times. A second unknown outcome closes the row by itself,
+ * as a separate end reason ("effect could not be confirmed"), never as a delivery that was given up: a tool may already have run,
+ * and a second send could run the same external action twice. Only a run with NO receipt (it never started, so nothing ran) is
+ * sent again without this cap (unconfirmedResendIsUnbounded).
+ */
 export const UNCONFIRMED_MAX_RESENDS = 1;
+
+/** A run that left no receipt never began: nothing ran, so sending the message again cannot repeat an effect and has no cap. */
+export function unconfirmedResendIsUnbounded(receipt: unknown): boolean {
+  return !receipt;
+}
 
 /** The terminal code of a dispatched turn that ended without a terminal receipt (runtime/runner.ts RUNTIME_TURN_UNSETTLED_CODE). */
 const UNSETTLED_TURN_CODE = "runtime_turn_unsettled";

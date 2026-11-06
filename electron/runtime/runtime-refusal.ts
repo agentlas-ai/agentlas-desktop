@@ -20,7 +20,11 @@ import type { RunnerFailureKind } from "./runner";
 
 const MAX_NOTICE_LENGTH = 400;
 
-const NOTICE_PATTERNS: RegExp[] = [
+/** Who wrote the text: a CLI's own notice (quota / login wording is its vocabulary), or a model's reply (never that vocabulary). */
+export type RefusalTextScope = "cli-notice" | "model-text";
+
+/** A CLI's own notice: its limit / login vocabulary (codex measured, antigravity). Only read with scope "cli-notice". */
+const CLI_NOTICE_PATTERNS: RegExp[] = [
   /\byou'?ve hit\b/i,
   /\busage limit\b/i,
   /\brate.?limit(ed)?\b/i,
@@ -34,11 +38,15 @@ const NOTICE_PATTERNS: RegExp[] = [
   /\bnot logged in\b/i,
   /\b(login|session|token) (expired|invalid)\b/i,
   /\bsubscription (required|expired)\b/i,
-  // ── 모델이 쓴 기계 자기보고 (2026-08-08 ollama 실측) ──
-  // "The system encountered a timeout error while processing a request. No further
-  // function calls are required. Please retry the operation..." — 도구 왕복이 무너진 뒤
-  // 로컬 모델이 뱉은 문장이 최종 답으로 저장됐다. 이건 사람에게 하는 답이 아니라
-  // 프로토콜 잡담이다. 짧고 구조 없는 출력에서만 보므로 산출물 오탐 여지가 거의 없다.
+];
+
+// ── 모델이 쓴 기계 자기보고 ( ollama 실측) ──
+// "The system encountered a timeout error while processing a request. No further
+// function calls are required. Please retry the operation..." — 도구 왕복이 무너진 뒤
+// 로컬 모델이 뱉은 문장이 최종 답으로 저장됐다. 이건 사람에게 하는 답이 아니라
+// 프로토콜 잡담이다. 짧고 구조 없는 출력에서만 보므로 산출물 오탐 여지가 거의 없다.
+// API·로컬 러너(scope "model-text")는 이 세 가지만 본다: 모델이 쓴 글에는 한도·로그인 어휘의 근거가 없다.
+const PROTOCOL_CHATTER_PATTERNS: RegExp[] = [
   /\bno further (function|tool) calls?\b/i,
   /\bsystem encountered (a|an) [a-z]+ error\b/i,
   /\bretry the (operation|request)\b/i,
@@ -91,11 +99,19 @@ export function detectApprovalRequired(
   return blocked ? { message: t, blocked } : { message: t };
 }
 
-/** 텍스트가 산출물이 아니라 거절 고지문인가. */
-export function detectRuntimeRefusal(text: string): { kind: RunnerFailureKind; message: string } | null {
+/**
+ * 텍스트가 산출물이 아니라 거절 고지문인가.
+ *
+ * scope "cli-notice"(기본): CLI가 낸 고지문 — 한도·로그인 어휘와 프로토콜 잡담 모두, 결과 종류는 kindOf 그대로.
+ * scope "model-text": API·로컬 러너가 모델의 최종 답을 볼 때 — 프로토콜 잡담 3종만, 결과는 `timeout`/`refused`뿐
+ *   (모델이 "upgrade to Node 22"나 "please log in"이라고 써도 한도·로그인 신호가 되지 않는다).
+ */
+export function detectRuntimeRefusal(text: string, scope: RefusalTextScope = "cli-notice"): { kind: RunnerFailureKind; message: string } | null {
   const t = String(text || "").trim();
   if (!t || t.length > MAX_NOTICE_LENGTH) return null;
   if (t.includes("{") || t.includes("```") || /\n\s*\n/.test(t)) return null;
-  if (!NOTICE_PATTERNS.some((re) => re.test(t))) return null;
-  return { kind: kindOf(t), message: t };
+  const patterns = scope === "model-text" ? PROTOCOL_CHATTER_PATTERNS : [...CLI_NOTICE_PATTERNS, ...PROTOCOL_CHATTER_PATTERNS];
+  if (!patterns.some((re) => re.test(t))) return null;
+  const kind = kindOf(t);
+  return { kind: scope === "model-text" && kind !== "timeout" ? "refused" : kind, message: t };
 }

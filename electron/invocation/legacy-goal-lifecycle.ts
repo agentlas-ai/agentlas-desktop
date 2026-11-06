@@ -8,6 +8,7 @@ import { getLongRun, getLongRunGoalRevisionBinding } from "../store/long-runs";
 import { restoreExactDesktopRuntimeSelection } from "../long-run/exact-runtime-binding";
 import { judgeRequired, type JudgmentRuntimeReceipt } from "../system-agents/judgment";
 import { GOAL_VERIFICATION_MODEL_TIMEOUT_MS } from "../long-run/criterion-proof";
+import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 
 type LifecycleVerdict = "ongoing" | "finite" | "unknown";
 export interface LegacyGoalLifecyclePreparation {
@@ -113,7 +114,7 @@ export async function prepareLegacyGoalLifecycle(input: {
         : "Does this current explicit user message confirm a continuing responsibility for this exact existing Goal until the user stops it?",
       labels: ["ongoing", "finite", "unknown"],
       input: JSON.stringify({ goalId: input.goalId, revision: snapshot.revision.revision, snapshotDigest,
-        objective: snapshot.revision.objective, acceptanceCriteria: snapshot.revision.acceptanceCriteria,
+        objective: snapshot.revision.objective, acceptanceCriteria: effectiveAcceptanceCriteria(snapshot.revision.acceptanceCriteria),
         originalRequest: snapshot.revision.originalRequest, currentRevisionSource: snapshot.revision.sourceMessage,
         ...(nativeStoredSource ? { exactStoredUserSource: input.source } : { currentUserMessage: input.source }) }),
       guidance: (nativeStoredSource

@@ -5,7 +5,7 @@ import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { isLongRunPauseReason } from "../../shared/long-run";
 import { getAutomation, getAutomationLiveRunId, getAutomationLiveRunState } from "../store/automations";
-import { latestGoalWaitSubscription } from "./wait-subscriptions";
+import { effectiveWaitCheckAt, latestGoalWaitSubscription } from "./wait-subscriptions";
 import { isGoalObserving } from "./effect-observation-tickets";
 import { getGoalRuntimeSelectionEvidence } from "./runtime-handoff";
 import { latestRuntimePlan } from "./plan";
@@ -84,7 +84,7 @@ export function getChatContinuitySnapshot(chatId: string, hostActiveRunId: strin
         nextAction: strategy.nextAction, reasonCode: strategy.reasonCode, metrics: strategy.metrics,
         nextWakeAt: strategy.nextWakeAt } : null,
       wait: boundWait ? { waitId: boundWait.waitId, state: boundWait.state, subjectKind: boundWait.intent.subject.kind,
-        nextCheckAt: boundWait.nextCheckAt, executionAvailability: "app-running" } : null,
+        nextCheckAt: effectiveWaitCheckAt(boundWait, Date.now()), executionAvailability: "app-running" } : null,
       effectObservation: isGoalObserving(goalId) ? "checking" : null,
     } : null;
 

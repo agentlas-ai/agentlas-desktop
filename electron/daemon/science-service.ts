@@ -670,6 +670,14 @@ export function createDaemonScienceService(options: {
             return {session:store.getLoopSessionForProject(record.projectId,prior.id)??prior,replayed:true,proceed:true as const,advisories:[]};
           }
         }
+        // The owner's own "continue" is a fresh epoch for a spent resource segment, the rule resumeLoop applies (clearUserStop).
+        // Without it the transition below refuses science-research-budget-paused and the owner's button cannot continue research.
+        // Replay-safe: the reset is keyed by the owner's request id.
+        if (ownerIntent && record.action === "resume") {
+          const held = store.researchExecutionBudgetForProject(record.projectId);
+          const spent = held ? store.expireResearchExecution(record.projectId, held.conversationId) : null;
+          if (spent?.status === "paused_budget") store.resetResearchExecutionBudget(record.projectId, spent.conversationId, record.requestId);
+        }
         const result = store.transitionLoopSession(record);
         if ((record.action === "pause" || record.action === "cancel") && prior?.activeRunId) {
           const turn = store.getTurnByInvocationRunId(prior.activeRunId);

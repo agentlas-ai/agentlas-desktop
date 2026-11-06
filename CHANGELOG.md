@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.128 — 2026-11-06
+
+- Messages that must not be lost wait for the room instead of being given up by count or clock: an owner message, a supervisor dispatch, a parked relay, teammate and child-session reports and a host recovery all wait for the chat to free, a graph step waiting for a busy room is never failed by a clock, and only the owner's stop ends the wait. A resend whose effect is unknown stays capped.
+- Goals: the same verification result twice now rests the Goal on a schedule with no model call (progress is the outcome, not the tool count), a spent runtime retry account no longer closes a Goal but reopens it for one probe two hours later, no model is asked to check a run receipt, an owner instruction the judge could not read is asked again on a signal, a proof kind the host cannot produce is judged by meaning, and a quiet Goal wait stores no row per poll.
+- Runtimes: the recovery loop tries every candidate runtime instead of stopping on a clock, a guessed sign-in failure no longer locks a runtime out and signing in again clears it, a failed Build turn moves to the next runtime, an API run survives a brief overload or a dropped connection after its tools ran, a serving reply still cut after four continuations is reported as cut, and a One recovery is capped per failure fingerprint and always says why.
+- Computer use and Reach: a run's browser-window lock lasts while the run is live, an input the driver may have sent is reported as possibly done instead of safe to repeat, a stale screen lock is taken over by its age, slow apps get time to open and come forward, a dialog capability that missed once stays callable, and a phone's visual-input refusal carries its real cause.
+- Cards: one result card for every domain now draws documents, file thumbnails, charts, tables, diagrams, motion stills and slides, a card shown in the conversation can be saved as a PNG picture, and a Science conversation's cards show in its results panel. The choice of visual is made where the model reads the card schema.
+- Agents and storage: an agent's interrupted file change is recovered when its next run starts, the Hephaestus sync watcher reconnects, a transient failure no longer spends the day's learning proposal, memory curation keeps only what is read, an app-side failure is retried after a restart or update, and delivery rows whose work is over are removed after 14 or 30 days (a teammate record stays while its chat exists).
+- Finance: a source's 5xx is retried once, a timeout is named, one 429 no longer blocks the rest twice, news search falls back to Yahoo, and an empty month start reads last month's yields.
+- Science: the package is pinned at a build where wall time paces research instead of stopping it, quiet loops rest, and the owner's "continue research" on a spent budget continues.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.127 — 2026-11-06
 
 - Updates and migrations no longer write a full copy of the database, and copies that earlier versions left behind are removed once this version has opened the store.

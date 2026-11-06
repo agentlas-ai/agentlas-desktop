@@ -2251,14 +2251,20 @@ async function runMcpInvocationInContext(
     const row = getDb().prepare("SELECT builtin, system_prompt FROM installed_agents WHERE id = ?").get(candidate.id) as { builtin: number; system_prompt: string } | undefined;
     if (!row || row.builtin || isCallOnlyHubAgent(candidate) || workspaceLeases.has(candidate.id)) return;
     // An edit that lands between the lease and the read (the agent's own previous process finishing a write, the owner saving in an
-    // editor) moves the revision once; the lease is taken again on the new files. A second move in a row is a real conflict.
+    // editor) moves the revision; the lease is taken again on the new files. The attempts are a bound on lock contention only: when
+    // the files are still moving after the last one, the run starts on exactly what was just read and pins that revision (the lease
+    // held from here on keeps later edits out), so the run never fails on an owner who is still saving.
+    const maxPinAttempts = 5;
     let leaseId = "", pin = { revisionId: "", treeDigest: "" }, workspace!: ReturnType<typeof getAgentWorkspace>;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt < maxPinAttempts; attempt += 1) {
       leaseId = `${req.runId ?? "invocation"}:${candidate.id}:${randomUUID()}`;
       pin = acquireAgentWorkspaceRunLease(candidate.id, leaseId); workspaceLeases.set(candidate.id, leaseId); workspacePins.set(candidate.id, pin);
       workspace = getAgentWorkspace(candidate.id);
       if (workspace.treeDigest === pin.treeDigest && workspace.currentRevisionId === pin.revisionId) break;
-      if (attempt === 1) throw new Error("agent_revision_changed_before_dispatch");
+      if (attempt === maxPinAttempts - 1) {
+        pin = { revisionId: workspace.currentRevisionId, treeDigest: workspace.treeDigest }; workspacePins.set(candidate.id, pin);
+        break;
+      }
       try { releaseAgentWorkspaceRunLease(candidate.id, leaseId); } catch { /* a lease that cannot be released stays conservative until recovery */ }
       workspaceLeases.delete(candidate.id); workspacePins.delete(candidate.id);
     }
@@ -7194,13 +7200,15 @@ async function runMcpInvocationInContext(
         sink({ kind: "notice", notice });
       },
     };
-    // Direct interactive fallback is a recovery chain, not an unbounded retry
-    // loop. The set lives for the whole invocation so a later Stormbreaker or
-    // One recovery pass cannot resurrect a runtime that already failed here.
-    const DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS = 4;
-    const DIRECT_RUNTIME_RECOVERY_MAX_ELAPSED_MS = 30_000;
-    const DIRECT_RUNTIME_RECOVERY_MAX_RETRY_EVENTS = 3;
+    // Direct interactive fallback walks the role pool until it has no candidate left; it ends only on a result or the pool running
+    // dry. What keeps it finite is this set: it lives for the whole invocation so a runtime that already failed here is never
+    // picked again, including by a later Stormbreaker or One recovery pass. What keeps a fallback from repeating work is the
+    // settlement decision (effectsObserved), roleFallbackBlocked, creditRetryBlocked and the invocation breaker, not a count.
+    /** The longest a same-runtime request-throttling wait may hold the owner (a wait, not a cap on how many runtimes are tried). */
+    const THROTTLE_INLINE_WAIT_MS = 30_000;
     const attemptedRuntimeKeys = new Set<string>();
+    /** Why each tried runtime stopped (its failure kind), so the closing sentence can say it for every one of them. */
+    const attemptedRuntimeCauses = new Map<string, RunnerFailure["kind"]>();
     const attemptedRuntimeReceipts = new Map<string, {
       kind: RuntimeStatus["kind"];
       backend: RuntimeStatus["backend"];
@@ -7342,17 +7350,7 @@ async function runMcpInvocationInContext(
     const invokeBrainRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
       const currentPicked = picked;
       if (!currentPicked) throw new Error("no-runner");
-      /*
-       * The recovery clock measures recovery, not the work.
-       *
-       * It used to start here, before the first attempt, while the budget it feeds is 30 seconds.
-       * So any request that took longer than 30 seconds -- which is every long prompt -- had its
-       * entire recovery budget spent by the work itself: the first failure was immediately ruled
-       * "time-limit", no other runtime was ever tried, and the person got an empty answer with a
-       * notice that said the retry budget had run out before a single retry happened.
-       *
-       * It now starts when the first failure is seen, so the budget covers what it is named after.
-       */
+      // The recovery clock only reports how long recovery ran (details.elapsedMs): it starts at the first failure, not at the work.
       let recoveryStartedAt: number | null = null;
       const recoveryElapsedMs = () => (recoveryStartedAt == null ? 0 : Date.now() - recoveryStartedAt);
       let recoveryRetryEvents = 0;
@@ -7361,15 +7359,6 @@ async function runMcpInvocationInContext(
       let sameRuntimeRetries = 0;
       /** Same-runtime retries spent on a store lock refused before dispatch (STORE_BUSY_CODE). */
       let storeBusyRetries = 0;
-      /** Throttle retries spent on the same runtime over the whole call (sameRuntimeRetries resets when the runtime changes). */
-      let throttleRetriesSpent = 0;
-      /*
-       * The attempt cap counts attempts on distinct runtimes. A same-runtime retry of request throttling or a busy store waits
-       * and resends the same request, so it must not use up the attempt that moves to the next runtime: with four attempts and
-       * three throttle retries a rate-limited first runtime ended the turn at "Recovery stopped" with the owner's own runtime
-       * never tried (found on the light-front lane, 429 with Retry-After).
-       */
-      const distinctAttempts = (): number => attemptCount - throttleRetriesSpent - storeBusyRetries;
       let originalFailure: RunnerFailure | null = null;
       let terminalNoticeEmitted = false;
       const currentOwnerPrompt = runnerTurnContextSource(request)?.userPrompt ?? request.userPrompt;
@@ -7383,7 +7372,7 @@ async function runMcpInvocationInContext(
       });
       const emitTerminalRecoveryFailure = (
         result: Awaited<ReturnType<Runner>>,
-        reason: "candidate-exhausted" | "attempt-limit" | "time-limit" | "event-limit",
+        reason: "candidate-exhausted",
       ): Awaited<ReturnType<Runner>> => {
         const failure = result.failure;
         if (!failure || terminalNoticeEmitted) return result;
@@ -7447,8 +7436,22 @@ async function runMcpInvocationInContext(
         const stoppedRuntime = (originalFailure ?? failure).runtime;
         const stoppedName = runtimeDisplayName(stoppedRuntime);
         const ownMachine = runtimeCostClass(stoppedRuntime) === "local";
-        const koMessage = `${stoppedName} ${ownMachine ? "모델이" : "쪽 문제로"} ${attemptCount}번 시도했지만 답을 받지 못했습니다. 요청은 저장돼 있으니 잠시 뒤 다시 보내거나 다른 모델을 골라 주세요. 자세한 원인은 자세히에서 볼 수 있어요.`;
-        const enMessage = `${stoppedName} did not answer after ${attemptCount} attempt${attemptCount === 1 ? "" : "s"}${ownMachine ? "" : " (a provider-side problem)"}. Your request is saved: send it again in a moment or pick another model. The details hold the cause.`;
+        // More than one runtime was tried: say all of them, each with the one cause that stopped it (the pool had nobody left).
+        const triedRuntimes = [...attemptedRuntimeReceipts.entries()];
+        let koMessage: string;
+        let enMessage: string;
+        if (triedRuntimes.length > 1) {
+          const causeKo: Record<RunnerFailure["kind"], string> = { quota: "한도", rate_limit: "요청 제한", auth: "로그인", refused: "거절", empty: "빈 답", exit: "비정상 종료", timeout: "시간 초과", unavailable: "연결 불가", unsupported: "미지원" };
+          const causeEn: Record<RunnerFailure["kind"], string> = { quota: "usage limit", rate_limit: "rate limit", auth: "not signed in", refused: "refused", empty: "empty reply", exit: "abnormal exit", timeout: "timed out", unavailable: "unreachable", unsupported: "unsupported" };
+          const cause = (key: string): RunnerFailure["kind"] => attemptedRuntimeCauses.get(key) ?? failure.kind;
+          const listKo = triedRuntimes.map(([key, receipt]) => `${runtimeDisplayName(receipt.kind)}(${causeKo[cause(key)]})`).join(", ");
+          const listEn = triedRuntimes.map(([key, receipt]) => `${runtimeDisplayName(receipt.kind)} (${causeEn[cause(key)]})`).join(", ");
+          koMessage = `사용할 수 있는 실행 환경 ${triedRuntimes.length}개를 모두 써 봤지만 답을 받지 못했습니다: ${listKo}. 요청은 저장돼 있으니 원인을 해결한 뒤 다시 보내 주세요. 자세한 원인은 자세히에서 볼 수 있어요.`;
+          enMessage = `All ${triedRuntimes.length} available runtimes were tried and none answered: ${listEn}. Your request is saved: send it again once the cause is fixed. The details hold each cause.`;
+        } else {
+          koMessage = `${stoppedName} ${ownMachine ? "모델이" : "쪽 문제로"} ${attemptCount}번 시도했지만 답을 받지 못했습니다. 요청은 저장돼 있으니 잠시 뒤 다시 보내 주세요. 자세한 원인은 자세히에서 볼 수 있어요.`;
+          enMessage = `${stoppedName} did not answer after ${attemptCount} attempt${attemptCount === 1 ? "" : "s"}${ownMachine ? "" : " (a provider-side problem)"}. Your request is saved: send it again in a moment. The details hold the cause.`;
+        }
         sink({
           kind: "notice",
           model: failure.runtime,
@@ -7505,8 +7508,6 @@ async function runMcpInvocationInContext(
           unattended: isUnattendedExecution(executionContext), attempt: emptyReplyRetries, resumeBudget: 0, effectsObserved: false });
         if (settlement.action !== "retry" || settlement.reason !== "empty_reply") return false;
         emptyReplyRetries += 1;
-        // Like a throttle or store-lock retry, it must not use up the attempt that moves to the next runtime.
-        throttleRetriesSpent += 1;
         runnerEvents.onStatus(locale === "ko" ? "모델이 아무 답도 하지 않아 같은 요청을 한 번 더 보냅니다…" : "The model returned nothing; sending the same request once more…");
         await new Promise<void>((resolve) => {
           const timer = setTimeout(() => { signal?.removeEventListener("abort", stop); resolve(); }, settlement.delayMs);
@@ -7516,11 +7517,8 @@ async function runMcpInvocationInContext(
         throwIfInvocationAborted(signal, locale);
         return true;
       };
-      while (distinctAttempts() < DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS) {
+      for (;;) {
         if (signal?.aborted) throw new Error(tStatus(locale, "aborted"));
-        if (originalFailure && recoveryElapsedMs() >= DIRECT_RUNTIME_RECOVERY_MAX_ELAPSED_MS) {
-          return emitTerminalRecoveryFailure({ text: "", failure: originalFailure }, "time-limit");
-        }
         attemptCount += 1;
         const selectedRuntime = active;
         const selectedRuntimeKey = runtimeAttemptKey(selectedRuntime);
@@ -7717,6 +7715,7 @@ async function runMcpInvocationInContext(
         // First failure: this is when recovery actually begins.
         if (recoveryStartedAt == null) recoveryStartedAt = Date.now();
         originalFailure = originalFailure ?? failed;
+        attemptedRuntimeCauses.set(selectedRuntimeKey, failed.kind);
         /*
          * The one settlement decision (shared/turn-settlement.ts) chooses between a bounded same-runtime retry (request
          * throttling that provably did no work), the role pool's next candidate, and surfacing this failure as is. It
@@ -7734,10 +7733,11 @@ async function runMcpInvocationInContext(
           fallbackAvailable: true,
         });
         if (settlement.action === "surface") return result;
-        if (settlement.action === "retry" && attemptCount < DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS
-          && recoveryElapsedMs() + settlement.delayMs < DIRECT_RUNTIME_RECOVERY_MAX_ELAPSED_MS) {
+        // decideTurnSettlement already bounds how many same-runtime retries a kind may spend (it reads sameRuntimeRetries).
+        if (settlement.action === "retry" && settlement.delayMs <= THROTTLE_INLINE_WAIT_MS) {
           sameRuntimeRetries += 1;
-          throttleRetriesSpent += 1;
+          // The settlement reads the store-lock counter for that code, so this retry must count there or it never reaches its limit.
+          if (failed.providerCode === STORE_BUSY_CODE) storeBusyRetries += 1;
           const seconds = Math.max(1, Math.round(settlement.delayMs / 1000));
           // The light front is the owner's opt-in: its waiting line names no runtime or model.
           const frontWait = active.kind === "agentlas" && isOneFrontSelection(req.runtimeSelection);
@@ -7786,15 +7786,6 @@ async function runMcpInvocationInContext(
         });
         const fallbackPicked = fallback ? pickRunner(fallback) : null;
         if (!fallback || !fallbackPicked) return emitTerminalRecoveryFailure(result, "candidate-exhausted");
-        if (distinctAttempts() >= DIRECT_RUNTIME_RECOVERY_MAX_ATTEMPTS) {
-          return emitTerminalRecoveryFailure(result, "attempt-limit");
-        }
-        if (recoveryElapsedMs() >= DIRECT_RUNTIME_RECOVERY_MAX_ELAPSED_MS) {
-          return emitTerminalRecoveryFailure(result, "time-limit");
-        }
-        if (recoveryRetryEvents >= DIRECT_RUNTIME_RECOVERY_MAX_RETRY_EVENTS) {
-          return emitTerminalRecoveryFailure(result, "event-limit");
-        }
         recoveryRetryEvents += 1;
         if (oneControllerFallbackEligible && fallback.kind !== "agentlas") {
           emitControllerRuntimeFallback(fallback, failed);
@@ -7840,7 +7831,6 @@ async function runMcpInvocationInContext(
           images: request.images,
         });
       }
-      throw new Error("runtime recovery loop exited without a terminal result");
     };
     const advanceUsageFloor = () => {
       liveUsageFloor = liveUsageHigh;

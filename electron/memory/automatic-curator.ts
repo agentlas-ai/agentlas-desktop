@@ -34,6 +34,37 @@ const CIRCUIT_KEY = "automatic_curator_model_circuit";
 export const curationBackoffMs = (failures: number): number =>
   Math.min(BACKOFF_CAP_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, Math.min(failures, 30) - 1));
 
+// Storage retention (who reads what, when it is deleted):
+// - memory_curation_jobs.result_json: nobody reads a completed job's report; only the small receipt
+//   below is kept (the report itself is already in memory_tickets/decisions).
+// - memory_curation_batches: a resume cache between the model answer and the commit. The commit
+//   deletes its own row; a crash leaves one that is dropped after BATCH_CRASH_RETENTION_MS.
+const BATCH_CRASH_RETENTION_MS = 24 * 60 * 60_000;
+const RESULT_RECEIPT_MAX_CHARS = 600;
+const PRUNE_CHUNK = 500;
+const PRUNE_MAX_CHUNKS = 200;
+let pruned = false;
+
+interface PruneDb { prepare(sql: string): { run(...params: unknown[]): { changes: number | bigint } } }
+
+/** One-time cleanup of what earlier builds left behind. Safe to repeat; only shrinks or deletes rows nobody reads. */
+export function pruneCurationStorage(db: PruneDb, nowMs = Date.now()): { batches: number; results: number; complete: boolean } {
+  const batches = Number(db.prepare("DELETE FROM memory_curation_batches WHERE created_at<?")
+    .run(new Date(nowMs - BATCH_CRASH_RETENTION_MS).toISOString()).changes);
+  // Chunked so the write lock is short; a crash or busy store resumes at the next pass.
+  const shrink = db.prepare(`UPDATE memory_curation_jobs SET result_json=json_object('policyVersion',json_extract(result_json,'$.policyVersion'),
+    'actor',json_extract(result_json,'$.actor'),'batchDigest',json_extract(result_json,'$.batchDigest'),'written',json_extract(result_json,'$.report.written'))
+    WHERE job_id IN (SELECT job_id FROM memory_curation_jobs WHERE state='completed' AND length(result_json)>? AND json_valid(result_json)
+      AND json_type(result_json,'$.report') IS NOT NULL LIMIT ?)`);
+  let results = 0, complete = false;
+  for (let i = 0; i < PRUNE_MAX_CHUNKS; i++) {
+    const changed = Number(shrink.run(RESULT_RECEIPT_MAX_CHARS, PRUNE_CHUNK).changes);
+    results += changed;
+    if (changed < PRUNE_CHUNK) { complete = true; break; }
+  }
+  return { batches, results, complete };
+}
+
 export interface AutomaticMemoryModelInput {
   systemPrompt: string;
   input: string;
@@ -267,6 +298,9 @@ async function processAutomaticMemoryCurationOwned(model?: AutomaticMemoryRuntim
   let processed = 0, written = 0, deferred = 0;
   try {
     const db = ensureSchema();
+    if (!pruned) {
+      try { pruned = pruneCurationStorage(db).complete; } catch { /* Busy or full store: retried on the next pass. */ }
+    }
     const store = getMemoryStoreInfo();
     if (target && (target.ownerNamespace !== store.ownerNamespace || target.intakeEpoch !== store.revocationEpoch)) {
       return { processed, written, deferred };
@@ -382,8 +416,10 @@ async function processAutomaticMemoryCurationOwned(model?: AutomaticMemoryRuntim
           semanticDecisions: dispositions, decisionIndexOffset: offset, writeProjections: false, projectPath: null,
           originTicketIds: jobs.map(job => job.ticket_id), policyVersion: POLICY });
         completeMemoryTicket(first.ticket_id, report, "semantic", { outcome: raw.length ? "decided" : "no_candidates" });
+        // The resume cache has no reader after this commit; it goes with it (rolled back if the commit fails).
+        db.prepare("DELETE FROM memory_curation_batches WHERE input_digest=?").run(batchDigest);
         for (const job of jobs) db.prepare("UPDATE memory_curation_jobs SET state='completed',result_json=?,expected_revision=?,updated_at=?,payload_json='{}',lease_token=NULL,lease_expires_at=NULL WHERE job_id=?")
-          .run(JSON.stringify({ policyVersion: POLICY, actor: "model_curated", batchDigest, report }), revision, new Date().toISOString(), job.job_id);
+          .run(JSON.stringify({ policyVersion: POLICY, actor: "model_curated", batchDigest, written: report.written }), revision, new Date().toISOString(), job.job_id);
         return report;
       });
       const report = commit.immediate(); processed = jobs.length; written = report.written;

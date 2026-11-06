@@ -253,6 +253,47 @@ function retriesDeclared(node: WorkflowNode): boolean {
   return typeof declared === "number" && Number.isFinite(declared) && declared > 0;
 }
 
+/**
+ * 워커 풀에서 서로 다른 모델을 몇 번까지 시작해도 되는가 (graph_worker 핸드오프 상한).
+ *
+ * 효과 노드(nodeEffect==="mutation")는 이중 발행 방지를 위해 MAX_SAME_METHOD_STARTS(2)를 유지한다.
+ * 읽기 노드는 두 번째까지는 그대로고, 세 번째 이후는 직전 실패가 "출력 없음"(provider에 보내지 않았거나 quota,
+ * rate_limit, unavailable)일 때만 풀 크기까지 허용한다 — 출력이 있었던 실패 뒤에 모델을 계속 바꾸면 토큰만 탄다.
+ */
+export function graphHandoffLimit(node: WorkflowNode, poolSize: number, lastNoOutput = false): number {
+  if (nodeEffect(node) === "mutation") return MAX_SAME_METHOD_STARTS;
+  const pool = Number.isFinite(poolSize) ? Math.floor(poolSize) : 0;
+  return lastNoOutput ? Math.max(MAX_SAME_METHOD_STARTS, pool) : MAX_SAME_METHOD_STARTS;
+}
+
+/** 출력 없음: provider에 닿지 않았거나, 한도·제한·연결 불가로 돌려받은 것. */
+export function graphFailureHadNoOutput(input: { neverDispatched: boolean; outputObserved: boolean; kind?: string | null }): boolean {
+  if (input.outputObserved) return false;
+  return input.neverDispatched || input.kind === "quota" || input.kind === "rate_limit" || input.kind === "unavailable";
+}
+
+function graphFailureCauseLine(kind: string | null | undefined): string {
+  switch (kind) {
+    case "quota": return L("사용 한도에 도달했습니다", "usage limit reached");
+    case "rate_limit": return L("요청이 일시적으로 제한됐습니다", "requests were temporarily limited");
+    case "unavailable": return L("모델에 연결할 수 없었습니다", "the model could not be reached");
+    case "auth": return L("로그인이 필요합니다", "sign-in is required");
+    case "refused": return L("모델이 요청을 거절했습니다", "the model refused the request");
+    case "timeout": return L("시간 안에 끝나지 않았습니다", "it did not finish in time");
+    case "empty": return L("응답이 비어 있었습니다", "the reply was empty");
+    case "unsupported": return L("지원하지 않는 요청입니다", "the request is not supported");
+    default: return L("실행이 오류로 끝났습니다", "the run ended with an error");
+  }
+}
+
+/** 소진 시 오너에게 보이는 사실 문구. 기계 코드는 문장에 넣지 않고 error.code 에만 둔다. */
+export function graphWorkerExhaustedError(count: number, kind: string | null | undefined, code: string): Error {
+  const n = Math.max(1, Math.floor(count));
+  const error = new Error(L(`모델 ${n}개 모두 실패: ${graphFailureCauseLine(kind)}.`, `All ${n} model(s) failed: ${graphFailureCauseLine(kind)}.`));
+  (error as Error & { code?: string }).code = code;
+  return error;
+}
+
 /** 일시 오류 재시도 간격 — 같은 순간에 몰려 다시 실패하지 않게 지수적으로 벌린다. */
 function retryBackoffMs(attempt: number): number {
   return Math.min(8_000, 500 * 2 ** (attempt - 1));
@@ -1370,6 +1411,52 @@ type EvalFailureRecord = {
 };
 type EvalReworkRecord = { depth: number; runId: string; attempt: number; priorFingerprint: string | null; priorEvaluatedDigest: string | null };
 
+/**
+ * A rework record that could not be written (a locked or full store) is written once more; when that fails too the
+ * count lives in this process-local map (capped) so the rework budget still holds and the owner is never asked to run again.
+ */
+const EVAL_REWORK_MEMORY_MAX = 128;
+const evalReworkMemory = new Map<string, { reworksDone: number; fingerprint: string; evaluatedDigest: string; failureCode: "EVAL_FAILED" | "EVAL_STUCK" }>();
+const evalReworkMemoryKey = (automationId: string, occurrenceId: string, nodeId: string): string => `${automationId}\u0000${occurrenceId}\u0000${nodeId}`;
+function rememberEvalRework(key: string, value: { reworksDone: number; fingerprint: string; evaluatedDigest: string; failureCode: "EVAL_FAILED" | "EVAL_STUCK" }): void {
+  evalReworkMemory.delete(key);
+  evalReworkMemory.set(key, value);
+  while (evalReworkMemory.size > EVAL_REWORK_MEMORY_MAX) evalReworkMemory.delete(evalReworkMemory.keys().next().value as string);
+}
+/** True when the write landed on the first or the second try. */
+function writeRunEventTwice(write: () => void): boolean {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { write(); return true; } catch { /* retry once, then fall back to memory */ }
+  }
+  return false;
+}
+/** The previous run's recovery diagnostic of this automation, if it was an exhausted eval rework: its fingerprint. */
+function previousEvalExhaustionFingerprint(automationId: string, runId: string): string | null {
+  try {
+    const row = getDb().prepare(
+      `SELECT payload_json FROM run_events WHERE automation_id = ? AND kind = 'workflow_recovery_diagnostic' AND run_id <> ?
+       ORDER BY ts DESC LIMIT 1`).get(automationId, runId) as { payload_json: string } | undefined;
+    const payload = row ? JSON.parse(row.payload_json) as { reasonCode?: unknown; fingerprint?: unknown } : null;
+    return payload?.reasonCode === "eval_rework_exhausted" && typeof payload.fingerprint === "string" ? payload.fingerprint : null;
+  } catch { return null; }
+}
+/** Same exhausted failure as the last one: the strategy model already saw it, so it is not asked again. */
+export function evalExhaustionRepeats(previous: string | null, current: string | null): boolean {
+  return previous !== null && current !== null && previous === current;
+}
+/**
+ * What the one strategy cycle of a failed run does about an exhausted eval rework. `reasonCode` replaces the generic
+ * graph_run_error for it; `skip` is true when the previous exhaustion of this automation had the same failure fingerprint.
+ * The scheduler (automation-scheduler.ts, which defers the cycle for scheduled runs) reads the same answer from
+ * RunGraphResult.automaticRetry.
+ */
+export function evalExhaustionStrategyPlan(automationId: string, runId: string,
+  diagnostic: { reasonCode: string; fingerprint: string | null } | null | undefined): { reasonCode: "eval_rework_exhausted"; skip: boolean } | null {
+  if (diagnostic?.reasonCode !== "eval_rework_exhausted") return null;
+  return { reasonCode: "eval_rework_exhausted",
+    skip: evalExhaustionRepeats(previousEvalExhaustionFingerprint(automationId, runId), diagnostic.fingerprint) };
+}
+
 /** This failed run and the runs it resumed, newest first, within one occurrence and graph digest. */
 function graphRunLineage(automationId: string, runId: string): string[] {
   try {
@@ -1442,6 +1529,7 @@ function evalReworkNextAction(
   labelsOf: (nodeIds: string[]) => string,
   plan: EvalReworkPlan,
   remaining: number,
+  checkLabel = "",
 ): string {
   if (decision.disposition === "rework") {
     const names = labelsOf(plan.reworkNodeIds);
@@ -1463,11 +1551,13 @@ function evalReworkNextAction(
         "다시 한 앞 단계가 같은 결과를 냈고 같은 항목에서 떨어졌습니다. 같은 판정을 되풀이하지 않도록 자동 재시도를 멈췄습니다. 앞 단계의 지시나 이 검증의 기준을 고쳐 주세요.",
         "The earlier step produced the same result again and failed on the same items, so automatic retries stopped instead of repeating the same verdict. Fix the earlier step's instructions or this check's criteria.",
       );
-    case "eval_rework_exhausted":
+    case "eval_rework_exhausted": {
+      const item = checkLabel ? `'${checkLabel}'` : L("이 검증", "this check");
       return L(
-        `앞 단계를 ${MAX_EVAL_REWORKS}번 다시 했지만 이 검증을 통과하지 못해 자동 재시도를 멈췄습니다. 앞 단계의 지시나 이 검증의 기준을 고쳐 주세요.`,
-        `The earlier step ran again ${MAX_EVAL_REWORKS} time(s) and still did not pass this check, so automatic retries stopped. Fix the earlier step's instructions or this check's criteria.`,
+        `앞 단계를 ${MAX_EVAL_REWORKS}번 다시 했고 ${item}에서 계속 통과하지 못해 자동 재작업을 멈췄습니다. 실행 전략 검토가 앞 단계 지시를 다시 계획합니다. 이 기준이 지금 입력으로 달성할 수 없는 것이라면, 검증 기준을 바꿀 수 있는 것은 오너뿐입니다.`,
+        `The earlier step ran again ${MAX_EVAL_REWORKS} time(s) and still did not pass ${item}, so automatic rework stopped. The strategy review replans the earlier step's instructions. If this criterion cannot be met with the current input, only the owner can change the criteria.`,
       );
+    }
     case "eval_rework_no_upstream":
       return L(
         "이 검증이 보는 값은 실행 입력에서 왔기 때문에 다시 판정해도 결과가 같습니다. 자동 재시도는 하지 않습니다. 입력이나 이 검증의 기준을 고쳐 다시 실행하세요.",
@@ -1475,8 +1565,8 @@ function evalReworkNextAction(
       );
     case "eval_rework_unrecorded":
       return L(
-        "다시 시도한 기록을 남기지 못해, 같은 일을 되풀이하지 않도록 자동 재시도를 멈췄습니다. 다시 실행해 주세요.",
-        "The rework record could not be saved, so automatic retries stopped rather than repeat the same work. Please run it again.",
+        "다시 시도한 기록을 저장하지 못해 이번 실행 중에는 메모리의 횟수로 이어가고, 자동 재시도는 멈췄습니다.",
+        "The rework record could not be saved, so this session continues from its in-memory count and automatic retries stopped.",
       );
     case "eval_stuck":
     default:
@@ -2693,7 +2783,10 @@ export async function runGraph(
       if (node.type !== "eval" || completed.has(node.id) || admissionDiagnostics.has(node.id)) continue;
       const history = readEvalReworkHistory(lineage, node.id);
       const plan = planEvalRework(graph, node.id, checkpoint, completed, effectNodeIds, lineage);
-      if (history.rework && (!history.failure || history.rework.depth < history.failure.depth)) {
+      const remembered = evalReworkMemory.get(evalReworkMemoryKey(automation.id, checkpoint.occurrenceId, node.id));
+      // A remembered failure at or after that rework's count means the check did judge the rework (its receipt was refused).
+      const judgedInMemory = remembered !== undefined && history.rework !== null && remembered.reworksDone >= history.rework.attempt;
+      if (history.rework && !judgedInMemory && (!history.failure || history.rework.depth < history.failure.depth)) {
         // An earlier attempt already started this rework; the check has not judged its result yet.
         evalReworkState.set(node.id, { attempt: history.rework.attempt, priorFingerprint: history.rework.priorFingerprint,
           priorEvaluatedDigest: history.rework.priorEvaluatedDigest });
@@ -2706,6 +2799,12 @@ export async function runGraph(
       const subjectName = str(node.config ?? {}, "subject");
       const evidenceName = str(node.config ?? {}, "evidence");
       let failure = history.failure;
+      if (remembered && (!failure || remembered.reworksDone > failure.reworksDone)) {
+        // The failure receipt could not be written; the budget used so far survives in memory.
+        failure = { depth: 0, runId: latestFailed.runId, failureCode: remembered.failureCode, fingerprint: remembered.fingerprint,
+          evaluatedDigest: remembered.evaluatedDigest, reworksDone: remembered.reworksDone,
+          decision: decideEvalRework({ plan, stuck: remembered.failureCode === "EVAL_STUCK", reworksDone: remembered.reworksDone, sameAsPrevious: false }) };
+      }
       let legacy = false;
       if (!failure) {
         // Failed before this receipt existed: decide from its typed code and the sealed checkpoint.
@@ -2725,7 +2824,9 @@ export async function runGraph(
       const attempt = failure.reworksDone + 1;
       const priorFingerprint = legacy ? null : failure.fingerprint;
       if (decision.disposition === "rework") {
-        try {
+        // The rework-start receipt only tells a later resume that this rework began. Written twice; when the store still
+        // refuses, the rework goes on from the in-memory evalReworkState set below (no owner action).
+        writeRunEventTwice(() => {
           recordRunEvent({
             runId, kind: EVAL_REWORK_EVENT_KIND, automationId: automation.id, nodeId: node.id,
             sourceEventId: `graph-eval-rework:${node.id}`,
@@ -2735,9 +2836,7 @@ export async function runGraph(
               ...(priorFingerprint ? { priorFingerprint } : {}),
             },
           });
-        } catch {
-          decision = { disposition: "stop", reasonCode: "eval_rework_unrecorded" };
-        }
+        });
       }
       if (decision.disposition === "stop") {
         const produces = str(node.config ?? {}, "produces") ?? `${node.id}_verdict`;
@@ -2749,7 +2848,7 @@ export async function runGraph(
             `검증 "${label}"이(가) 지난 시도에서 통과하지 못했고, 같은 결과를 다시 판정하지 않았습니다.${lastReason ? `\n${lastReason}` : ""}`,
             `Check "${label}" did not pass on the last attempt, and the same result was not judged again.${lastReason ? `\n${lastReason}` : ""}`,
           ),
-          nextAction: evalReworkNextAction(decision, labelsOf, plan, 0),
+          nextAction: evalReworkNextAction(decision, labelsOf, plan, 0, label),
         };
         admissionDiagnostics.set(node.id, stopFailure);
         noteGraphRetryStop(automaticRetryStops, { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint: priorFingerprint });
@@ -3391,7 +3490,7 @@ export async function runGraph(
   // Per node: until when it may not be cut for silence (node-liveness.ts). Read by the invocation timer, the node timer
   // and the worker owner check, so the three never disagree about a node that is still working.
   const nodeLiveness = new Map<string, NodeLiveness>();
-  const workerFallbackState = new Map<string, { pool: GraphWorkerPool | null; attempted: Set<string>; notInvoked: Set<string>; deadline: number; original: RuntimeSelection; predecessor?: Readonly<{ receipt: GraphWorkerFailureReceipt; attempt: GraphWorkerAttempt }> }>();
+  const workerFallbackState = new Map<string, { pool: GraphWorkerPool | null; attempted: Set<string>; notInvoked: Set<string>; deadline: number; original: RuntimeSelection; lastNoOutput?: boolean; lastKind?: string; predecessor?: Readonly<{ receipt: GraphWorkerFailureReceipt; attempt: GraphWorkerAttempt }> }>();
   const observedRuntimeByNode = new Map<string, RuntimeSelection>();
   const runtimeSelectionForNode = (node: WorkflowNode): RuntimeSelection | undefined => {
     if (opts.immutableImplementation) {
@@ -3856,7 +3955,7 @@ export async function runGraph(
     const plan = planEvalRework(graph, node.id, checkpoint!, completed, effectNodeIds,
       [runId, ...(resumeOfRunId ? graphRunLineage(automation.id, resumeOfRunId) : [])]);
     let decision = decideEvalRework({ plan, stuck: input.failureCode === "EVAL_STUCK", reworksDone, sameAsPrevious });
-    try {
+    const recorded = writeRunEventTwice(() => {
       recordRunEvent({
         runId, kind: EVAL_FAILURE_EVENT_KIND, automationId: automation.id, nodeId: node.id,
         sourceEventId: `graph-eval-failure:${node.id}`,
@@ -3867,14 +3966,15 @@ export async function runGraph(
           reworkNodeIds: plan.reworkNodeIds, unsafeNodeIds: plan.unsafe.map((row) => row.nodeId),
         },
       });
-    } catch {
-      // Without the receipt the next attempt cannot count this rework or see an identical result.
-      if (decision.disposition === "rework") decision = { disposition: "stop", reasonCode: "eval_rework_unrecorded" };
-    }
+    });
+    // Without the receipt the next resume cannot count this rework or see an identical result, so the count is kept in
+    // memory (keyed by occurrence) and the rework goes on: the owner is not asked to run it again.
+    if (!recorded) rememberEvalRework(evalReworkMemoryKey(automation.id, checkpoint!.occurrenceId, node.id),
+      { reworksDone, fingerprint, evaluatedDigest, failureCode: input.failureCode });
     if (decision.disposition === "stop") noteGraphRetryStop(automaticRetryStops, { nodeId: node.id, reasonCode: decision.reasonCode, fingerprint });
     const labelsOf = (ids: string[]): string =>
       ids.map((id) => graph.nodes.find((candidate) => candidate.id === id)?.label || id).join(", ");
-    return { decision, nextAction: evalReworkNextAction(decision, labelsOf, plan, Math.max(0, MAX_EVAL_REWORKS - reworksDone)) };
+    return { decision, nextAction: evalReworkNextAction(decision, labelsOf, plan, Math.max(0, MAX_EVAL_REWORKS - reworksDone), node.label || node.id) };
   };
   /** The rework returned exactly what was already judged: same input, same verdict. It is not judged again. */
   const failUnchangedRework = (node: WorkflowNode, produces: string, evaluatedDigest: string): void => {
@@ -5261,6 +5361,19 @@ export async function runGraph(
           // A node keeps its original run/owner and pin; only this invocation's
           // selected runtime may change through the configured Worker snapshot.
           if (!nativeMcpCall) {
+            // A reworked step goes to another member of the Worker pool than the one that produced the output the check
+            // rejected: the same model repeating the same step is how a rework fails twice for the same reason. A node that
+            // declares its own runtime keeps it.
+            if (!workerFallbackState.has(node.id) && !opts.immutableImplementation && !quotaRuntimeOverrides.has(node.id) && !str(node.config, "runtime")) {
+              const reworkRound = Math.max(0, ...[...evalReworkScope].filter(([, ids]) => ids.has(node.id))
+                .map(([evalNodeId]) => evalReworkState.get(evalNodeId)?.attempt ?? 0));
+              const reworkPool = reworkRound > 0 ? readGraphWorkerPool() : null;
+              if (reworkPool && reworkPool.selections.length > 1) {
+                const current = runtimeSelectionForNode(node);
+                const at = current ? reworkPool.selections.findIndex((pin) => graphWorkerIdentity(pin) === graphWorkerIdentity(current)) : -1;
+                quotaRuntimeOverrides.set(node.id, reworkPool.selections[((at < 0 ? 0 : at) + reworkRound) % reworkPool.selections.length]!);
+              }
+            }
             const planned = runtimeSelectionForNode(node);
             if (planned) {
               modelInvocationFailed = true; // an admission failure must not enter generic replay
@@ -5301,13 +5414,13 @@ export async function runGraph(
                 captured.attempted.add(unavailableIdentity);
                 captured.notInvoked.add(unavailableIdentity);
                 const replacement = captured.pool && chooseGraphWorker(captured.pool, runtimes, captured.attempted, planned, unavailable.failure);
-                if (!replacement) throw new Error("graph_worker_candidates_unavailable");
+                if (!replacement) throw graphWorkerExhaustedError(captured.attempted.size, unavailable.failure?.kind ?? captured.lastKind, "graph_worker_candidates_unavailable");
                 selected = replacement;
                 tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_runtime_worker_handoff",
                   payload: { phase: "not_invoked", from: planned, to: selected, cause: unavailable.reason,
                     poolFingerprint: captured.pool!.fingerprint } });
               }
-              if (captured.attempted.size - captured.notInvoked.size >= MAX_SAME_METHOD_STARTS) throw new Error("graph_worker_attempt_limit");
+              if (captured.attempted.size - captured.notInvoked.size >= graphHandoffLimit(node, captured.pool?.selections.length ?? 0, captured.lastNoOutput === true)) throw graphWorkerExhaustedError(captured.attempted.size, captured.lastKind, "graph_worker_attempt_limit");
               const exact = selectExactRuntime(runtimes, selected);
               selected = exact && !opts.immutableImplementation ? selectionForRuntime(exact.active, { role: selected.role, inherit: selected.inherit, longContext: selected.longContext ?? exact.active.longContextEnabled }) : selected;
               captured.attempted.add(graphWorkerIdentity(selected));
@@ -5932,7 +6045,11 @@ export async function runGraph(
             && !(checkpoint!.prepareReceipts[node.id]?.length)
             && !(checkpoint!.toolReceipts[node.id]?.some(receipt => !receipt.name.startsWith("error:")))) {
             const state = workerFallbackState.get(node.id);
-            if (state?.pool && state.attempted.size - state.notInvoked.size < MAX_SAME_METHOD_STARTS && Date.now() < state.deadline) {
+            if (state) {
+              state.lastKind = graphWorkerReceipt.failure?.kind;
+              state.lastNoOutput = graphFailureHadNoOutput({ neverDispatched: providerNeverDispatched, outputObserved: providerOutputObserved, kind: graphWorkerReceipt.failure?.kind });
+            }
+            if (state?.pool && state.attempted.size - state.notInvoked.size < graphHandoffLimit(node, state.pool.selections.length, state.lastNoOutput === true) && Date.now() < state.deadline) {
               try {
                 const runtimes = await detectRuntimes(true);
                 readGraphWorkerFailure(graphWorkerReceipt, graphWorkerAttempt); // original owner after discovery
@@ -6041,7 +6158,12 @@ export async function runGraph(
           const settlementRetry = settlement.action === "retry";
           const maxAttempts = settlementRetry
             ? Math.max(RATE_LIMIT_MAX_RETRIES + 1, nodeMaxAttempts(node))
-            : claimedWithoutTools || quotaHandoff
+            : quotaHandoff
+            ? Math.max(MAX_SAME_METHOD_STARTS, nodeMaxAttempts(node), (() => {
+                const handoffState = workerFallbackState.get(node.id);
+                return handoffState?.pool ? graphHandoffLimit(node, handoffState.pool.selections.length, handoffState.lastNoOutput === true) : 0;
+              })())
+            : claimedWithoutTools
             ? Math.max(MAX_SAME_METHOD_STARTS, nodeMaxAttempts(node))
             : nodeMaxAttempts(node);
           // 계약 실패는 원칙적으로 재시도하지 않는다 — 다만 '도구 0건 주장'은 예외다.
@@ -6853,8 +6975,13 @@ export async function runGraph(
   // (including the daemon and Terminal fallback) must still enter the same
   // generic strategy loop; otherwise a stored proposal can never be produced
   // from that path and the next run has no revision to consume.
+  // An exhausted eval rework is the one stop that asks the strategy model to replan the earlier step's instructions. The same
+  // failure fingerprint as the last exhaustion would only repeat that call (a daily automation failing for the same reason),
+  // so it is not asked again; the diagnostic event recorded above stays as the fact.
+  const evalExhausted = evalExhaustionStrategyPlan(automation.id, runId, automaticRetryDiagnostic);
+  const strategyRepeats = evalExhausted?.skip === true;
   if (!needsInput && !dryRun && !opts.immutableImplementation && opts.strategyCycle !== "defer" && (opts.depth ?? 0) === 0
-    && nativeGraphSuccessNeedsReflection(graph, ok)) {
+    && !strategyRepeats && nativeGraphSuccessNeedsReflection(graph, ok)) {
     try {
       void withAutomationRunAccounting({ runId, automationId: automation.id }, () => runAutomationStrategyCycle({
         automationId: automation.id,
@@ -6864,7 +6991,7 @@ export async function runGraph(
         // judge. Keep that fact explicit instead of claiming acceptance from
         // kernel completion alone.
         outcome: null,
-        reasonCode: ok ? null : "graph_run_error",
+        reasonCode: ok ? null : evalExhausted ? evalExhausted.reasonCode : "graph_run_error",
         output: Object.values(outputs).slice(-1)[0] ?? null,
         // A node's durable failure receipt is authoritative even when the
         // aggregate Graph error string is rewritten by an adapter. In

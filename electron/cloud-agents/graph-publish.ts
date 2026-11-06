@@ -202,8 +202,8 @@ export async function publishGraphToHub(input: {
     return {
       ok: false,
       reason: L(
-        `공개 목록 문구를 만들지 못했습니다(${listingProblems.join(", ")}). 영문 제목·설명을 직접 넣어 다시 시도해 주세요.`,
-        `Could not create the public listing text (${listingProblems.join(", ")}). Enter an English title and description and try again.`,
+        `공개 목록 문구를 만들지 못했습니다(${listingProblems.join(", ")}). 영문 제목·설명을 직접 넣어 주세요.`,
+        `Could not create the public listing text (${listingProblems.join(", ")}). An English title and description are needed.`,
       ),
     };
   }

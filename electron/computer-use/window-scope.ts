@@ -10,30 +10,38 @@
  *   - every screen point (click/move/drag ends) must lie inside a window of the granted browser, measured from
  *     that browser itself (CDP Browser.getWindowForTarget), so a click cannot land on another app's window;
  *   - point-less input (keys, typing, scroll) requires the granted app so the driver focuses it first.
- * Read-only requests (status, list apps, screen capture) are unaffected. Grants expire (bounded) and are released
- * when the ladder's run ends. The lock is global for its short life: while a grant is live, no computer-use
+ * Read-only requests (status, list apps, screen capture) are unaffected. A grant is released when the ladder's run
+ * ends. The time limit is only a backstop against a release that never arrives: when it passes, a grant whose run is
+ * still live is extended by another period instead of dropped (dropping would lift the lock mid-run), and a grant
+ * with no live run, or no way to tell, is dropped. The lock is global while a grant is live: no computer-use
  * request may target anything else.
  */
 
 export interface ScreenRect { x: number; y: number; width: number; height: number }
 
-interface ScopeGrant { id: string; pids: ReadonlySet<number>; windows: () => Promise<ScreenRect[]>; until: number; reason: string }
+interface ScopeGrant { id: string; pids: ReadonlySet<number>; windows: () => Promise<ScreenRect[]>; until: number; ttl: number; alive?: () => boolean; reason: string }
 
 const grants = new Map<string, ScopeGrant>();
 let nextId = 0;
 
 export const COMPUTER_USE_SCOPE_MAX_MS = 15 * 60_000;
 
-export function grantComputerUseWindowScope(input: { pid: number; windows: () => Promise<ScreenRect[]>; ttlMs?: number; reason: string; now?: number }): () => void {
+/** `alive`: true while the run that holds the grant is still running; checked only when a period ends. Absent = the grant just expires. */
+export function grantComputerUseWindowScope(input: { pid: number; windows: () => Promise<ScreenRect[]>; ttlMs?: number; reason: string; now?: number; alive?: () => boolean }): () => void {
   if (!Number.isInteger(input.pid) || input.pid <= 1) throw new Error("computer-use-scope-pid-invalid");
   const id = `scope-${++nextId}`;
   const ttl = Math.min(Math.max(1_000, input.ttlMs ?? COMPUTER_USE_SCOPE_MAX_MS), COMPUTER_USE_SCOPE_MAX_MS);
-  grants.set(id, { id, pids: new Set([input.pid]), windows: input.windows, until: (input.now ?? Date.now()) + ttl, reason: input.reason });
+  grants.set(id, { id, pids: new Set([input.pid]), windows: input.windows, until: (input.now ?? Date.now()) + ttl, ttl, alive: input.alive, reason: input.reason });
   return () => { grants.delete(id); };
 }
 
 export function activeComputerUseWindowScope(now = Date.now()): { pids: Set<number>; windows: () => Promise<ScreenRect[]> } | null {
-  for (const [id, grant] of grants) if (grant.until <= now) grants.delete(id);
+  for (const [id, grant] of grants) {
+    if (grant.until > now) continue;
+    let live = false;
+    try { live = grant.alive?.() === true; } catch { live = false; }
+    if (live) grant.until = now + grant.ttl; else grants.delete(id);
+  }
   if (!grants.size) return null;
   const pids = new Set<number>();
   const providers: Array<() => Promise<ScreenRect[]>> = [];

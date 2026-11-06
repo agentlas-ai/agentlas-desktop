@@ -16,6 +16,17 @@ async function acquireSlot(): Promise<void> {
 function releaseSlot(): void { active--; while (active < MAX_ACTIVE && waiting.length) waiting.shift()!(); }
 const nextHostRequest = new Map<string, number>();
 const blockedUntil = new Map<string, number>();
+const MAX_BLOCK_MS = 15 * 60_000;
+/** Every Finance reader (this file, Yahoo, the world map, the dashboard feeds) shares one block per host, so a refusal seen by one stops the others at once. A block never gets shorter. */
+export function blockHost(host: string, ms: number): void {
+  const until = Date.now() + Math.max(1000, Math.min(ms, MAX_BLOCK_MS));
+  if (until > (blockedUntil.get(host) || 0)) blockedUntil.set(host, until);
+}
+/** Whole seconds until the host may be read again; 0 when it is not blocked. */
+export function hostBlockedSeconds(host: string): number {
+  const left = (blockedUntil.get(host) || 0) - Date.now();
+  return left > 0 ? Math.ceil(left / 1000) : 0;
+}
 export function isFinanceSourceUrlAllowed(url: URL): boolean {
   if (url.protocol !== 'https:' || url.port || url.username || url.password || url.hash) return false;
   const keys = [...url.searchParams.keys()];
@@ -43,24 +54,42 @@ export function isFinanceSourceUrlAllowed(url: URL): boolean {
   if (url.hostname === 'home.treasury.gov') return url.pathname === '/resource-center/data-chart-center/interest-rates/pages/xml' && url.searchParams.get('data') === 'daily_treasury_yield_curve' && keys.length === 2 && keys.every(key => ['data','field_tdr_date_value','field_tdr_date_value_month'].includes(key)) && /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])?$/.test(url.searchParams.get('field_tdr_date_value') || url.searchParams.get('field_tdr_date_value_month') || '');
   return isVerifiedIsharesUrl(url);
 }
+/** A server error or a dropped connection may be gone a moment later; a refusal (429), a timeout, an oversized or malformed body is not read again. */
+function readableAgain(error: unknown): boolean {
+  return error instanceof Error && (/^finance_source_http_5\d\d$/.test(error.message) || error.name === 'TypeError');
+}
+const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+/** One read, and after a server error or dropped connection one more, which goes through the host's request spacing and block again. GDELT asks for five seconds between requests, so its second read waits six. */
 export async function fetchFinanceText(url: URL, fetcher: typeof fetch = fetch): Promise<string> {
   if (!isFinanceSourceUrlAllowed(url)) throw new Error('finance_source_url_rejected');
-  if (Date.now() < (blockedUntil.get(url.hostname) || 0)) throw new Error('finance_source_rate_limited');
+  try { return await fetchOnce(url, fetcher); }
+  catch (error) {
+    if (!readableAgain(error)) throw error;
+    await wait(url.hostname === 'api.gdeltproject.org' ? 6000 : 1500);
+    return fetchOnce(url, fetcher);
+  }
+}
+async function fetchOnce(url: URL, fetcher: typeof fetch): Promise<string> {
+  if (hostBlockedSeconds(url.hostname) > 0) throw new Error('finance_source_rate_limited');
   // Reserve the host's next start synchronously, wait for it, then take a slot: a slot is never held while sleeping. SEC stays well
   // below its documented ten requests/second. GDELT is already one at a time (free-sources.ts) and answers in 10-22 s, so it takes no
   // shared slot that SEC, FRED or Treasury reads would wait behind.
   const start = Math.max(Date.now(), nextHostRequest.get(url.hostname) || 0);
   nextHostRequest.set(url.hostname, start + (url.hostname.includes('sec.gov') ? 250 : 500));
-  await new Promise<void>(resolve => setTimeout(resolve, Math.max(0, start - Date.now())));
+  await wait(Math.max(0, start - Date.now()));
+  // A block set while this read waited for its turn (another caller was refused) stops it here, before any request.
+  if (hostBlockedSeconds(url.hostname) > 0) throw new Error('finance_source_rate_limited');
   const shared = url.hostname !== 'api.gdeltproject.org';
   if (shared) await acquireSlot();
-  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), shared ? 20000 : 35000);
+  const controller = new AbortController(); let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, shared ? 20000 : 35000);
   try {
     const response = await fetcher(url, { redirect: 'error', signal: controller.signal, headers: { Accept: 'application/json, text/csv, application/xml, text/xml;q=0.9', 'User-Agent': 'Agentlas Finance (https://agentlas.cloud)' } });
-    if (response.status === 429 || response.status === 503) {
+    const retry = response.headers.get('retry-after'), retrySeconds = retry && /^\d+$/.test(retry) ? Number(retry) : null;
+    // A 503 blocks the host only when the source says how long; without that it is an ordinary server error and is read once more.
+    if (response.status === 429 || (response.status === 503 && retrySeconds !== null)) {
       // GDELT's rule is one request per five seconds and it sends no Retry-After; a minute's block would fail every news read in the turn.
-      const retry = response.headers.get('retry-after'); const seconds = retry && /^\d+$/.test(retry) ? Number(retry) : url.hostname === 'api.gdeltproject.org' ? 6 : 60;
-      blockedUntil.set(url.hostname, Date.now() + Math.max(1000, Math.min(seconds * 1000, 15 * 60000)));
+      blockHost(url.hostname, (retrySeconds ?? (url.hostname === 'api.gdeltproject.org' ? 6 : 60)) * 1000);
       throw new Error('finance_source_rate_limited');
     }
     if (!response.ok) throw new Error(`finance_source_http_${response.status}`);
@@ -70,7 +99,8 @@ export async function fetchFinanceText(url: URL, fetcher: typeof fetch = fetch):
     try { for (;;) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength; if (size > LIMIT) throw new Error('finance_source_too_large'); chunks.push(part.value); } }
     finally { await reader.cancel().catch(() => undefined); }
     return Buffer.concat(chunks).toString('utf8');
-  } finally { clearTimeout(timer); if (shared) releaseSlot(); }
+  } catch (error) { if (timedOut) throw new Error('finance_source_timeout'); throw error; }
+  finally { clearTimeout(timer); if (shared) releaseSlot(); }
 }
 export async function fetchFinanceJson(url: URL, fetcher: typeof fetch = fetch): Promise<unknown> {
   const text = await fetchFinanceText(url, fetcher);

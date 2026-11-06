@@ -43,9 +43,10 @@ import {
   type SegmentBudgetUsage,
 } from "../../shared/segment-budget";
 import { GOAL_OWNER_ANSWER_REQUIRED, GOAL_OWNER_HOLD_BLOCKED_REASONS, goalHeldForOwnerAnswer, goalHeldForOwnerGrant } from "../../shared/goal-display-state";
+import { NO_PROGRESS_RETRY_LIMIT, VERIFICATION_NO_PROGRESS_REASON } from "../../shared/long-run-checkpoint";
 import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
-import { createRuntimeRetryStore } from "./runtime-retry";
+import { createRuntimeRetryStore, RUNTIME_RETRY_REOPEN_AFTER_MS } from "./runtime-retry";
 import { invocationProcessOwner } from "./invocation-run-owners";
 import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
 import { agentRunCwd } from "../runtime/exec";
@@ -1304,25 +1305,59 @@ export function goalProviderRetryNotBefore(runId: string, now = Date.now()): num
   return revision ? createRuntimeRetryStore(getDb).goalFloor({ goalId: current.goalId, revision: revision.revision }, now)?.until ?? null : null;
 }
 
-/** The owner-mandated finite automatic retry account ends here. This is the
- * existing budget pause wire value, not a user Stop or a claim of completion. */
-export function closeGoalRuntimeRetryBudget(runId: string, invocationRunId: string): boolean {
-  const db = getDb();
-  const closed = db.transaction(() => {
-    const current = getLongRun(runId);
-    if (!current || current.surface === "science" || !["running", "queued", "waiting_tool", "blocked"].includes(current.status)
-      || longRunOwnerHold(runId) || liveLongRunAttemptCount(runId)) return false;
-    const now = new Date().toISOString();
-    const changed = db.prepare(`UPDATE long_runs SET status='paused',pause_reason='budget',blocked_reason=NULL,
-      paused_at=?,updated_at=?,version=version+1 WHERE id=? AND version=? AND status=?`)
-      .run(now,now,runId,current.version,current.status);
-    if (changed.changes !== 1) throw new Error("runtime_retry_budget_close_conflict");
-    appendEventInDb({runId,kind:"run.status_changed",actorKind:"host",payload:{from:current.status,to:"paused",
-      reason:"runtime_retry_budget_exhausted",invocationRunId},at:now});
-    return true;
-  }).immediate();
-  if (closed) emitDesktopStoreChange({entity:"long-run",id:runId});
-  return closed;
+/** The runtime retry account of a Goal is spent: the model connection kept failing. The host does not give up and does not keep
+ * calling the failing executor either; it rests the Goal on a host retry schedule (waiting_tool, like every provider wait) for
+ * the time after which the retry store admits one probe call (RUNTIME_RETRY_REOPEN_AFTER_MS, 0..5 min of jitter on top so a
+ * burst of Goals does not wake together). Null when the Goal is not in a state this may schedule (owner hold, live attempt,
+ * Science, finished, or another process moved it first). */
+export function scheduleGoalRuntimeRetryReopen(runId: string, invocationRunId: string, options: { nowMs?: number; random?: () => number } = {}):
+  { nextAt: string } | null {
+  const nowMs = options.nowMs ?? Date.now();
+  const current = getLongRun(runId);
+  if (!current || current.surface === "science" || !["running", "queued", "waiting_tool", "blocked"].includes(current.status)
+    || longRunOwnerHold(runId) || goalOwnerAnswerHold(runId) || liveLongRunAttemptCount(runId)) return null;
+  const jitter = Math.floor(Math.min(0.999999, Math.max(0, (options.random ?? Math.random)())) * 5 * 60_000);
+  const nextAt = new Date(nowMs + RUNTIME_RETRY_REOPEN_AFTER_MS + jitter).toISOString();
+  try {
+    scheduleBlockedGoalRetry({ runId, expectedVersion: current.version, kind: "resume", fromReason: "goal_pass_runtime_retry_reopen",
+      retryIndex: nextBlockedGoalRetrySlot(runId, nowMs).retryIndex, nextAt, detail: `runtime_retry_reopen:${invocationRunId}`.slice(0, 120),
+      trigger: "runtime-retry-reopen", requestedBy: "host" });
+  } catch (error) {
+    if (error instanceof Error && ["blocked_goal_retry_state_changed", "blocked_goal_retry_controller_live", LONG_RUN_OWNER_HOLD_CODE,
+      GOAL_OWNER_ANSWER_PENDING_CODE].includes(error.message)) return null;
+    throw error;
+  }
+  return { nextAt };
+}
+
+const RUNTIME_RETRY_CLEANUP_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/** Startup, once per store (idempotent query): a Goal an earlier build paused as `budget` because its runtime retry account was
+ * spent (the latest status event says so) goes back onto a retry schedule. Science uses the same pause reason for its segment
+ * budget and is never touched; a Goal idle for more than seven days stays paused, so a forgotten Goal does not suddenly resume
+ * its outside effects. Returns the number moved. */
+export function rescheduleExhaustedRuntimeRetryGoals(options: { nowMs?: number; random?: () => number } = {}): number {
+  const nowMs = options.nowMs ?? Date.now();
+  const since = new Date(nowMs - RUNTIME_RETRY_CLEANUP_WINDOW_MS).toISOString();
+  const rows = getDb().prepare(`SELECT r.id AS id FROM long_runs r WHERE r.status='paused' AND r.pause_reason='budget'
+    AND r.surface!='science' AND r.updated_at>=? AND (
+      SELECT json_extract(e.payload_json,'$.reason') FROM long_run_events e
+      WHERE e.run_id=r.id AND e.kind='run.status_changed' ORDER BY e.seq DESC LIMIT 1) = 'runtime_retry_budget_exhausted'`)
+    .all(since) as { id: string }[];
+  let moved = 0;
+  for (const row of rows) {
+    try {
+      // One transaction: paused -> queued (the host's only way out of paused) and the schedule land together or not at all.
+      getDb().transaction(() => {
+        const paused = getLongRun(row.id);
+        if (!paused || paused.status !== "paused" || paused.pauseReason !== "budget" || longRunOwnerHold(row.id)) return;
+        transitionLongRun({ runId: row.id, to: "queued", actorKind: "host", reason: "runtime_retry_reopen_cleanup", expectedVersion: paused.version });
+        if (!scheduleGoalRuntimeRetryReopen(row.id, "startup-cleanup", options)) throw new Error("runtime_retry_cleanup_not_schedulable");
+        moved += 1;
+      }).immediate();
+    } catch (error) { console.warn("[runtime-retry] could not reschedule a spent Goal:", error); }
+  }
+  return moved;
 }
 
 /**
@@ -2082,6 +2117,7 @@ export function currentCompleteGoalVerificationEvidence(runId: string): { refs: 
  */
 export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion: number, opts?: { allowIdleWaiting?: boolean; allowIdleActive?: boolean }): LongRunRecord {
   const db = getDb();
+  let rebound = false;
   db.transaction(() => {
     const run = getLongRun(runId);
     if (!run || run.surface === "science") throw new Error("long_run_goal_binding_not_allowed");
@@ -2109,11 +2145,33 @@ export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion:
     appendEventInDb({ runId, kind: "run.goal_revision_bound", actorKind: "host", at: now,
       payload: { revision: goal.revision, previousRevision: binding?.revision ?? null, receiptCursor: cursor.n,
         sourceMessageId: goal.sourceMessage.messageId } });
+    rebound = true;
   }).immediate();
+  // A new Goal revision is new instruction: a Goal resting on the "same result again" schedule looks now, once.
+  if (rebound) pullForwardNoProgressRetry(runId);
   const run = getLongRun(runId);
   if (!run) throw new Error("long_run_goal_binding_readback_failed");
   emitDesktopStoreChange({ entity: "long-run", id: runId });
   return run;
+}
+
+/** Retry-index ladder of the idle-spin rest: 30 min doubling per consecutive no-progress verification beyond the limit (6 h cap). */
+export function noProgressRetryDelayMs(noProgressRetries: number): number {
+  return Math.min(6 * 60 * 60_000, 30 * 60_000 * 2 ** Math.min(Math.max(noProgressRetries - NO_PROGRESS_RETRY_LIMIT, 0), 10));
+}
+
+/** Moves a pending idle-spin retry (and only that one) to now. The new schedule event carries trigger `no-progress-pull-forward`, so the
+ * ladder is unchanged and the next identical verification rests again. False when nothing was pulled (no such retry, or the state moved). */
+export function pullForwardNoProgressRetry(runId: string): boolean {
+  try {
+    const retry = pendingBlockedGoalRetry(runId);
+    const run = getLongRun(runId);
+    if (!run || !retry || retry.fromReason !== VERIFICATION_NO_PROGRESS_REASON || Date.parse(retry.nextAt) <= Date.now()) return false;
+    scheduleBlockedGoalRetry({ runId, expectedVersion: run.version, kind: retry.kind, fromReason: retry.fromReason,
+      retryIndex: retry.retryIndex, nextAt: new Date().toISOString(), detail: "no_progress_pull_forward",
+      trigger: "no-progress-pull-forward", requestedBy: "host" });
+    return true;
+  } catch { return false; }
 }
 
 function latestCriterionVerdicts(runId: string): Map<number, { taskId: string | null; verdict: string; evidenceRefs: string[]; artifactRefs: string[] }> {

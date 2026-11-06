@@ -3,7 +3,7 @@ import type { DeclaredPromptPart } from "../runtime/prompt-order";
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import { currentHistoryRuntimeFence } from "../one/history-runtime-fences";
 import { withInvocationUsageIfAbsent, currentInvocationObservedUsage, currentInvocationRunnerScopeCount } from "../runtime/invocation-usage";
-import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { rolePriorityRuntimes, runtimeFailureBlocksReplay } from "../runtime/selection";
 import { runnerFailureFromError } from "../runtime/runner";
 import { runObservedRunner, runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // Hephaestus 빌더(hep-build) 구동기.
@@ -55,10 +55,12 @@ import { hephaestusRoot } from "./engine";
 import { cardsMigrate, contractComplete, contractScaffold, contractVerify, securityScan } from "./commands";
 import { isCompletedBuildTurn } from "./build-turn";
 import { packageContentDigest, settleScanAgainstPackage } from "./scan-binding";
+import { initialContractRepairProgress, judgeContractRepairRound } from "./contract-repair-progress";
 import { stageAttachments, type ResolvedHephaestusBuildAttachment } from "./build-attachments";
 import { contractTargetRoot, verifiedCompletedPackageRoot } from "./build-result-path";
 import { deriveOpenCrabMatchSignal, queryOpenCrabContext } from "../opencrab/ontology";
 import { runBuildRunnerWithMcpRecovery } from "./mcp-runtime-retry";
+import { buildFallbackAdmits, describeBuildRuntimeAttempts, runBuildTurnOnRuntimeLadder } from "./build-runtime-fallback";
 import { buildRunMcpRunnerBinding, buildRunRequestWithAttachment, withBuildMcpAttachmentForRun } from "./build-run-attachment";
 import { userDataPath } from "../runtime-paths";
 
@@ -287,7 +289,7 @@ export interface ResolvedHephaestusBuildRequest extends Omit<HephaestusBuildRequ
 const scaffoldedWorkspaces = new Set<string>();
 
 /**
- * 계약 표적 수리를 몇 번까지 시도할지. 루프는 blocker가 줄지 않는 순간 멈추므로
+ * 계약 표적 수리를 몇 번까지 시도할지. 루프는 진전이 없거나 같은 목록이 돌아오면 멈추므로
  * 이 값은 "그때까지 몇 번을 허용하나"이지 "몇 번을 반드시 돈다"가 아니다.
  */
 const MAX_CONTRACT_REPAIR_ROUNDS = 6;
@@ -866,9 +868,16 @@ export async function runHephaestusBuild(
     } catch (error) {
       // The cause (a machine code such as native-browser-task-unbound) belongs in the log, not on the owner's screen.
       if (!signal.aborted) console.warn("[hephaestus-build] run ended with an error", runId, error instanceof Error ? error.message : String(error));
+      // The machine code names the cause; free-form text from a thrown error stays in the log.
+      const cause = (() => {
+        const code = (error as { code?: unknown } | null)?.code;
+        if (typeof code === "string" && /^[A-Za-z0-9_.:-]{2,80}$/.test(code)) return code;
+        const message = error instanceof Error ? error.message.trim() : "";
+        return /^[A-Za-z0-9_.:-]{3,80}$/.test(message) ? message : "unknown_error";
+      })();
       sink({ runId, kind: "error", text: signal.aborted
         ? (locale === "ko" ? "빌드 취소됨" : "Build cancelled")
-        : (locale === "ko" ? "빌드를 끝내지 못했습니다. 잠시 뒤 다시 시도해 주세요." : "The build could not finish. Please try again in a moment.") });
+        : (locale === "ko" ? `빌드를 끝내지 못했습니다(${cause}).` : `The build could not finish (${cause}).`) });
     } finally {
       const runnerScopeCount = currentInvocationRunnerScopeCount();
       if (ownsScope && runnerScopeCount > 0) {
@@ -937,13 +946,19 @@ async function runHephaestusBuildInScope(
       : (ko ? `빌드 실패: ${(error as Error).message}` : `Build failed: ${(error as Error).message}`) });
     return;
   }
-  const buildActive = workload.runtime;
+  // The runtime the Build turn runs on. It changes only when the turn moves down the owner's worker pool (see the ladder below).
+  let buildActive = workload.runtime;
   const selectedRunner = (
     buildActive.kind === picked.active.kind &&
     buildActive.backend === picked.active.backend &&
     buildActive.source === picked.active.source
   ) ? picked : pickRunner(buildActive);
-  const buildPicked = selectedRunner ?? picked;
+  let buildPicked: NonNullable<ReturnType<typeof pickRunner>> = selectedRunner ?? picked;
+  // A runtime session belongs to one runtime; the turn resumes it only on the runtime that opened it.
+  let buildRuntimeSessionId = req.runtimeSessionId;
+  // Not replaceable: a model the owner pinned, and a turn that resumes a runtime session (the conversation, and the owner's saved
+  // build conversation, are bound to the runtime that opened it).
+  const buildRuntimePinned = workload.source === "manual-override" || req.runtimePinned === true || Boolean(req.runtimeSessionId);
   onRuntimeResolved?.(selectionForRuntime(selectedRunner ? buildActive : picked.active, {
     model: buildActive.model ?? null,
     effort: buildActive.effort ?? null,
@@ -1215,7 +1230,7 @@ async function runHephaestusBuildInScope(
         effort: buildActive.effort ?? undefined,
         permission: "full",
         cwd: req.workspace,
-        runtimeSessionId: req.runtimeSessionId,
+        runtimeSessionId: buildRuntimeSessionId,
         mcpConfigPath: config?.configPath,
         mcpAllowedTools: config?.allowedTools,
         mcpCodexConfigArgs: config?.codexConfigArgs,
@@ -1296,6 +1311,7 @@ async function runHephaestusBuildInScope(
           }
         },
       };
+    const runBuilderTurnOnce = async () => {
     let runnerOutcome;
     try {
       runnerOutcome = await runBuildRunnerWithMcpRecovery({
@@ -1333,9 +1349,82 @@ async function runHephaestusBuildInScope(
     } finally {
       thinkingStartedAt = null;
     }
+    return runnerOutcome;
+    };
+    // A turn that ended without writing the package it declared complete is a runtime failure in effect (a small local model).
+    const turnWroteNothing = (text: string): boolean => {
+      try {
+        if (!isCompletedBuildTurn(text)) return false;
+        const completed = verifiedCompletedPackageRoot(req.workspace, text);
+        const target = contractTargetRoot({ workspace: req.workspace, completed });
+        return target.root !== null && countPackageFiles(target.root) === 0;
+      } catch { return false; }
+    };
+    // Failure or an empty turn moves on to the next runtime of the owner's worker pool. What the next runtime is given must
+    // match what the first was: the MCP attachment was resolved for one kind, and the contract reader is wired into the prompt.
+    const fallbackConstraints = {
+      attachmentKinds: req.mcpAttachment?.receipt.attached.length ? new Set([picked.active.kind, buildActive.kind]) : null,
+      requiresContractReader: builderContractReader !== null,
+      contractReaderSupported: builderContractReaderSupported,
+    };
+    let earlierAttemptNoted = false;
+    const ladder = await runBuildTurnOnRuntimeLadder({
+      initial: buildActive,
+      signal,
+      pinned: buildRuntimePinned,
+      attempt: async (runtime) => {
+        if (runtime !== buildActive) {
+          const nextRunner = pickRunner(runtime);
+          if (!nextRunner) throw new Error("build_fallback_runtime_without_runner");
+          buildActive = runtime;
+          buildPicked = nextRunner;
+          buildRuntimeSessionId = undefined;
+          workload = { ...workload, runtime, resolvedRuntimeId: null, resolvedTier: null, source: "safe-fallback",
+            resolutionCodes: [...workload.resolutionCodes, "build-runtime-fallback"] };
+          onRuntimeResolved?.(selectionForRuntime(runtime, { model: runtime.model ?? null, effort: runtime.effort ?? null,
+            longContext: runtime.longContextEnabled ?? false }));
+          // Ledger desktop.hephaestus.build.user: earlier-attempt-note is the last block, added once per turn.
+          if (!earlierAttemptNoted && countPackageFiles(req.workspace) > 0) {
+            earlierAttemptNoted = true;
+            userPrompt += "\n\n[Earlier attempt]\nAnother runtime stopped before finishing this turn; the working folder may hold files it wrote. "
+              + "Read them, keep what is correct, and finish the package in that same folder; do not start a second package folder.";
+          }
+        }
+        const outcome = await runBuilderTurnOnce();
+        if (signal.aborted) return { outcome };
+        if (outcome.result.failure) return { outcome, failure: outcome.result.failure };
+        if (turnWroteNothing(outcome.result.text)) return { outcome, unusableCode: "build_wrote_nothing" };
+        return { outcome };
+      },
+      next: async (failed, failure, tried) => {
+        const pool = rolePriorityRuntimes(await detectRuntimes(), "worker", {
+          failedRuntime: failed, ...(failure ? { failure } : {}), exclude: [...tried],
+        });
+        return pool.find((candidate) => buildFallbackAdmits(candidate, fallbackConstraints)) ?? null;
+      },
+      onSwitch: (from, to, skipped) => {
+        const last = skipped[skipped.length - 1];
+        markActivity(ko ? `${to.kind} 런타임으로 이어서 실행` : `Continuing on ${to.kind}`);
+        sink({ runId, kind: "log", text: ko
+          ? `${from.kind} 런타임이 끝내지 못해(${last?.code ?? "unknown"}) 작업 풀의 다음 런타임 ${to.kind}${to.model ? `/${to.model}` : ""}로 같은 턴을 이어갑니다.`
+          : `${from.kind} did not finish (${last?.code ?? "unknown"}); the same turn continues on the next runtime of the worker pool, ${to.kind}${to.model ? `/${to.model}` : ""}.` });
+      },
+    });
+    const runnerOutcome = ladder.outcome;
     const result = runnerOutcome.result;
     if (signal.aborted) throw signal.reason ?? new Error("Build cancelled");
-    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
+    if (result.failure) {
+      if (ladder.skipped.length > 0) {
+        sink({ runId, kind: "log", text: ko
+          ? `시도한 런타임: ${describeBuildRuntimeAttempts(ladder.skipped, { runtime: ladder.runtime, failure: result.failure, code: result.failure.providerCode ?? result.failure.kind })}`
+          : `Runtimes tried: ${describeBuildRuntimeAttempts(ladder.skipped, { runtime: ladder.runtime, failure: result.failure, code: result.failure.providerCode ?? result.failure.kind })}` });
+      } else if (buildRuntimePinned) {
+        sink({ runId, kind: "log", text: ko
+          ? "빌드 모델이 고정되어 있거나 이미 시작한 대화를 이어가는 턴이라 다른 런타임으로 넘기지 않았습니다."
+          : "The Build model is pinned or this turn resumes a conversation already bound to its runtime, so it was not moved to another runtime." });
+      }
+      throw new ObservedRunnerFailureError(result.failure);
+    }
     const finalMcpAttachment = runnerOutcome.attachment;
     // Follow-up/repair retains the exact actual degraded composition, not the pre-recovery prompt.
     systemPrompt = runnerOutcome.prompt.systemPrompt;
@@ -1491,6 +1580,14 @@ async function runHephaestusBuildInScope(
       // 넘기면 "패키지 무결성 검증 실패 · 생성한 파일은 보존했습니다"로 통보되는데,
       // 보존된 파일이 없으니 그 문장은 거짓이고 사용자는 고칠 곳을 못 찾는다.
       // 실측 2026-08-17: 로컬 qwen3:30b 빌드가 완료를 선언하고 파일 0개를 남겼다.
+      const wroteNothingFacts = (korean: boolean): string => {
+        if (ladder.skipped.length > 0) {
+          const chain = describeBuildRuntimeAttempts(ladder.skipped, { runtime: ladder.runtime, code: "build_wrote_nothing" });
+          return korean ? ` 시도한 런타임: ${chain}` : ` Runtimes tried: ${chain}`;
+        }
+        if (buildRuntimePinned) return korean ? " 빌드 모델이 고정되어 있거나 이미 시작한 대화를 이어가는 턴이라 다른 런타임으로 넘기지 않았습니다." : " The Build model is pinned or this turn resumes a conversation bound to its runtime, so no other runtime was tried.";
+        return "";
+      };
       contractReport = {
         status: "unverified",
         reason: "the engine declared completion but wrote no files",
@@ -1501,8 +1598,8 @@ async function runHephaestusBuildInScope(
         kind: "stage",
         stage: "contract",
         text: ko
-          ? "엔진이 완료를 선언했지만 폴더에 파일을 하나도 쓰지 않았습니다 — 검증할 패키지가 없습니다. 다른 모델로 다시 시도하세요."
-          : "The engine declared completion but wrote no files — there is no package to verify. Try again with a different model.",
+          ? `엔진이 완료를 선언했지만 폴더에 파일을 하나도 쓰지 않았습니다 — 검증할 패키지가 없습니다.${wroteNothingFacts(true)}`
+          : `The engine declared completion but wrote no files — there is no package to verify.${wroteNothingFacts(false)}`,
       });
     } else if (!signal.aborted && isCompletedBuildTurn(resultText)) {
       const readBlockers = (report: unknown): string[] | null => {
@@ -1539,15 +1636,20 @@ async function runHephaestusBuildInScope(
         return { status: "unverified", reason: res.error || "contract verify returned no result" };
       };
       contractReport = await runContractVerify();
-      let previousCount = Number.POSITIVE_INFINITY;
-      // 두 라운드는 강한 모델이 남긴 잔여 서너 건에는 맞지만, 로컬 30B가 남긴
-      // 77건에는 시작도 못 해 본 채 끝난다(2026-08-17 실측). 종료 조건은 라운드 수가
-      // 아니라 진전이다 — 한 라운드에 blocker가 하나도 안 줄면 그 자리에서 멈춘다.
-      // 상한은 무한 루프 방지용이지 품질 정책이 아니다.
+      let repairProgress = initialContractRepairProgress();
+      // 종료 조건은 라운드 수가 아니라 진전이다. 진전은 blocker 개수가 아니라 "이전 목록에서 하나라도
+      // 해결됐고 이 목록을 처음 본다"이다 — 일부를 고치며 같은 수의 새 blocker를 만드는 라운드도 움직인 것이다.
+      // 같은 목록이 돌아오면(A를 고치면 B, B를 고치면 A) 진동이라 멈춘다.
+      // 라운드 상한은 무한 루프 방지용이지 품질 정책이 아니다.
       for (let round = 1; round <= MAX_CONTRACT_REPAIR_ROUNDS && !signal.aborted; round += 1) {
         const blockers = readBlockers(contractReport);
-        if (!blockers || blockers.length === 0 || blockers.length >= previousCount) break;
-        previousCount = blockers.length;
+        if (!blockers) break;
+        const verdict = judgeContractRepairRound(repairProgress, blockers);
+        if (!verdict.next) {
+          if (verdict.reason !== "clean") console.log(`[build] contract repair stops: ${verdict.reason}, ${blockers.length} blocker(s)`);
+          break;
+        }
+        repairProgress = verdict.state;
         markActivity(ko ? `계약 표적 수리 ${round}/${MAX_CONTRACT_REPAIR_ROUNDS}` : `Targeted contract repair ${round}/${MAX_CONTRACT_REPAIR_ROUNDS}`);
         sink({
           runId,

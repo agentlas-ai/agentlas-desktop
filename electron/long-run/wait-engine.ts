@@ -150,7 +150,48 @@ export function reconcileWaitClaim<W extends WaitEngineRecord>(input:{
 export function waitObservationReady(wait:{intent:{condition:string};lastObservedDigest:string},observation:{digest:string;terminal:boolean}):boolean {
   return wait.intent.condition==="changed" ? observation.digest!==wait.lastObservedDigest : observation.terminal;
 }
+/** The longest poll interval; a wait at this interval whose subject is unchanged stores no row per poll. */
+export const WAIT_MAX_INTERVAL_MS=300_000;
 export function nextWaitObservationAt(intervalMs:number,now:number):{intervalMs:number;nextCheckAt:string} {
-  const interval=Math.min(intervalMs*2,300_000);
+  const interval=Math.min(intervalMs*2,WAIT_MAX_INTERVAL_MS);
   return {intervalMs:interval,nextCheckAt:new Date(now+interval).toISOString()};
+}
+/**
+ * The last quiet check (subject unchanged, interval already at the cap, nothing stored) per wait, kept in memory by one poller.
+ * An entry is bound to the revision it was taken from, so any stored change wins; at most `limit` entries; a restart or an evicted
+ * entry checks once more, which is harmless. A clock that went back (entry in the future) never holds a check.
+ */
+export const QUIET_WAIT_CHECK_LIMIT=256;
+export function createQuietWaitChecks(limit:number=QUIET_WAIT_CHECK_LIMIT) {
+  const seen=new Map<string,{revision:number;at:number}>();
+  return {
+    note(wait:{waitId:string;revision:number},at:number):void {
+      seen.delete(wait.waitId);seen.set(wait.waitId,{revision:wait.revision,at});
+      while(seen.size>limit)seen.delete(seen.keys().next().value as string);
+    },
+    pending(wait:{waitId:string;revision:number;intervalMs:number},now:number):boolean {
+      const last=seen.get(wait.waitId);
+      return Boolean(last && last.revision===wait.revision && last.at<=now && now-last.at<wait.intervalMs);
+    },
+    drop(waitId:string):void {seen.delete(waitId);},
+    size():number {return seen.size;},
+  };
+}
+/**
+ * The next check every reader shows or plans around. A pending wait at the longest interval does not store a row for a poll that
+ * found nothing new, so its stored nextCheckAt falls behind; the next check is then the next step of that interval after `nowMs`
+ * (a pure function of the stored fields, the same in every process), never later than the deadline. Any other wait, a future time, or
+ * a missing/invalid interval returns the stored value: a wait below the cap writes a row on every poll, so a past time is really overdue.
+ */
+export function effectiveWaitCheckAt(wait:{nextCheckAt:string|null;intervalMs?:number|null;deadline?:string|null;state?:string},nowMs:number):string|null {
+  const stored=wait.nextCheckAt;
+  if(!stored)return null;
+  const at=Date.parse(stored);
+  if(!Number.isFinite(at)||at>nowMs||(wait.state!==undefined&&wait.state!=="pending"))return stored;
+  const interval=wait.intervalMs;
+  if(typeof interval!=="number"||!Number.isSafeInteger(interval)||interval<WAIT_MAX_INTERVAL_MS)return stored;
+  let rolled=at+(Math.floor((nowMs-at)/interval)+1)*interval;
+  const deadline=wait.deadline?Date.parse(wait.deadline):Number.NaN;
+  if(Number.isFinite(deadline)&&deadline<rolled)rolled=deadline;
+  return new Date(rolled).toISOString();
 }

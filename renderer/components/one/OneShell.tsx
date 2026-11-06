@@ -8329,10 +8329,14 @@ function OneSessionsShell() {
           selected ? "task" : "conversation",
           { runId: nextRecoveryRunId, displayUserMessage: false, promptOrigin: "system", automaticRecovery: true, sourceRunId: receipt.runId },
         );
-      }).catch(() => {
+      }).catch((error: unknown) => {
         if (!cancelled) {
           verificationSettled = true;
-          setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: "" });
+          // The cause goes to the console log; the card states the fact (an empty diagnosis hides the card entirely).
+          console.warn("[one-auto-recovery] recovery state could not be read:", error);
+          setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: appLocale === "ko"
+            ? "자동 복구 상태를 읽지 못했습니다. 원인은 기록으로 남겼습니다."
+            : "The automatic recovery state could not be read. The cause was logged." });
         }
       });
       return () => {

@@ -1,5 +1,6 @@
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import { quotaExhausted } from "../../shared/runtime-quota";
+import { signInFactBlocksOwnerStart } from "../runtime/runtime-cooldown";
 
 export interface ScienceRuntimeSelectionAvailability {
   status: "available" | "unavailable" | "unknown";
@@ -31,7 +32,14 @@ export function scienceRuntimeSelectionAvailability(
   const exact = { kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: selection.model ?? runtime.model,
     // An open ACP seat is asked about by name: the cooldown and signed-out records are kept per seat.
     ...(runtime.acpAgentId ? { acpAgentId: runtime.acpAgentId } : {}) };
-  if (runtime.credentialAccess?.status === "unavailable" || runtime.signInRequired || ports.signedOut(exact))
+  // A "signed out" fact older than the start gate stops blocking: the run itself is the probe (runtime-cooldown.ts).
+  const signedOutFact = (): boolean => {
+    const fact = ports.signedOut(exact) as { since?: number | string } | null | undefined;
+    return fact ? signInFactBlocksOwnerStart(fact.since ?? now, now) : false;
+  };
+  if (runtime.credentialAccess?.status === "unavailable"
+    || (runtime.signInRequired && signInFactBlocksOwnerStart(runtime.signInRequired.since, now))
+    || signedOutFact())
     return { status: "unavailable", reason: "auth" };
   const cooling = ports.cooldown(exact, now);
   if (cooling && cooling.until > now && (cooling.kind === "quota" || cooling.kind === "auth")) {

@@ -200,9 +200,15 @@ export async function runSteps(ports: RunPorts, capability: Capability, params: 
       if (!target?.role) { await cleanup(); return fail("unsupported_body", "a step has no target", run); }
       const wantedLabel = placeholderName(target.label) ? String(params[placeholderName(target.label) as string] ?? "") : target.label;
       if (placeholderName(target.label) && params[placeholderName(target.label) as string] === undefined) { await cleanup(); return fail("bad_parameters", "the choice for this step was not given", run); }
-      const dialog = await windowOfDialog();
-      const elements = await elementsOf(dialog.panel);
-      const element = findElement(elements, target.role, wantedLabel, target.nth ?? 0);
+      let dialog = await windowOfDialog();
+      let element = findElement(await elementsOf(dialog.panel), target.role, wantedLabel, target.nth ?? 0);
+      // A dialog that is still drawing shows no control on the first look (the menu path above gets the same second look). The same control is read again after
+      // a moment, read-only; a different, similar-looking control is never taken for it.
+      if (!element?.element_token && !ports.signal?.aborted) {
+        await sleep(1200);
+        dialog = await windowOfDialog();
+        element = findElement(await elementsOf(dialog.panel), target.role, wantedLabel, target.nth ?? 0);
+      }
       if (!element?.element_token) { await cleanup(); return fail("element_not_found", `${target.role}${wantedLabel ? ` "${wantedLabel}"` : ""} is not in the dialog`, run, true); }
       const args: Record<string, unknown> = { pid: (dialog.panel ?? ports.target).pid, window_id: (dialog.panel ?? ports.target).windowId, element_token: element.element_token };
       if (step.tool === "set_value") {

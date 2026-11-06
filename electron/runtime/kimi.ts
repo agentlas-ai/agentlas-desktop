@@ -154,9 +154,14 @@ async function clearConnectionReceipt(): Promise<void> {
  */
 const CONNECTION_VERIFY_DEADLINE_MS = 45_000;
 const CONNECTION_VERIFY_BUDGET_MS = 5_000;
-/** Pause before the same check runs again: 30 s after the first failure, then 90 s, then 3 min. */
-function connectionFailureRetryMs(failures: number): number {
-  return Math.min(30_000 * 3 ** Math.max(0, failures - 1), 3 * 60_000);
+/**
+ * Pause before the same check runs again: 30 s after the first failure, then 90 s, tripling each time. A configuration nobody
+ * has verified is retried at least every 3 min (a reader is waiting on it). One that was verified before is already listed,
+ * so a check that keeps failing only bills model turns for nothing: it backs off up to 6 h. A login or any config change makes
+ * a new key, which is checked at once.
+ */
+function connectionFailureRetryMs(failures: number, knownGood: boolean): number {
+  return Math.min(30_000 * 3 ** Math.max(0, failures - 1), knownGood ? 6 * 60 * 60_000 : 3 * 60_000);
 }
 
 type KimiConnectionCheck = "verified" | "failed";
@@ -253,7 +258,7 @@ export async function probeKimi(options: KimiProbeOptions = {}): Promise<KimiPro
   const knownGood = await readKnownGoodConfiguration(configDigest);
   if (options.observationOnly) return knownGood ? connected : null;
   const failed = failedThisRun.get(key);
-  if (failed && Date.now() - failed.at < connectionFailureRetryMs(failed.count)) return knownGood ? connected : null;
+  if (failed && Date.now() - failed.at < connectionFailureRetryMs(failed.count, knownGood)) return knownGood ? connected : null;
   const check = startKimiVerification(found, configDigest, version, key);
   if (!knownGood) {
     const outcome = await waitForKimiVerification(check, CONNECTION_VERIFY_BUDGET_MS);
@@ -508,10 +513,13 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
       ? "Kimi Code는 현재 검증된 무도구 격리 모드를 지원하지 않습니다. Claude Code, Ollama 또는 API 런타임을 선택하세요."
       : "Kimi Code does not currently support verified tool-less isolation. Select Claude Code, Ollama, or an API runtime.");
   }
+  // Both refusals are typed results, not thrown prose: the failure's kind and code decide the sign-in card, so no wording is read.
   const bin = await resolveKimiBinary();
-  if (!bin) throw new Error(req.locale === "ko" ? "Kimi Code를 찾지 못했습니다." : "Kimi Code is not installed.");
+  if (!bin) return { text: "", turnDelivery: "not-dispatched", failure: { kind: "unsupported", runtime: KIND, source: "marker",
+    providerCode: "kimi_not_installed", message: req.locale === "ko" ? "Kimi Code를 찾지 못했습니다." : "Kimi Code is not installed." } };
   if (!(await hasUsableKimiConfiguration())) {
-    throw new Error(req.locale === "ko" ? "Kimi Code 로그인이 필요합니다. 설정에서 Kimi Code 연결을 눌러주세요." : "Kimi Code login is required. Connect Kimi Code in Settings.");
+    return { text: "", turnDelivery: "not-dispatched", failure: { kind: "auth", runtime: KIND, source: "marker",
+      providerCode: "kimi_login_required", message: req.locale === "ko" ? "Kimi Code 로그인이 필요합니다. 설정에서 Kimi Code 연결을 눌러주세요." : "Kimi Code login is required. Connect Kimi Code in Settings." } };
   }
 
   const staged = await stageCliImageAttachments(req);

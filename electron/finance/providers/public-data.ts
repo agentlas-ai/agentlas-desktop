@@ -311,11 +311,23 @@ export function parseTreasury(xml: string, url: string): FinanceDataResult {
     for (const tenor of tenors) rows.push([day, tenor.replace(/_/g,'.'), num(tag(entry[0], `d:BC_${tenor}`)), '% per annum']); }
   result.columns = ['Observation date','Maturity','Par curve yield','Unit']; result.rows = rows.sort((a,b) => String(b[0]).localeCompare(String(a[0]))).slice(0, 14*22); result.asOf = newest(result.rows.map(row => String(row[0])));
   result.warnings = ['Official Treasury daily nominal par yield curve, latest 22 observation days from the requested month. This is a curve estimate, not a specific bond price, executable quote, YTM, total return, or forecast.', 'Missing maturities remain null; yields are percentage points. No fabricated intraday timestamp or historical vintage is supplied. Treasury public-access policy applies; source attribution retained.'];
-  if (!rows.length) result.warnings.push('The requested month has no observations; no previous-month values were substituted.');
+  if (!rows.length) result.warnings.push('The requested month has no observations; no values from another month were put in its place.');
   return result;
 }
-export async function queryTreasury(period: string): Promise<FinanceDataResult> {
-  const month = /^20\d{2}(?:0[1-9]|1[0-2])$/.test(period) ? period : new Date().toISOString().slice(0,7).replace('-','');
+function treasuryUrl(month: string): URL {
   const url = new URL('https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml'); url.searchParams.set('data','daily_treasury_yield_curve'); url.searchParams.set('field_tdr_date_value_month',month);
-  return parseTreasury(await fetchFinanceText(url), url.href);
+  return url;
+}
+/** The month a yield read asks for: the owner's YYYYMM, otherwise the current one. When the current month has no observation yet (the first days of a month), the previous month's real observations are read once and labelled; an owner's explicit month is never replaced. `now` is the clock. */
+export async function queryTreasury(period: string, now: number = Date.now()): Promise<FinanceDataResult> {
+  const requested = /^20\d{2}(?:0[1-9]|1[0-2])$/.test(period), at = new Date(now);
+  const key = (date: Date) => date.toISOString().slice(0,7).replace('-','');
+  const month = requested ? period : key(at);
+  const url = treasuryUrl(month), result = parseTreasury(await fetchFinanceText(url), url.href);
+  if (requested || result.rows.length) return result;
+  const earlier = key(new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() - 1, 1))), previousUrl = treasuryUrl(earlier);
+  const previous = parseTreasury(await fetchFinanceText(previousUrl), previousUrl.href);
+  if (!previous.rows.length) return result;
+  previous.warnings.unshift(`finance_treasury_previous_month: no observations yet in ${month}; these rows are the real observations of ${earlier} (latest ${previous.asOf}). Nothing was filled in.`);
+  return previous;
 }

@@ -61,7 +61,7 @@ import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { automationRuntimePermission } from "../shared/graph-node-protocol";
-import { runGraph, type RunGraphResult } from "./workflow/run-graph";
+import { evalExhaustionStrategyPlan, runGraph, type RunGraphResult } from "./workflow/run-graph";
 import { graphExecutionDigest } from "../shared/graph-execution-digest";
 import { AutomationWorkspaceError, automationWorkspaceOwnerText, captureAutomationWorkspace } from "./automation-workspace";
 import { sweepAutomationEffectObservations } from "./long-run/effect-observation";
@@ -646,6 +646,24 @@ export class AutomationActiveRemovalError extends Error {
   }
 }
 
+const OVERLAP_SKIP_NOTED_MAX = 200;
+const overlapSkipNoted = new Set<string>();
+/**
+ * A scheduled occurrence refused because the previous run of the same automation is still going leaves one fact on the run
+ * event path (no model, no new table) instead of ending silently. Once per occurrence: the due poll asks again every tick.
+ * The memory is bounded; after a restart the worst case is one more line.
+ */
+function noteOccurrenceSkippedForOverlap(automationId: string, occurrence: string | null): void {
+  if (!occurrence) return;
+  const key = `${automationId}|${occurrence}`;
+  if (overlapSkipNoted.has(key)) return;
+  if (overlapSkipNoted.size >= OVERLAP_SKIP_NOTED_MAX) overlapSkipNoted.delete(overlapSkipNoted.values().next().value as string);
+  overlapSkipNoted.add(key);
+  tryRecordRunEvent({ runId: `automation-overlap:${randomUUID()}`, automationId, kind: "automation_occurrence_skipped_overlap",
+    payload: { reasonCode: "previous_run_still_running", factOnly: true, occurrence,
+      text: { ko: "이전 실행이 아직 끝나지 않아 이번 회차는 건너뛰었습니다", en: "The previous run has not finished yet, so this occurrence was skipped" } } });
+}
+
 /**
  * Deletion is destructive while a write-capable runtime owns this automation.
  * Refuse instead of assuming AbortSignal compliance: a provider that ignores
@@ -1134,7 +1152,10 @@ async function runOne(
   // A rootless start (an event trigger, a chain, a One graph command) hands on a rootless continuation, as it ran.
   const continuation = captureMainContinuation();
   if (dispatchPaused()) return { accepted: false };
-  if (running.has(a.id)) return { accepted: false };
+  if (running.has(a.id)) {
+    noteOccurrenceSkippedForOverlap(a.id, opts?.occurrenceId ?? (opts?.claim ? opts.expectedNextRunAt ?? null : null));
+    return { accepted: false };
+  }
   // A retired Goal continuation is history, not a job: no entry (Run now, chain, trigger, recovery) starts a turn from it.
   if (isGoalContinuationAutomation(a)) {
     if (opts?.preclaimed) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
@@ -2025,12 +2046,16 @@ async function runOne(
       // reconciliation decision through this single shared cycle. Direct Graph
       // runs use the same module from runGraph; keeping the scheduler's guard
       // here prevents reflection from observing an uncommitted or abandoned run.
+      // An exhausted eval rework names itself (eval_rework_exhausted) in this one cycle, and the same failure fingerprint as the
+      // previous exhaustion is not asked again: the strategy model already saw it (workflow/run-graph.ts evalExhaustionStrategyPlan,
+      // the same answer a direct Graph run reads).
+      const evalExhausted = currentRunId && automaticRetryStopped ? evalExhaustionStrategyPlan(a.id, currentRunId, automaticRetryStopped) : null;
       if (!graphLoginWait && !workspaceFailure && !shutdownDispatchClosed && !controller.signal.aborted && isGraphAutomation && graphRunAttempted && runLedgerRecorded && !opts?.dryRun
-        && nativeGraphSuccessNeedsReflection(a.graph, runStatus === "ok")
+        && nativeGraphSuccessNeedsReflection(a.graph, runStatus === "ok") && evalExhausted?.skip !== true
         && !parentMissing && !leaseOwnershipLost && currentRunId) {
         try {
           const reflectionInput = { automationId: a.id, sourceRunId: currentRunId,
-            status: runStatus, outcome: runOutcome, reasonCode: runReasonCode, output: output ?? null,
+            status: runStatus, outcome: runOutcome, reasonCode: evalExhausted ? evalExhausted.reasonCode : runReasonCode, output: output ?? null,
             effectsUnconfirmed: requiresGraphReconciliation(machineError ?? runError),
             runError: machineError ?? runError, runtimeSelection: a.runtimeSelection };
           classifyInBackground({ automation: a, runId: currentRunId, phase: "reflection", sourceSignal: controller.signal,

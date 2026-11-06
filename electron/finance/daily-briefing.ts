@@ -68,7 +68,7 @@ export async function observeFinanceDailyCheckin(scope:FinanceScope,binding:Fina
   const unconfirmedReview=!!db.prepare(`SELECT 1 FROM one_supervisor_notices WHERE one_id=? AND task_id=? AND (
     (review_state='held' AND review_reason='finance_daily_prior_unconfirmed') OR
     (review_state='skipped' AND review_reason='finance_daily_already_admitted') OR
-    (review_state='reviewed' AND review_reason IS NOT NULL AND review_reason NOT IN ('quiet','review_stopped_by_owner','finance_monitoring_disabled'))
+    (review_state IN ('reviewed','unreviewed') AND review_reason IS NOT NULL AND review_reason NOT IN ('quiet','review_stopped_by_owner','finance_monitoring_disabled'))
   ) LIMIT 1`).get(binding.oneId,`checkin:${binding.checkinId}`);
   scope.assertCurrent();return {active:row.active===1,nextRunAt:row.active===1?new Date(row.next_at).toISOString():null,lastSentAt,pending:notices.some(notice=>notice.review_state==='pending'||notice.review_state==='claimed'),...(unconfirmedReview?{unconfirmedReview:true}:{})};
 }
@@ -103,7 +103,7 @@ export async function wakeFinanceDailyBriefing():Promise<string[]> {
       db.transaction(()=>{
         scope.assertCurrent();
         const exact=db.prepare('SELECT 1 FROM one_supervisor_checkins WHERE id=? AND one_id=? AND command_id=? AND active=1').get(allowed!.checkinId,allowed!.oneId,allowed!.commandId);
-        if(exact)db.prepare("UPDATE one_supervisor_notices SET review_state='held',review_reason='finance_daily_prior_unconfirmed' WHERE one_id=? AND task_id=? AND review_state='reviewed' AND review_reason IN ('finance_daily_safety_unavailable','finance_monitoring_access_unavailable')").run(allowed!.oneId,`checkin:${allowed!.checkinId}`);
+        if(exact)db.prepare("UPDATE one_supervisor_notices SET review_state='held',review_reason='finance_daily_prior_unconfirmed' WHERE one_id=? AND task_id=? AND review_state IN ('reviewed','unreviewed') AND review_reason IN ('finance_daily_safety_unavailable','finance_monitoring_access_unavailable')").run(allowed!.oneId,`checkin:${allowed!.checkinId}`);
       }).immediate();scope.assertCurrent();
     }
   }catch(error){

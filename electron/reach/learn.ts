@@ -392,6 +392,9 @@ export interface RunLearnedOptions {
   locator?: typeof locate;
 }
 
+// How many more times the screen is read when the expected change is not there yet, each (settle time x 4) after the last.
+const OUTCOME_RECHECKS = 3;
+
 export async function runLearned(driver: LearnDriver, capability: Capability, params: Record<string, unknown>, options: RunLearnedOptions = {}): Promise<LearnRunResult> {
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const result = (partial: Partial<LearnRunResult> & { ok: boolean; stepsRun: number }): LearnRunResult => ({ outcome: "unknown", healed: [], ...partial });
@@ -440,8 +443,15 @@ export async function runLearned(driver: LearnDriver, capability: Capability, pa
     await sleep(options.settleMs ?? 150);
   }
   await sleep(options.settleMs ?? 150);
-  const after = await driver.snapshot();
-  const outcome = checkOutcome(capability.postconditions?.[0], start, after);
+  let after = await driver.snapshot();
+  let outcome = checkOutcome(capability.postconditions?.[0], start, after);
+  // A screen that has not caught up yet is read again (read-only, no input): the change an app draws a moment late is not reported as missing.
+  for (let look = 0; outcome === "unsatisfied" && look < OUTCOME_RECHECKS; look += 1) {
+    if (options.signal?.aborted) return result({ ok: false, code: "aborted", stepsRun: run, healed });
+    await sleep((options.settleMs ?? 150) * 4);
+    after = await driver.snapshot();
+    outcome = checkOutcome(capability.postconditions?.[0], start, after);
+  }
   if (outcome === "unsatisfied") return result({ ok: false, code: "outcome_unsatisfied", stepsRun: run, outcome, healed });
   // a heal is only written back when the run ended in the state the work is for
   const updated: Capability | undefined = healed.length > 0 && outcome === "satisfied"

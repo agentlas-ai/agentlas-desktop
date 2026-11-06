@@ -1157,11 +1157,14 @@ export function runnerFailureFromError(error: unknown, runtime: string): RunnerF
   // providerCode; prose is read only for an error that carries none (R-054, docs 31 W1).
   const typedCode = refusalCode(error);
   if (typedCode) return { kind: "exit", message: message.slice(0, 2_000), runtime, source: "exit", providerCode: typedCode };
-  const kind: RunnerFailureKind = /quota|usage limit|weekly limit|credits?|resets?/i.test(message)
+  // Prose is a guess (source "exit"; runtime-cooldown never records it). The words below must name an account allowance or a login
+  // outright: bare "reset"/"credit"/"login"/"authentication" also appear in ECONNRESET, "preset", "login shell", "authentication
+  // plugin", so they are not signals.
+  const kind: RunnerFailureKind = /quota|usage limit|weekly limit|credit balance|(?:insufficient|out of|exhausted|used up) credits?|\bno (?:more |remaining )?credits? (?:left|remaining|available)|credits? (?:exhausted|depleted|used up|exceeded|have run out)|\bresets? (?:in|at|on)\b/i.test(message)
     ? "quota"
     : /\b429\b|rate.?limit/i.test(message)
     ? "rate_limit"
-    : /unauthori[sz]ed|authentication|not logged in|please run \/login|\blogin\b|\bsign in\b|token.*(?:expired|invalid)|\bforbidden\b/i.test(message)
+    : /unauthori[sz]ed|authentication (?:failed|required|error)|invalid authentication|failed to authenticate|not logged in|please run \/login|\blog ?in (?:required|expired|failed)\b|\bplease (?:log|sign) ?in\b|\bsign in\b|token.*(?:expired|invalid)|\bforbidden\b/i.test(message)
       ? "auth"
       : /timed? ?out|timeout/i.test(message)
         ? "timeout"

@@ -26,6 +26,7 @@ import { resolveEffectiveContextWindow } from "../shared/models";
 import type { AutomationStrategyProposalObservationV1 } from "./store/automation-strategy-proposals";
 import type { AutomationStrategyRevisionReceipt } from "./store/automation-strategy-revisions";
 import type { GoalStrategyAutomationRecommendationV1 } from "../shared/goal-strategy";
+import { effectiveAcceptanceCriteria } from "../shared/goal-scope";
 
 /**
  * Main-only reflection input. The terminal assistant result is already owned
@@ -302,7 +303,7 @@ function reflectionEvidence(input: AutomationStrategyReflectionInput): string | 
       objective: input.goal.revision.objective,
       originalRequest: input.goal.revision.originalRequest.text,
       lifecycle: input.goal.revision.lifecycle ?? "finite",
-      acceptanceCriteria: input.goal.revision.acceptanceCriteria,
+      acceptanceCriteria: effectiveAcceptanceCriteria(input.goal.revision.acceptanceCriteria),
       status: input.goal.status,
       authority: input.goal.authority ?? "verified_binding",
     } : null,

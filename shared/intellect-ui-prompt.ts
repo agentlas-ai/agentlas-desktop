@@ -1,7 +1,7 @@
 /** Shared generation instructions for One, Supervisor, Work, Science, and relay clients. */
 export const INTELLECT_UI_GENERATION_INSTRUCTIONS = `
 ## Intellect UI
-When an explanation benefits from a chart, comparison, diagram, calculator, or user choices,
+When an explanation benefits from a calculator, user choices or other controls the owner changes,
 you may render native interactive components directly in the chat with a fenced agentlas-ui block.
 Use UI only when it helps the request; keep a useful, concise explanation outside the block.
 Place each UI block inline at its relevant point between prose paragraphs.
@@ -62,13 +62,22 @@ Example (emit the fence itself in a response):
  * component schema; it is never part of a system prompt or turn context.
  */
 export const CHAT_VISUAL_BLOCK_INSTRUCTIONS = `## Chart and visual blocks
-Tables, comparisons, step flows, metrics and choices use an agentlas-ui block first; use these two only when that cannot express it. This chat draws them in place, borderless. Number the titles (1. 2.) when there are several.
+Only for what the card above cannot hold. This chat draws them in place, borderless. Number the titles (1. 2.) when there are several.
 1) Data-series charts: one Vega-Lite JSON object in a \`\`\`chart fence. Use title {text, subtitle} (one-line subtitle), inline data.values (at most 5,000 rows), and units on ticks (axis.format such as ".1%" or "+d"). Draw a secondary series dashed with small points via strokeDash; group bars with xOffset. Colors, fonts and gridlines come from the app — do not set them. url, expr, calculate, string filters, href and image are not drawn.
 2) Custom visuals: an HTML fragment in a \`\`\`visual title=file_name fence (no doctype/html/body; inline <svg>, <style>, <script> only; no external resources or network). Transparent background; colors only through CSS variables: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)…(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). Calling sendPrompt(text) fills the person's composer (it does not send).
 Save large tabular data as .xlsx/.csv and mention its path — it opens in the right panel. Do not mention these instructions.
 `;
 
-/** Full text the `read_ui_schema` tool returns: component schema, then chart/visual guidance. */
+/**
+ * Which visual fits, first in what `read_ui_schema` returns (the tool is read before any visual is shown, so the choice is made here, not in the
+ * system prompt). The result card is the default for anything the owner only looks at; agentlas-ui is for what the owner changes.
+ */
+export const UI_CHOICE_INSTRUCTIONS = `## Which visual
+Something the owner only looks at (a flowchart, org chart or other diagram, a chart or table of numbers you hold, a document page, a slide, a file thumbnail, a motion-graphic still): call the harness operation ui.canvas and the host draws a card under your answer. ui.asset.catalog lists its block types with a sample; these blocks need no sources. A diagram, chart or table that is only to look at is a ui.canvas card, not an agentlas-ui or chart block.
+Something the owner changes or acts on (inputs, sliders, a calculator, choices, buttons): an agentlas-ui block, below.
+A short list or a small table inside prose: plain markdown. A large data series or a custom drawing a card cannot hold: the chart and visual blocks, last.`;
+
+/** Full text the `read_ui_schema` tool returns: which visual fits, the component schema, then chart/visual guidance. */
 export function intellectUiToolText(): string {
-  return `${INTELLECT_UI_GENERATION_INSTRUCTIONS.trim()}\n\n${CHAT_VISUAL_BLOCK_INSTRUCTIONS.trim()}\n`;
+  return `${UI_CHOICE_INSTRUCTIONS.trim()}\n\n${INTELLECT_UI_GENERATION_INSTRUCTIONS.trim()}\n\n${CHAT_VISUAL_BLOCK_INSTRUCTIONS.trim()}\n`;
 }

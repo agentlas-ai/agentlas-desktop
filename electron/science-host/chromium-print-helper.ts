@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   CHROMIUM_PRINT_HELPER_FLAG, CHROMIUM_PRINT_RESULT_PREFIX, CHROMIUM_PRINT_SCHEMA,
-  chromiumPrintFailureReason, type ChromiumHelperResult, type ChromiumPrintReadiness,
+  CHROMIUM_PNG_LIMITS, chromiumPrintFailureReason, type ChromiumHelperResult, type ChromiumPrintReadiness, type ChromiumRenderMode,
 } from "./chromium-print-protocol";
 
 const DOCUMENT_URL = "agentlas-science-print://document/index.html";
@@ -99,6 +99,11 @@ export async function runChromiumPrintHelper(): Promise<void> {
     try { process.kill(parentPid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") parentGone(); }
   }, 500);
 
+  /** What this request asks for (PDF unless it says PNG, with its bounded size). Set once from the one render message. */
+  let renderMode: ChromiumRenderMode = "pdf";
+  let pngWidth: number = 960;
+  let pngScale: 1 | 2 = 2;
+
   async function render(): Promise<void> {
     try {
       await app.whenReady();
@@ -139,12 +144,27 @@ export async function runChromiumPrintHelper(): Promise<void> {
       // not await a DevTools command before giving that renderer a document.
       await Promise.all([contents.debugger.sendCommand("Network.enable"), window.loadURL(DOCUMENT_URL)]);
       if (finished) return;
-      // Force print-only CSS/font faces into layout before awaiting font readiness.
-      await contents.debugger.sendCommand("Emulation.setEmulatedMedia", { media: "print" });
+      // Force print-only CSS/font faces into layout before awaiting font readiness. A picture is the screen with motion off: the still is the final state of every entrance animation.
+      await contents.debugger.sendCommand("Emulation.setEmulatedMedia", renderMode === "png" ? { media: "screen", features: [{ name: "prefers-reduced-motion", value: "reduce" }] } : { media: "print" });
+      // The page is laid out at its width in a short viewport: scrollHeight is never less than the viewport, so a tall one would pad the picture.
+      if (renderMode === "png") await contents.debugger.sendCommand("Emulation.setDeviceMetricsOverride", { width: pngWidth, height: 100, deviceScaleFactor: pngScale, mobile: false });
       const readiness = await contents.executeJavaScriptInIsolatedWorld(1001, [{ code: ASSET_READINESS }]) as ChromiumPrintReadiness;
       if (finished) return;
       if (blockedResource || readiness.failedFontCount > 0 || readiness.failedStylesheetCount > 0 || readiness.loadedImageCount !== readiness.imageCount) {
         finish({ ok: false, reason: blockedResource ? "science_chromium_external_resource_blocked" : "science_chromium_assets_not_loaded", readiness });
+        return;
+      }
+      if (renderMode === "png") {
+        const measured = await contents.executeJavaScriptInIsolatedWorld(1001, [{ code: "Math.ceil(document.documentElement.scrollHeight)" }]) as number;
+        const height = Math.max(1, Math.min(CHROMIUM_PNG_LIMITS.maxHeight, Number.isFinite(measured) ? measured : 100));
+        await contents.debugger.sendCommand("Emulation.setDeviceMetricsOverride", { width: pngWidth, height, deviceScaleFactor: pngScale, mobile: false });
+        const shot = await contents.debugger.sendCommand("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false }) as { data?: string };
+        if (typeof shot.data !== "string" || !shot.data) { finish({ ok: false, reason: "science_chromium_png_empty", readiness }); return; }
+        const png = Buffer.from(shot.data, "base64");
+        if (finished) return;
+        if (png.length > CHROMIUM_PNG_LIMITS.maxBytes) { finish({ ok: false, reason: "science_chromium_png_too_large", readiness }); return; }
+        fs.writeFileSync(path.join(directory!, "output.png"), png, { flag: "wx", mode: 0o600 });
+        finish({ ok: true, readiness, width: pngWidth * pngScale, height: height * pngScale });
         return;
       }
       const bytes = await contents.printToPDF({ printBackground: true, pageSize: "A4",
@@ -169,6 +189,12 @@ export async function runChromiumPrintHelper(): Promise<void> {
         if (requestId !== null || message.type !== "render" || message.schema !== CHROMIUM_PRINT_SCHEMA
           || typeof message.requestId !== "string" || !/^[0-9a-f-]{36}$/iu.test(message.requestId)) throw new Error("protocol");
         requestId = message.requestId;
+        // An optional picture request: the mode is a fixed word and the size is bounded, never taken as given.
+        if (message.mode === "png") {
+          const width = Number(message.width);
+          if (!Number.isInteger(width) || width < CHROMIUM_PNG_LIMITS.minWidth || width > CHROMIUM_PNG_LIMITS.maxWidth || (message.scale !== 1 && message.scale !== 2)) throw new Error("protocol");
+          renderMode = "png"; pngWidth = width; pngScale = message.scale;
+        } else if (message.mode !== undefined && message.mode !== "pdf") throw new Error("protocol");
         void render();
       } catch { finish({ ok: false, reason: "science_chromium_helper_request_invalid" }); }
     }

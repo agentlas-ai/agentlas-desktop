@@ -12,6 +12,7 @@
  */
 import { projectGoalPlanReadiness, type PlanReadiness } from "../../shared/goal-shape";
 import { readEpisodeQuietBaseline } from "../long-run/episode-disposition";
+import { effectiveWaitCheckAt } from "../long-run/wait-engine";
 import { getDb } from "../store/db";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { readGoalPlan } from "../store/goal-plans";
@@ -581,7 +582,7 @@ function factsRecheckAtMs(db: Database.Database, run: AgiGoalRow, nowMs: number,
     const wait = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
       .get(run.id) as { payload_json: string } | undefined;
     const subscription = wait ? JSON.parse(wait.payload_json)?.subscription : null;
-    if (subscription) { add(subscription.nextCheckAt); add(subscription.deadline); add(subscription.intent?.subject?.notBefore); }
+    if (subscription) { add(effectiveWaitCheckAt(subscription, nowMs)); add(subscription.deadline); add(subscription.intent?.subject?.notBefore); }
   } catch { /* a source that cannot be read leaves the floor */ }
   return Math.min(...times);
 }

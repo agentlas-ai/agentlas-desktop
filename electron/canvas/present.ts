@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { canvasFit, canvasLayout, type CanvasBlock, type CanvasChart, type CanvasInput, type CanvasLine, type CanvasView } from '../../shared/canvas';
+import { canvasFit, canvasLayout, isBaseCanvasBlock, type CanvasBlock, type CanvasChart, type CanvasInput, type CanvasLine, type CanvasView } from '../../shared/canvas';
+import '../../shared/canvas/blocks/registry'; // the host knows every asset block before it builds a card (the renderer loads them on demand)
 import type { HarnessCallContext } from '../harness/capability-ports';
 import type { CanvasSeriesRead } from './turn-state';
 import type { CanvasSeriesRequest } from './registry';
@@ -32,6 +33,8 @@ export interface CanvasBuildOptions {
  */
 export async function buildCanvasCard(input: Omit<CanvasInput, 'guide'>, o: CanvasBuildOptions): Promise<{ view: CanvasView; warnings: string[] }> {
   const args = { ...input }, { guide } = o;
+  // A card with figures (a base block) names where they came from; a card of assets alone (diagram, document, slide) needs no source.
+  if (!args.sources.length && args.blocks.some(isBaseCanvasBlock)) throw new z.ZodError([{ code: 'custom', path: ['sources'], message: 'A card with figures names where they came from: give at least one source ({ title, url }). A card of diagrams, documents or slides needs none.' }]);
   // Never a dead end: a card the guide cannot govern is drawn as sent and the guide's rule rides in the warnings. A refusal here was
   // read as "answer without a card" (Codex run 9: 11 of 20 card-less answers were a refused card that was never sent again).
   const unguided: string[] = [];
