@@ -328,10 +328,6 @@ export class AliveLifetimeService {
       const actionWorldSha = digest(observations.filter(({ attachment }) => hasActionRoute(attachment.domain))
         .map(({ attachment, result }) => ({ attachmentId: attachment.attachmentId, scope: attachment.scope,
           world: result.observation.world ?? result.salience ?? null })));
-      if (lastReview?.errorCode === "agy_read_tools_unsupported" && !runtimeBindingChanged && !grantChanged
-        && agent.state.lastActionWorldSha === actionWorldSha) {
-        beats.push(this.wait(agent, "runtime.read-tools-unsupported", nowMs)); continue;
-      }
       let actionWait: string | null = null;
       const sameActionFailureWorld = agent.state.actionFailureEpoch === agent.controlEpoch
         && agent.state.actionFailureGrantRevision === (agent.state.grantRevision ?? null)

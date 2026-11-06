@@ -404,7 +404,7 @@ export class AliveLifetimeStore {
       // Failed calls use finite backoff; neither path guesses intent from the model's prose.
       const failures = receipt.status === "completed" ? 0 : Number(agent.state.failedReviews ?? 0) + 1;
       const nextWakeAtMs = validDecision ? (decision.nextWakeAtMs === null ? null : Math.max(nowMs + 60_000, decision.nextWakeAtMs!))
-        : receipt.status === "completed" || errorCode === "agy_read_tools_unsupported"
+        : receipt.status === "completed"
           ? null : failures <= 3 ? nowMs + [30_000, 120_000, 480_000][failures - 1] : null;
       this.db.prepare("UPDATE alive_wakes SET status=?,receipt_json=?,settled_at_ms=? WHERE wake_id=?")
         .run(receipt.status, JSON.stringify(receipt), nowMs, receipt.runId);

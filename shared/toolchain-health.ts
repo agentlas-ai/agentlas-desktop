@@ -1,4 +1,4 @@
-// Health of a callable Toolchain: when real uses start failing, it is pulled back and repaired.
+// Health of a callable Toolchain: when real uses start failing, it is pulled back.
 //
 // Owner scheme (2026-10-20): a Toolchain for an app or page is built on the assumption that the app's or page's structure stays
 // the same. Later the structure changes, errors become frequent, and the Toolchain is changed. This file decides, from the
@@ -20,8 +20,6 @@ export const TOOLCHAIN_HEALTH_POLICY = Object.freeze({
   failureShare: 0.5,
   /** Outcomes kept per version. */
   keep: 24,
-  /** Repairs the detector asks for per asset before it stops and retires the asset instead. */
-  maxRepairs: 2,
 });
 
 export type FailureKind = "environment" | "tool";
@@ -63,6 +61,8 @@ export interface HealthLedger {
   version: number;
   contentHash: string;
   outcomes: HealthOutcome[];
+  /** Set once this stable version was pulled back for failing. Immutable per version: a newly published stable version has its own ledger. */
+  pulledBack?: true;
   updatedAt: string;
 }
 

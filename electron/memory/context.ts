@@ -793,9 +793,11 @@ function formatMemorySections(sections: string[]): string {
   ].join("\n\n");
 }
 
+// Custody is the owner, the store file and the forget clock (a forget or an owner edit bumps the epoch in the same transaction).
+// The write revision is not custody: another chat or the first projection pass writing during a build is newer data, not another owner.
 function sameMemoryCustody(left: ReturnType<typeof getMemoryStoreInfo>, right: ReturnType<typeof getMemoryStoreInfo>): boolean {
   return left.ownerNamespace === right.ownerNamespace && left.path === right.path
-    && left.revocationEpoch === right.revocationEpoch && left.revision === right.revision;
+    && left.revocationEpoch === right.revocationEpoch;
 }
 
 function projectPmSection(projectPath: string, taskPrompt?: string): string | null {

@@ -115,6 +115,7 @@ import {
   runtimeFailureBlocksReplay,
   selectRuntimeForTargets,
 } from "../runtime/selection";
+import { READ_ANSWER_ONLY_EMPTY_CODE } from "../../shared/turn-settlement";
 import { getAgentById, listInstalledAgentsReadOnly } from "./registry";
 import { getDb } from "../store/db";
 import type { OneArtifactBindingRequestV1 } from "../../shared/one-artifacts";
@@ -857,6 +858,16 @@ function taskForceCandidateRuntimes(p: BorrowedTaskForceParams, options: { ignor
   return candidates.length > 0 ? candidates : [p.active];
 }
 
+/**
+ * The control-plane turns (plan, synthesis) run at read permission (taskForceOrchestratorBoundary). They start on a runtime that
+ * reads with tools unless the runtime is not the pool's to choose: the owner's exact pick, an override, a fixed contract. Those
+ * run answer-only on what they have (antigravity.ts antigravityAnswerOnlyRequest).
+ */
+function taskForceReadStepPinned(p: BorrowedTaskForceParams): boolean {
+  return oneControllerRuntimePreferred(p) || Boolean(p.runtimeOverride) || Boolean(p.workforceSelectionReceipt)
+    || p.benchmarkMode === true || p.req.agentAppMode === true;
+}
+
 function oneControllerRuntimePreferred(p: BorrowedTaskForceParams): boolean {
   return p.runtimePinHonored === true
     && Boolean(p.req.runtimeSelection);
@@ -886,7 +897,7 @@ function taskForceRecoveryRuntime(
     p.workforceSelectionReceipt ||
     p.benchmarkMode ||
     p.req.agentAppMode ||
-    oneControllerRuntimePreferred(p)
+    (oneControllerRuntimePreferred(p) && failure.providerCode !== READ_ANSWER_ONLY_EMPTY_CODE)
   ) {
     return null;
   }
@@ -5690,6 +5701,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           ? p.active
           : managerControllerPriority[0] ?? p.active;
       const managerPlanBaseResolution = resolveWorkloadAllocationAcrossRuntimes({
+        readStep: { pinned: taskForceReadStepPinned(p) },
         allocation: managerPlanAllocation,
         runtimes: candidateRuntimes,
         fallbackRuntime: managerControllerDefault,
@@ -6150,6 +6162,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         ? packet.allocation
         : defaultWorkloadAllocation("synthesize");
       const managerSynthesisBaseResolution = resolveWorkloadAllocationAcrossRuntimes({
+        readStep: { pinned: taskForceReadStepPinned(p) },
         allocation: managerSynthesisAllocation,
         runtimes: candidateRuntimes,
         fallbackRuntime: managerControllerDefault,
@@ -8375,6 +8388,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       ? p.active
       : controllerPriority[0] ?? p.active;
   const synthesisResolution = resolveWorkloadAllocationAcrossRuntimes({
+    readStep: { pinned: taskForceReadStepPinned(p) },
     allocation: plan.synthesisAllocation,
     runtimes: synthesisCandidateRuntimes,
     fallbackRuntime: controllerDefault,
@@ -8540,6 +8554,9 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   let synthesisRuntime = synthesisActive;
   let synthesisRunner = synthesisPicked;
   const failedSynthesisRuntimes: RuntimeStatus[] = [];
+  // A tools-free read answer that came back empty with nothing having acted (READ_ANSWER_ONLY_EMPTY_CODE) is sent once more to the
+  // same runtime when no other runtime of the pool can take the synthesis.
+  let emptyReadAnswerResent = false;
   while (true) {
     try {
       final = await runSynthesisOn(synthesisRuntime, synthesisRunner);
@@ -8555,6 +8572,10 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
       // Fixed contracts or an exhausted ordered pool fail honestly. Ordinary
       // One/Work runs continue on the next configured orchestrator member.
       if (!recovery || failedSynthesisRuntimes.some((runtime) => sameRuntimeModel(runtime, recovery))) {
+        if (typed.failure.providerCode === READ_ANSWER_ONLY_EMPTY_CODE && !emptyReadAnswerResent) {
+          emptyReadAnswerResent = true;
+          continue;
+        }
         if (runtimeFailureBlocksReplay(typed.failure)) throw typed;
         // The teammates' results exist and the only thing that cannot run is the model that writes the summary. An ordinary
         // owner/Work turn then gets the teammates' own results assembled by the host (no model is called, so no runtime pin or

@@ -10,6 +10,7 @@ import { composeDeclaredPrompt, type DeclaredPromptPart } from "../electron/runt
 // 표면적 항목은 scripts/probe-runtime-capabilities.mjs 가 설치된 CLI 의 --help 로
 // 실측해 어긋나면 알린다. probedVersion 이 낡은 값은 확신처럼 쓰지 말 것.
 import type { RuntimeKind } from "./types";
+import type { RuntimeToolKind } from "./runtime-tool-kind";
 
 /** 커스텀 슬래시 명령/스킬이 사는 곳 (홈 디렉터리 기준 세그먼트). */
 export interface RuntimeCommandSurface {
@@ -288,7 +289,7 @@ export const RUNTIME_REQUEST_LIMITS: Record<RuntimeKind, RuntimeRequestLimits> =
     evidence: "electron/runtime/codex.ts runCodex: `untrustedNoTools && !judgmentOnly` throws RuntimeJudgmentRefusal" },
   antigravity: { untrustedNoTools: "refused", readWithTools: "refused",
     readMechanism: "antigravityPermissionArgs(read): no permission flag, so headless agy auto-denies write_file/command (workspace reads only)",
-    evidence: "electron/runtime/antigravity.ts runAntigravity: untrustedNoTools (judgmentOnly or not) throws RuntimeJudgmentRefusal, antigravityReadToolFailure refuses read+tools (agy_read_tools_unsupported: headless agy auto-denies every tool without a permission flag)" },
+    evidence: "electron/runtime/antigravity.ts runAntigravity: untrustedNoTools (judgmentOnly or not) throws RuntimeJudgmentRefusal; a read step that offers tools starts on another runtime (selection.ts routeReadStepRuntime) and, with nobody else in the pool, runs answer-only here (antigravityAnswerOnlyRequest: headless agy auto-denies every tool without a permission flag)" },
   grok: { untrustedNoTools: "judgment-only", readWithTools: "supported",
     readMechanism: "ACP (default): read/plan session mode + host arbiter rejects edit/execute; legacy grok.ts: grokPermissionArgs(read) --deny GROK_READ_ONLY_DENIED_TOOLS",
     evidence: "electron/runtime/grok.ts runGrok: `untrustedNoTools && !judgmentOnly` throws (judgments run with --deny \"*\")" },
@@ -317,6 +318,17 @@ export const RUNTIME_REQUEST_LIMITS: Record<RuntimeKind, RuntimeRequestLimits> =
     readMechanism: "prepareMainToolLoop(read) in agentlas-serving.ts: read built-ins only + host arbiter (mutating tools denied on read)",
     evidence: "electron/runtime/agentlas-serving.ts skips the tool loop when untrustedNoTools" },
 };
+
+/**
+ * Tool kinds whose completed call changes nothing outside the run (workspace reads and searches). A run whose every completed
+ * call is one of these has had no effect, so repeating its request elsewhere repeats nothing. Data, read by runners; no tool names.
+ */
+export const PURE_READ_TOOL_KINDS: readonly RuntimeToolKind[] = ["read", "search"];
+
+/** Whether a read-permission step that offers tools can run on `kind` (readWithTools). An unknown kind makes no claim. */
+export function runtimeReadsWithTools(kind: string): boolean {
+  return (RUNTIME_REQUEST_LIMITS as Record<string, RuntimeRequestLimits | undefined>)[kind]?.readWithTools !== "refused";
+}
 
 export type RuntimeRequestRefusal = "untrusted_no_tools_unsupported" | "read_tools_unsupported";
 

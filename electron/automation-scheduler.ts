@@ -1136,7 +1136,7 @@ async function runOne(
   if (dispatchPaused()) return { accepted: false };
   // The previous run of this automation is still going. Nothing is dropped and nothing is recorded as skipped here: the due slot stays due
   // (next_run_at moves only when a run settles), and a cron slot that falls due during a run is merged into one catch-up that the settlement
-  // schedules (store/automations.ts markAutomationRun, event automation_occurrence_caught_up).
+  // schedules by setting next_run_at to the settle time (store/automations.ts markAutomationRun, catchUpOverlap).
   if (running.has(a.id)) return { accepted: false };
   // A retired Goal continuation is history, not a job: no entry (Run now, chain, trigger, recovery) starts a turn from it.
   if (isGoalContinuationAutomation(a)) {

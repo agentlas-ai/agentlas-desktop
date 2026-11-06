@@ -8,9 +8,8 @@ import { getAutomation } from "../store/automations";
 import type { RunGraphOptions } from "../workflow/run-graph";
 import { getToolchainAsset, toolchainSchemaProblems } from "./assets";
 import { currentAssetPublicationValidation } from "./asset-cold-start";
-import { recordToolchainTrialOutcome } from "./trial";
 import { recordToolchainHealthOutcome } from "./health";
-import { isToolchainPulledBack } from "./trial-ledger";
+import { isToolchainPulledBack } from "./health";
 
 const PREFIX = "toolchain.call.v1:";
 export interface ToolchainCallInput { toolchainId: string; version: number; args: Record<string, unknown> }
@@ -28,8 +27,6 @@ export interface ToolchainCallOptions {
   /** Host-only: the graph run that calls this occurrence again has already admitted it (the owner chose [Rerun from this node], or the
    * engine judged the step safe to replay). A failed, uncertain or interrupted receipt of the same key is then replaced by a new attempt. */
   reattempt?: boolean;
-  /** Host-only: this conversation holds a live trial grant for this exact draft version (toolchains/trial.ts). */
-  trial?: boolean;
   sink?: RunGraphOptions["sink"];
   /** Main-only producer hooks. Neither is accepted from an IPC/MCP DTO. The
    * exact persisted running/terminal receipt is supplied by this executor. */
@@ -109,9 +106,9 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
     const release = asset?.versions.find(item => item.version === input.version);
     if (!asset || !release) throw new Error("toolchain_version_not_found");
     if (asset.status === "withdrawn" && !publication?.ownerReregister) throw new Error("toolchain_withdrawn");
-    if (!validation && !options.trial && (asset.status !== "callable" || release.validation.state !== "passed")) throw new Error("toolchain_version_not_callable");
-    // A stable version that failed in real use was pulled back (health.ts); a repaired version takes its place through trial.
-    if (!validation && !options.trial && isToolchainPulledBack(asset)) throw new Error("toolchain_pulled_back_for_repair");
+    if (!validation && (asset.status !== "callable" || release.validation.state !== "passed")) throw new Error("toolchain_version_not_callable");
+    // A stable version that failed in real use was pulled back (health.ts); a newly published stable version takes its place.
+    if (!validation && isToolchainPulledBack(asset)) throw new Error("toolchain_pulled_back_for_repair");
     const problems = toolchainSchemaProblems(release.contract.inputSchema, input.args);
     if (problems.length) throw new Error(`toolchain_input_invalid:${problems.join(",")}`);
     if (Buffer.byteLength(JSON.stringify(input.args)) > 256 * 1024) throw new Error("toolchain_input_too_large");
@@ -160,7 +157,7 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
         if (!current || current.id !== receipt.id || current.runId !== receipt.runId || current.inputHash !== inputHash
           || current.status !== "running" || !version || version.contentHash !== receipt.contentHash
           || (asset?.status === "withdrawn" && !publication?.ownerReregister)
-          || (!validation && !options.trial && (asset?.status !== "callable" || version.validation.state !== "passed"))
+          || (!validation && (asset?.status !== "callable" || version.validation.state !== "passed"))
           || !carrier?.graph || graphExecutionDigest(carrier, carrier.graph) !== graphDigest) throw new Error("graph_occurrence_custody_changed");
       };
       const result = await withGraphOccurrenceCustody({ automationId: release.implementation.snapshot.id, occurrenceId, graphDigest },
@@ -192,8 +189,7 @@ async function invoke(input: ToolchainCallInput, options: ToolchainCallOptions, 
         error: failureText(error, options.signal), completedAt: new Date().toISOString() };
     }
     write(key, completed);
-    if (options.trial) recordToolchainTrialOutcome(completed);
-    else if (!validation) recordToolchainHealthOutcome(completed);
+    if (!validation) recordToolchainHealthOutcome(completed);
     // A lost native response/registration never rewrites the genuine execution
     // result or authorizes replay. The persisted terminal receipt is reconciled.
     await options.afterSettlement?.(Object.freeze(structuredClone(completed)));

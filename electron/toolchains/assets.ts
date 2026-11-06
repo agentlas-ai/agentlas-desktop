@@ -250,21 +250,6 @@ export function withdrawToolchainAsset(id: string): ToolchainAsset {
     return save({ ...asset, status: "withdrawn" });
   }).immediate();
 }
-/** Host verdict only (toolchains/trial.ts): a detector draft that worked in real tasks becomes callable with those
- * real call receipts as its validation. Never reachable from IPC or a model tool. */
-export function promoteToolchainVersionFromTrial(id: string, version: number, contentHash: string, receipts: string[], chatId: string | null): ToolchainAsset {
-  return getDb().transaction(() => {
-    const asset = getToolchainAsset(id);
-    const release = asset?.versions.find(item => item.version === version);
-    if (!asset || !release || release.contentHash !== contentHash) throw new Error("toolchain_trial_release_changed");
-    if (asset.status === "withdrawn") throw new Error("toolchain_withdrawn");
-    const at = new Date().toISOString();
-    return save({ ...asset, status: "callable", stableVersion: version, name: release.contract.name,
-      versions: asset.versions.map(item => item.version === version ? { ...item,
-        exposedBy: { kind: "one" as const, chatId, at, authorityRevision: `trial:${receipts.join(",")}` },
-        validation: { state: "passed" as const, at, receipts, problems: [] } } : item) });
-  }).immediate();
-}
 const publishing = new Map<string, Map<object, Promise<ToolchainAsset>>>();
 export function toolchainAssetTestInProgress(id: string): boolean {
   return [...publishing.entries()].some(([key, jobs]) => key.startsWith(id + "@") && jobs.size > 0);

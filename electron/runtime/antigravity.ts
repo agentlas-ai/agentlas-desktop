@@ -42,7 +42,7 @@ import { randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure, RunnerFailureKind } from "./runner";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
-import { normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
+import { normalEndToolEvidence, READ_ANSWER_ONLY_EMPTY_CODE, settleNormalEnd } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt, markRefusedBeforeDispatch, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { announceToolDenied } from "./tool-approval";
@@ -60,7 +60,7 @@ import { waitForRetiredCliExit } from "./retired-cli-exit";
 import { tStatus } from "./status-i18n";
 import { selectionFor } from "../capabilities/one-capabilities";
 import { agyProductHomePath, agySpawnHome, agySpawnsInPersonalHome, withAgyProductHome } from "./antigravity-personal-context";
-import { runtimeRequestRefusal } from "../../shared/runtime-capabilities";
+import { PURE_READ_TOOL_KINDS, runtimeRequestRefusal } from "../../shared/runtime-capabilities";
 import { configuredIdentity, type InstallChannel } from "../install-identity";
 import { isAgentlasProductHome, productHomeRefusedOnThisHost } from "./product-home-identity";
 import { abortReasonError } from "./abort-reason";
@@ -807,7 +807,10 @@ export function antigravityDenialReason(message: string): AntigravityDenial["rea
  * 정 안 되면 사람이 읽을 수 있는 사유와 함께 멈춰라."
  *
  * - 답이 있으면 막힌 도구가 있어도 실패가 아니다(`undefined`). 넘어가고 계속한 실행이다.
- * - 승인 거부(approval)로 답이 비었으면 그대로 `refused` — 사람이 권한을 올리면 풀린다.
+ * - 도구를 열지 않은 실행(읽기 권한, antigravityAnswerOnlyRequest)이 답 없이 끝났으면 `empty` +
+ *   READ_ANSWER_ONLY_EMPTY_CODE 다(완료된 호출이 없거나 전부 순수 읽기일 때만). 효과가 있을 수 있는 호출이 하나라도 끝났으면
+ *   코드 없는 `empty` 라 다른 곳에서 같은 요청을 다시 실행하지 않는다. 호출한 쪽이 풀의 다음 런타임으로 이어간다.
+ * - 도구를 연 실행에서 승인 거부(approval)로 답이 비었으면 그대로 `refused` — 사람이 권한을 올리면 풀린다.
  * - 보호 경계(boundary)뿐이면 `empty` 로 돌린다. 권한으로 못 여는 경계라 `refused` 는
  *   거짓 안내이고, Science 루프의 REFUSED_CODES 에 걸려 연구가 영구 차단된다
  *   (agentlas-science/src/pass-failure-verdict.ts: refused=block, 그 외=bounded retry).
@@ -817,18 +820,28 @@ export function antigravityEmptyRunOutcome(input: {
   answered: boolean;
   toolsAllowed: boolean;
   denials: readonly AntigravityDenial[];
+  /** Completed calls that are not pure reads. READ_ANSWER_ONLY_EMPTY_CODE is only set when there are none: the code lets the same request run elsewhere. */
+  effectfulToolCalls: number;
   locale?: string;
-}): { kind: "refused" | "empty"; message: string } | undefined {
+}): { kind: "refused" | "empty"; message: string; providerCode?: string } | undefined {
   if (input.answered) return undefined;
   const approval = input.denials.filter((d) => d.reason === "approval");
   const boundary = input.denials.filter((d) => d.reason === "boundary");
+  if (!input.toolsAllowed && input.denials.length > 0 && input.effectfulToolCalls > 0) {
+    const ko = "Antigravity 가 도구 없이 답하는 이 실행에서 일부 도구가 실행된 뒤 글 답을 내지 못했습니다.";
+    const en = "Antigravity ran some tools in this tools-free answer and returned no text.";
+    return { kind: "empty", message: input.locale === "ko" ? ko : en };
+  }
+  if (!input.toolsAllowed && input.denials.length > 0) {
+    const ko = "Antigravity 가 도구 없이 답하는 이 실행에서 글 답을 내지 못했습니다. 실행된 도구는 읽기뿐입니다.";
+    const en = "Antigravity returned no text in this tools-free answer. Only reads ran.";
+    return { kind: "empty", providerCode: READ_ANSWER_ONLY_EMPTY_CODE, message: input.locale === "ko" ? ko : en };
+  }
   if (approval.length > 0) {
     const names = approval.map((d) => d.tool).join(", ");
     return {
       kind: "refused",
-      message: !input.toolsAllowed
-        ? `Antigravity cannot use tools under read permission: this CLI has no way to allow read-only tools headlessly, so every call (${names}) is auto-denied and the run returns nothing. Raise the permission to write, or pick another runtime for read-only work.`
-        : `Antigravity produced no answer because ${approval.length === 1 ? "a tool call was" : `${approval.length} tool calls were`} auto-denied for missing approval: ${names}. ${approval[0]?.detail ?? ""}`.trim(),
+      message: `Antigravity produced no answer because ${approval.length === 1 ? "a tool call was" : `${approval.length} tool calls were`} auto-denied for missing approval: ${names}. ${approval[0]?.detail ?? ""}`.trim(),
     };
   }
   if (boundary.length > 0) {
@@ -841,31 +854,26 @@ export function antigravityEmptyRunOutcome(input: {
 }
 
 /**
- * Host-authored (one line, no tool, runtime or cause named beyond the fact) appended to the request of the single
- * answer-only retry (antigravityDeniedNothingActed). The first attempt's session rules already say "tools: cannot be
- * approved here; do not attempt", and the model tried a tool anyway: this line states what happened, last, where the
- * model reads it last. Observed in use: 8 task-force syntheses (read permission by design) of finished teams
- * ended "runtime_turn_unsettled" because the synthesis model ran `run_command` once.
+ * Host-authored (one line, no tool, runtime or cause named beyond the fact) appended last to the user turn of every agy run
+ * that has no tools (read permission: agy has no read-only tool mode and denies every call headlessly). Declared as the
+ * closing boundary of the turn (docs/PROMPT-COMPOSITION-POLICY.md). Team syntheses (read
+ * permission by design) ended "runtime_turn_unsettled" because the model ran `run_command` once; a rule inside the session
+ * header did not hold, a last line did, so the line now goes out with the first request and no run is repeated.
  */
 export const ANTIGRAVITY_ANSWER_ONLY_NOTE =
-  "host note: your previous attempt called tools; every call was denied and nothing ran. Tools cannot be used in this session. Do not call any tool. Write your complete final answer now as plain text, from the information above.";
+  "host note: tools cannot be used in this session; every call is denied and nothing runs. Do not call any tool. Write your complete final answer now as plain text, from the information above; say what you could not check.";
 
 /**
- * Whether an agy run that returned no answer provably did nothing, from structural facts only: tools were never allowed
- * (a read permission: agy has no headless way to approve a read-only tool, so it denies every call and ends the run),
- * agy itself reported at least one approval denial (result.denied_actions or a tool step in ERROR), no tool call of the
- * run completed without an error frame (`completedToolCalls`) and the runtime gave no failure of its own (quota, sign-in, safety
- * block). Then the turn can run once more as an answer-only turn without repeating anything. Pure; no words.
+ * A request an agy run takes when it would run at read permission: no tool surface is offered (the configured MCP tools are
+ * left out, agy's own are denied by the CLI) and the closing note goes out with the first send. Write and full permission,
+ * and browser-only runs, are returned unchanged.
  */
-export function antigravityDeniedNothingActed(input: {
-  answered: boolean;
-  toolsAllowed: boolean;
-  denials: readonly AntigravityDenial[];
-  completedToolCalls: number;
-  runtimeSaidWhy: boolean;
-}): boolean {
-  return !input.answered && !input.toolsAllowed && !input.runtimeSaidWhy && input.completedToolCalls === 0
-    && input.denials.some((denial) => denial.reason === "approval");
+export function antigravityAnswerOnlyRequest(req: RunnerRequest): RunnerRequest {
+  if (req.browserOnly || req.permission === "write" || req.permission === "full") return req;
+  registerDeclaredPromptModule({ id: "desktop.runtime.antigravity.answer-only-note", revision: 1, stability: "final-boundary",
+    changeTriggers: ["permission"], order: Number.MAX_SAFE_INTEGER });
+  return replaceRunnerUserPrompt({ ...req, mcpConfigPath: undefined, mcpAllowedTools: undefined, mcpCodexConfigArgs: undefined },
+    `${req.userPrompt}\n\n${ANTIGRAVITY_ANSWER_ONLY_NOTE}`);
 }
 
 /**
@@ -2341,26 +2349,23 @@ function antigravityBrowserResidentScope(configPath: string | undefined): Antigr
  * The attempt resumed a stored conversation agy no longer holds: the host found no conversation file before dispatch
  * (`dispatched: false`), or agy reported another conversation id or began the turn at step 0 of an empty conversation
  * and the process was stopped (`dispatched: true`). `replayable` is false when that run had already produced text or a
- * tool step (it may have acted). runPreparedAntigravity re-runs a replayable turn once in a fresh conversation seeded
+ * tool step (it may have acted). runPreparedAntigravityResumable re-runs a replayable turn once in a fresh conversation seeded
  * with the conversation it lost.
  */
 const AGY_CONVERSATION_LOST = Symbol("agy-conversation-lost");
 /**
- * The attempt ended with no answer because agy auto-denied every tool call the model tried under a read permission and NO
- * tool call of the run completed (antigravityDeniedNothingActed). Nothing acted, so runPreparedAntigravity may run the
- * same turn once more as an answer-only turn (ANTIGRAVITY_ANSWER_ONLY_NOTE). Internal marker, never a public result field.
+ * A tools-free answer ended with no text after a call that may have had an effect: the conversation id the same agy conversation
+ * continues in once (runPreparedAntigravityResumable). Internal marker, never a public result field.
  */
-const AGY_ANSWER_ONLY_RETRY = Symbol("agy-answer-only-retry");
+const AGY_ANSWER_ONLY_RESUME = Symbol("agy-answer-only-resume");
 type AntigravityAttemptResult = RunnerResult & {
   [AGY_CONVERSATION_LOST]?: { dispatched: boolean; replayable: boolean };
-  [AGY_ANSWER_ONLY_RETRY]?: true;
+  [AGY_ANSWER_ONLY_RESUME]?: string;
 };
 
 /** Whether this run already started an agy process or wrote a turn to one (RuntimeTurnDelivery "not-dispatched" otherwise). */
 interface AntigravityDispatchState {
   attempted: boolean;
-  /** The run is the single answer-only re-run (runPreparedAntigravity): its own denials are announced as they come. */
-  answerOnlyRetry?: boolean;
 }
 
 function antigravityConversationLostFailure(locale: string | undefined): RunnerFailure {
@@ -2371,53 +2376,44 @@ function antigravityConversationLostFailure(locale: string | undefined): RunnerF
 }
 
 /**
- * One agy turn: runPreparedAntigravityResumable, plus at most one answer-only re-run when agy denied every tool a
- * read-permission run tried and nothing completed (antigravityDeniedNothingActed).
- */
-async function runPreparedAntigravity(
-  req: RunnerRequest,
-  events: RunnerEvents,
-  bin: string,
-  executableFingerprint: string,
-  executableGeneration: string,
-  agyAdditionalDirs: string[] = [],
-  /** Pre-2026-10-16 executable fingerprint (it hashed st_dev); read-only, see cli-executable-identity.ts. */
-  legacyExecutableFingerprint?: string,
-  dispatch: AntigravityDispatchState = { attempted: false },
-): Promise<RunnerResult> {
-  const run = (next: RunnerRequest) => runPreparedAntigravityResumable(next, events, bin, executableFingerprint,
-    executableGeneration, agyAdditionalDirs, legacyExecutableFingerprint, dispatch);
-  const first = await run(req);
-  const { [AGY_ANSWER_ONLY_RETRY]: retryable, ...settled } = first;
-  if (!retryable || req.signal?.aborted) return settled;
-  /*
-   * ★읽기 권한 실행이 도구를 시도했고 agy 가 전부 자동 거부해 답 없이 끝났다 — 아무것도 실행되지 않았다.
-   * 같은 턴을 **정확히 한 번** 더, 도구를 쓰지 말고 글로만 답하라는 호스트 한 줄을 요청 끝에 붙여 돌린다.
-   * 팀이 끝난 뒤의 종합(읽기 권한이 설계상 기본)이 이 한 번의 실수로 "실행 여부 불확실" 실패가 되어 팀원이 낸 결과를
-   * 오너에게 못 전하던 사고(2026-10-25/26, 8건)의 수리. 첫 시도는 완료된 도구 호출이 0건이라는 구조 증거가 있을 때만
-   * 여기 온다(antigravityDeniedNothingActed). 두 번째도 같은 거부로 끝나면 그 실패가 그대로 나간다(재시도 상한 1).
-   */
-  events.onStatus("[runtime-session] answer_only_retry kind=antigravity reason=tools_denied_headless");
-  dispatch.answerOnlyRetry = true;
-  // The retry's one host-authored line is a declared module (docs/PROMPT-COMPOSITION-POLICY.md): last in the user turn, varies per run.
-  registerDeclaredPromptModule({ id: "desktop.runtime.antigravity.answer-only-retry-note", revision: 1, stability: "turn-context",
-    changeTriggers: ["permission", "model-output"], order: Number.MAX_SAFE_INTEGER });
-  const second = await run(replaceRunnerUserPrompt(req, `${req.userPrompt}\n\n${ANTIGRAVITY_ANSWER_ONLY_NOTE}`));
-  const { [AGY_ANSWER_ONLY_RETRY]: _again, ...final } = second;
-  return final;
-}
-
-/**
  * A stored agy conversation can disappear (the owner's 30-day deletion of unused CLI originals, agy's own pruning). agy
  * then answers from a new, empty conversation (measured, antigravity-conversation-metadata.ts antigravityConversationGone);
  * saving that conversation and returning its answer made the turn, and every later one, run without the chat's history
- * (A3 live probe 2026-10-16: 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
+ * (A3 live probe: 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
  * fresh conversation that carries the conversation (unattended-session-turns.ts rule 4): the chat's own history for a
  * per-chat binding, the agent-context journal for its native handle. The dead binding is replaced and one typed
  * receipt is emitted. A turn that cannot be handed the conversation, or whose lost run already produced text or a tool
  * step (rule 3), fails with the typed agy_conversation_lost and keeps nothing from that run.
  */
 async function runPreparedAntigravityResumable(
+  req: RunnerRequest,
+  events: RunnerEvents,
+  bin: string,
+  executableFingerprint: string,
+  executableGeneration: string,
+  agyAdditionalDirs: string[],
+  legacyExecutableFingerprint: string | undefined,
+  dispatch: AntigravityDispatchState,
+): Promise<AntigravityAttemptResult> {
+  const first = await runPreparedAntigravityLostAware(req, events, bin, executableFingerprint, executableGeneration,
+    agyAdditionalDirs, legacyExecutableFingerprint, dispatch);
+  const { [AGY_ANSWER_ONLY_RESUME]: conversationId, ...settled } = first;
+  if (!conversationId || req.signal?.aborted) return settled;
+  /*
+   * A tools-free answer ended with no text after a call that may have had an effect. The request is not sent anywhere else
+   * (that would repeat the effect): the same agy conversation continues once with only the answer-only note as this turn's
+   * input, and the model answers from its own history. A second empty result stays the plain empty failure.
+   */
+  events.onStatus("[runtime-session] answer_only_resume kind=antigravity reason=effect_then_no_text");
+  const resumeReq = replaceRunnerUserPrompt({ ...req, turnContext: undefined, turnContextStable: undefined, images: undefined },
+    ANTIGRAVITY_ANSWER_ONLY_NOTE);
+  const second = await runPreparedAntigravityAttempt(resumeReq, events, bin, executableFingerprint, executableGeneration,
+    agyAdditionalDirs, legacyExecutableFingerprint, dispatch, null, conversationId);
+  const { [AGY_ANSWER_ONLY_RESUME]: _again, ...final } = second;
+  return final;
+}
+
+async function runPreparedAntigravityLostAware(
   req: RunnerRequest,
   events: RunnerEvents,
   bin: string,
@@ -2462,6 +2458,8 @@ async function runPreparedAntigravityAttempt(
   dispatch: AntigravityDispatchState,
   /** The stored conversation is gone: start a fresh one even when the record would resume it. */
   freshReason: "session_not_found" | null,
+  /** The answer-only continuation of the conversation an effectful call ran in (runPreparedAntigravityResumable). */
+  resumeConversation?: string,
 ): Promise<AntigravityAttemptResult> {
   // A fresh conversation gets the full prompt; a resumed one (--conversation) gets this turn's input only.
   let runReq = req;
@@ -2495,8 +2493,8 @@ async function runPreparedAntigravityAttempt(
   const storedResumeId = commonContext
     ? (commonHandle && agySaved && agyFingerprint && agySavedMatches(agySaved.fingerprint) && agySaved.sessionId === commonHandle ? commonHandle : null)
     : agySaved && agyFingerprint && agySavedMatches(agySaved.fingerprint) ? agySaved.sessionId : null;
-  // A conversation agy no longer holds is never resumed again: this attempt starts a fresh one (runPreparedAntigravity).
-  const agyResumeId = freshReason ? null : storedResumeId;
+  // A conversation agy no longer holds is never resumed again: this attempt starts a fresh one (runPreparedAntigravityResumable).
+  const agyResumeId = freshReason ? null : (resumeConversation ?? storedResumeId);
   if (freshReason && storedResumeId && runReq.chatId) {
     invalidateStableTurnContext({ chatId: runReq.chatId, runtimeKind: ANTIGRAVITY_KIND, sessionId: storedResumeId });
   }
@@ -2989,14 +2987,6 @@ async function runPreparedAntigravityAttempt(
   }, () => hostEffects.size - claimedEffects.size + Number(hostReceiptOverflow), attestAntigravityMetadataSteps,
   { structuredAnswerChannel: Boolean(runReq.outputSchema) });
   let effectExitCode: number | null = null, effectStdoutEnded = false;
-  const holdApprovalNotices = !agyToolsAllowed && !dispatch.answerOnlyRetry;
-  const heldApprovalNotices: Array<() => void> = [];
-  /** The attempt ended: its held denial announcements are shown, unless the answer-only re-run replaces this attempt. */
-  const settleHeldApprovalNotices = (rerun: boolean): void => {
-    const held = heldApprovalNotices.splice(0);
-    if (rerun) return;
-    for (const announce of held) { try { announce(); } catch { /* an announcement never decides the run */ } }
-  };
   return new Promise<AntigravityAttemptResult>((resolve, reject) => {
     const invocationStartedAtMs = Date.now();
     /** Whether an earlier attempt of this run (a dead resident) already reached agy. */
@@ -3066,8 +3056,8 @@ async function runPreparedAntigravityAttempt(
     } = { text: "", inputTokens: 0, outputTokens: 0, schemaBound: Boolean(runReq.outputSchema) };
     const announcedDenials = new Set<string>();
     const reportedAgyTools = new Set<string>();
-    /** Tool calls of this run that completed without an error frame (a denied or failed call is not one). */
-    const succeededAgyTools = new Set<string>();
+    /** Calls of this run that completed without an error frame and are not pure reads (PURE_READ_TOOL_KINDS): they may have had an effect. */
+    const effectfulAgyTools = new Set<string>();
     const stagedAgyGeneratedImageSources = new Set<string>();
     let agyLineBuf = "";
     let settled = false;
@@ -3116,7 +3106,7 @@ async function runPreparedAntigravityAttempt(
        * 1.4.0): it reports another conversation id (its first `init` event: X was gone and agy opened a new one), or its
        * first `user_input` step is step 0 (X's id was kept but X held no steps, e.g. an emptied store file). Stop it at
        * once, before it answers or uses a tool from an empty context; the turn re-runs fresh with the conversation carried
-       * (runPreparedAntigravity). If the run already produced text or a tool step, it may have acted and is never replayed
+       * (runPreparedAntigravityResumable). If the run already produced text or a tool step, it may have acted and is never replayed
        * (unattended-session-turns.ts rule 3); it still ends as the typed loss, not as an answer.
        */
       const lostSignal = !resumesStoredConversation || conversationLost ? null
@@ -3135,7 +3125,7 @@ async function runPreparedAntigravityAttempt(
         const key = `${step.tool.id}:${step.tool.done ? "done" : "active"}`;
         if (!reportedAgyTools.has(key)) {
           reportedAgyTools.add(key);
-          if (step.tool.done && !step.tool.failed) succeededAgyTools.add(step.tool.id);
+          if (step.tool.done && !step.tool.failed && !(step.tool.kind && PURE_READ_TOOL_KINDS.includes(step.tool.kind))) effectfulAgyTools.add(step.tool.id);
           const toolArtifactPaths = [...(step.tool.artifactPaths ?? [])];
           if (step.tool.done && !step.tool.failed && step.tool.name === "generate_image"
             && runReq.chatId) {
@@ -3220,10 +3210,9 @@ async function runPreparedAntigravityAttempt(
             i18n: { ko, en },
           });
           };
-          // A read-permission run (agy denies every tool there) that will be re-run as an answer-only turn must not show the
-          // owner "a tool call was auto-denied" for a turn that then answers: held until the attempt ends (flushed unless a
-          // re-run follows). Its re-run, and every run with tools allowed, announces as before.
-          if (holdApprovalNotices) heldApprovalNotices.push(announceApproval); else announceApproval();
+          // A tools-free answer (read permission, antigravityAnswerOnlyRequest) asked for no tool, so a denied call is not an approval
+          // the owner could give: nothing is announced for it. Every run with tools allowed announces as before.
+          if (agyToolsAllowed) announceApproval();
         }
       }
       const now = Date.now();
@@ -3433,6 +3422,7 @@ async function runPreparedAntigravityAttempt(
           answered: Boolean(trimmed),
           toolsAllowed: !structural,
           denials: denied,
+          effectfulToolCalls: effectfulAgyTools.size + (resumeConversation ? 1 : 0),
           locale: runReq.locale,
         });
         const failure = runtimeSaidWhy ?? (deniedOutcome
@@ -3440,8 +3430,9 @@ async function runPreparedAntigravityAttempt(
             kind: deniedOutcome.kind,
             message: deniedOutcome.message,
             runtime: "antigravity" as const,
+            ...(deniedOutcome.providerCode ? { providerCode: deniedOutcome.providerCode } : {}),
             // 경계 판정은 문구에서 나온다 — 출처를 marker 로 속이지 않는다(runtime-refusal.ts 규약).
-            source: deniedOutcome.kind === "empty" ? ("heuristic" as const) : ("marker" as const),
+            source: deniedOutcome.kind === "empty" && !deniedOutcome.providerCode ? ("heuristic" as const) : ("marker" as const),
           }
           : antigravityExitFailure(body, stderr)
           /*
@@ -3464,6 +3455,8 @@ async function runPreparedAntigravityAttempt(
                 ? "Antigravity 가 아무 답도 내지 않고 실행을 끝냈습니다. 이 턴은 결과로 인정하지 않습니다."
                 : "Antigravity ended the run without producing any answer. This turn is not counted as a result.",
               runtime: "antigravity" as const,
+              // A tools-free answer (antigravityAnswerOnlyRequest) that produced no text and no tool step: the next runtime answers.
+              ...(structural && effectfulAgyTools.size === 0 && !resumeConversation ? { providerCode: READ_ANSWER_ONLY_EMPTY_CODE } : {}),
               source: "exit" as const,
             }
             : undefined));
@@ -3483,20 +3476,12 @@ async function runPreparedAntigravityAttempt(
         if (completed && stableContext?.delivery && agyState.conversationId) {
           acknowledgeStableTurnContext(stableContext.delivery, { sessionId: agyState.conversationId, acknowledgementId: randomUUID() });
         }
-        // A read-permission run that agy ended because it denied every tool call the model tried, with no call completed,
-        // did nothing: runPreparedAntigravity runs the same turn once more as an answer-only turn.
-        const answerOnlyRetryable = antigravityDeniedNothingActed({
-          answered: Boolean(trimmed),
-          toolsAllowed: !structural,
-          denials: denied,
-          completedToolCalls: succeededAgyTools.size,
-          runtimeSaidWhy: Boolean(runtimeSaidWhy),
-        });
         resolve({
           text: trimmed,
           ownerControlTerminal: completed ? "completed" : "uncertain",
           ...(failure ? { failure } : {}),
-          ...(answerOnlyRetryable && failure ? { [AGY_ANSWER_ONLY_RETRY]: true as const } : {}),
+          ...(failure && !resumeConversation && structural && !runtimeSaidWhy && deniedOutcome && !deniedOutcome.providerCode && effectfulAgyTools.size > 0
+            && agyState.conversationId?.trim() ? { [AGY_ANSWER_ONLY_RESUME]: agyState.conversationId } : {}),
           ...(completed ? normalEndToolEvidence(agyEnd) : {}),
           // The conversation this turn ran on: the common journal acknowledges it as the binding's native handle (NH11).
           ...(!failure && agyState.conversationId?.trim() ? { sessionId: agyState.conversationId } : {}),
@@ -3596,34 +3581,16 @@ async function runPreparedAntigravityAttempt(
       }
     }
   }).then(result => {
-    settleHeldApprovalNotices(Boolean(result[AGY_ANSWER_ONLY_RETRY]) && req.signal?.aborted !== true);
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: !!result.failure }));
     if (effectRun && !result.failure) recordMainExecutionProofs({scopeId:effectRun.scopeId,bindings:effectBindings,signal:req.signal,claims:executionClaims});
     // The effort level this process ran at (antigravity-effort.ts); null when this runner set none.
     return { ...result, appliedEffort: effortPlan.applied };
   }, error => {
-    settleHeldApprovalNotices(false);
     effectRun?.complete(effectCoverage.finish({ exitCode: effectExitCode, stdoutEnded: effectStdoutEnded, cancelled: req.signal?.aborted === true, failed: true }));
     throw error;
   }).finally(detachEffects);
   }
 };
-
-/**
- * A configured tool surface must not silently become an answer-only read run. The condition is the declared
- * readWithTools limit (shared/runtime-capabilities.ts RUNTIME_REQUEST_LIMITS), the row selectors filter on.
- */
-export function antigravityReadToolFailure(req: RunnerRequest): RunnerFailure | undefined {
-  if (runtimeRequestRefusal(ANTIGRAVITY_KIND, { permission: req.permission, browserOnly: req.browserOnly,
-    mcpConfigPath: req.mcpConfigPath, mcpAllowedTools: req.mcpAllowedTools }) !== "read_tools_unsupported") return undefined;
-  return {
-    kind: "refused", runtime: "antigravity", source: "marker",
-    providerCode: "agy_read_tools_unsupported",
-    message: req.locale === "ko"
-      ? "Antigravity의 현재 헤드리스 실행은 읽기 권한을 유지하며 선택된 도구를 사용할 수 없습니다. 같은 읽기 권한을 지원하는 허용된 런타임이 필요합니다."
-      : "Antigravity cannot use the configured tools while preserving read permission in this headless runtime. Use an allowed runtime supporting the same read scope.",
-  };
-}
 
 export const runAntigravity: Runner = async (
   req: RunnerRequest,
@@ -3654,8 +3621,10 @@ export const runAntigravity: Runner = async (
         : "Antigravity CLI has no verified isolation that disables all built-in tools and inherited MCP servers. This untrusted run cannot start; use a runtime with verified isolation.",
     );
   }
-  const readToolFailure = antigravityReadToolFailure(req);
-  if (readToolFailure) return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: readToolFailure };
+  // A step at read permission gets no tool surface and the closing answer-only note with its first send: agy has no read-only tool
+  // mode. Callers that can route a step to a runtime that reads with tools do so before dispatch (selection.ts
+  // routeReadStepRuntime); every other read step answers in text here, so no read step ends refused.
+  req = antigravityAnswerOnlyRequest(req);
   // A gate or script (no install identity) in the account's own HOME: no product mirror can exist (product-home-identity.ts),
   // so the person's CLI is not even probed.
   if (productHomeRefusedOnThisHost(agySpawnHome(req.env ?? process.env))) {
@@ -3681,7 +3650,7 @@ export const runAntigravity: Runner = async (
       }),
     );
   }
-  return await runPreparedAntigravity(
+  return await runPreparedAntigravityResumable(
     runReq,
     events,
     executableIdentity.executable,

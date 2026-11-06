@@ -3,7 +3,7 @@
 // Owner design (2026-10-20): work done once runs and ends. Work that comes back with different inputs (find topics, then let the
 // team discuss; monitor performance) is a graph that stays; a graph that has served three different inputs has proven that and is
 // never switched off here. A Toolchain is something else: a deterministic tool for an app or page the agents keep operating by
-// hand (toolchains/detector.ts). Measured on the owner's store before this existed:
+// hand. Measured on the owner's store before this existed:
 // 39 of 68 automations were input-triggered graphs, 38 of them saved by one room's Goal turns
 // (one-team.one_graph_save, renamed per episode), 37 still on, none with an end, a Goal or a run limit — the store's end
 // conditions (markAutomationRun) only finish schedules.

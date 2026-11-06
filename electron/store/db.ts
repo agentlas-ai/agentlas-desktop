@@ -30,6 +30,7 @@ import { createFollowupCustodySchema } from "./followup-custody-schema";
 import { createChatFileMessageBindings } from "./chat-file-message-bindings";
 import { createGeneratedVideoReceiptSchema } from "../invocation/generated-video-receipt-schema";
 import { settleDeadHostTriggerEvent } from "./unconfirmed-occurrence";
+import { purgeRetiredToolchainDetector } from "./retired-toolchain-detector";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -5824,6 +5825,8 @@ export function initStore(options: StoreInitOptions = {}): void {
   } catch {
     // 정리는 베스트에포트다 — 기동을 막지 않는다.
   }
+  // 없앤 자동 도구묶음 감지기의 잔여 meta 행만 지운다(초안·자산은 건드리지 않는다). 지울 행이 없으면 아무 일도 안 한다.
+  purgeRetiredToolchainDetector(_db);
 
   // v100 — durable in-app plugin builder drafts.  The seed is retained so an
   // agent-offer can be enforced once per conversation even after a restart or

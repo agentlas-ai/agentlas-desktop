@@ -293,6 +293,13 @@ export const EMPTY_NO_TOOL_RAN_CODE = "empty_no_tool_ran";
 /** Every host-loop code of an empty answer with zero tools dispatched (Agentlas serving keeps its own two codes). */
 export const EMPTY_NO_TOOL_RAN_CODES: ReadonlySet<string> = new Set([EMPTY_NO_TOOL_RAN_CODE, "agentlas_serving_empty_answer", "empty_answer"]);
 
+/**
+ * A read-permission turn of a runtime that cannot read with tools (RUNTIME_REQUEST_LIMITS readWithTools "refused") ran answer-only,
+ * tools never offered, and ended with no text. Every tool call the model still tried was denied by the runtime and none was
+ * approved, so nothing that needs approval ran (workspace reads at most). The next runtime of the pool takes the step.
+ */
+export const READ_ANSWER_ONLY_EMPTY_CODE = "read_answer_only_empty";
+
 const EMPTY_COLLECTION_TEXT_MAX = 8_192;
 const EMPTY_COLLECTION_DEPTH = 2;
 

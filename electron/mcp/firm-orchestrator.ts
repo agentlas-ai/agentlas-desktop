@@ -65,7 +65,8 @@ import { parseSurfaces } from "../surface-emitter";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { buildDelegateProtocol, parseDelegations, type Delegation, type DelegationStage } from "./delegate";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
-import { runtimeFailureBlocksReplay, pickRunner, rolePriorityRuntimes, selectRuntimeForTargets } from "../runtime/selection";
+import { runtimeFailureBlocksReplay, pickRunner, rolePriorityRuntimes, routeReadStepRuntime, selectRuntimeForTargets } from "../runtime/selection";
+import { READ_ANSWER_ONLY_EMPTY_CODE } from "../../shared/turn-settlement";
 import { currentRunPriority } from "../runtime/run-priority";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordRunEvent } from "../store/run-events";
@@ -1297,7 +1298,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
         explicitPinned: !p.req.agentAppMode,
       })
     : null;
-  const active = workloadResolution?.runtime ?? baseActive;
+  // A read-permission turn (every plan and synthesis of a team is one, controlPlaneTurn) starts on a runtime that reads with tools
+  // unless the pick is not the pool's to change (selection.ts routeReadStepRuntime); otherwise it runs answer-only.
+  const active = routeReadStepRuntime(workloadResolution?.runtime ?? baseActive, candidateRuntimes, {
+    permission: p.req.agentAppMode || turn.runtimeToolsDisabled || controlPlaneTurn ? "read" : nodePermission,
+    pinned: pinnedControllerPreferred || teammatePinnedToRoom || Boolean(runtimeChoice?.override) || p.req.agentAppMode === true });
   const picked = sameRuntime(active, baseActive) ? basePicked : pickRunner(active) ?? basePicked;
   if (workloadResolution) {
     if (workloadResolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
@@ -1543,7 +1548,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   while (
     result.failure
     && !p.req.agentAppMode
-    && !pinnedControllerPreferred
+    && (!pinnedControllerPreferred || result.failure.providerCode === READ_ANSWER_ONLY_EMPTY_CODE)
     && !teammatePinnedToRoom
     && !(turn.signal ?? p.signal)?.aborted
   ) {
@@ -1572,6 +1577,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     });
     executedRuntime = fallback;
     executedPicked = fallbackPicked;
+    result = await runNodeOn(executedRuntime, executedPicked);
+  }
+  // No other runtime took a tools-free read answer that came back empty with nothing having acted: the same runtime gets it once more.
+  if (result.failure?.providerCode === READ_ANSWER_ONLY_EMPTY_CODE && !(turn.signal ?? p.signal)?.aborted) {
     result = await runNodeOn(executedRuntime, executedPicked);
   }
   if (result.failure) {

@@ -192,18 +192,18 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
     domain: {
       version: "1", dependencies: ["store", "invocation"],
       // A Toolchain is an MCP tool for an app or page once operated by hand (each callable one is also listed to agents as
-      // its own tc_<name> tool). The only clock is the repeated-work detector; repairs follow real-use failures.
-      lifecycle: { host: "main", start: ["startToolchainDetector"], clocks: ["repeated-work detector check 10m then 6h, a pass that calls a model at most once per 24h"] },
+      // its own tc_<name> tool). Toolchains are made, published and run only on request (owner screen or One's tools); no clock.
+      lifecycle: { host: "main", start: [], clocks: [] },
       operations: {
         appControl: ["toolchains.listAssets", "toolchains.getAsset", "toolchains.runAsset", "toolchains.publishVersion", "toolchains.withdrawAsset"],
         ipc: ["toolchains:assets-list", "toolchains:assets-run", "toolchains:assets-publish"],
         teamTools: ["toolchain_create", "toolchain_publish", "toolchain_search", "toolchain_inspect", "toolchain_run", "toolchain_result", "toolchain_report"],
       },
-      persistence: { metaPrefixes: ["toolchain.asset.v1:", "toolchain.call.v1:", "toolchain.trial.v1:", "toolchain.detector.miss.v1:", "toolchain.detector.verdict.v1:", "toolchain.detector.state.v1"] },
+      persistence: { metaPrefixes: ["toolchain.asset.v1:", "toolchain.call.v1:", "toolchain.health.v1:"] },
       events: [],
       acceptance: [
         { gate: "test-toolchain-mcp-tools.cjs", evidence: "fake" }, { gate: "test-toolchain-health.cjs", evidence: "fake" },
-        { gate: "test-toolchain-surfaces.cjs", evidence: "fake" }, { gate: "test-toolchain-detector.cjs", evidence: "fake" },
+        { gate: "test-toolchain-surfaces.cjs", evidence: "fake" }, { gate: "test-toolchain-retired-detector-cleanup.cjs", evidence: "fake" },
       ],
     },
   },

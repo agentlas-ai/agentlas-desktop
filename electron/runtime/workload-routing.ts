@@ -1,6 +1,7 @@
 import type { DeclaredPromptPart } from "./prompt-order";
 import type { AgentRuntimeOverride, RuntimeStatus } from "../../shared/types";
 import { createHash } from "node:crypto";
+import { runtimeReadsWithTools } from "../../shared/runtime-capabilities";
 import { buildShadowRoutingEvaluation } from "./routing-evaluation";
 
 /**
@@ -698,7 +699,30 @@ export function resolveWorkloadAllocation(input: {
  * Resolve the parent AI's exact decision across live runtimes. Manual/scoped
  * pins still win. Missing or invalid pairs preserve the active fallback as-is.
  */
-export function resolveWorkloadAllocationAcrossRuntimes(input: {
+export function resolveWorkloadAllocationAcrossRuntimes(input: Parameters<typeof resolveAllocationAcrossRuntimes>[0]): WorkloadResolution {
+  const resolution = resolveAllocationAcrossRuntimes(input);
+  if (!input.readStep || input.readStep.pinned) return resolution;
+  if (runtimeReadsWithTools(resolution.runtime.kind)) return resolution;
+  // The callers' pools are already limited to runtimes that can take a dispatch.
+  const routed = input.runtimes.find((candidate) => runtimeReadsWithTools(candidate.kind));
+  if (!routed) return resolution;
+  return {
+    ...resolution,
+    runtime: { ...routed },
+    resolvedRuntimeId: inventoryIdForRuntime(input.runtimes, routed),
+    resolvedTier: resolvedTierForRuntime(routed),
+    source: "safe-fallback",
+    resolutionCodes: [...resolution.resolutionCodes, "read-tools-runtime-routed"],
+  };
+}
+
+function resolveAllocationAcrossRuntimes(input: {
+  /**
+   * The step runs at read permission and may use tools (a control-plane plan or synthesis). Unless `pinned` (an exact pick of the
+   * owner, a fixed contract), the resolved runtime must read with tools (runtimeReadsWithTools): the first runtime of `runtimes`
+   * (the caller's ordered pool) that does takes the step on its own configured model; without one the step runs answer-only.
+   */
+  readStep?: { pinned: boolean };
   allocation?: WorkloadAllocation | null;
   runtimes: RuntimeStatus[];
   fallbackRuntime: RuntimeStatus;

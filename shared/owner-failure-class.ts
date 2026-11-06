@@ -51,7 +51,7 @@ export const EXTERNAL_FAILURE_TABLE: readonly ExternalFailureEntry[] = Object.fr
   ]),
   // Not waited on (WAITABLE_EXTERNAL_CAUSES): the same request fails the same way at every check.
   ...entry("fixed_limit", "A limit that waiting does not lift: the request does not fit the model's context window, or a budget the owner set.", [
-    "model_context_capacity_exceeded", "codex_context_window_exceeded", "local_context_limit_exceeded", "budget_cost_exhausted", "budget_cost_unavailable",
+    "model_context_capacity_exceeded", "codex_context_window_exceeded", "local_context_limit_exceeded", "prompt_too_long", "budget_cost_exhausted", "budget_cost_unavailable",
   ]),
   ...entry("provider_auth", "The provider (or the signed-in browser) needs the owner to sign in.", [
     "http_401", "auth", "auth_expired", "auth_required", "auth-required", "login_required", "login-required", "not_signed_in",

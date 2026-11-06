@@ -1,5 +1,5 @@
 /** Paired owner Finance access. Reuses the host service; never emulates renderer IPC or runs a second model loop. */
-import { MobileBridgeRefusal, type MobileBridgeSpecificRefusalCode } from '../../shared/mobile-bridge-refusal';
+import { MobileBridgeNotReady, MobileBridgeRefusal, type MobileBridgeSpecificRefusalCode } from '../../shared/mobile-bridge-refusal';
 import { createMobileAccountAdmission } from './mobile-account-admission';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -11,6 +11,7 @@ import { FINANCE_NOTICE_VERSION, type FinanceExperienceRequest } from '../../sha
 import { FINANCE_DATA_CATEGORIES } from '../../shared/finance-data-routing';
 import { financeNativeTranscriptContents } from '../../shared/finance-native-transcript';
 import { MOBILE_FINANCE_CAPABILITY, validateMobileFinanceParams } from '../../shared/mobile-bridge';
+import { transientFinanceCode } from './source-failure';
 import type { FinanceService } from './service';
 import type { FinanceScope } from './store';
 import type { Chat } from '../../shared/types';
@@ -219,7 +220,12 @@ export async function requestMobileFinance(method:Method,params:Record<string,un
       const header={...report,sections:report.sections.map(({chart,...section})=>({...section,projection:null,widget:null}))};
       return finish({report:header,workspaceRevision:result.workspaceRevision,...(result.archiveId?{archiveId:result.archiveId}:{}),presentation,reportProjection:{sectionOffset:offset,totalSections,nextSectionOffset:next<totalSections?next:null,rawDataOmitted:true}});
     }
-    case 'search':return finish(await ports.service.search(scope,args as {query:string}));
+    case 'search':{
+      // A source that is busy or down for a moment is not "no match" (source-failure.ts, the one list): the phone's sheet waits and searches again.
+      const found=await ports.service.search(scope,args as {query:string});scope.assertCurrent();
+      const busy=!found.assets.length?transientFinanceCode(found.warnings):null;if(busy)throw new Error(busy);
+      return finish(found);
+    }
     case 'query':return finish(await ports.service.query(scope,args as z.infer<typeof query>));
     case 'worldMarkets':return finish(await ports.worldMarkets(scope,selection));
     case 'dashboardFeeds':{
@@ -240,7 +246,12 @@ export async function requestMobileFinance(method:Method,params:Record<string,un
       }
       const found=await ports.service.search(scope,{query:input.query});scope.assertCurrent();
       const matches=found.assets.filter(asset=>asset.id===input.assetId&&asset.symbol===input.symbol&&asset.exchange===input.exchange&&asset.currency===input.currency);
-      if(matches.length!==1)throw new Error('finance_asset_selection_required');
+      if(matches.length!==1){
+        // The same rule as Desktop's own add (service.ts): a re-search the source could not answer is not "no match". It is also a write the bridge must not store as refused for a day (the phone sends the same key again later).
+        const busy=!found.assets.length?transientFinanceCode(found.warnings):null;
+        if(busy)throw new MobileBridgeNotReady(busy,'The Finance data source is busy. It can be asked again.');
+        throw new Error('finance_asset_selection_required');
+      }
       const asset=matches[0],current=await ports.service.load(scope);scope.assertCurrent();
       const workspace=current.watchlist.some(item=>item.id===asset.id)?current:await ports.service.apply(scope,{expectedRevision:current.revision,operations:[{type:'watchlist.add',asset}]});
       return finish({workspace,asset,warnings:found.warnings});

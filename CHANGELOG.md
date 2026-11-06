@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.130 — 2026-11-07
+
+- Phone Finance: a phone search or add that the market data source could not answer for a moment waits and goes through instead of showing "no results" or a refusal the app kept for a day.
+- The automatic Toolchain detector and its trial path are removed. It scanned the run history every six hours and made model judgments for drafts nothing ever promoted or ran, and its trial permissions put unrelated drafts into One's search. The owner's toolchains, the tools that create, publish, run and search them, and the drafts already made stay; the detector's own records are cleared once when the app opens its store.
+- Memory: a memory write made by another conversation while a turn is building its recall no longer leaves that turn with no memory. Forgetting a memory or an owner edit still ends the recall, and an account switch or a different store still does.
+- A Claude conversation that runs over the model's context window now says so, in the same words as the other runtimes, and is no longer waited on or retried as if the app had a problem.
+- A read-only step on Antigravity answers in text or moves to a runtime that can read, instead of ending the run.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.129 — 2026-11-06
 
 - Phone Finance works again when the account service is slow or down: a phone is admitted by the owner of its pairing instead of a network proof on every request, the background channel no longer closes for every request because of one bad value or a busy moment, Finance reads never wait on a lock and a write holds one only for the write, a search or add that the price source cannot answer for a moment waits and goes through, turning monitoring on cannot hang, and a monitor that was killed mid-run no longer shows "already running".

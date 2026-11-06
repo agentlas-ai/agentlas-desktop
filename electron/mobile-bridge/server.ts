@@ -44,7 +44,7 @@ import { mobileBridgeJsonBytes } from "./sanitize";
 import { mobileBridgeMailReplayMayRerun } from "./mail-replay-policy";
 import { mobileBridgeIsOwnerMessage, mobileBridgeOrphanMayRerun } from "./orphan-rerun-policy";
 import { isTransientSendRefusalCode, sendRefusalCode, isStoreBusyRefusedBeforeDispatch, transientSendBackoffMs } from "../../shared/transient-send-refusal";
-import { mobileBridgeSpecificRefusal } from "../../shared/mobile-bridge-refusal";
+import { MobileBridgeNotReady, mobileBridgeSpecificRefusal } from "../../shared/mobile-bridge-refusal";
 
 /**
  * A phone write the Desktop refused only because the chat (or its channel) was not ready yet: the codes of
@@ -56,6 +56,7 @@ import { mobileBridgeSpecificRefusal } from "../../shared/mobile-bridge-refusal"
  */
 export const MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE = "desktop_not_ready";
 export function mobileBridgeNotReadyRefusal(error: unknown): string | null {
+  if (error instanceof MobileBridgeNotReady) return error.code;
   const code = sendRefusalCode(error);
   if (code && isTransientSendRefusalCode(code)) return code;
   return isStoreBusyRefusedBeforeDispatch(error) ? "store_busy" : null;

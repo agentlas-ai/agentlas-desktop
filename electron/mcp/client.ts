@@ -355,7 +355,7 @@ import {
 import { markRefusedBeforeDispatch, outwardFailureCode, refusalCode, unsettledTurnCauseFailure, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
 import {
   createToolOutcomeTally, decideTurnSettlement, EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_REPLY_MAX_RETRIES, endedWithoutAnswerAfterUnusableTools,
-  innermostTypedCode, isTypedCode, PREPARATION_MAX_RETRIES, RATE_LIMIT_MAX_RETRIES, STORE_BUSY_CODE, STORE_BUSY_MAX_RETRIES,
+  innermostTypedCode, isTypedCode, PREPARATION_MAX_RETRIES, RATE_LIMIT_MAX_RETRIES, READ_ANSWER_ONLY_EMPTY_CODE, STORE_BUSY_CODE, STORE_BUSY_MAX_RETRIES,
 } from "../../shared/turn-settlement";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
@@ -366,6 +366,7 @@ import {
   goalRuntimePinDrift,
   nextRunnableRuntime,
   rolePriorityRuntimes,
+  routeReadStepRuntime,
   runtimeFailureBlocksReplay,
   runtimeDisplayName,
   roleFallbackBlocked,
@@ -420,10 +421,6 @@ import type {
   RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
-
-/** Runtimes whose read permission keeps a configured tool surface usable. Antigravity's headless
- * read mode refuses it outright (runtime/antigravity.ts antigravityReadToolFailure). */
-const OBSERVATION_READ_TOOL_CAPABLE = (kind: string): boolean => kind !== "antigravity";
 
 /**
  * Bounded machine code for an MCP preparation failure. Plain Errors used to collapse to
@@ -844,14 +841,6 @@ class InvocationRunnerFailureError extends Error {
     return { code: failure.providerCode, message: failure.message };
   }
 
-  static readToolScopeFailure(error: unknown): { code: string; message: string } | null {
-    if (!(error instanceof InvocationRunnerFailureError) || !(#failure in error)) return null;
-    const failure = error.#failure;
-    if (failure.kind !== "refused" || failure.runtime !== "antigravity"
-      || failure.source !== "marker" || failure.providerCode !== "agy_read_tools_unsupported") return null;
-    return { code: failure.providerCode, message: failure.message };
-  }
-
   static projectResidencyBusyFailure(error: unknown): { code: string; message: string } | null {
     if (error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
       return {
@@ -966,8 +955,7 @@ export function invocationFailure(
       ...(runtimeFailure ? { runtimeFailure } : {}) };
   }
   const capabilityFailure = InvocationRunnerFailureError.imageInputFailure(error)
-    ?? InvocationRunnerFailureError.localContextFailure(error)
-    ?? InvocationRunnerFailureError.readToolScopeFailure(error);
+    ?? InvocationRunnerFailureError.localContextFailure(error);
   if (capabilityFailure) return { ...capabilityFailure, ...(runtimeFailure ? { runtimeFailure } : {}) };
   const raw = error instanceof Error ? error.message : String(error);
   /*
@@ -3405,23 +3393,22 @@ async function runMcpInvocationInContext(
     }
   }
   /*
-   * ★A read-only observation must be able to call its read tools. Antigravity's headless read
-   * mode refuses any configured tool surface (antigravityReadToolFailure →
-   * agy_read_tools_unsupported), so an observation pinned there failed every retry (production
-   * 2026-09-23, automation observation on an agy-pinned automation). Start such a run on the
-   * next orchestrator runtime instead; the pin itself is not rewritten.
+   * ★A step at read permission starts on a runtime that reads with tools (shared/runtime-capabilities.ts readWithTools): the
+   * next one of the orchestrator pool when the chosen one cannot (Antigravity has no read-only tool mode: an
+   * automation observation pinned there failed every retry, and Goal syntheses ended unsettled). An owner's
+   * exact pick is kept for an ordinary turn and runs answer-only (antigravity.ts); a Main-issued observation steers away from it
+   * as before. The saved pin itself is not rewritten.
    */
-  if (runtimeChoice && readOnlyObservationRun && !continuationRuntimePinned
-    && !OBSERVATION_READ_TOOL_CAPABLE(runtimeChoice.active.kind)) {
-    const fallback = rolePriorityRuntimes(runtimes, "orchestrator")
-      .find((candidate) => OBSERVATION_READ_TOOL_CAPABLE(candidate.kind) && pickRunner(candidate));
-    const fallbackPicked = fallback ? pickRunner(fallback) : null;
-    tryRecordRunEvent({ runId: req.runId!, chatId: req.chatId, kind: "observation_runtime_selection",
-      payload: { schemaVersion: 1, reasonCode: "observation_read_tools_unsupported",
-        refusedKind: runtimeChoice.active.kind, fallbackKind: fallback?.kind ?? null } });
-    if (fallback && fallbackPicked) {
-      runtimeChoice = { active: fallback, picked: fallbackPicked, override: null, unavailableOverride: null };
-      controllerFallbackBeforeRun = fallback;
+  if (runtimeChoice && !continuationRuntimePinned) {
+    const routed = routeReadStepRuntime(runtimeChoice.active, rolePriorityRuntimes(runtimes, "orchestrator"),
+      { permission: normalizedPermission, pinned: !readOnlyObservationRun && (runtimeResolution.pinHonored || Boolean(runtimeChoice.override)) });
+    const routedPicked = routed !== runtimeChoice.active ? pickRunner(routed) : null;
+    if (routed !== runtimeChoice.active && routedPicked) {
+      if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: req.chatId, kind: "observation_runtime_selection",
+        payload: { schemaVersion: 1, reasonCode: "observation_read_tools_unsupported",
+          refusedKind: runtimeChoice.active.kind, fallbackKind: routed.kind, observation: readOnlyObservationRun } });
+      runtimeChoice = { active: routed, picked: routedPicked, override: null, unavailableOverride: null };
+      controllerFallbackBeforeRun = routed;
     }
   }
   /*
@@ -7509,6 +7496,11 @@ async function runMcpInvocationInContext(
        * provider-usage marker, as for the store lock above. True when the caller should run the attempt again.
        */
       let emptyReplyRetries = 0;
+      // A tools-free read answer that came back empty with nothing having acted (READ_ANSWER_ONLY_EMPTY_CODE) is sent once more to the
+      // same runtime when no other runtime can take it (an empty pool, or a run whose runtime is fixed), so the step is not lost.
+      let readAnswerResends = 0;
+      const resendEmptyReadAnswer = (failure: RunnerFailure | undefined): boolean =>
+        failure?.providerCode === READ_ANSWER_ONLY_EMPTY_CODE && signal?.aborted !== true && readAnswerResends < 1 && (readAnswerResends += 1) > 0;
       const retryEmptyReply = async (failure: RunnerFailure | undefined): Promise<boolean> => {
         if (!failure || signal?.aborted || executionContext?.graphWorkerAttempt || executionContext?.source === "alive") return false;
         const settlement = decideTurnSettlement({ outcome: "failed", kind: failure.kind, providerCode: failure.providerCode,
@@ -7700,7 +7692,10 @@ async function runMcpInvocationInContext(
         // "Cannot use it now" is a fact, not a retry: a runner-typed quota / rate limit / sign-in refusal still cools the
         // runtime and marks it signed out (noteRuntimeFailure keeps only those kinds), or the next turn, the Goal's quota
         // handoff and the connection badge all keep trusting a dead runtime.
-        if (result.ownerControlTerminal === "uncertain" && !runtimeTerminalEvidence.closedHttpRefusal) {
+        // A tools-free read answer that came back empty ran nothing that needs approval (READ_ANSWER_ONLY_EMPTY_CODE): the pool's next
+        // runtime takes the step like a refusal before dispatch.
+        if (result.ownerControlTerminal === "uncertain" && !runtimeTerminalEvidence.closedHttpRefusal
+          && result.failure?.providerCode !== READ_ANSWER_ONLY_EMPTY_CODE) {
           if (result.failure?.source === "marker") noteRuntimeFailure(active, result.failure);
           return result;
         }
@@ -7734,7 +7729,10 @@ async function runMcpInvocationInContext(
           throw graphDirectFailureError;
         }
         if (result.failure && attemptRefusedBeforeDispatch && await retryStoreBusyBeforeDispatch(result.failure)) continue;
-        if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
+        if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) {
+          if (resendEmptyReadAnswer(result.failure)) continue;
+          return result;
+        }
         const failed = result.failure;
         // First failure: this is when recovery actually begins.
         if (recoveryStartedAt == null) recoveryStartedAt = Date.now();
@@ -7754,7 +7752,8 @@ async function runMcpInvocationInContext(
           ...(resetAt !== null ? { retryAfterMs: Math.max(0, resetAt - Date.now()) } : {}),
           unattended: isUnattendedExecution(executionContext),
           attempt: failed.providerCode === STORE_BUSY_CODE ? storeBusyRetries : sameRuntimeRetries, resumeBudget: 0,
-          effectsObserved: !attemptEvents.creditRetrySafe() || Boolean(result.text.trim()),
+          effectsObserved: failed.providerCode !== READ_ANSWER_ONLY_EMPTY_CODE
+            && (!attemptEvents.creditRetrySafe() || Boolean(result.text.trim())),
           fallbackAvailable: true,
         });
         if (settlement.action === "surface") return result;
@@ -7810,7 +7809,10 @@ async function runMcpInvocationInContext(
           return candidateKey !== selectedRuntimeKey && !attemptedRuntimeKeys.has(candidateKey);
         });
         const fallbackPicked = fallback ? pickRunner(fallback) : null;
-        if (!fallback || !fallbackPicked) return emitTerminalRecoveryFailure(result, "candidate-exhausted");
+        if (!fallback || !fallbackPicked) {
+          if (resendEmptyReadAnswer(failed)) continue;
+          return emitTerminalRecoveryFailure(result, "candidate-exhausted");
+        }
         recoveryRetryEvents += 1;
         if (oneControllerFallbackEligible && fallback.kind !== "agentlas") {
           emitControllerRuntimeFallback(fallback, failed);

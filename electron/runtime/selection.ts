@@ -1,6 +1,7 @@
 import { isRuntimeCredentialUnavailable, RUNTIME_CREDENTIAL_UNAVAILABLE_CODE } from "./credential-access";
 import { invocationBreaker, invocationBreakerKey } from "./invocation-breaker";
 import { runtimeCooldown } from "./runtime-cooldown";
+import { runtimeReadsWithTools } from "../../shared/runtime-capabilities";
 import { withDurableRuntimeRetry } from "./durable-retry";
 import { withModelImageBudget } from "./model-image-budget";
 import type {
@@ -756,6 +757,22 @@ export function rolePriorityRuntimes(
   pushCandidate(legacyActive);
   appendQuotaCreditFallback();
   return out;
+}
+
+/**
+ * Where a step that runs at read permission and may use tools starts: the runtime it was going to use when that runtime reads
+ * with tools (shared/runtime-capabilities.ts readWithTools), else the first runtime of `pool` (the caller's own ordered
+ * candidates, rolePriorityRuntimes) that does and can take a dispatch. Capability rows decide; no runtime is named here.
+ * `pinned` keeps the owner's exact pick, and a pool with nobody capable keeps the runtime: both run answer-only on it
+ * (antigravity.ts antigravityAnswerOnlyRequest), so no read step ends refused.
+ */
+export function routeReadStepRuntime(
+  active: RuntimeStatus,
+  pool: readonly RuntimeStatus[],
+  options: { permission: string | undefined; pinned?: boolean },
+): RuntimeStatus {
+  if (options.permission !== "read" || options.pinned || runtimeReadsWithTools(active.kind)) return active;
+  return pool.find((candidate) => runtimeReadsWithTools(candidate.kind) && pickRunner(candidate)) ?? active;
 }
 
 /**

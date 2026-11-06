@@ -1,6 +1,7 @@
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
+import { READ_ANSWER_ONLY_EMPTY_CODE } from "../../shared/turn-settlement";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
 import { runnerResultRefusedBeforeDispatch, runtimeFailureIsClosedHttpRefusal, unsettledTurnError,
   RUNTIME_TURN_UNSETTLED_CODE, RUNTIME_SILENT_TIMEOUT_CODE, RUNTIME_PROTOCOL_UNRECOGNIZED_CODE } from "./runner";
@@ -33,6 +34,8 @@ function observeRunnerSettlement<T>(provider: Promise<T>): Promise<T> {
 const TYPED_PROVIDER_FAILURE_KINDS: ReadonlySet<RunnerFailure["kind"]> = new Set(["quota", "rate_limit", "auth", "unsupported", "unavailable", "refused"]);
 const UNKNOWN_TERMINAL_CODES: ReadonlySet<string> = new Set([RUNTIME_TURN_UNSETTLED_CODE, RUNTIME_SILENT_TIMEOUT_CODE, RUNTIME_PROTOCOL_UNRECOGNIZED_CODE]);
 function typedProviderFailure(failure: RunnerFailure | undefined, toolActivity: boolean, request: RunnerRequest): boolean {
+  // A tools-free read answer that came back empty: nothing needing approval ran whatever tools the model tried (denied).
+  if (failure?.providerCode === READ_ANSWER_ONLY_EMPTY_CODE) return true;
   if (!failure || failure.source !== "marker" || UNKNOWN_TERMINAL_CODES.has(failure.providerCode ?? "")) return false;
   const toolless = request.untrustedNoTools === true || request.judgmentOnly === true;
   return TYPED_PROVIDER_FAILURE_KINDS.has(failure.kind) && (!toolActivity || toolless);

@@ -33,7 +33,7 @@ import {
   workloadRuntimeInventory,
   type WorkloadAllocation,
 } from "../runtime/workload-routing";
-import { runtimeFailureBlocksReplay, pickActive, pickRunner, rolePriorityRuntimes } from "../runtime/selection";
+import { runtimeFailureBlocksReplay, pickActive, pickRunner, rolePriorityRuntimes, routeReadStepRuntime } from "../runtime/selection";
 import { runnerFailureFromError, withoutMcpTransportEnv } from "../runtime/runner";
 import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
 import { stripReplyMemoryEventsReadOnly } from "../memory/curator";
@@ -383,7 +383,10 @@ export async function runSwarmInvocation(
   const roomPinnedWorker = roomPinnedTeammateRuntime(p);
   if (roomPinnedWorker) candidateRuntimes.splice(0, candidateRuntimes.length, roomPinnedWorker);
   const workerPriority = rolePriorityRuntimes(candidateRuntimes, "worker");
-  const workerDefault = roomPinnedWorker ?? workerPriority[0] ?? pickActive(candidateRuntimes, "worker") ?? p.active;
+  // A read-permission worker or synthesis starts on a runtime that reads with tools unless its runtime is not the pool's to change.
+  const readRoute = (runtime: typeof p.active): typeof p.active => routeReadStepRuntime(runtime, candidateRuntimes,
+    { permission: p.req.permissions, pinned: Boolean(roomPinnedWorker) || Boolean(p.runtimeOverride) || Boolean(p.workforceSelectionReceipt) });
+  const workerDefault = readRoute(roomPinnedWorker ?? workerPriority[0] ?? pickActive(candidateRuntimes, "worker") ?? p.active);
   const workerDefaultRunner = sameRuntime(workerDefault, p.active)
     ? p.picked
     : pickRunner(workerDefault) ?? p.picked;
@@ -547,7 +550,7 @@ export async function runSwarmInvocation(
         explicitPinned: !p.workforceSelectionReceipt,
       })
     : null;
-    const active = resolution?.runtime ?? workerDefault;
+    const active = readRoute(resolution?.runtime ?? workerDefault);
     const taskRunner = sameRuntime(active, workerDefault)
       ? workerDefaultRunner
       : pickRunner(active) ?? workerDefaultRunner;
@@ -777,7 +780,7 @@ export async function runSwarmInvocation(
       manualOverride: p.runtimeOverride,
       explicitPinned: !p.workforceSelectionReceipt,
     });
-    const active = resolution.runtime;
+    const active = readRoute(resolution.runtime);
     const synthesisRunner = sameRuntime(active, p.active) ? p.picked : pickRunner(active) ?? p.picked;
     if (resolution.resolutionCodes.some((code) => code.includes("active-preserved"))) {
       synthEmit({

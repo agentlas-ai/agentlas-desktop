@@ -5110,12 +5110,6 @@ app.whenReady().then(async () => {
   }, 15_000).unref?.();
   startOneTeamNotificationBridge();
   startRunAlertBridge();
-  // Repeated-work detector (electron/toolchains/detector.ts): one model judgment a day at most, Main only, real app only.
-  if (!developmentEffectsSuppressed()) {
-    void import("./toolchains/detector")
-      .then((detector) => detector.startToolchainDetector(() => Boolean(quitServicesStopPromise)))
-      .catch((error) => console.warn("[toolchain-detector] not started:", error instanceof Error ? error.message : error));
-  }
   /*
    * Establish the daemon before choosing the physical Mobile Bridge owner.
    * Previously Desktop opened its listener first and `ensureDaemonRunning`

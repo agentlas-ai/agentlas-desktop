@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { acceptToolchainHits } from "../../shared/toolchain";
 import { autoLocalEmbedding, LOCAL_HASHING_DIMENSIONS, rankHybridLocal } from "../memory/local-embedding";
 import type { ToolchainAsset, ToolchainAssetVersion } from "../../shared/toolchain-asset";
-import { isToolchainPulledBack } from "./trial-ledger";
+import { isToolchainPulledBack } from "./health";
 
 const MAX_CACHED = 256;
 const embeddings = new Map<string, readonly number[]>();

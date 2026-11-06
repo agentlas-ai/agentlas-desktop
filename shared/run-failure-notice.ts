@@ -100,6 +100,8 @@ export const OWNER_ACTION_FAILURE_CODES: ReadonlySet<string> = new Set(["agentla
  */
 export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = new Map<string, HostFailureClass>([
   ["model_context_capacity_exceeded", "capacity"], ["codex_context_window_exceeded", "capacity"], ["local_context_limit_exceeded", "capacity"],
+  // claude-code's typed result `terminal_reason: "prompt_too_long"` (claude-code.ts claudeFailureFromEvent), the same class as the others.
+  ["prompt_too_long", "capacity"],
   ["serving_unavailable", "unavailable"],
   // The provider (not the app) could not take the request: as the terminal code of a turn that never started work, or as the
   // cause behind an unfinished one (runtime/runner.ts unsettledTurnCauseFailure).

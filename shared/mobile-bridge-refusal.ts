@@ -76,3 +76,17 @@ export function mobileBridgeSpecificRefusal(error: unknown): { code: MobileBridg
   if (!(error instanceof MobileBridgeRefusal) || !CODES.has(error.code)) return null;
   return { code: error.code, message: error.message };
 }
+
+/**
+ * A write the Desktop could not decide yet because a source it needs was busy or down for a moment (nothing was added). The bridge
+ * releases the request's replay entry and answers desktop_not_ready (retryable), so the phone sends the SAME key again later instead of
+ * being handed the stored refusal for a day (server.ts mobileBridgeNotReadyRefusal). Only for commands that are safe to run again.
+ */
+export class MobileBridgeNotReady extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "MobileBridgeNotReady";
+    this.code = code;
+  }
+}
