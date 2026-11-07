@@ -3,7 +3,7 @@ import {retainHistoryWorkOrigin} from './history-work-dispatch';
 import { withOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
 import { getAuthenticatedActorIds } from "../auth";
 import { getDb, STORE_SCHEMA_VERSION } from "../store/db";
-import { ONE_SUPERVISOR_SCHEMA, withDoneWhen } from "../../shared/one-supervisor";
+import { ONE_SUPERVISOR_SCHEMA } from "../../shared/one-supervisor";
 import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, ONE_SUPERVISOR_EXTENSIONS_SCHEMA, sameSupervisorRuntimeCompatibility } from "../../shared/one-supervisor-runtime";
 import { importNativeJsonValue } from "../daemon/native-json-transfer";
 import { NATIVE_MAIN_PREPARATION_POLICY } from "../daemon/native-invocation-policy";
@@ -12,7 +12,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createFreshReservationFrontier } from "../runtime/fresh-reservation-frontier";
 import type { InvocationRunReceipt, McpInvocationRequest } from "../../shared/types";
 import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
-import { canonicalInvocationRequestJson, createInvocationAdmission, decideInvocationAdmission, getInvocationAdmission, rearmRejectedInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION } from "../store/invocation-admissions";
+import { canonicalInvocationRequestJson, createInvocationAdmission, decideInvocationAdmission, getInvocationAdmission, invocationProvenNotStarted, rearmRejectedInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION } from "../store/invocation-admissions";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import { nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
 import type { createNativeGuiOwnerClient } from "../invocation/native-gui-owner";
@@ -39,21 +39,8 @@ export function supervisorNativeNoticePurpose(origin: object, request: Readonly<
   authorizeSupervisorNativeOrigin(origin, request); return origins.get(origin)!.purpose;
 }
 
-/** The conversation a durable command runs in and the exact prompt its dispatch sends, for the four command families.
- * A Work's prompt is its brief plus the finished-when list (withDoneWhen, the same function the Work executor sends). */
-export function supervisorCommandBinding(store: Pick<OneSupervisorStore, "db">, oneId: string, row: SupervisorRequestRow): { target: string | undefined; prompt: unknown } {
-  const payload = JSON.parse(row.payload_json);
-  let target: string | undefined;
-  if (row.kind === "reply") target = row.origin_chat_id;
-  else if (row.kind === "work") target = payload.workerChatId;
-  else if (row.kind === "chat-send") target = payload.chatId;
-  else if (row.kind === "follow-up") {
-    const delegated = store.db.prepare("SELECT payload_json FROM one_supervisor_requests WHERE one_id=? AND task_id=? AND kind='work' ORDER BY rowid LIMIT 1")
-      .get(oneId, row.task_id) as { payload_json: string } | undefined;
-    if (delegated) target = JSON.parse(delegated.payload_json).workerChatId;
-  }
-  return { target, prompt: row.kind === "work" && typeof payload.text === "string" ? withDoneWhen(payload.text, payload.doneWhen) : payload.text };
-}
+export { supervisorCommandBinding } from "./supervisor-command-binding";
+import { supervisorCommandBinding } from "./supervisor-command-binding";
 
 /** Original durable command + exact identity/generation is the host producer.
  * This capability never crosses IPC and does not pretend to be a renderer. */
@@ -181,13 +168,17 @@ export function createSupervisorNativeRuntime(options: {
     // Durable retained custody remains a barrier even while the viewer is offline.
     return owner?.ownerKind === "daemon" && ["active", "settling"].includes(owner.state) ? { runId: owner.runId } : null;
   }
-  /** A start with no admission row, or with a rejected one (owner-start-boundary-not-crossed), left no run behind. Its pending
+  /** A start with no admission row, a rejected one (owner-start-boundary-not-crossed), or one the service refused before the start
+   * boundary (a typed refusal of a start this process saw fail), left no run behind. Its pending
    * entry must go, or attach() reports a run that does not exist and drain() never starts another owner message. An admission
    * that is pending/admitted stays: the original attempt may be live and is reconciled from its receipt and custody. */
   function releaseIfNeverStarted(runId: string): void {
     try {
       const admission=getInvocationAdmission(runId);
-      if ((!admission || admission.status === "rejected") && !options.receipt(runId)
+      // A start this process saw refused counts the service's typed refusal before the start boundary too (invocationProvenNotStarted):
+      // its pending reservation alone kept One's conversation locked and the domain hand-over waiting for good .
+      const refusedHere=starts.get(runId)?.refused===true;
+      if ((!admission || admission.status === "rejected" || (refusedHere && invocationProvenNotStarted(runId))) && !options.receipt(runId)
         && !getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(runId)) {
         const owner=invocationRunOwners.getOwnerByRunId(runId);
         if(!owner || owner.state==='released')pending.delete(runId);

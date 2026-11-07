@@ -266,6 +266,34 @@ export function getInvocationAdmission(runId: string): InvocationAdmission | nul
   return row ? decode(row) : null;
 }
 
+/**
+ * The ledger proves this run never started: no admission row, a rejected one, or a pending one whose own reservation was refused
+ * before the start boundary in the process it was sent to (the typed invocation_start_refusal row, startBoundaryCrossed false,
+ * written at or after this reservation's pending_at), with no invoke_started and no live run lease. The last case is then closed as
+ * rejected here, as the refusing process meant to (the background service refused a One review before it had adopted
+ * the personal domain and its rejection did not land; the pending row kept the review "live" in Main, held the conversation's one
+ * pending slot, so every new start of it was refused, and kept the domain hand-over waiting). A row re-armed after a refusal has a
+ * later pending_at, so the older refusal does not count for it.
+ */
+export function invocationProvenNotStarted(runId: string): boolean {
+  const admission = getInvocationAdmission(runId);
+  if (!admission || admission.status === "rejected") return true;
+  if (admission.status !== "pending") return false;
+  return getDb().transaction((): boolean => {
+    const row = rowForRun(runId);
+    if (!row || row.status !== "pending") return row?.status === "rejected";
+    if (anyStartReceipt(runId)) return false;
+    const refused = getDb().prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'invocation_start_refusal'
+      AND json_extract(payload_json, '$.startBoundaryCrossed') = 0 AND ts >= ? LIMIT 1`).get(runId, row.pending_at);
+    if (!refused) return false;
+    if (getDb().prepare("SELECT 1 FROM invocation_run_owners WHERE run_id = ? AND state IN ('active','settling') LIMIT 1").get(runId)) return false;
+    const now = new Date().toISOString();
+    getDb().prepare(`UPDATE invocation_admissions SET status = 'rejected', rejected_at = ?, rejection_reason_code = 'native_start_refused_before_boundary',
+      updated_at = ? WHERE run_id = ? AND status = 'pending'`).run(now, now, runId);
+    return true;
+  }).immediate();
+}
+
 export function getPendingInvocationAdmissionForChat(chatId: string): InvocationAdmission | null {
   validId(chatId, "chat_id");
   const row = getDb().prepare(

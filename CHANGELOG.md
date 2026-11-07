@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.134 — 2026-11-07
+
+- One: right after an update, a One turn the app sent to the background service (the review of a finished Work, a message from the phone) is no longer refused before it starts while the service has not yet taken over One's conversation; the app's own supervisor already checked that turn, and the service now re-checks that its conversation and prompt are the ones the app sent. A start the service did refuse before it began, with its refusal recorded, no longer leaves One's conversation locked: the run that never started is closed as rejected, so the next message and the pending review start, the owner hears the result of a finished Work, and the hand-over of the conversation to the background service goes on.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 ## 1.3.133 — 2026-11-07
 
 - One: when you ask for work inside the conversation, One now does it there with its own tools and asks with choices when a decision or a sign-in is needed. It hands work to a background Work only when the work must go on without you (long, scheduled, or asked to run separately), and after a hand-off it stays in charge: the real status, what happened, and the Work's questions to you.

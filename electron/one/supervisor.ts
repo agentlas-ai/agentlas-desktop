@@ -19,7 +19,7 @@ import { getLongRunByGoalId } from "../store/long-runs";
 import { invocationService } from "../invocation/service";
 import { stopInvocationGoal } from "../runtime/invocation-owner-control";
 import { admitMainInvocation } from "../runtime/scheduled-root-context";
-import { canonicalInvocationRequestJson, getInvocationAdmission, INVOCATION_ADMISSION_DIGEST_VERSION } from '../store/invocation-admissions';
+import { canonicalInvocationRequestJson, getInvocationAdmission, invocationProvenNotStarted, INVOCATION_ADMISSION_DIGEST_VERSION } from '../store/invocation-admissions';
 import { currentUiLocale } from "../ui-locale";
 import { OneSupervisorStore, supervisorHash, personalSupervisorConversationInDb, supervisorStoppedGoalForTask, type SupervisorRequestRow } from "./supervisor-store";
 import { ownerStoppedChatSince } from "../invocation/earlier-attempt";
@@ -39,6 +39,7 @@ import { OneSupervisorOwner } from "./supervisor-owner";
 import {OneBudgetStore} from "./budget-store";
 import {OneBudgetRuntime} from "./budget-runtime";
 import { createSupervisorNativeRuntime, oneSupervisorNativeRuntime, startSupervisorPreparedInvocation } from "./supervisor-native-runtime";
+import { dispatchedByDesktopSupervisor } from "./supervisor-command-binding";
 import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId, registerAppRuntimeParticipant } from "../long-run/app-runtime-coordinator";
 import { assertOnePersonalDataInvocationCurrent, collectOnePersonalDataResult, recoverOnePersonalDataResults } from './personal-data-runtime';
@@ -181,7 +182,7 @@ export function currentOneNativeWorkBudget(commandId:string,budgetId:string):{ad
 }
 /** Nothing was started for a run when the admission ledger has no row for it, or has rejected it (owner-start-boundary-not-crossed). */
 function noStartProof(runId:string):boolean {
-  try { const admission=getInvocationAdmission(runId); return !admission || admission.status==='rejected'; } catch { return false; }
+  try { return invocationProvenNotStarted(runId); } catch { return false; }
 }
 export function oneSupervisor():OneSupervisorService {
   if (supervisor) return supervisor;
@@ -411,6 +412,12 @@ const observeOrdinaryOneNativeSource = (source: OrdinaryOneTurnSource) => {
   // adopted the One domain, Desktop has no personal-domain owner, so the turn runs like the Goal's own Desktop
   // wake-ups: outside the personal domain, without personal native capabilities. Any other One turn still needs it.
   if (personalDomainHeldByDaemon() && oneGoalRoomTurnOnDesktop(readOrdinaryOneTurn(source, "scope").request.chatId)) return undefined;
+  // The background service before it adopted the personal domain, running a turn Desktop's supervisor dispatched to it (a review,
+  // the owner's message from the phone): Desktop holds the domain and observes that turn through its native runtime. This process has
+  // no supervisor to ask; asking threw supervisor_daemon_domain_not_adopted and refused every One turn Desktop sent while the
+  // hand-over was still pending (the review of a finished Work right after an update restart).
+  if (dispatchedByDesktopSupervisor(getDb(), {supervisorPresent:!!supervisor,hostConfigured:!!hostOptions,processKind:invocationProcessOwner().ownerKind},
+    readOrdinaryOneTurn(source, "scope").request)) return undefined;
   const observed = oneSupervisor().observeOrdinaryNativeTurn(source);
   if (!observed) return undefined;
   return { ...observed, wrap<T>(body: () => T): T {
