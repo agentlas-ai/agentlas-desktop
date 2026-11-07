@@ -279,6 +279,9 @@ export function invocationProvenNotStarted(runId: string): boolean {
   const admission = getInvocationAdmission(runId);
   if (!admission || admission.status === "rejected") return true;
   if (admission.status !== "pending") return false;
+  // The write lock only when there is something to close: a plain read first (the proof is re-checked inside the transaction).
+  if (!getDb().prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'invocation_start_refusal'
+    AND json_extract(payload_json, '$.startBoundaryCrossed') = 0 AND ts >= ? LIMIT 1`).get(runId, admission.pendingAt)) return false;
   return getDb().transaction((): boolean => {
     const row = rowForRun(runId);
     if (!row || row.status !== "pending") return row?.status === "rejected";

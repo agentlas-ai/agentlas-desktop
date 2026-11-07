@@ -62,6 +62,25 @@ export function claimInvocationBrowserLoginWait(input: {
     return true;
   })();
 }
+/**
+ * The sign-in waits an earlier process of this kind parked and never ended: it died (kill -9, a crash, a forced reboot) instead of
+ * quitting, which blocks them (service cancelParkedBrowserLoginWait "host_restart"). Their resume handle died with it, so nothing can
+ * resume them, and a Work waiting on one stayed open for good with nothing running (one/supervisor-work-executor parkedEnded). They
+ * are blocked the same way. Called only where the caller proved every earlier process of its kind gone, with releaseAbandoned's proof:
+ * the wait's run was owned by another process of this kind (invocation_run_owners keeps released rows). Returns the blocked run ids.
+ */
+export function blockAbandonedBrowserLoginWaits(ownerKind: "desktop" | "daemon", liveOwnerId: string): string[] {
+  const runs = getDb().prepare(`SELECT DISTINCT e.run_id AS runId FROM run_events e JOIN invocation_run_owners o ON o.run_id = e.run_id
+    WHERE e.kind = ? AND o.owner_kind = ? AND o.owner_id <> ?`).all(EVENT, ownerKind, liveOwnerId) as { runId: string }[];
+  const blocked: string[] = [];
+  for (const { runId } of runs) {
+    const state = latestInvocationBrowserLoginWait(runId)?.state;
+    if (state !== "waiting" && state !== "claimed") continue;
+    settleInvocationBrowserLoginWait(runId, "blocked", "host_gone");
+    blocked.push(runId);
+  }
+  return blocked;
+}
 export function settleInvocationBrowserLoginWait(runId: string, state: "dispatched" | "cancelled" | "blocked", reason: string | null = null, successorInvocationId?: string): void {
   getDb().transaction(() => {
     const current = latestInvocationBrowserLoginWait(runId);

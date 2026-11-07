@@ -97,6 +97,7 @@ import { buildAppMenu } from "./menu";
 import { closeStore, getDb, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
 import { getDaemonAutostartEnabled, markDaemonAutostartStoreReady, readDaemonAutostartStoreReady, resolveDaemonAutostartPolicy } from "./store/daemon-autostart";
 import { storeIdentityDigest } from "./daemon/diagnostic-log";
+import { GUI_BACKGROUND_START_ARG } from "./daemon/gui-background-launch";
 import { mainWindowDevToolsAllowed } from "./devtools-policy";
 import { rememberedMainWindowRoute, rememberMainWindowUrl } from "./main-route-memory";
 import { mainWindowInitialRoute } from "../shared/restorable-route";
@@ -794,6 +795,9 @@ const STARTUP_PLACEHOLDER_HTML = `<!doctype html>
 const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURIComponent(STARTUP_PLACEHOLDER_HTML)}`;
 
 let mainWindow: BrowserWindow | null = null;
+// Started by the background service for One (daemon/gui-background-launch.ts): run in the tray and open no window. An owner's own
+// launch, Dock click or tray "open" during the start brings the window as usual and ends this.
+let backgroundStartPending = process.argv.includes(GUI_BACKGROUND_START_ARG);
 let nativePersonalEntry:ReturnType<typeof createOnePersonalNativeMainEntry>|null=null;
 let nativeMainFamilyRouter:ReturnType<typeof createOneNativeMainFamilyRouter>|null=null;
 let nativeGmailSourceOwner:GmailPersonalSourceOwner|null=null;
@@ -830,6 +834,11 @@ let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
 let oneBriefingInterval: NodeJS.Timeout | null = null;
 
 async function presentStartupRecovery(presentation: StartupRecoveryPresentation): Promise<string | null> {
+  // A background start (for One) that cannot open its store needs the owner: it shows the recovery window like any launch.
+  if (backgroundStartPending && (!mainWindow || mainWindow.isDestroyed())) {
+    backgroundStartPending = false;
+    await createWindow({ startupPlaceholder: true });
+  }
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return null;
   const payload = JSON.stringify(presentation);
   return mainWindow.webContents.executeJavaScript(`(() => {
@@ -1237,6 +1246,8 @@ app.on("open-url", (event, url) => {
 app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
   // Update lock retries must not repeatedly bring the old window to front.
   if ((additionalData as { startupIntent?: string } | undefined)?.startupIntent === "update-relaunch") return;
+  // The background service asking for an app that is already running: it attaches; no window comes forward.
+  if (argv.includes(GUI_BACKGROUND_START_ARG)) return;
   // A launch always ends with the main window on screen. Returning when the window had been closed left
   // Windows with a running app the person could not reach (window-lifecycle.ts, 2026-10-24).
   const action = secondInstanceWindowAction({
@@ -1257,6 +1268,8 @@ app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
   // Windows/Linux 는 두 번째 인스턴스의 argv 에 URL 을 실어 보낸다.
   const link = argv.find((arg) => typeof arg === "string" && arg.startsWith("agentlas://"));
   if (link) routeAgentlasDeepLink(link);
+  // The owner launched it: the window is theirs, also when it arrives before startup can show one (the start then ends with the window).
+  backgroundStartPending = false;
   if (action === "ignore") return;
   if (action === "create") {
     leaveBackgroundHold();
@@ -1674,7 +1687,7 @@ app.on("activate", () => {
   // Hiding the Dock icon for background mode re-activates the app on macOS;
   // that is not the person asking for the window. The tray's "열기" and a second
   // launch (second-instance) are the ways back.
-  if (backgroundHoldActive()) return;
+  if (backgroundHoldActive() || backgroundStartPending) return;
   if (!mainWindow || mainWindow.isDestroyed()) {
     void createWindow();
     return;
@@ -1922,7 +1935,7 @@ configureUpdateResumeHost({
     // longer run anything: restart it; the ledger continues the paused work on the next launch.
     console.warn("[updater] update handoff was refused after work was paused; restarting to continue it");
     quitRelaunching = true;
-    app.relaunch();
+    relaunchWithWindow();
     app.quit();
   },
 });
@@ -2103,7 +2116,7 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
     restore?.();
   },
   install: installDownloadedUpdate,
-  relaunch: () => app.relaunch(),
+  relaunch: () => relaunchWithWindow(),
   quit: () => {
     noteQuitIntent("update-install");
     app.quit();
@@ -2214,6 +2227,18 @@ function commitQuit(plan: Extract<QuitPlan, { kind: "quit" }>): void {
   if (backgroundHoldActive()) leaveBackgroundHold();
   console.info("[quit] quitting", { daemon: plan.daemon });
   app.quit();
+}
+
+/** A relaunch the app makes itself (an update, a refused hand-off, a startup recovery retry) comes back as an ordinary launch: the
+ * background-start flag of the process it replaces is not carried (Electron reuses process.argv by default). */
+function relaunchWithWindow(): void {
+  app.relaunch({ args: process.argv.slice(1).filter((arg) => arg !== GUI_BACKGROUND_START_ARG) });
+}
+
+/** A start by the background service: the app runs in its tray (the same hold as "continue in background") and opens no window. */
+function startInBackgroundForOne(): void {
+  console.info("[startup] started by the background service: running in the tray, no window");
+  holdInBackground({ kind: "background", activeWork: 0, autoQuitWhenIdle: false });
 }
 
 function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>): void {
@@ -2425,7 +2450,7 @@ app.whenReady().then(async () => {
   // GUI launches get it; headless entries below never open a window.
   const headlessEntry = process.argv.includes("--graph-surface") || process.argv.includes("--headless-automations");
   let startupPlaceholderShown = false;
-  if (!headlessEntry && !oneOnlyLaunch) {
+  if (!headlessEntry && !oneOnlyLaunch && !backgroundStartPending) {
     await createWindow({ startupPlaceholder: true });
     startupPlaceholderShown = true;
     traceUpdaterStartup("startup-window-visible");
@@ -2559,7 +2584,7 @@ app.whenReady().then(async () => {
   // screen first so a locked or slow Keychain never makes Agentlas look dead.
   // The application renderer and IPC surface still load only after migration,
   // continuity, authentication, and bootstrap gates have completed.
-  if (!oneOnlyLaunch && (!startupPlaceholderShown || !mainWindow || mainWindow.isDestroyed())) {
+  if (!oneOnlyLaunch && !backgroundStartPending && (!startupPlaceholderShown || !mainWindow || mainWindow.isDestroyed())) {
     await createWindow({ startupPlaceholder: true });
     traceUpdaterStartup("startup-window-visible");
     traceStartup("startup-window-visible");
@@ -4933,8 +4958,10 @@ app.whenReady().then(async () => {
     // starts listeners and schedulers, and synchronizes external accounts.
     await flushPendingOneNotification();
     if (oneOnlyLaunch) await openOneWindow();
+    else if (backgroundStartPending && (!mainWindow || mainWindow.isDestroyed())) startInBackgroundForOne();
     else if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
     else await loadMainRendererIntoWindow();
+    backgroundStartPending = false;
     traceStartup("development-external-effects-suppressed");
     return;
   }
@@ -5077,8 +5104,10 @@ app.whenReady().then(async () => {
   osMaintenanceReady = true;
   await flushPendingOneNotification();
   if (oneOnlyLaunch) await openOneWindow();
+  else if (backgroundStartPending && (!mainWindow || mainWindow.isDestroyed())) startInBackgroundForOne();
   else if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
   else await loadMainRendererIntoWindow();
+  backgroundStartPending = false;
   traceStartup("window-loaded");
   if (!quitServicesStopPromise && !quitCleanupPromise) startMemoryRevocationCleanup();
   // 누가 어떤 버전을 쓰는지 서버가 알게 한다(1.0.31·32 크래시 때 영향 범위를 셀 수 없었다).
@@ -5719,7 +5748,7 @@ app.whenReady().then(async () => {
       retry: async () => {
         await initializeDesktopStore();
         recordImmediateExit("relaunch", 0, { stage: "startup-recovery-retry" });
-        app.relaunch();
+        relaunchWithWindow();
         app.exit(0);
       },
     });

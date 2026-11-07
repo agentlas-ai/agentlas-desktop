@@ -195,6 +195,13 @@ export function oneSupervisor():OneSupervisorService {
   if(!hostOptions)nativeRuntime=createSupervisorNativeRuntime({store,owner,identity:()=>getOneProfile().oneId,receipt:runId=>invocationService.receipt(runId)});
   const attach=(chatId:string)=>nativeRuntime?.attach(chatId) ?? invocationService.attach(chatId,{includeEvents:false});
   const receipt=(runId:string)=>nativeRuntime?.receipt(runId) ?? invocationService.receipt(runId);
+  // A parked sign-in wait resumes under a new run id (invocation/service resumeParkedBrowserLoginWait): a reply, a hand-off and a
+  // message into a room follow it. A store that cannot be read yet knows no successor: the row keeps its own run.
+  const signInSuccessorRun=(runId:string)=>{try{const wait=latestInvocationBrowserLoginWait(runId);return wait?.state==="dispatched" && wait.successorInvocationId ? wait.successorInvocationId : null;}catch{return null;}};
+  // The resume handle lives in the process that parked the run: a quit blocks the wait (service preserveWaiting), and so does the
+  // next start of a process that died instead (blockAbandonedBrowserLoginWaits); then nothing can resume it. A wait still
+  // "waiting" may belong to a live process (Main or the daemon), so only "blocked" counts.
+  const signInWaitEnded=(runId:string)=>{try{return latestInvocationBrowserLoginWait(runId)?.state==="blocked";}catch{return false;}};
   const cancelNative=(runId:string)=>!hostOptions && (invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' || nativeRuntime?.ownsPending(runId)) ? nativeRuntime!.cancel(runId) : invocationService.cancel(runId);
   const unconfirmedRetryAllowed=(chatId:string,sinceMs?:number)=>{
     try {const chat=getChat(chatId);return !!chat && chat.originSurface==="work" && !chat.goalId
@@ -319,7 +326,7 @@ export function oneSupervisor():OneSupervisorService {
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
     runtime:{
-      start:startNative,attach,receipt,noStartProof,placement:readRunTurnPlacement,unconfirmedRetryAllowed,
+      start:startNative,attach,receipt,noStartProof,placement:readRunTurnPlacement,unconfirmedRetryAllowed,successorRun:signInSuccessorRun,parkedEnded:signInWaitEnded,
       cancel:cancelNative,pauseGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"pause"),
       cancelGoal:(chatId,goalId)=>stopInvocationGoal(chatId,goalId,"delete"),
       steer:(req,runId)=>!hostOptions && invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' ? nativeRuntime!.steer(req,runId) : invocationService.steerFromSupervisor(req,runId,admitMainInvocation(req.chatId)),
@@ -358,12 +365,7 @@ export function oneSupervisor():OneSupervisorService {
       const chat=getChat(job.chat_id),task=getCanonicalTaskForChat(job.chat_id);
       if (!chat || chat.originSurface!=="work" || chat.kind!=="user" || task?.id!==job.task_id) throw supervisorError('supervisor_work_native_binding_changed');
     },runtime:{start:startNative,attach,receipt,onSettled,noStartProof,placement:readRunTurnPlacement,unconfirmedRetryAllowed,cancel:cancelNative,
-      // A parked sign-in wait resumes under a new run id (invocation/service resumeParkedBrowserLoginWait): the job follows it.
-      // A store that cannot be read yet knows no successor: the job keeps its own run (and is settled when it can be read).
-      successorRun:runId=>{try{const wait=latestInvocationBrowserLoginWait(runId);return wait?.state==="dispatched" && wait.successorInvocationId ? wait.successorInvocationId : null;}catch{return null;}},
-      // The resume handle lives in the process that parked the run: an app restart blocks the wait (service preserveWaiting), and then
-      // nothing can resume it. A wait still "waiting" may belong to a live process (Main or the daemon), so only "blocked" counts.
-      parkedEnded:runId=>{try{return latestInvocationBrowserLoginWait(runId)?.state==="blocked";}catch{return false;}}},
+      successorRun:signInSuccessorRun,parkedEnded:signInWaitEnded},
     onFailure:error=>console.warn("[one-supervisor] worker admission deferred",error instanceof Error ? error.message : "unknown"),
     rebindHandoffBrief:(chatId,fromRunId,toRunId)=>moveHostPromptMessage(chatId,fromRunId,toRunId,"one-dispatch-brief"),
     noticeSettled:(row,receipt)=>supervisor!.noticeSettledHandOff(row,receipt),

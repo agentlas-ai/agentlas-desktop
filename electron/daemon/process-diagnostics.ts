@@ -117,7 +117,34 @@ export function diagnosticErrorShape(error: unknown): Required<Pick<DaemonRuntim
   };
 }
 
-/** One console call as a typed line: tag of the first string, codes from the strings and from any error argument. */
+/** Fields that carry a machine code in the host's structured diagnostics (invocation/error-diagnostic.ts and the like). */
+const CODE_KEYS: ReadonlySet<string> = new Set(["code", "errorCode", "reasonCode", "causeCode", "checkpointKind"]);
+/**
+ * Codes held by named fields of a plain object argument, a few levels deep (a cause chain). Only those fields are read, through the same
+ * code filter as text, so a value of any other field (an id, a title, a prompt) never reaches the record. Before, an object argument
+ * kept nothing: the service's line for the refused One start was a bare tag, with its reasonCode in the object.
+ */
+function codesInRecord(value: unknown, add: (code: string) => void, depth = 0): void {
+  // Bytes carry no code fields, and listing a large buffer's indexes before the cut cost 1.1 s for 5 MB (deploy review).
+  if (depth > 3 || !value || typeof value !== "object" || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return;
+  if (Array.isArray(value)) { for (let index = 0; index < Math.min(8, value.length); index += 1) codesInRecord(value[index], add, depth + 1); return; }
+  // The first 24 own keys, read one by one: a wide object is never listed whole.
+  const entries: Array<[string, unknown]> = [];
+  try {
+    for (const key in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      entries.push([key, (value as Record<string, unknown>)[key]]);
+      if (entries.length >= 24) break;
+    }
+  } catch { return; /* a hostile proxy */ }
+  for (const [key, item] of entries) {
+    if (CODE_KEYS.has(key)) { const code = safeDiagnosticCode(item); if (code) add(code); }
+    else if (item && typeof item === "object") codesInRecord(item, add, depth + 1);
+  }
+}
+
+/** One console call as a typed line: tag of the first string, codes from the strings, from any error argument and from the named code
+ * fields of an object argument. */
 export function diagnosticConsoleLine(level: DaemonConsoleLevel, args: readonly unknown[]): DaemonRuntimeFields {
   const first = typeof args[0] === "string" ? TAG.exec(args[0]) : null;
   const codes: string[] = [];
@@ -130,6 +157,7 @@ export function diagnosticConsoleLine(level: DaemonConsoleLevel, args: readonly 
       if (shape.errorCode) add(shape.errorCode);
       for (const code of shape.codes) add(code);
       if (!errorName && shape.errorName && (arg instanceof Error)) { errorName = shape.errorName; errorCode = shape.errorCode; frames = shape.frames; }
+      if (!(arg instanceof Error)) codesInRecord(arg, add);
     }
   }
   return { level, tag: first ? safeDiagnosticTag(first[1].toLowerCase()) : null, codes,

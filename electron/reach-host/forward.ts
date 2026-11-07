@@ -49,7 +49,7 @@ export async function forwardReachToDesktop(tool: string, args: Record<string, u
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
     // The window answered but could not run it (Main's typed refusal or failure): say what it said, in the call's own vocabulary.
-    if (typeof code === "string" && code !== "app-window-unavailable") {
+    if (typeof code === "string" && code !== "app-window-unavailable" && code !== "app-window-starting") {
       return { status: "refused", reason: "desktop_refused", next: String((error as Error).message).slice(0, 300) };
     }
     return null;

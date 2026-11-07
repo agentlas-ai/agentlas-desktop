@@ -16,16 +16,36 @@ type AppBridge = Pick<DaemonDeviceBridge, "appControl"> & Partial<Pick<DaemonDev
 // the first call to find none waits this long, and the next ones within the memo are refused at once, as before.
 const MAIN_ATTACH_WAIT_MS = 6_000;
 const MAIN_ABSENT_MEMO_MS = 30_000;
+/** A window process this service just started (gui-background-launch.ts) gets this long: a cold start measured 8-21 s. */
+const MAIN_START_WAIT_MS = 30_000;
 const mainAbsentAt = new WeakMap<object, number>();
 
-async function waitForMain(bridge: AppBridge, withinMs: number): Promise<void> {
-  if (bridge.attached !== false) { mainAbsentAt.delete(bridge); return; }
+/** Set only by the background service (daemon/main.ts): it may start the app when no window process is attached. */
+export interface MainProcessLauncher { launch(): boolean; starting(): boolean; attached?(): void }
+let mainLauncher: MainProcessLauncher | null = null;
+export function configureMainProcessLauncher(next: MainProcessLauncher | null): void { mainLauncher = next; }
+function mainStarting(): boolean {
+  try { return mainLauncher?.starting() === true; } catch { return false; }
+}
+
+function noteAttached(bridge: AppBridge): void {
+  mainAbsentAt.delete(bridge);
+  try { mainLauncher?.attached?.(); } catch { /* the launcher's state is advisory */ }
+}
+
+async function waitForMain(bridge: AppBridge, withinMs: number, mayStart: boolean): Promise<void> {
+  if (bridge.attached !== false) { noteAttached(bridge); return; }
   if (!bridge.whenAttached || !(withinMs > 0)) return;
+  // After a login only this service runs: an operation One calls starts the app in the background (its tray, no window) and waits for
+  // it, instead of answering "tell the owner to open Agentlas" to an owner who is on the phone. A catalog listing never starts it.
+  let starting = false;
+  try { starting = (mayStart && mainLauncher?.launch() === true) || mainStarting(); } catch { starting = false; }
   const gaveUpAt = mainAbsentAt.get(bridge);
-  if (gaveUpAt !== undefined && Date.now() - gaveUpAt < MAIN_ABSENT_MEMO_MS) return;
-  const waitMs = Math.min(MAIN_ATTACH_WAIT_MS, withinMs);
-  if (await bridge.whenAttached(waitMs)) mainAbsentAt.delete(bridge);
-  else if (waitMs >= MAIN_ATTACH_WAIT_MS) mainAbsentAt.set(bridge, Date.now()); // only a full wait proves the window is not coming
+  if (!starting && gaveUpAt !== undefined && Date.now() - gaveUpAt < MAIN_ABSENT_MEMO_MS) return;
+  const fullWait = starting ? MAIN_START_WAIT_MS : MAIN_ATTACH_WAIT_MS;
+  const waitMs = Math.min(fullWait, withinMs);
+  if (await bridge.whenAttached(waitMs)) noteAttached(bridge);
+  else if (!starting && waitMs >= MAIN_ATTACH_WAIT_MS) mainAbsentAt.set(bridge, Date.now()); // only a full wait proves the window is not coming
 }
 
 /**
@@ -37,6 +57,7 @@ async function waitForMain(bridge: AppBridge, withinMs: number): Promise<void> {
  */
 export const APP_WINDOW_ABSENT_MESSAGE = "The Agentlas app window is not connected right now (the app is closed, restarting or updating), and this action can only run through it. Nothing was changed. Do not repeat the call in this run: continue with the other tools, or tell the owner to open Agentlas and send the request again.";
 export const APP_WINDOW_NO_ANSWER_MESSAGE = "The Agentlas app window is open but did not answer this request, so it may or may not have run. Read the state before repeating it.";
+export const APP_WINDOW_STARTING_MESSAGE = "Agentlas is starting in the background to run this (only its background service was running). Nothing was changed yet. Make the same call again in a moment.";
 export const APP_WINDOW_SCREEN_LOCKED_MESSAGE = "The screen is locked or asleep, so this action cannot run right now. Try again after the owner unlocks it.";
 
 function unavailable(error: unknown, bridge?: AppBridge): { code: string; message: string } {
@@ -48,6 +69,7 @@ function unavailable(error: unknown, bridge?: AppBridge): { code: string; messag
   // A window process that is attached right now but failed this request (the channel dropped under it, or it could not answer, or it refused)
   // is not "closed". A bridge that cannot say (a legacy fake) or has no window process attached is the absent case.
   const windowAttached = bridge?.attached === true;
+  if (!windowAttached && mainStarting()) return { code: "app-window-starting", message: APP_WINDOW_STARTING_MESSAGE };
   return { code: "app-window-unavailable", message: windowAttached ? APP_WINDOW_NO_ANSWER_MESSAGE : APP_WINDOW_ABSENT_MESSAGE };
 }
 
@@ -61,7 +83,7 @@ export async function remoteAppControlOperations<T extends object>(input: Record
   // re-attaching) is given the attach wait again and asked once more, instead of answering "unavailable" for a window that is coming back.
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await waitForMain(bridge, MAIN_ATTACH_WAIT_MS);
+      await waitForMain(bridge, MAIN_ATTACH_WAIT_MS, false);
       const answer = await bridge.appControl({ kind: "operations", ownerTurn: false, input });
       if (answer.outcome === "value") return answer.value as T;
       // Main refused or failed: say so, with the catalog this process can describe (nothing in it is runnable here).
@@ -84,7 +106,9 @@ export async function remoteAppControlCall(caller: AppControlCaller, input: { op
   // "running": the operation was neither refused nor lost, and the model's repeat of the call reaches the same run.
   const operation = typeof input.operation === "string" ? input.operation.trim() : "";
   const deadline = Date.now() + windowMs;
-  await waitForMain(bridge, deadline - Date.now() - 1500);
+  // Only the owner's own turn starts the app: a check-in, a review or any other host turn waits for a running app and never opens one
+  // behind the owner's back (deploy review ; the window policy already asked for ownerTurn).
+  await waitForMain(bridge, deadline - Date.now() - 1500, caller.ownerTurn === true);
   for (;;) {
     try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, permission: caller.permission ?? "read", input: request }); }
     catch (error) {

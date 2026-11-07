@@ -92,6 +92,9 @@ export async function startManagedOneHost(raw: unknown, options: ManagedOneHostO
   }
   owners.configureInvocationProcessOwner("daemon", `managed-one:${config.hostId}:${config.generation}:${randomUUID()}`);
   owners.invocationRunOwners.releaseAbandoned("daemon", owners.invocationProcessOwner().ownerId);
+  // The same proof ends the sign-in waits an earlier host parked and could no longer resume (invocation/browser-login-wait).
+  try { (await import("../invocation/browser-login-wait")).blockAbandonedBrowserLoginWaits("daemon", owners.invocationProcessOwner().ownerId); }
+  catch { console.warn("[managed-one] abandoned sign-in wait sweep deferred"); }
   (await import("../architecture/seed")).seedBuiltinAgents();
   const { CONVERSATIONAL_ROLES } = await import("../../shared/runtime-roles");
   const { setModelRoleMembers } = await import("../store/model-roles");

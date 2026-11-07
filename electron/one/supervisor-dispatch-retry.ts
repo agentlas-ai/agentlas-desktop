@@ -1,6 +1,6 @@
 import type { RuntimeSelection } from "../../shared/types";
 import { supervisorError } from "../../shared/one-supervisor";
-import { startRetryBackoffMs, transientSendBackoffMs } from "../../shared/transient-send-refusal";
+import { UNDISPATCHED_START_MAX_ATTEMPTS, startRetryBackoffMs, transientSendBackoffMs } from "../../shared/transient-send-refusal";
 import type { OneSupervisorStore, SupervisorRequestRow } from "./supervisor-store";
 import { sendRefusalCode } from "../../shared/transient-send-refusal";
 import { undispatchedInternalFailure } from "../../shared/run-failure-cause";
@@ -104,10 +104,16 @@ export function countSupervisorPreBeginRefusal(store: OneSupervisorStore, row: S
   if (!retry) throw supervisorError("supervisor_retry_frame_missing");
   if (!supervisorRetryExhausted(row,now)) save(store,row,{...retry,attempts:retry.attempts+1});
 }
-/** A runtime signal or a sign-in may have cleared the cause: the stored wait ends now. Returns whether the row had a wait to end. */
-export function wakeSupervisorDispatch(store: OneSupervisorStore, row: SupervisorRequestRow, now = Date.now()): boolean {
+/**
+ * A runtime signal or a sign-in may have cleared the cause: a wait in the long steps (attempts at the old cap or past it,
+ * supervisorRefusalDelay `long`) ends now when the signal came after the wait began. `signalAt` is that signal's time: Infinity when
+ * this process just heard it, or the shared floor the other process of the store wrote (runtime-signals.ts, one meta row). The wait
+ * began at notBefore minus its step. Returns whether the row had such a wait to end.
+ */
+export function wakeSupervisorLongWait(store: OneSupervisorStore, row: SupervisorRequestRow, signalAt: number, now = Date.now()): boolean {
   const retry = supervisorDispatchRetry(row);
-  if (!retry || retry.notBefore <= now) return false;
+  if (!retry || retry.notBefore <= now || retry.attempts < UNDISPATCHED_START_MAX_ATTEMPTS) return false;
+  if (signalAt <= retry.notBefore - startRetryBackoffMs(Math.max(0, retry.attempts - 1))) return false;
   save(store, row, { ...retry, notBefore: 0 });
   return true;
 }

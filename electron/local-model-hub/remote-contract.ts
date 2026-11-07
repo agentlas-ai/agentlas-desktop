@@ -127,7 +127,8 @@ export type LocalModelRpcCommand = { clientId: string } & (
   | { op: "run.read"; runId: string; afterSequence: number; limit?: number; waitMs?: number }
   | { op: "run.cancel"; runId: string }
   | { op: "run.permission"; runId: string; approvalId: string; resourceDigest: string; decision: RuntimeToolPermissionDecision }
-  | { op: "run.result"; ownerEpoch: string; runId: string; generation: string; resultId: string; allow: boolean }
+  // signIn (with allow false): the owner's own One turn met a sign-in only the owner can do; the model reads it as the call's result.
+  | { op: "run.result"; ownerEpoch: string; runId: string; generation: string; resultId: string; allow: boolean; signIn?: { site: string; step: string } }
   | { op: "run.ack"; runId: string; throughSequence: number }
   | { op: "client.detach" }
 );

@@ -125,7 +125,7 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     id: "run_events.ledgers",
     table: "run_events",
     kinds: [
-      "automation_scheduler_terminal", "runtime_effect_boundary", "runtime_adapter_effect_started", "runtime_adapter_effect_completed",
+      "runtime_effect_boundary", "runtime_adapter_effect_started", "runtime_adapter_effect_completed",
       "model_call_ledger", "invoke_started", "invoke_result", "invoke_completed", "invoke_failed", "mcp_final", "mcp_error",
       "agent_revision_run_finished", "runtime_usage_started", "runtime_usage_recorded", "workflow_node_state", "goal_result_presentation",
     ],
@@ -133,8 +133,22 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     action: { type: "keep-forever" },
     writer: "automation-scheduler.ts, effect-boundary-reader.ts, runtime adapters, model-call ledger",
     readers: "terminal receipts, effect ledger (outward-effect), accounting, resume, phone sync, Goal evidence",
-    evidence: "automation_scheduler_terminal payload is the run's terminal receipt with its output; runtime_effect_boundary lists every outward effect "
-      + "of a run (operations[].outcome). Both are cited by receipts. The remaining kinds are each under 8 MB.",
+    evidence: "runtime_effect_boundary lists every outward effect of a run (operations[].outcome) and is cited by receipts. "
+      + "The remaining kinds are each under 8 MB.",
+  },
+  {
+    id: "run_events.automation-terminal-output",
+    table: "run_events",
+    kinds: ["automation_scheduler_terminal"],
+    observedMb: 37,
+    action: { type: "compact-payload", days: 0 },
+    writer: "store/automations.ts recordAutomationTerminalReceipt: one receipt per finished run, carrying the run's output (up to the chain budget)",
+    readers: "automations.ts previousSuccessfulRunOutput (the newest ok receipt of an automation; unchanged = same outputDigest) and "
+      + "reconcileDurableChainDeliveries (receipts with fan-out targets, whose output is the chained input)",
+    evidence: "Owner store: 8,488 receipts, 37 MB. One 10-minute change watch wrote 4,414 receipts with 15 distinct outputs (32 MB), "
+      + "147 identical ones in a day. The row, digest, status, byte count and fan-out list stay. Only the output text of an ok receipt "
+      + "with no fan-out is emptied (outputTruncated true, which the receipt parser accepts), and only when a newer ok receipt of the same "
+      + "automation repeats its outputDigest. The newest ok receipt of every output keeps its text, so both readers read what they read before.",
   },
   {
     id: "run_events.host-recovery-claim",

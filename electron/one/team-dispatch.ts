@@ -421,6 +421,10 @@ export function recoverOneTeamDispatches(): void {
   if (!managedOneTeamAvailable()) return;
   if (recovered) return;
   recovered = true;
+  // The signals that re-send a waiting report (a run settled, the owner signed in again, a runtime signal) are listened to from the
+  // start: after a restart with only waiting reports and no new dispatch in this process they were never installed, so a report
+  // waiting for the owner's sign-in was never sent after the sign-in.
+  try { installSettleListener(); } catch (error) { console.warn("[one-team] report signals not installed:", error instanceof Error ? error.message : error); }
   try {
     ensureTable();
     reviveExhaustedReports();
@@ -710,7 +714,6 @@ let settleListenerInstalled = false;
 
 function installSettleListener(): void {
   if (settleListenerInstalled) return;
-  settleListenerInstalled = true;
   runtime().invocationService.onSettled((envelope) => {
     ensureTable();
     const dispatch = getDb().prepare(
@@ -729,6 +732,9 @@ function installSettleListener(): void {
       startQueuedDispatches();
     }, 1_500);
   });
+  // Marked only once the subscription is in place: a runtime that was not ready (it threw above) is subscribed on the next call,
+  // instead of never (recovery now installs these at start, where a throw is swallowed).
+  settleListenerInstalled = true;
   // A withheld report remains pending. Returning to its original account can
   // retry it without relaunching the teammate or consuming an attempt.
   try {
@@ -750,6 +756,10 @@ function installSettleListener(): void {
       },0);
     });
   } catch { /* A host without auth events still recovers through its durable rows. */ }
+  // A runtime signed in, recovered or reconnected: a report refused for the owner (a runtime sign-in, credits) may go now.
+  try {
+    (require("../runtime/runtime-signals") as typeof import("../runtime/runtime-signals")).onRuntimeSignal(() => { setTimeout(() => retryFailedReports(), 0); });
+  } catch { /* the sign-in signal above still re-sends it */ }
 }
 
 /** The personal One hears a teammate result when its own one_chat_send run started that teammate (22 O1). */
@@ -1073,10 +1083,12 @@ function reportToOne(dispatch: OneDispatchRow, userPrompt?: string | null, markR
     console.warn("[one-team] report turn not started:", message);
     // No model ran, so this refusal does not use up the cap (only a report turn that may have run does, see revertQueuedOneTeamReport):
     // the count stays below it and the report waits for the next signal. A refusal only the owner can clear (sign-in, payment,
-    // permission) is the one closed here: nothing the host does clears it.
-    const closedForOwner = refusalNeedsOwner(error);
-    if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ?, report_attempts = CASE WHEN ? = 1 THEN ? ELSE MIN(report_attempts + 1, ? - 1) END WHERE id = ? AND reported_at IS NULL")
-      .run(message.slice(0, 240), closedForOwner ? 1 : 0, ONE_TEAM_REPORT_ATTEMPTS, ONE_TEAM_REPORT_ATTEMPTS, dispatch.id);
+    // permission) used to close the report for good, so after the owner signed in again nothing re-sent it and a Goal waiting on this
+    // result never woke: it now waits for the owner's own act (a restored sign-in, a runtime signal), with no timer retrying it.
+    // A waiting Goal's refusal is not the owner's to clear: the Goal's next turn carries the report (settleParkedReports matches it exactly).
+    const forOwner = refusalNeedsOwner(error) && message !== "goal_waiting_system_start_refused";
+    if (markReported) getDb().prepare("UPDATE one_team_dispatches SET report_error = ?, report_attempts = MIN(report_attempts + 1, ? - 1) WHERE id = ? AND reported_at IS NULL")
+      .run(`${forOwner ? REPORT_WAITS_FOR_OWNER : ""}${message}`.slice(0, 240), ONE_TEAM_REPORT_ATTEMPTS, dispatch.id);
     armOrphanSweep();
     return "failed";
   }
@@ -1164,12 +1176,14 @@ const REPORT_NO_PROGRESS_CODES = [ONE_TEAM_REPORT_OWNER_STOPPED, "one_team_repor
 const RETRY_PARENTS_PER_PASS = 10;
 const RETRY_ROWS_PER_PARENT = 10;
 const REPORT_WAITING_SQL = "status <> 'running' AND reported_at IS NULL AND report_error IS NOT NULL AND report_attempts < ?";
+/** report_error prefix of a report refused for a cause only the owner clears: re-sent on the owner's act (sign-in, runtime signal), never by the timer. */
+const REPORT_WAITS_FOR_OWNER = "owner_action:";
 
 /** Rooms that have a report waiting and a reason a signal or the fallback can still help: what keeps the fallback timer on. */
 export function pendingReportParents(): string[] {
   ensureTable();
   return (getDb().prepare(`SELECT DISTINCT parent_chat_id AS id FROM one_team_dispatches WHERE ${REPORT_WAITING_SQL}
-    AND report_error NOT IN (${REPORT_NO_PROGRESS_CODES.map(() => "?").join(",")})`)
+    AND report_error NOT IN (${REPORT_NO_PROGRESS_CODES.map(() => "?").join(",")}) AND report_error NOT LIKE '${REPORT_WAITS_FOR_OWNER}%'`)
     .all(ONE_TEAM_REPORT_ATTEMPTS, ...REPORT_NO_PROGRESS_CODES) as Array<{ id: string }>).map((entry) => entry.id);
 }
 

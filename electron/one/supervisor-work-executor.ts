@@ -7,10 +7,10 @@ import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
 import { OneSupervisorWorkQueue, type SupervisorWorkLease } from "./supervisor-work-queue";
 import {OneBudgetAdmissionDenied} from "./budget-store";
-import {onRuntimeSignal} from "../runtime/runtime-signals";
+import {onRuntimeSignal, runtimeSignalFloor} from "../runtime/runtime-signals";
 import {UNDISPATCHED_START_MAX_ATTEMPTS,isTransientSendRefusalCode,sendRefusalCode,startRefusalWaitsLong, isStoreBusyError, isRefusedBeforeDispatch } from "../../shared/transient-send-refusal";
 
-import {rebindSupervisorUnconfirmed, SUPERVISOR_UNCONFIRMED_MAX_SENDS, countSupervisorPreBeginRefusal, retainSupervisorStartVerdict, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, reserveSupervisorDispatch, supervisorRefusalDelay, wakeSupervisorDispatch} from "./supervisor-dispatch-retry";
+import {rebindSupervisorUnconfirmed, SUPERVISOR_UNCONFIRMED_MAX_SENDS, countSupervisorPreBeginRefusal, retainSupervisorStartVerdict, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, reserveSupervisorDispatch, supervisorRefusalDelay, wakeSupervisorLongWait} from "./supervisor-dispatch-retry";
 
 
 /** The brief as Work receives it: the brief itself, then One's checklist for "finished" when it gave one. */
@@ -59,6 +59,16 @@ const BOOKKEEPING_HOLDS: ReadonlySet<string> = new Set(["work_owner_unconfirmed"
  * The adapter's lifetime determines whether this is a Main host worker or a
  * daemon worker; a queue/table alone never establishes daemon ownership.
  */
+/** The run that carries `runId` on after its sign-in waits (each parked wait resumes under a new run id), with that run's receipt. */
+export function signInCarrier(runtime: Pick<SupervisorWorkRuntime, "receipt" | "successorRun">, runId: string): { runId: string; receipt: InvocationRunReceipt | null } {
+  let current = runId, receipt = runtime.receipt(current);
+  for (let hop = 0; hop < 8 && runtime.successorRun && receipt?.status === "waiting_input"; hop += 1) {
+    const next = runtime.successorRun(current);
+    if (!next || next === current) break;
+    current = next; receipt = runtime.receipt(current);
+  }
+  return { runId: current, receipt };
+}
 /** How long a hand-off may be refused at its start before One is told (it keeps retrying either way). */
 export const WORK_START_STALL_MS = 5 * 60_000;
 
@@ -72,10 +82,11 @@ export class OneSupervisorWorkExecutor {
   private readonly reconciled = new Map<string, {version: string; checkedAt: number}>();
   private readonly unsubscribe: () => void;
   private readonly stopWakes: Array<() => void> = [];
+  private signalFloorSeen = 0;
   constructor(private readonly deps: SupervisorWorkExecutorOptions) {
     // A runtime signal or a sign-in ends a long refusal wait now (the cause may have cleared).
-    try { this.stopWakes.push(onRuntimeSignal(() => this.wakeLongWaits())); } catch { /* the step ends by itself */ }
-    try { this.stopWakes.push((require("../auth") as typeof import("../auth")).onAuthSessionRestored(() => this.wakeLongWaits())); } catch { /* the step ends by itself */ }
+    try { this.stopWakes.push(onRuntimeSignal(() => this.wakeLongWaits(Infinity))); } catch { /* the step ends by itself */ }
+    try { this.stopWakes.push((require("../auth") as typeof import("../auth")).onAuthSessionRestored(() => this.wakeLongWaits(Infinity))); } catch { /* the step ends by itself */ }
     if (deps.queue.db !== deps.store.db) throw supervisorError('supervisor_work_store_mismatch');
     this.unsubscribe = deps.runtime.onSettled(event => {
       if (this.closed || !this.started) return;
@@ -106,8 +117,8 @@ export class OneSupervisorWorkExecutor {
     // A UI disconnect never cancels a worker. Native host shutdown remains the
     // single owner of its child tree, deadlines and terminal interruption receipt.
   }
-  /** Claims waiting out a long step (attempts past the old cap) are claimable now. */
-  private wakeLongWaits(): void {
+  /** Claims waiting out a long step (attempts past the old cap) that began before `signalAt` are claimable now. */
+  private wakeLongWaits(signalAt: number, tickAfter = true): void {
     if (this.closed || !this.started) return;
     try {
       this.deps.assertOwner();
@@ -115,16 +126,20 @@ export class OneSupervisorWorkExecutor {
       let woken = false;
       for (const job of identity ? this.deps.queue.waitingRefused(identity) : []) {
         const row = this.deps.store.get(job.command_id);
-        if (!row || row.state !== "stored" || (supervisorDispatchRetry(row)?.attempts ?? 0) < UNDISPATCHED_START_MAX_ATTEMPTS) continue;
-        if (!this.deps.store.db.transaction(() => { const fresh = this.deps.store.get(job.command_id); return !!fresh && fresh.state === "stored" && wakeSupervisorDispatch(this.deps.store, fresh, this.deps.now?.() ?? Date.now()) && this.deps.queue.wakeRefused(job); }).immediate()) continue;
+        if (!row || row.state !== "stored") continue;
+        if (!this.deps.store.db.transaction(() => { const fresh = this.deps.store.get(job.command_id); return !!fresh && fresh.state === "stored" && wakeSupervisorLongWait(this.deps.store, fresh, signalAt, this.deps.now?.() ?? Date.now()) && this.deps.queue.wakeRefused(job); }).immediate()) continue;
         woken = true;
       }
-      if (woken) this.tick(false);
+      if (woken && tickAfter) this.tick(false);
     } catch (error) { this.deps.onFailure?.(error); }
   }
   kick(): void { this.tick(); }
   tick(reconcileNow = true): void {
     if (this.closed || this.ticking) return;
+    // A sign-in or runtime signal heard by the other process of this store reaches this one through the shared floor (one meta row,
+    // read at most every 2 s): a long refusal wait that began before it ends here too.
+    const floor = runtimeSignalFloor();
+    if (floor > this.signalFloorSeen) { this.signalFloorSeen = floor; this.wakeLongWaits(floor, false); }
     this.ticking = true;
     try {
       this.deps.assertOwner();
@@ -397,15 +412,7 @@ export class OneSupervisorWorkExecutor {
   }
   /** The run that carries the job now and its receipt: its own, or the successor a sign-in wait resumed it under (followed for a few
    * hops). Only a run that stopped to wait for the owner (waiting_input) can have one; the receipt read is the one reconcile needs. */
-  private carrier(runId: string): { runId: string; receipt: InvocationRunReceipt | null } {
-    let current = runId, receipt = this.deps.runtime.receipt(current);
-    for (let hop = 0; hop < 8 && this.deps.runtime.successorRun && receipt?.status === "waiting_input"; hop += 1) {
-      const next = this.deps.runtime.successorRun(current);
-      if (!next || next === current) break;
-      current = next; receipt = this.deps.runtime.receipt(current);
-    }
-    return { runId: current, receipt };
-  }
+  private carrier(runId: string): { runId: string; receipt: InvocationRunReceipt | null } { return signInCarrier(this.deps.runtime, runId); }
   private settle(job: SupervisorWorkLease, receipt: InvocationRunReceipt): void {
     if (receipt.runId !== this.carrier(job.run_id).runId || receipt.chatId !== job.chat_id || !terminal(receipt.status)) return;
     if (this.retryUnconfirmed(job,receipt)) return;
@@ -462,8 +469,9 @@ export class OneSupervisorWorkExecutor {
     if (refused) { this.retryAfterRefusal(job, refused); return; }
     const { runId: carrier, receipt } = this.carrier(job.run_id);
     // A sign-in wait an app restart cut can no longer resume: the hand-off ends as interrupted, so One is woken to continue it
-    // (a follow-up resumes it in the same conversation) instead of the card staying open with nothing running.
-    if (carrier === job.run_id && receipt?.status === "waiting_input" && receipt.chatId === job.chat_id && this.deps.runtime.parkedEnded?.(carrier)) {
+    // (a follow-up resumes it in the same conversation) instead of the card staying open with nothing running. The wait is the
+    // carrier's: a successor that stopped at a second sign-in is cut the same way.
+    if (receipt?.runId === carrier && receipt.status === "waiting_input" && receipt.chatId === job.chat_id && this.deps.runtime.parkedEnded?.(carrier)) {
       this.settle(job, { ...receipt, status: "interrupted" });
       return;
     }

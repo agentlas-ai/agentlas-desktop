@@ -559,7 +559,21 @@ export function readyLessonsFor(agentId: string): Array<{ groupId: string; memor
 }
 /** True while a learning change waits for the owner, so the proposer does not stack another on top of it. */
 export function hasOpenLearningProposal(agentId: string): boolean {
-  return listProposals(agentId).some(proposal => proposal.status === "review_ready" && proposal.memoryEntryIds.length > 0);
+  const open = listProposals(agentId).filter(proposal => proposal.status === "review_ready" && proposal.memoryEntryIds.length > 0);
+  if (!open.length) return false;
+  // A learning change whose base the agent's files have since moved past can never be applied; the diff view marks it stale the same
+  // way. Left "open", it held that agent's learning back until the owner happened to open it (three agents, 8-18 days).
+  // A change that still applies keeps waiting for the owner's review. One snapshot per agent, every 30 minutes while idle.
+  return withLock(agentId, () => {
+    const digest = snapshotAgentWorkspace(rootFor(agentId).root).treeDigest;
+    let held = false;
+    for (const listed of open) {
+      const proposal = getProposal(listed.id);
+      if (proposal.status !== "review_ready") continue;
+      if (proposal.baseTreeDigest !== digest) { proposal.status = "stale"; saveProposal(proposal); } else held = true;
+    }
+    return held;
+  });
 }
 /**
  * What the host knows about the memories behind a learning change, for the auto-evolution gate (auto-evolution.ts): their kinds,

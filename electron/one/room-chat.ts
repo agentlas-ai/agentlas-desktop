@@ -19,6 +19,8 @@ export const MAX_ROOM_SAY_CHARS = 4_000;
 const BRAKE_WINDOW_MS = 10 * 60_000;
 const MAX_DIRECT_PER_PAIR = 8;
 const MAX_ONE_WAKES_PER_ROOM = 10;
+/** Notes held past the One brake (the newest are kept); they reach One in one wake when the window frees. */
+const MAX_HELD_NOTES = 20;
 const DUPLICATE_WINDOW_MS = 60_000;
 
 export interface RoomChatMember { agentId: string; memberId: string; name: string; aliases: string[] }
@@ -51,6 +53,8 @@ export interface RoomChatPorts {
   /** A normal system follow-up to One in the room. */
   wakeOne(input: { roomChatId: string; notes: RoomNoteForOne[] }): void;
   now?(): number;
+  /** Runs `run` once after `ms` (default: an unref'd timer). */
+  later?(run: () => void, ms: number): void;
 }
 
 export interface RoomSayInput { text?: unknown; to?: unknown; replyTo?: unknown }
@@ -101,6 +105,9 @@ export function createRoomChat(ports: RoomChatPorts) {
   const now = ports.now ?? (() => Date.now());
   const pairLog = new Map<string, number[]>();
   const wakeLog = new Map<string, number[]>();
+  const later = ports.later ?? ((run: () => void, ms: number) => { setTimeout(run, ms).unref?.(); });
+  /** Notes past the One brake, per room, and when the window frees. */
+  const held = new Map<string, { notes: RoomNoteForOne[]; dueAt: number }>();
   const store = createRoomDiscussionStore({
     db: () => ports.db(),
     appendChatMessage: (chatId, _role, text, options) => ports.appendMessage(chatId, text, options?.speakerAgentId ?? ""),
@@ -113,6 +120,31 @@ export function createRoomChat(ports: RoomChatPorts) {
     recent.push(now());
     log.set(key, recent);
     return true;
+  }
+
+  function wake(roomChatId: string, notes: RoomNoteForOne[]): void {
+    try { ports.wakeOne({ roomChatId, notes }); }
+    catch (error) { console.warn("[room-chat] One follow-up not queued:", error instanceof Error ? error.message : error); }
+  }
+
+  /**
+   * One is woken at most MAX_ONE_WAKES_PER_ROOM times a window. A note past that is not dropped (it used to be: the room kept it, One
+   * never heard of it): it is held, and one wake carries every held note when the window frees.
+   */
+  function wakeOrHold(roomChatId: string, notes: RoomNoteForOne[]): void {
+    const waiting = held.get(roomChatId);
+    if (waiting && now() < waiting.dueAt) {
+      waiting.notes.push(...notes);
+      waiting.notes.splice(0, Math.max(0, waiting.notes.length - MAX_HELD_NOTES));
+      return;
+    }
+    const carried = waiting ? [...waiting.notes, ...notes].slice(-MAX_HELD_NOTES) : notes;
+    held.delete(roomChatId);
+    if (underBrake(wakeLog, roomChatId, MAX_ONE_WAKES_PER_ROOM)) { wake(roomChatId, carried); return; }
+    const dueAt = Math.min(...(wakeLog.get(roomChatId) ?? [now()])) + BRAKE_WINDOW_MS + 1_000;
+    held.set(roomChatId, { notes: [...carried], dueAt });
+    later(() => { const entry = held.get(roomChatId); if (entry && entry.dueAt === dueAt) { held.delete(roomChatId); wakeOrHold(roomChatId, entry.notes); } },
+      Math.max(1_000, dueAt - now()));
   }
 
   /** The dispatch this child chat is working for, when it belongs to a group room. */
@@ -224,9 +256,8 @@ export function createRoomChat(ports: RoomChatPorts) {
     } catch { stepOwner = null; }
     if (reachesOne && stepOwner && deliverGraphTeamStepEvent(stepOwner, { kind: "note", dispatchId: self.dispatchId, from: senderName, text, urgent: notesForOne.idle.length > 0 })) {
       // delivered to the step
-    } else if (reachesOne && underBrake(wakeLog, roomChatId, MAX_ONE_WAKES_PER_ROOM)) {
-      try { ports.wakeOne({ roomChatId, notes: [notesForOne] }); }
-      catch (error) { console.warn("[room-chat] One follow-up not queued:", error instanceof Error ? error.message : error); }
+    } else if (reachesOne) {
+      wakeOrHold(roomChatId, [notesForOne]);
     }
     return {
       ok: true, message_id: written.messageId, delivered,

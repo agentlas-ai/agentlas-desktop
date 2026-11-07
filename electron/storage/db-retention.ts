@@ -43,6 +43,8 @@ export interface DbRetentionReport {
   turnContextEntries: { compacted: number };
   sessionCheckpoints: { deleted: number };
   sourceVersions: { deleted: number };
+  /** Automation receipts whose output text a newer receipt repeats (policy rule run_events.automation-terminal-output). */
+  terminalOutputs: { compacted: number };
   /** Delivery/ledger rows whose work is over (policy rules `*.closed`): rows deleted per table, tables left alone (older shape). */
   closedRows: { deleted: number; byTable: Record<string, number>; skipped: string[]; ran: boolean };
   complete: boolean;
@@ -209,6 +211,34 @@ function trimStepEvents(db: Database.Database, now: number, budget: Budget, queu
   }
   result.done = true;
   return result;
+}
+
+/* ------------------------------------------- automation terminal receipts */
+
+/**
+ * The receipts to empty are picked once per pass (one window over the ok receipts), then emptied by rowid in slices. A picked row
+ * stays picked: receipts never change, and a newer receipt with the same output only adds to the rows that qualify.
+ */
+export interface TerminalOutputState { pending: number[] | null }
+export function compactRepeatedTerminalOutputs(db: Database.Database, state: TerminalOutputState): { compacted: number; done: boolean } {
+  const rule = retentionRule("run_events.automation-terminal-output");
+  if (rule.action.type !== "compact-payload") throw new Error("db_retention_rule_shape");
+  // Only receipts of real runs (automation_runs.dry_run = 0), newest by the run's started_at: the reader
+  // (automations.ts previousSuccessfulRunOutput) looks at exactly those runs in exactly that order, so a dry run or a manual run
+  // whose receipt time differs from its start never empties the receipt the reader takes. The pick carries a flag, not the text.
+  state.pending ??= (db.prepare(`SELECT rid FROM (
+      SELECT e.rowid AS rid, json_extract(e.payload_json, '$.output') != '' AS hasText,
+        json_array_length(e.payload_json, '$.fanoutTargetIds') AS fanout,
+        ROW_NUMBER() OVER (PARTITION BY e.automation_id, json_extract(e.payload_json, '$.outputDigest')
+          ORDER BY r.started_at DESC, e.rowid DESC) AS newer
+      FROM run_events e JOIN automation_runs r ON r.id = e.run_id AND r.automation_id = e.automation_id AND COALESCE(r.dry_run, 0) = 0
+      WHERE e.kind = 'automation_scheduler_terminal' AND json_valid(e.payload_json) AND json_extract(e.payload_json, '$.status') = 'ok')
+    WHERE newer > 1 AND hasText AND fanout = 0`).all() as Array<{ rid: number }>).map((row) => row.rid);
+  const batch = state.pending.splice(0, DB_RETENTION_LIMITS.sliceRows);
+  if (!batch.length) return { compacted: 0, done: true };
+  const compacted = db.prepare(`UPDATE run_events SET payload_json = json_set(payload_json, '$.output', '', '$.outputTruncated', json('true'))
+    WHERE rowid IN (${batch.map(() => "?").join(",")}) AND kind = 'automation_scheduler_terminal'`).run(...batch).changes;
+  return { compacted, done: state.pending.length === 0 };
 }
 
 /* -------------------------------------------------- agent context journal */
@@ -388,7 +418,7 @@ function writeCursors(db: Database.Database, cursors: Cursors): void {
 export async function runDbRetentionPass(options: DbRetentionOptions): Promise<DbRetentionReport> {
   const report: DbRetentionReport = {
     ran: false, skipped: "none", chatDetail: { runs: 0, deleted: 0 }, stepEvents: { entities: 0, deleted: 0 },
-    toolEntries: { compacted: 0 }, turnContextEntries: { compacted: 0 }, sessionCheckpoints: { deleted: 0 }, sourceVersions: { deleted: 0 },
+    toolEntries: { compacted: 0 }, turnContextEntries: { compacted: 0 }, sessionCheckpoints: { deleted: 0 }, sourceVersions: { deleted: 0 }, terminalOutputs: { compacted: 0 },
     closedRows: { deleted: 0, byTable: {}, skipped: [], ran: false }, complete: false,
     checkpointedWal: false, vacuum: { ran: false, reason: "not-run", fileBytesBefore: 0, fileBytesAfter: 0, ms: 0 }, workMs: 0, errors: [],
   };
@@ -441,6 +471,10 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
       const closedState = newClosedPurgeState();
       report.closedRows.ran = true;
       done.closed = await sliceLoop("delivery.closed-rows", () => purgeClosedBatch(db, now, closedState), (value) => { report.closedRows.deleted += value.deleted; });
+      // Same cadence: the pick reads every automation receipt once.
+      const terminalState: TerminalOutputState = { pending: null };
+      done.closed = await sliceLoop("run_events.automation-terminal-output", () => compactRepeatedTerminalOutputs(db, terminalState),
+        (value) => { report.terminalOutputs.compacted += value.compacted; }) && done.closed;
       report.closedRows.byTable = closedState.deleted;
       report.closedRows.skipped = closedState.skipped;
       if (done.closed) options.shortBusy(() => db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
@@ -455,7 +489,8 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
     // The memory-store version purge does not hold back the main store's reclaim: its rows live in the other file.
     report.complete = done.chat && done.steps && done.journal && done.checkpoints && done.closed && report.errors.length === 0;
     const changed = report.chatDetail.deleted + report.stepEvents.deleted + report.toolEntries.compacted
-      + report.turnContextEntries.compacted + report.sessionCheckpoints.deleted + report.sourceVersions.deleted + report.closedRows.deleted;
+      + report.turnContextEntries.compacted + report.sessionCheckpoints.deleted + report.sourceVersions.deleted + report.closedRows.deleted
+      + report.terminalOutputs.compacted;
     if (changed > 0) {
       const checkpoint = options.shortBusy(() => db.pragma("wal_checkpoint(TRUNCATE)") as Array<{ busy?: number }>);
       report.checkpointedWal = Boolean(checkpoint && !checkpoint[0]?.busy);

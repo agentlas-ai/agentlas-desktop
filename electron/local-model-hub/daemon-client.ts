@@ -13,6 +13,7 @@ import type { RunnerEvents, RunnerResult } from "../runtime/runner";
 import type { LocalModelHubControlPort, LocalModelHubRuntimePort, LocalModelRuntimeObservation } from "./ports";
 import type { LocalModelHubSnapshot } from "../../shared/local-model-hub";
 import { exportPreparedMcpAdmission, preparedMcpProxyScope, preparedMcpProxyScopeMatchesAsk } from "../mcp-tools/prepared-transport";
+import { isBrowserSignInNeeded } from "../../shared/browser-sign-in-needed";
 import { assertLocalModelWireValue, localModelRemoteError, remoteLocalModelRequest,
   LOCAL_MODEL_PRE_LAUNCH_CODES, WORK_RELAY_CHUNK_CHARS, WORK_RELAY_MAX_CHARS,
   type LocalModelControlCommand, type LocalModelControlPage, type LocalModelRpcCommand,
@@ -335,6 +336,8 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
       let mcpAdmission: ReturnType<typeof exportPreparedMcpAdmission> | undefined;
       let proxyScope: ReturnType<typeof preparedMcpProxyScope> | undefined;
       let resultBoundaryGeneration: string | undefined, workRecoveryGeneration: string | undefined;
+      /** The service carries a sign-in only the owner can do as the call's result (run.result signIn). */
+      let relaysSignIn = false;
       let workRecoveryHost: ReturnType<typeof createMainWorkRecoveryRelayHost> | null = null;
       let wire: ReturnType<typeof remoteLocalModelRequest>;
       let preScope: { ownerEpoch: string; runId: string } | null = null;
@@ -370,6 +373,7 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
             || capability.generation !== resultBoundaryGeneration) {
             throw failure("local_model_daemon_result_boundary_unsupported", "not-dispatched", preScope);
           }
+          relaysSignIn = capability.signInResult === true;
           request.signal?.throwIfAborted();
         }
         if (workRecoveryGeneration) {
@@ -601,6 +605,18 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
                 if (preparedMcpProxyScope(request.mcpConfigPath) !== proxyScope) throw new Error("mcp_prepared_scope_changed");
               }
             } catch (error) {
+              // The owner's own One turn met a sign-in only the owner can do (mcp/client.ts ownerAnswersSignIn): the service hands the
+              // model the site as the call's result and the run goes on, as Main's own loop does (local-tool-loop.ts). A service that
+              // cannot carry it (an older build: no signInResult) releases the page as it is, which shows the sign-in, instead of
+              // ending the owner's turn. A result the service no longer waits for (its own timer, a stop) leaves nothing to answer.
+              if (isBrowserSignInNeeded(error) && !request.signal?.aborted) {
+                await command({ op: "run.result", clientId, ownerEpoch: scope.ownerEpoch, runId: scope.runId, generation: resultBoundaryGeneration,
+                  resultId: pending.id, ...(relaysSignIn ? { allow: false, signIn: { site: error.site, step: error.step } } : { allow: true }) },
+                  scope.ownerEpoch).catch(() => {});
+                answeredResults.add(pending.id);
+                if (answeredResults.size > 32) answeredResults.delete(answeredResults.values().next().value!);
+                continue;
+              }
               await command({ op: "run.result", clientId, ownerEpoch: scope.ownerEpoch, runId: scope.runId,
                 generation: resultBoundaryGeneration, resultId: pending.id, allow: false }, scope.ownerEpoch, 1_000).catch(() => {});
               throw error;

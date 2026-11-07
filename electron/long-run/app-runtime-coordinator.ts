@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
 import { invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
+import { blockAbandonedBrowserLoginWaits } from "../invocation/browser-login-wait";
 import { releaseGoneTerminalOwners } from "../store/terminal-owner-liveness";
 import { userDataDir } from "../runtime-paths";
 import {
@@ -75,6 +76,13 @@ export function initializeAppRuntimeCoordinator(
       }
     } catch (error) {
       console.error("[invocation] abandoned run lease release failed", error);
+    }
+    // The same proof ends the sign-in waits that Desktop parked and could no longer resume (a Work on one is then continued by One).
+    try {
+      const blocked = blockAbandonedBrowserLoginWaits("desktop", invocationProcessOwner().ownerId);
+      if (blocked.length > 0) console.warn(`[invocation] ended ${blocked.length} sign-in wait(s) a previous Desktop left: ${blocked.join(", ")}`);
+    } catch (error) {
+      console.error("[invocation] abandoned sign-in wait sweep failed", error);
     }
   }
   // A terminal that died without releasing (kill -9, a crash, a reboot) left its lease active, which refuses every later turn of

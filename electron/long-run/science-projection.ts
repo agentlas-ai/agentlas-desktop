@@ -5,6 +5,7 @@ import {
 } from "agentlas-science/dist/contracts/science-long-run";
 import { getDb } from "../store/db";
 import { parseSegmentBudgetState } from "../../shared/segment-budget";
+import { LONG_RUN_TERMINAL_STATUSES, type LongRunStatus } from "../../shared/long-run";
 import {
   applyScienceLongRunProjectionStatus,
   applyScienceAuthorCompletionProjection,
@@ -38,7 +39,10 @@ function assertDaemonOwner(owner: ScienceDaemonProjectionOwner): void {
 }
 
 /** Called after the previous Science execution host has relinquished its lease.
- * Only canonical Science projections move; task, attempt and result states do not. */
+ * Only canonical Science projections move; task, attempt and result states do not. Ended runs move too: the startup reconcile
+ * re-projects every loop session, ended ones included, and that projection requires the current owner. Only a run that can still act
+ * gets the run.host_owner_changed event. Nothing reads it, and an ended run gained one per service boot (measured on a real installation: 230 on
+ * 2 runs cancelled in September). */
 export function adoptScienceLongRunOwnership(input: {
   appInstanceId: string;
   assertOwner(): void;
@@ -48,12 +52,12 @@ export function adoptScienceLongRunOwnership(input: {
   const db = getDb();
   return db.transaction(() => {
     assertDaemonOwner(owner);
-    const rows = db.prepare(`SELECT r.id, r.goal_id, r.science_job_id, r.host_owner_kind, r.app_instance_id
+    const rows = db.prepare(`SELECT r.id, r.goal_id, r.science_job_id, r.host_owner_kind, r.app_instance_id, r.status
       FROM long_runs r JOIN long_run_domain_bindings b ON b.long_run_id = r.id
       WHERE r.surface = 'science' AND r.execution_location = 'desktop-local'
         AND r.host_owner_kind IN ('desktop', 'daemon') AND b.domain = 'science'
         AND b.object_type = 'loop_session' AND b.object_id = r.science_job_id`).all() as Array<{
-      id: string; goal_id: string; science_job_id: string; host_owner_kind: string; app_instance_id: string | null;
+      id: string; goal_id: string; science_job_id: string; host_owner_kind: string; app_instance_id: string | null; status: LongRunStatus;
     }>;
     const adopted: string[] = [];
     for (const row of rows) {
@@ -63,7 +67,7 @@ export function adoptScienceLongRunOwnership(input: {
         WHERE id = ? AND host_owner_kind = ? AND app_instance_id IS ?`)
         .run(owner.appInstanceId, row.id, row.host_owner_kind, row.app_instance_id);
       if (changed.changes !== 1) throw new Error("science_projection_owner_changed");
-      appendLongRunEvent({ runId: row.id, kind: "run.host_owner_changed", actorKind: "host", actorId: owner.appInstanceId,
+      if (!LONG_RUN_TERMINAL_STATUSES.has(row.status)) appendLongRunEvent({ runId: row.id, kind: "run.host_owner_changed", actorKind: "host", actorId: owner.appInstanceId,
         payload: { previousHostOwnerKind: row.host_owner_kind, previousOwnerEpoch: row.app_instance_id,
           hostOwnerKind: "daemon", ownerEpoch: owner.appInstanceId } });
       adopted.push(row.id);

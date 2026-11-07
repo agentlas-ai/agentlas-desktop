@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.135 — 2026-11-08
+
+- One: a sign-in wait that a process left behind when it died ends at the next start, and the Work on it is continued by One. A reply the app refused for its own state waits one, five and ten minutes like a hand-off, and wakes when a sign-in or a runtime signal arrives. A reply, follow-up or room message whose turn stopped at a sign-in follows the run that continued it, and a wait an app restart cut ends as stopped instead of hanging. A reply start that never answered is released by the 30-second check, so the next message and One's report are never held behind it.
+- Hand-offs: a result whose notice failed is told to One again, a teammate report refused for the owner waits for the owner's act instead of closing, and a teammate note that passes One's wake limit is kept and reaches One in one wake when the window frees.
+- Agentlas Local: One's reply goes on past a sign-in (the page is handed over as it is when an older background service cannot carry the sign-in).
+- Background service: a start it refused before it began frees its run id, so the app's retry of the same run starts; a run id stays free after a replay of a closed attempt and after a host refusal at once. Its runtime log keeps the codes of a structured diagnostic argument and reads byte buffers and large objects safely.
+- App: after a login, the background service starts the app in its tray only for the owner's own turn when One needs an app operation; a check-in or a review never opens the app.
+- Phone: the first message to a new One conversation is saved once, with its files, not twice.
+- Storage: the retention pass empties the output text of an automation receipt a newer receipt repeats (a dry run never counts).
+- Learning: a learning change whose base the agent's files moved past no longer holds that agent's learning back. Science: the service's ownership hand-over writes no unread events on ended runs.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 ## 1.3.134 — 2026-11-07
 
 - One: right after an update, a One turn the app sent to the background service (the review of a finished Work, a message from the phone) is no longer refused before it starts while the service has not yet taken over One's conversation; the app's own supervisor already checked that turn, and the service now re-checks that its conversation and prompt are the ones the app sent. A start the service did refuse before it began, with its refusal recorded, no longer leaves One's conversation locked: the run that never started is closed as rejected, so the next message and the pending review start, the owner hears the result of a finished Work, and the hand-over of the conversation to the background service goes on.

@@ -1,4 +1,5 @@
 import { withLocalModelPermissionRelay } from "./local-model-approval";
+import { browserSignInNeededFrom, type BrowserSignInNeeded } from "../../shared/browser-sign-in-needed";
 import { withAttemptChildren, type AttemptChildren } from "../runtime/attempt-children";
 import { drainAttemptChildren, killCliTree } from "../runtime/exec";
 import type { RuntimeToolPermissionDecision } from "../runtime/tool-approval";
@@ -25,7 +26,7 @@ type Run = Entry & { events: Array<{ sequence: number; event: RemoteLocalModelRu
   resultBoundaryGeneration?: string;
   workRecoveryGeneration?: string;
   runtimeQuiesced?: boolean;
-  resultRequests: Map<string, { request: RemoteMcpToolResultRequest; settle(allow: boolean): void }>;
+  resultRequests: Map<string, { request: RemoteMcpToolResultRequest; settle(allow: boolean, signIn?: BrowserSignInNeeded | null): void }>;
   /** Pending Work journal calls (work-recovery-relay.ts): `text` is the call, `receive` takes Main's answer in chunks. */
   workRequests: Map<string, { request: RemoteWorkRecoveryRequest; text: string;
     receive(offset: number, text: string, chars: number, digest: string): boolean; settle(error: Error): void }>;
@@ -221,7 +222,7 @@ export function createDaemonLocalModelRpc(options: {
         case "run.cancel": value = cancel(runs, clientId, command.runId, "run"); break;
         case "run.result-capability": {
           assertAdmission(clientId);
-          value = { schema: "agentlas.local-model-result-boundary.v1", supported: true,
+          value = { schema: "agentlas.local-model-result-boundary.v1", supported: true, signInResult: true,
             ownerEpoch: options.ownerEpoch, clientId, runId: id(command.runId), generation: id(command.generation) };
           break;
         }
@@ -374,12 +375,14 @@ export function createDaemonLocalModelRpc(options: {
                     if (current.resultRequests.size >= 16) throw localModelRemoteError("local_model_remote_result_capacity_exceeded");
                     return new Promise<void>((resolve, reject) => {
                       const resultId = randomUUID(); let settled = false;
-                      const finish = (allow: boolean) => {
+                      const finish = (allow: boolean, signIn?: BrowserSignInNeeded | null) => {
                         if (settled) return; settled = true;
-                        if (!allow) { boundaryRefused = true; children.closing = true; }
+                        // A sign-in only the owner can do is the call's result in the owner's One turn (local-tool-loop.ts reads it), not a
+                        // withheld result: the run and its tools go on.
+                        if (!allow && !signIn) { boundaryRefused = true; children.closing = true; }
                         clearTimeout(timer); current.controller.signal.removeEventListener("abort", abort);
                         current.resultRequests.delete(resultId);
-                        if (allow) resolve(); else reject(localModelRemoteError("local_model_remote_result_delivery_rejected"));
+                        if (allow) resolve(); else reject(signIn ?? localModelRemoteError("local_model_remote_result_delivery_rejected"));
                         wake(current);
                       };
                       const abort = () => finish(false);
@@ -427,7 +430,9 @@ export function createDaemonLocalModelRpc(options: {
             || !pending || command.generation !== row.resultBoundaryGeneration || typeof command.allow !== "boolean") {
             throw localModelRemoteError("local_model_remote_result_refused");
           }
-          pending.settle(command.allow); value = { resolved: true }; break;
+          const signIn = command.signIn === undefined ? null : browserSignInNeededFrom(command.signIn);
+          if (command.signIn !== undefined && (!signIn || command.allow)) throw localModelRemoteError("local_model_remote_result_refused");
+          pending.settle(command.allow, signIn); value = { resolved: true }; break;
         }
         case "run.work-read": {
           const row = get(runs, clientId, command.runId);

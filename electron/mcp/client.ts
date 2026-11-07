@@ -333,6 +333,7 @@ import { agentRunCwd } from "../runtime/exec";
 import { codexUserConfigOutsideBrowser } from "../runtime/codex-desktop-surface";
 import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
 import { ownerVisiblePrompt, stripStaffGuidance } from "../one/owner-prompt";
+import { bindChatFileGroupToMessage, hasChatFileMessageBinding } from "../store/chat-file-message-bindings";
 import { browserCaptureDir, savedBrowserCaptureDir, screenCaptureDir } from "../media/capture-artifacts";
 import { userDataPath } from "../runtime-paths";
 import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
@@ -1223,6 +1224,25 @@ function buildAppEditUserPromptParts(prompt: string, appRecord: AppFactoryAppRec
 
 function buildAppEditUserPrompt(prompt: string, appRecord: AppFactoryAppRecord, locale: "ko" | "en"): string {
   return composeCurrentUserPrompt(buildAppEditUserPromptParts(prompt, appRecord, locale));
+}
+
+/** The conversation's only row is the owner's message this run carries, and no other run has started in it: the ingress wrote it. */
+export function ingressFirstUserMessage(chatId: string, req: McpInvocationRequest): string | null {
+  const rows = listChatMessages(chatId, 2);
+  if (rows.length !== 1 || rows[0].role !== "user" || rows[0].text !== ownerVisiblePrompt(req)) return null;
+  const earlier = getDb().prepare("SELECT 1 FROM run_events WHERE chat_id = ? AND kind = 'invoke_started' AND run_id <> ? LIMIT 1")
+    .get(chatId, req.runId ?? "");
+  if (earlier) return null;
+  const messageId = rows[0].id, groupId = req.fileGroupId;
+  // The reused row carries the run's file group exactly as a row the run writes itself does (chats.ts appendChatMessage): the
+  // ingress may have saved it without the binding, and the phone opens a file of that message only through it.
+  if (groupId) {
+    const db = getDb();
+    db.transaction(() => {
+      if (!hasChatFileMessageBinding(db, { chatId, messageId, groupId })) bindChatFileGroupToMessage(db, { chatId, messageId, groupId });
+    })();
+  }
+  return messageId;
 }
 
 function hasPriorConversationContext(chatId: string): boolean {
@@ -2552,7 +2572,7 @@ async function runMcpInvocationInContext(
     // to go on. Every other turn waits below and resumes after the sign-in (shared/browser-sign-in-needed.ts ownerAnswersSignIn).
     const ownerWall = outcomes.find((outcome) => outcome.state === "awaiting-owner");
     if (ownerWall?.state === "awaiting-owner" && ownerAnswersSignIn({ oneMode: req.oneMode, promptOrigin: req.promptOrigin,
-      unattended: isUnattendedExecution(executionContext), hostNotice: hostNoticePurpose !== undefined, agentlasLocal: active.kind === "agentlas-local",
+      unattended: isUnattendedExecution(executionContext), hostNotice: hostNoticePurpose !== undefined,
       ownerMessageId: () => { try { return supervisorIngressMessage(getDb(), req.chatId, req.runId); } catch { return null; } } })) {
       throw browserSignInNeeded(ownerWall.site, ownerWall.card.reason);
     }
@@ -2696,11 +2716,16 @@ async function runMcpInvocationInContext(
   const ownHostPrompt = req.promptOrigin === "system" && req.runId && hostNoticePurpose
     ? hostPromptMessageForRun(chat.id, req.runId, hostNoticePurpose) : null;
   if (ownHostPrompt) excludedSupervisorInputs.add(ownHostPrompt);
+  // An ingress that opens a new conversation commits the person's first words itself before the run (the phone's first One turn,
+  // mobile-bridge one.invoke.start): it is this run's message, not history, and it is not written a second time. Before, the owner's
+  // words showed twice and the model read its own prompt as history (measured on a real installation: 8 such conversations since August).
+  const ingressFirstMessage = req.promptOrigin === "system" || req.agentAppMode ? null : ingressFirstUserMessage(chat.id, req);
+  if (ingressFirstMessage) excludedSupervisorInputs.add(ingressFirstMessage);
   const history = req.agentAppMode || executionContext?.source === "automation" || scienceRecovery
     ? []
     : listChatMessages(chat.id, 80).filter(message => !excludedSupervisorInputs.has(message.id));
   const priorHistory = history;
-  const hadPriorConversationContext = scienceRecovery || req.agentAppMode || isAliveControllerRun
+  const hadPriorConversationContext = scienceRecovery || req.agentAppMode || isAliveControllerRun || ingressFirstMessage
     ? false
     : hasPriorConversationContext(chat.id);
   // Group, firm, borrowed-task-force, and Stormbreaker branches return before
@@ -2711,7 +2736,7 @@ async function runMcpInvocationInContext(
   let persistedUserMessageId: string | null = supervisorIngressMessage(getDb(), chat.id, req.runId)
     ?? carriedFollowupMessages.at(-1)
     // A host recovery turn answers the owner's message that is already in the transcript (invocation/host-recovery.ts): no second copy.
-    ?? hostRecoveryOf(req)?.userMessageId ?? null;
+    ?? hostRecoveryOf(req)?.userMessageId ?? ingressFirstMessage;
   let userMessagePersisted = persistedUserMessageId !== null || ownHostPrompt !== null;
   // A product-authored continuation is not the person's turn. It stays durable
   // so the next turn keeps the context, but it is written as a system turn:

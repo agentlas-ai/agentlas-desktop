@@ -4,6 +4,7 @@ import { mergePendingAskUserRequests } from "../confirm/ask-user";
 import { ALIVE_DECISION_PROTOCOL, createDaemonAliveDecisionPort } from "./alive-decision-port";
 import { ALIVE_RUNTIME_PROTOCOL } from "../alive-organisms/runtime-protocol";
 import { getDb } from "../store/db";
+import { tryRecordRunEvent } from "../store/run-events";
 import { agentContextOwnerBinding } from "../runtime/agent-context-admission";
 import { withAgentContext } from "../runtime/agent-context";
 import { detectRuntimes } from "../runtime/detect";
@@ -25,10 +26,18 @@ import { handGoalIntakeToMain } from "../invocation/goal-intake-forward";
 import { answerChatHandoverRequest, CHAT_HANDOVER_VERSION, registerChatHandoverPeer } from "../runtime/chat-host-handover";
 import { createDaemonNativeInvocationHost } from "./native-invocation-host";
 import { nativeStartDescriptor, type NativeStartDescriptor } from "./native-start-protocol";
+import { nativeStartReplay, releaseRefusedStart } from "./native-start-replay";
+
+/** A start this service refused before anything began: the typed pre-boundary refusal the ledger reads (store/invocation-admissions.ts). */
+function refusedBeforeStart(start: NativeStartDescriptor, phase: string, reasonCode: string): void {
+  tryRecordRunEvent({ runId: start.binding.runId, chatId: start.binding.chatId, kind: "invocation_start_refusal",
+    sourceEventId: `native-start-refused:${start.handle}:${phase}`, payload: { schemaVersion: "agentlas.invocation-start-refusal.v1",
+      phase, host: "daemon", reasonCode, startBoundaryCrossed: false } });
+}
 import type { NativeAuthenticatedIdentity } from "./native-session-auth";
 import { createNativeInvocationPublicPublisher, nativePublicAttachmentOperation, nativePublicKindsRequest, NATIVE_PUBLIC_KINDS_VERSION } from "../invocation/native-public-events";
 import { createNativeInvocationApprovalChannel } from "./native-invocation-approvals";
-import { getInvocationAdmission } from "../store/invocation-admissions";
+import { getInvocationAdmission, invocationProvenNotStarted } from "../store/invocation-admissions";
 import { getCurrentTurnSteer } from "../store/current-turn-steers";
 import { settleRunKeyElicitationFromWindow } from "../mcp/run-key-elicitation";
 import type { NativeInvocationResources } from "./native-invocation-config";
@@ -390,7 +399,20 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       if (!accepting) fail("daemon_shutting_down");
       if (!observationAvailable(attachment)) fail("native_invocation_observation_unavailable");
       const start = nativeStartDescriptor(params);
-      if (owned.has(start.handle) || known.has(start.binding.runId)) fail("native_invocation_descriptor_replayed");
+      // A run id this service already took in this boot (native-start-replay.ts): nothing of this attempt starts; when the earlier
+      // attempt is closed the refusal is recorded as this reservation's typed pre-boundary refusal, so Desktop's ledger closes it
+      // (store/invocation-admissions.ts invocationProvenNotStarted). A duplicate of an attempt still on its way records nothing.
+      const replay = nativeStartReplay(owned, known, start, value => host!.executableAuthorityClosed(value));
+      if (replay !== "fresh") {
+        if (replay === "replayed-closed") {
+          refusedBeforeStart(start, "native-start-descriptor", "native_invocation_descriptor_replayed");
+          // The earlier attempt is closed and this refusal now proves the reservation never started: the run id is free, so Desktop's
+          // next retry is a fresh start instead of another replay (a retry that came during the earlier attempt's cleanup left it taken).
+          const prior = known.get(start.binding.runId);
+          if (prior) { try { releaseRefusedStart(owned, known, prior.start, prior, invocationProvenNotStarted); } catch { /* stays taken */ } }
+        }
+        fail("native_invocation_descriptor_replayed");
+      }
       const reservation = getInvocationAdmission(start.binding.runId);
       if (!reservation || reservation.status !== "pending" || reservation.chatId !== start.binding.chatId
         || reservation.inputDigest !== start.binding.inputDigest || reservation.ownerProcessEpoch !== options.bootId) fail("native_invocation_descriptor_replayed");
@@ -402,7 +424,19 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       }
       const record = { peer, identity: attachment.identity, start, released: false };
       owned.set(start.handle, record); known.set(start.binding.runId, record);
-      return host.start(peer, start);
+      let started: ReturnType<typeof host.start>;
+      try { started = host.start(peer, start); }
+      catch (error) {
+        // The host refused it at once (capacity, a changed channel): nothing began. The typed refusal lets the ledger prove it and free the run id.
+        refusedBeforeStart(start, "native-host-start", "native_host_start_refused");
+        try { releaseRefusedStart(owned, known, start, record, invocationProvenNotStarted); } catch { /* the run id stays taken: the safe side */ }
+        throw error;
+      }
+      // Refused before the start boundary (the ledger proves it): the run id is free for Desktop's retry (native-start-replay.ts).
+      void Promise.resolve(started).catch(() => {
+        try { releaseRefusedStart(owned, known, start, record, invocationProvenNotStarted); } catch { /* the run id stays taken: the safe side */ }
+      });
+      return started;
     }
     if (method === "invoke.cancel") {
       if (exact(params, ["version", "chatId", "runId"]) && params.version === "agentlas.native-owner-stop.v1") {

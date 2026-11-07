@@ -20,6 +20,16 @@ export function browserSignInNeeded(site: string, cardReason?: string): BrowserS
   return Object.assign(new Error(BROWSER_SIGN_IN_NEEDED), { code: BROWSER_SIGN_IN_NEEDED, site, step }) as BrowserSignInNeeded;
 }
 
+const SIGN_IN_STEPS: readonly BrowserSignInStep[] = ["sign-in", "approve", "code", "password-rejected"];
+
+/** The same fact carried across a process boundary (the local-model relay, daemon/local-model-rpc.ts): the site and the step only. */
+export function browserSignInNeededFrom(value: unknown): BrowserSignInNeeded | null {
+  const fact = value && typeof value === "object" ? value as { site?: unknown; step?: unknown } : null;
+  if (!fact || typeof fact.site !== "string" || !fact.site || fact.site.length > 253 || /[\r\n\x00]/.test(fact.site)
+    || !SIGN_IN_STEPS.includes(fact.step as BrowserSignInStep)) return null;
+  return Object.assign(new Error(BROWSER_SIGN_IN_NEEDED), { code: BROWSER_SIGN_IN_NEEDED, site: fact.site, step: fact.step as BrowserSignInStep }) as BrowserSignInNeeded;
+}
+
 export function isBrowserSignInNeeded(error: unknown): error is BrowserSignInNeeded {
   return typeof error === "object" && error !== null && (error as { code?: unknown }).code === BROWSER_SIGN_IN_NEEDED
     && typeof (error as { site?: unknown }).site === "string";
@@ -47,7 +57,6 @@ export interface SignInTurn {
   promptOrigin?: "user" | "system";
   unattended: boolean;
   hostNotice: boolean;
-  agentlasLocal: boolean;
   /** The owner's message this run answers, as the supervisor recorded it (supervisorIngressMessage). Read only when a wall was met. */
   ownerMessageId: () => string | null;
 }
@@ -55,12 +64,13 @@ export interface SignInTurn {
 /**
  * True when this turn answers the owner's own One message: the sign-in becomes the call's result and the turn goes on. Every other
  * run waits for the sign-in and resumes by itself: a Work, an automation or unattended pass, a host-started One turn (Goal resume,
- * wait follow-up, team brief or report, a review), and agentlas-local (its daemon relay cannot carry the typed result yet).
+ * wait follow-up, team brief or report, a review). Every runtime carries the result: the MCP proxy (CLIs), Main's own tool loop (BYOK,
+ * serving, local models) and the local-model relay to the background service (agentlas-local, run.result signIn).
  * A message typed in the Desktop composer arrives as promptOrigin "user". A message sent from the phone or the personal window is
  * written into the conversation by the supervisor first and started as a "system" prompt, so the supervisor's record of that message
  * is what says it is the owner's (without it, every phone message still ended at the sign-in as an interrupted answer).
  */
 export function ownerAnswersSignIn(turn: SignInTurn): boolean {
-  if (turn.oneMode !== true || turn.unattended || turn.hostNotice || turn.agentlasLocal) return false;
+  if (turn.oneMode !== true || turn.unattended || turn.hostNotice) return false;
   return turn.promptOrigin !== "system" || turn.ownerMessageId() !== null;
 }

@@ -1032,6 +1032,12 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
     throw new Error("agentlasd QA identity does not match its user-data directory");
   }
   configureInstallIdentity(installIdentity);
+  // After a login only this service runs: it starts the app in the background (tray, no window) when One needs an app operation
+  // (gui-background-launch.ts). Only the official installation does; a QA or development identity never starts an app.
+  if (installIdentity.channel === "official") {
+    const [{ configureMainProcessLauncher }, guiLaunch] = await Promise.all([import("../app-control/daemon-remote"), import("./gui-background-launch")]);
+    configureMainProcessLauncher({ launch: () => guiLaunch.launchGuiInBackground(), starting: () => guiLaunch.guiStarting(), attached: () => guiLaunch.guiAttached() });
+  }
   const { installModelCatalogResolver, refreshRemoteCatalog } = await import("../runtime/model-catalog");
   installModelCatalogResolver();
   void refreshRemoteCatalog().catch(error => console.warn("[agentlasd] model catalog refresh failed", error));
@@ -1176,6 +1182,13 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       }
     } catch (error) {
       console.error("[agentlasd] abandoned run lease release failed:", error);
+    }
+    // The same proof ends the sign-in waits that service parked and could no longer resume (a Work on one is then continued by One).
+    try {
+      const blocked = (await import("../invocation/browser-login-wait")).blockAbandonedBrowserLoginWaits("daemon", bootId);
+      if (blocked.length > 0) console.warn(`[agentlasd] ended ${blocked.length} sign-in wait(s) a previous service left: ${blocked.join(", ")}`);
+    } catch (error) {
+      console.error("[agentlasd] abandoned sign-in wait sweep failed:", error);
     }
     // A terminal that died without releasing (kill -9, a crash, a reboot) holds its chat's lease for good; only a per-owner proof
     // that its process and agent children are gone may release it (never "every other terminal").

@@ -25,14 +25,16 @@ import type { OneTeamResult } from "./host-alerts";
 import { buildTeamSessionHandoff } from "./session-handoff";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor } from '../../shared/one-profile';
 import type { OneSupervisorWorkQueue } from "./supervisor-work-queue";
+import { signInCarrier } from "./supervisor-work-executor";
 import { runtimeFailureBlocksNextAutomaticTurn } from "../../shared/runtime-turn-admission";
 import { isTypedCode, STORE_BUSY_CODE } from "../../shared/turn-settlement";
 import { UNCONFIRMED_MAX_RESENDS, UNCONFIRMED_VERIFY_CONTINUATIONS, unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
 import type { OneSupervisorOwner } from "./supervisor-owner";
 import type { SupervisorJournalInput, SupervisorJournalPage, SupervisorStopInput } from "../../shared/one-supervisor-runtime";
 import {OneBudgetAdmissionDenied,type OneBudgetStore} from "./budget-store";
-import {TRANSIENT_SEND_DEADLINE_MS,isStoreBusyRefusedBeforeDispatch,isTransientSendRefusalCode,sendRefusalCode,transientSendBackoffMs,isRefusedBeforeDispatch} from "../../shared/transient-send-refusal";
-import {retainSupervisorStartVerdict, resumeLegacySupervisorHeld, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, supervisorRetryExhausted, reserveSupervisorDispatch, supervisorRefusalDelay} from "./supervisor-dispatch-retry";
+import {TRANSIENT_SEND_DEADLINE_MS,isStoreBusyRefusedBeforeDispatch,isTransientSendRefusalCode,sendRefusalCode,startRefusalWaitsLong,transientSendBackoffMs,isRefusedBeforeDispatch} from "../../shared/transient-send-refusal";
+import {onRuntimeSignal, runtimeSignalFloor} from "../runtime/runtime-signals";
+import {retainSupervisorStartVerdict, resumeLegacySupervisorHeld, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, supervisorRetryExhausted, reserveSupervisorDispatch, supervisorRefusalDelay, wakeSupervisorLongWait} from "./supervisor-dispatch-retry";
 import {ONE_BUDGET_REJECTION_CODES,type OneBudgetConfigureInput,type OneBudgetConfigureResult,type OneBudgetListInput,type OneBudgetRejectionCode} from "../../shared/one-budget";
 
 export interface SupervisorRuntime {
@@ -55,6 +57,10 @@ export interface SupervisorRuntime {
   /** The durable placement fact of a run (invocation/turn-placement.ts): "unconfirmed" = dispatched, not proven in the conversation. */
   placement?(runId: string): "placed" | "not-dispatched" | "unconfirmed";
   unconfirmedRetryAllowed?(chatId: string, sinceMs?: number): boolean;
+  /** The run that continued this one after the owner's sign-in, or null (the same reader the Work executor follows). */
+  successorRun?(runId: string): string | null;
+  /** The run's sign-in wait can no longer resume (an app restart blocked it, or it belonged to an earlier app process). */
+  parkedEnded?(runId: string): boolean;
 }
 /** A host check that could not be answered right now (billing unreachable). Nothing started and nothing was decided. */
 export class SupervisorStartDeferred extends Error {
@@ -207,22 +213,34 @@ export class OneSupervisorService {
   private reviewUnstartedStreak = 0;
   /** sweepDeferredDelegations: the ended run already judged per hand-off (bounded; after a restart a run is judged once more, idempotently). */
   private readonly sweptWaits = new Map<string, string>();
+  /** When the hand-offs older than a day were last looked at (once an hour). */
+  private olderDeferredSweptAt = 0;
   /** When hand-offs waiting on the owner were last read by the sweep (every five minutes). */
   private deferredWaitsSweptAt = 0;
+  /** Unreviewed results whose owner notice the store refused, told again on the tick (retellUnreviewed); bounded. */
+  private readonly untoldUnreviewed = new Map<string, {reviewRunId: string; chatId: string; count: number; tries: number}>();
+  private untoldScanned = false;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   /** The retry of a chat-send refused before dispatch has its own timer, so it never replaces (or is replaced by) a reply's or a review's. */
   private chatSendTimer: ReturnType<typeof setTimeout> | undefined;
   private chatSendTimerAt = 0;
   private chatSendDraining = false;
   private readonly unsubscribe: () => void;
+  private readonly stopWakes: Array<() => void> = [];
+  private signalFloorSeen = 0;
   constructor(private readonly deps: SupervisorDependencies) {
+    // A runtime signal or a sign-in ends a long refusal wait now (the cause may have cleared), as for a hand-off (supervisor-work-executor.ts).
+    try { this.stopWakes.push(onRuntimeSignal(() => this.wakeLongWaits(Infinity))); } catch { /* the step ends by itself */ }
+    try { this.stopWakes.push((require("../auth") as typeof import("../auth")).onAuthSessionRestored(() => this.wakeLongWaits(Infinity))); } catch { /* the step ends by itself */ }
     this.unsubscribe = deps.runtime.onSettled(event => {
       if (this.closed) return;
       const oneId=deps.identity().oneId;
       try { deps.assertAuthority?.(); deps.owner?.assert(oneId,true); } catch { return; } // stale owners never write another owner's outcome
       const ordinary = deps.store.db.prepare("SELECT payload_json FROM one_supervisor_requests WHERE run_id=?").all(event.runId) as Array<{payload_json:string}>;
       if (ordinary.some(row => Object.prototype.hasOwnProperty.call(JSON.parse(row.payload_json), "ordinaryNative"))) return;
-      const settledRows = deps.store.forRun(event.runId);
+      const ownRows = deps.store.forRun(event.runId);
+      // The event names only the run that settled: a row whose run went on under it after a sign-in settles with it.
+      const settledRows = ownRows.length ? ownRows : this.carriedBy(oneId, event);
       for (const row of settledRows) if(row.one_id===oneId)this.settle(row, event.receipt, false, event);
       if (!settledRows.length) this.noticeDelegatedOutcome(oneId, event);
       if(!deps.owner || deps.owner.current()?.phase==='active')this.drain();
@@ -233,6 +251,31 @@ export class OneSupervisorService {
     if (this.retryTimer) clearTimeout(this.retryTimer); this.retryTimer = undefined;
     if (this.chatSendTimer) clearTimeout(this.chatSendTimer); this.chatSendTimer = undefined;
     this.unsubscribe();
+    for (const stop of this.stopWakes.splice(0)) { try { stop(); } catch { /* nothing to undo */ } }
+  }
+  /**
+   * Replies and messages into rooms waiting out a long step that began before `signalAt` start now (Infinity: this process just heard
+   * the signal). `arm`: start the drains (a listener); a drain or the sweep that asked goes on itself.
+   */
+  private wakeLongWaits(signalAt: number, arm = true): boolean {
+    if (this.closed) return false;
+    let woken = false;
+    try {
+      const oneId = this.binding().oneId, now = Date.now();
+      for (const row of this.deps.store.list(oneId, "stored")) {
+        if ((row.kind !== "reply" && row.kind !== "chat-send" && row.kind !== "follow-up") || ordinaryNativeMarker(row)) continue;
+        try { if (wakeSupervisorLongWait(this.deps.store, row, signalAt, now)) woken = true; } catch { /* changed meanwhile: the next pass reads it */ }
+      }
+    } catch { return false; }
+    if (woken && arm) { this.armChatSendDrain(0); this.armDrain(0); }
+    return woken;
+  }
+  /** The other process of this store heard a signal (shared floor, one meta row read at most every 2 s): its long waits end here too. */
+  private signalFloorAdvanced(): boolean {
+    const floor = runtimeSignalFloor();
+    if (floor <= this.signalFloorSeen) return false;
+    this.signalFloorSeen = floor;
+    return this.wakeLongWaits(floor, false);
   }
   /** Host-only observation of an existing ordinary native One turn; never a start or tool grant. */
   observeOrdinaryNativeTurn(source: OrdinaryOneTurnSource): OrdinaryNativeTurnObservation | undefined {
@@ -358,7 +401,8 @@ export class OneSupervisorService {
       return;
     }
     const delayMs = this.deps.store.db.transaction(() => {
-      const delay = supervisorRefusalDelay(this.deps.store, row, now);
+      // The app's own state (not a busy room or store) waits the long steps after the old cap, as a hand-off does.
+      const delay = supervisorRefusalDelay(this.deps.store, row, now, startRefusalWaitsLong(code));
       this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: code});
       return delay;
     }).immediate();
@@ -689,6 +733,8 @@ export class OneSupervisorService {
    */
   noticeSettledHandOff(row: SupervisorRequestRow, receipt: RunEnd, event?: SupervisorSettledEvent): boolean {
     const wait = row.task_id && receipt.status !== "cancelled" ? this.questionWait(receipt, event) : null;
+    // A question card in a room the owner took back is the owner's to answer there; One does not repeat it (workerNeedsOwner).
+    if (wait && personalAgentRoomReleased(receipt.chatId, this.deps.store.db)) return false;
     if (wait) return this.deps.store.noticeNeedsOwner(row.one_id, row.task_id!, row.origin_chat_id, `question:${wait.sourceMessageId}`, wait.detail);
     if (receipt.status === "completed" && this.deps.delegatedWorkPending?.(receipt.chatId, receipt.runId)) return false; // deferred
     const state = receipt.status === "completed" || receipt.status === "cancelled" ? receipt.status : receipt.status === "interrupted" ? "interrupted" : "failed";
@@ -707,6 +753,28 @@ export class OneSupervisorService {
       return [question.question, ...(options.length ? [`options: ${options.join(" / ")}`] : [])].join("\n");
     }).join("\n") : durable?.detail ?? "";
     return {sourceMessageId: request?.sourceMessageId ?? durable?.sourceMessageId ?? `run:${receipt.runId}`, detail};
+  }
+  /**
+   * The receipt that decides a reply's, a follow-up's or a room message's outcome: its own run's or, after a sign-in, the run that
+   * went on under a new id (signInCarrier, the rule the Work executor follows). A sign-in wait no process can resume any more (an
+   * app restart or a dead process blocked it) ends that turn as interrupted, as for a cut hand-off: the row closes (One reviews a
+   * hand-off; an owner reply still the newest message is sent once more), instead of a held row that waits for ever.
+   */
+  private outcomeReceipt(row: SupervisorRequestRow): {runId: string; receipt: InvocationRunReceipt | null} {
+    const runId = row.run_id!;
+    if (row.kind !== "reply" && row.kind !== "follow-up" && row.kind !== "chat-send") return {runId, receipt: this.deps.runtime.receipt(runId)};
+    const carried = signInCarrier(this.deps.runtime, runId), receipt = carried.receipt;
+    if (receipt?.status === "waiting_input" && receipt.runId === carried.runId && this.deps.runtime.parkedEnded?.(carried.runId))
+      return {runId: carried.runId, receipt: {...receipt, status: "interrupted"}};
+    return carried;
+  }
+  /** Open rows whose run went on after a sign-in under the run `event` settled. */
+  private carriedBy(oneId: string, event: SupervisorSettledEvent): SupervisorRequestRow[] {
+    try {
+      return this.deps.store.pending(oneId).filter(row => !!row.run_id && row.run_id !== event.runId && (row.state === "accepted" || row.state === "held")
+        && (row.kind === "reply" || row.kind === "follow-up" || row.kind === "chat-send") && !ordinaryNativeMarker(row)
+        && signInCarrier(this.deps.runtime, row.run_id).runId === event.runId);
+    } catch { return []; }
   }
   /** Saved-but-unclaimed replies are safe. A claimed start without proof is held, never replayed. */
   recover(): void {
@@ -739,18 +807,18 @@ export class OneSupervisorService {
       const never = this.neverStartedHold(row);
       if (never === "restart") { this.restartNeverStarted(row); continue; }
       if (never === "expire") { this.expireNeverStarted(row); continue; }
-      const receipt = this.deps.runtime.receipt(row.run_id);
+      const {runId: carrierRunId, receipt} = this.outcomeReceipt(row);
       if (settled(receipt)) this.settle(row, receipt!);
       else if (row.state === "held" && (row.kind === "reply" || row.kind === "work" || row.kind === "follow-up") && receipt?.status === "running"
-        && receipt.runId === row.run_id
+        && receipt.runId === carrierRunId
         && receipt.chatId === (row.kind === "reply" ? row.origin_chat_id : JSON.parse(row.payload_json).workerChatId)
-        && this.deps.runtime.attach(receipt.chatId)?.runId === row.run_id) {
+        && this.deps.runtime.attach(receipt.chatId)?.runId === carrierRunId) {
         // A lost start ACK can hide a live reply. Exact native receipt plus its live owner
         // restores observation and control; it never re-dispatches the start or proves
         // that an uncertain steering/cancel command was applied.
         this.deps.store.update(row, {state:"accepted",acknowledgement:"delivered",reason:"recovered_from_native_receipt"});
       }
-      else if ((!receipt || this.deps.runtime.attach(receipt.chatId)?.runId !== row.run_id) && row.state !== "held") {
+      else if ((!receipt || this.deps.runtime.attach(receipt.chatId)?.runId !== carrierRunId) && row.state !== "held") {
         this.deps.store.update(row, {state:"held",acknowledgement:"unknown",reason:"dispatch_liveness_unconfirmed"});
       }
       if (isReview(row) && !this.lateProof.has(row.command_id) && this.deps.store.get(row.command_id)?.state === "held") {
@@ -925,6 +993,7 @@ export class OneSupervisorService {
   }
   private drain(): void {
     if (this.closed) return;
+    this.signalFloorAdvanced();
     // Messages One sent into other conversations wait for their rooms, not for this conversation's live run or pending reply.
     this.drainChatSends();
     if (this.draining) return;
@@ -1024,22 +1093,57 @@ export class OneSupervisorService {
     if (!this.deps.noticeOwner) return;
     const ko = this.deps.locale() === "ko";
     for (const group of exhausted) {
-      // The result itself goes to the owner, written by the host with no model: a review that could not run three times must not leave
-      // finished work unread. Only when the result cannot be put together does the line fall back to naming where it is.
-      let told = false;
-      try {
-        const text = this.unreviewedResultText(this.deps.store.unreviewedByRun(reviewRunId).filter(notice => notice.originChatId === group.originChatId), ko);
-        if (text) { this.deps.noticeOwner(group.originChatId, reviewRunId, text); told = true; }
-      } catch { /* the plain line below still says where the result is */ }
-      if (told) continue;
-      try {
-        this.deps.noticeOwner(group.originChatId, reviewRunId, ko
-          ? `작업 결과 ${group.count}건을 아직 검토하지 못했습니다. 활동 기록에서 읽을 수 있습니다.`
-          : `${group.count} work result${group.count === 1 ? " has" : "s have"} not been reviewed yet. You can read ${group.count === 1 ? "it" : "them"} in Activity.`);
-      } catch { /* the notice is best effort; the result itself stays in Activity */ }
+      // A notice the store refused (a locked store) is told again on the next tick (retellUnreviewed), never dropped.
+      if (!this.tellUnreviewed(reviewRunId, group.originChatId, group.count, ko) && this.untoldUnreviewed.size < 200) {
+        this.untoldUnreviewed.set(`${reviewRunId}\n${group.originChatId}`, {reviewRunId, chatId: group.originChatId, count: group.count, tries: 0});
+      }
     }
     // The results are pending again: look for them once the hold-off (if any) ends.
     this.armDrain(Math.max(0, this.reviewHoldOffUntil - Date.now()));
+  }
+  /**
+   * The result itself goes to the owner, written by the host with no model: a review that could not run three times must not leave finished
+   * work unread. Only when the result cannot be put together does the line fall back to naming where it is. True once a notice was written.
+   */
+  private tellUnreviewed(reviewRunId: string, chatId: string, count: number, ko: boolean): boolean {
+    try {
+      const text = this.unreviewedResultText(this.deps.store.unreviewedByRun(reviewRunId).filter(notice => notice.originChatId === chatId), ko);
+      if (text) { this.deps.noticeOwner!(chatId, reviewRunId, text); return true; }
+    } catch { /* the plain line below still says where the result is */ }
+    try {
+      this.deps.noticeOwner!(chatId, reviewRunId, ko
+        ? `작업 결과 ${count}건을 아직 검토하지 못했습니다. 활동 기록에서 읽을 수 있습니다.`
+        : `${count} work result${count === 1 ? " has" : "s have"} not been reviewed yet. You can read ${count === 1 ? "it" : "them"} in Activity.`);
+      return true;
+    } catch { return false; }
+  }
+  /**
+   * Unreviewed results whose owner notice was not written: refused by the store in this process, or (looked up once per process) left
+   * without their notice by an earlier one. Told on the periodic tick until a notice is written; nothing here calls a model.
+   */
+  private retellUnreviewed(): void {
+    if (!this.deps.noticeOwner) return;
+    if (!this.untoldScanned) {
+      try {
+        const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+        const rows = this.deps.store.db.prepare(`SELECT n.review_run_id AS reviewRunId, n.origin_chat_id AS chatId, COUNT(*) AS count
+          FROM one_supervisor_notices n WHERE n.review_state='unreviewed' AND n.review_run_id IS NOT NULL AND n.reviewed_at >= ?
+          AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id=n.origin_chat_id AND m.host_notice_json IS NOT NULL
+            AND json_valid(m.host_notice_json) AND json_extract(m.host_notice_json,'$.runId')=n.review_run_id)
+          GROUP BY n.review_run_id, n.origin_chat_id LIMIT 50`).all(since) as Array<{reviewRunId: string; chatId: string; count: number}>;
+        for (const row of rows) this.untoldUnreviewed.set(`${row.reviewRunId}\n${row.chatId}`, {...row, tries: 0});
+        this.untoldScanned = true;
+      } catch (error) {
+        // A busy store looks again on the next tick; a store without the conversation table (tests) has nothing to find.
+        if (/no such table/i.test(error instanceof Error ? error.message : "")) this.untoldScanned = true;
+      }
+    }
+    if (!this.untoldUnreviewed.size) return;
+    const ko = this.deps.locale() === "ko";
+    for (const [key, entry] of [...this.untoldUnreviewed]) {
+      // A conversation that keeps refusing (deleted) stops being asked after an hour of ticks; the results stay in Activity.
+      if (this.tellUnreviewed(entry.reviewRunId, entry.chatId, entry.count, ko) || ++entry.tries >= 120) this.untoldUnreviewed.delete(key);
+    }
   }
   /**
    * What the workers returned, put in the owner's chat by the host when their review could not run. Each line carries the outcome the host
@@ -1350,10 +1454,19 @@ export class OneSupervisorService {
     // are asked again on the next sweep, instead of firing without their gate or being revoked.
     const fired = this.deps.store.fireDueCheckins(oneId, chatId, now, hold, info => this.deps.noticeOwner?.(chatId, `cap:${now}`, checkinDailyCapLine(info.scope, this.deps.locale()), "info"));
     this.sweepDeferredDelegations(oneId);
+    this.retellUnreviewed();
     // The same tick starts a review for results another process queued (a graph the scheduler delivered) or that
     // were queued while One was closed.
-    if (fired || this.deps.store.hasPendingReview(oneId)) this.drain();
+    if (fired || this.signalFloorAdvanced() || this.deps.store.hasPendingReview(oneId)) this.drain();
+    // A reply start that never answered holds drain(); recover() releases it (held, never replayed), but only a snapshot ran it, so
+    // with no window and no phone reading One the owner's next message and every review waited. The sweep looks only when one is stale.
+    if (this.replyStartStalled(oneId)) try { this.recover(); } catch { /* the next sweep or snapshot looks again */ }
     return fired;
+  }
+  /** A reply in "dispatching" whose start this process is not waiting on (or has waited on longer than any start takes). */
+  private replyStartStalled(oneId: string, now = Date.now()): boolean {
+    return this.deps.store.pending(oneId).some(row => row.kind === "reply" && row.state === "dispatching" && !ordinaryNativeMarker(row)
+      && !(now - (this.dispatchInFlight.get(row.command_id) ?? -Infinity) < DISPATCH_IN_FLIGHT_MAX_MS));
   }
   /** A graph result was queued for review in this process (one/host-alerts wake): start the review now. */
   reviewQueuedResults(): void {
@@ -1484,6 +1597,8 @@ export class OneSupervisorService {
         AND (json_extract(payload_json,'$.workerChatId')=? OR json_extract(payload_json,'$.chatId')=? OR task_id=?)
         ORDER BY rowid DESC LIMIT 1`).get(oneId, event.runId, event.chatId, event.chatId, `task_${event.chatId}`) as SupervisorRequestRow|undefined;
       if (!row) return;
+      // A room the owner took back ("내가 직접 이어가기") is the owner's: its later turns are not One's hand-off outcome (workerNeedsOwner).
+      if (personalAgentRoomReleased(event.chatId, this.deps.store.db)) return;
       // Only a hand-off whose outcome has not been reported since it was made; later turns of the same room are not reported again.
       // A "waiting for the owner" notice (a question card) is not its outcome: the run that ends after the owner answered is.
       if (this.deps.store.db.prepare("SELECT 1 FROM one_supervisor_notices WHERE one_id=? AND task_id=? AND created_at>=? AND state<>'needs-owner' LIMIT 1").get(oneId, row.task_id, row.created_at)) return;
@@ -1500,33 +1615,57 @@ export class OneSupervisorService {
    */
   private sweepDeferredDelegations(oneId: string): number {
     if (!this.deps.delegatedWorkPending || !this.deps.latestRun) return 0;
+    const now = Date.now();
+    // Hand-offs of the last day are looked at on every tick. Delegated sessions may run for days (a long Goal), so older ones (up to thirty
+    // days) are looked at once an hour, and only a run that ended after the first look is reported: the first look of a process records the
+    // conversation's latest run without reporting, so weeks-old results are not handed to One at once by a new build or a restart.
+    const older = now - this.olderDeferredSweptAt >= 3_600_000;
+    if (older) this.olderDeferredSweptAt = now;
     // A Work waiting on the owner's answer is usually woken by the answer's own settle (noticeDelegatedOutcome); the sweep reads it every
     // five minutes, not every tick (each look builds a run receipt).
-    const now = Date.now();
-    const readWaits = now - this.deferredWaitsSweptAt >= 300_000;
-    if (readWaits) this.deferredWaitsSweptAt = now;
+    const waits = now - this.deferredWaitsSweptAt >= 300_000;
+    if (waits) this.deferredWaitsSweptAt = now;
+    let written = (this.sweepDeferredWindow(oneId, new Date(now - 86_400_000).toISOString(), null, false, waits));
+    if (older) written += (this.sweepDeferredWindow(oneId, new Date(now - 30 * 86_400_000).toISOString(), new Date(now - 86_400_000).toISOString(), true, true));
+    return written;
+  }
+  private sweepDeferredWindow(oneId: string, since: string, until: string | null, baseline: boolean, readWaits: boolean): number {
+    const latestRun = this.deps.latestRun, delegatedWorkPending = this.deps.delegatedWorkPending;
+    if (!latestRun || !delegatedWorkPending) return 0;
     let written = 0;
     try {
-      const since = new Date(Date.now() - 24 * 3_600_000).toISOString();
       // A hand-off with no notice at all (its outcome deferred) goes first; one waiting on the owner's answer (a question card) comes after,
       // so Works left waiting cannot crowd out the ones whose result is due.
       const rows = this.deps.store.db.prepare(`SELECT r.*, EXISTS (SELECT 1 FROM one_supervisor_notices w WHERE w.one_id=r.one_id AND w.task_id=r.task_id
           AND w.created_at>=r.created_at AND w.state='needs-owner') AS waiting
         FROM one_supervisor_requests r WHERE r.one_id=? AND r.kind IN ('work','follow-up','chat-send')
-        AND r.state='completed' AND r.task_id IS NOT NULL AND r.run_id IS NOT NULL AND r.updated_at>=?
+        AND r.state='completed' AND r.task_id IS NOT NULL AND r.run_id IS NOT NULL AND r.updated_at>=? AND (? IS NULL OR r.updated_at<?)
         AND NOT EXISTS (SELECT 1 FROM one_supervisor_notices n WHERE n.one_id=r.one_id AND n.task_id=r.task_id AND n.created_at>=r.created_at AND n.state<>'needs-owner')
-        ORDER BY waiting, r.rowid DESC LIMIT 20`).all(oneId, since) as Array<SupervisorRequestRow & {waiting: number}>;
+        ORDER BY waiting, r.rowid DESC LIMIT 20`).all(oneId, since, until, until) as Array<SupervisorRequestRow & {waiting: number}>;
       for (const row of rows) {
         if (row.waiting && !readWaits) continue;
         const chat = this.workerChatOf(row);
-        const latest = chat ? this.deps.latestRun(chat) : null;
-        if (!chat || !latest || latest.runId === row.run_id || !["completed","failed","cancelled","interrupted"].includes(latest.status)) continue;
+        const latest = chat ? latestRun(chat) : null;
+        // A room the owner took back is the owner's: its later turns are not One's to report (noticeDelegatedOutcome).
+        if (!chat || !latest || personalAgentRoomReleased(chat, this.deps.store.db)) continue;
+        const ended = ["completed","failed","cancelled","interrupted"].includes(latest.status);
+        if (this.sweptWaits.size >= 400) this.sweptWaits.clear();
+        // An older hand-off seen for the first time in this process: a run that ended more than a day ago is the baseline, not news (a run
+        // still going is reported when it ends; one that ended in the last day, while no process was looking, is reported now).
+        if (baseline && !this.sweptWaits.has(row.command_id)) {
+          let endedAt = Number.NaN;
+          try { endedAt = ended ? Date.parse(this.deps.runtime.receipt(latest.runId)?.updatedAt ?? "") : Number.NaN; } catch { endedAt = Number.NaN; }
+          if (!(Number.isFinite(endedAt) && Date.now() - endedAt < 86_400_000)) {
+            this.sweptWaits.set(row.command_id, ended ? latest.runId : row.run_id ?? "");
+            continue;
+          }
+        }
+        if (latest.runId === row.run_id || !ended) continue;
         // Each ended run is judged once: a run that asked the owner stays a wait even after the owner answered and before the next run
         // starts (judging it again then would report the Work finished), and a Work left waiting is not read again every tick.
         if (this.sweptWaits.get(row.command_id) === latest.runId) continue;
-        if (this.deps.delegatedWorkPending(chat, latest.runId)) continue;
+        if (delegatedWorkPending(chat, latest.runId)) continue;
         if (this.noticeSettledHandOff(row, {runId: latest.runId, chatId: chat, status: latest.status as RunEnd["status"]})) written++;
-        if (this.sweptWaits.size >= 200) this.sweptWaits.clear();
         this.sweptWaits.set(row.command_id, latest.runId);
       }
     } catch (error) {
