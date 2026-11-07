@@ -5,6 +5,8 @@
  */
 import type { GoalNextWake } from "../../shared/goal-wake";
 import { getLongRunByGoalId, pendingBlockedGoalRetry } from "../store/long-runs";
+import { noProgressRestSettled } from "./goal-no-progress-wait";
+import { VERIFICATION_NO_PROGRESS_REST_CAUSE } from "../../shared/long-run-checkpoint";
 import { effectiveWaitCheckAt, latestGoalWaitSubscription } from "./wait-subscriptions";
 import { GOAL_WAKE_DAILY_BUDGET, goalWakeWindow } from "./wake-arbiter";
 
@@ -17,7 +19,8 @@ export function goalNextWake(goalId: string, now = Date.now()): GoalNextWake | n
   const candidates: Array<Omit<GoalNextWake, "wakesToday" | "budget">> = [];
   const retry = pendingBlockedGoalRetry(run.id);
   if (retry) {
-    candidates.push({ at: retry.nextAt, cause: retry.fromReason ?? "retry",
+    // A rest that has delivered its result waits for a signal: readers must not show a next try that will not come.
+    candidates.push({ at: retry.nextAt, cause: noProgressRestSettled(run.id, retry) ? VERIFICATION_NO_PROGRESS_REST_CAUSE : retry.fromReason ?? "retry",
       requestedBy: retry.fromReason === "wake_budget_reached" ? "budget" : retry.requestedBy === "model" ? "model" : "host" });
   }
   const wait = latestGoalWaitSubscription(goalId);

@@ -172,7 +172,7 @@ export function classifyOwnerFailure(failure: OwnerFailureFacts): OwnerFailureCl
  *  - interrupted: nothing ran and the app quit before its own retry started, and that claim kept no restart data (an older row or a request that cannot be rebuilt).
  *  - background: a turn the host started itself (not the owner's words); the problem is logged.
  */
-export type InternalFailurePlan = "recovering" | "recovered" | "uncertain" | "checking" | "exhausted" | "repeated" | "waiting" | "expired" | "newer" | "goal" | "manual" | "interrupted" | "background";
+export type InternalFailurePlan = "recovering" | "recovered" | "uncertain" | "checking" | "exhausted" | "repeated" | "waiting" | "expired" | "newer" | "goal" | "manual" | "interrupted" | "interrupted_exhausted" | "background";
 
 const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
   ko: {
@@ -188,6 +188,7 @@ const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
     checking: "앱 안쪽 문제로 이번 시도가 중간에 멈췄습니다. 일부 작업이 이미 실행됐을 수 있어, 앱이 먼저 어디까지 됐는지 확인한 뒤 한 번 이어서 처리합니다.",
     manual: "앱 안쪽 문제로 이 요청을 시작하지 못했습니다. 아무것도 실행되지 않았고 요청은 저장되어 있습니다. 문제는 기록으로 남겼고, 앱이 자동으로 다시 시작하지는 않습니다. 이어서 하려면 말씀해 주세요.",
     interrupted: "앱이 종료되면서 자동 재시도가 시작되지 못했습니다. 아무것도 실행되지 않았고 요청은 저장되어 있습니다. 문제는 기록으로 남겼습니다. 이어서 하려면 말씀해 주세요.",
+    interrupted_exhausted: "재시도가 두 번 중단됐습니다. 일부는 실행됐을 수 있으니 기록을 확인해 주세요. 요청은 저장돼 있습니다.",
     background: "앱 안쪽 문제로 이번 자동 실행이 끝나지 못했습니다. 문제는 기록으로 남겼습니다.",
   },
   en: {
@@ -203,6 +204,7 @@ const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
     checking: "An app-side problem stopped this attempt midway. Some work may already have run, so the app first checks how far it got and then continues once.",
     manual: "An app-side problem kept this request from starting. Nothing ran and your request is saved. The problem is logged, and the app does not start it again by itself. Tell me to continue and I will pick it up.",
     interrupted: "The app quit before its automatic retry could start. Nothing ran and your request is saved. The problem is logged. Tell me to continue and I will pick it up.",
+    interrupted_exhausted: "The retry was interrupted twice. Some of it may have run, so please check the record. Your request is saved.",
     background: "An app-side problem stopped this automatic run. The problem is logged.",
   },
 };

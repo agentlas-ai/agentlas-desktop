@@ -126,6 +126,9 @@ export class OneSupervisorStore {
       CREATE INDEX IF NOT EXISTS one_supervisor_checkin_due ON one_supervisor_checkins(one_id,active,next_at);`);
     // Receipts and their ordered change records commit in the same SQLite transaction,
     // including writes made by existing native adapters. Notification delivery is not authority.
+    // The one-time backfill below is for a store that had requests before this table existed. Once the table exists, its rows are trimmed by
+    // storage/db-retention-policy.ts (one_supervisor_command_events.closed); a backfill that ran on every start would put them back.
+    const eventsTableExisted = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_supervisor_command_events'").get());
     db.exec(`CREATE TABLE IF NOT EXISTS one_supervisor_command_events (
       cursor INTEGER PRIMARY KEY AUTOINCREMENT, one_id TEXT NOT NULL, command_id TEXT NOT NULL,
       receipt_json TEXT NOT NULL, recorded_at TEXT NOT NULL
@@ -140,8 +143,8 @@ export class OneSupervisorStore {
     WHEN NEW.receipt_json<>OLD.receipt_json BEGIN
       INSERT INTO one_supervisor_command_events(one_id,command_id,receipt_json,recorded_at)
       VALUES(NEW.one_id,NEW.command_id,NEW.receipt_json,NEW.updated_at);
-    END;
-    INSERT INTO one_supervisor_command_events(one_id,command_id,receipt_json,recorded_at)
+    END;`);
+    if (!eventsTableExisted) db.exec(`INSERT INTO one_supervisor_command_events(one_id,command_id,receipt_json,recorded_at)
       SELECT r.one_id,r.command_id,r.receipt_json,r.updated_at FROM one_supervisor_requests r
       WHERE NOT EXISTS(SELECT 1 FROM one_supervisor_command_events e WHERE e.command_id=r.command_id);`);
   }

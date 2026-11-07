@@ -76,6 +76,7 @@ import type { ToolPermission } from "../../shared/builtin-tools";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import type { ToolResultTrust } from "../../shared/types";
 import { EMPTY_NO_TOOL_RAN_CODE, normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
+import { browserSignInNeededResult, isBrowserSignInNeeded } from "../../shared/browser-sign-in-needed";
 
 function agentlasDispatchedOrigin(toolName: string): ToolInvocationOrigin {
   return { kind: "agentlas", providerName: "Agentlas", toolName };
@@ -786,10 +787,12 @@ function assertMcpResultDelivery(approval: LocalToolApprovalContext): void {
   if (approval.mcpResultDeliveryState?.blocked) throw approval.mcpResultDeliveryState.reason;
 }
 
+/** Null when the result goes out as it is; the text the model reads instead when the owner's own One turn met a sign-in only the
+ * owner can do (shared/browser-sign-in-needed.ts) — that is not a delivery failure, so nothing later is blocked. */
 async function awaitMcpResultDelivery(
   approval: LocalToolApprovalContext,
   input: Parameters<NonNullable<RunnerRequest["beforeMcpToolResult"]>>[0],
-): Promise<void> {
+): Promise<string | null> {
   const state = approval.mcpResultDeliveryState;
   let delivery: Promise<void> | undefined;
   try {
@@ -802,6 +805,7 @@ async function awaitMcpResultDelivery(
         () => state?.pending.delete(tracked),
         (reason) => {
           state?.pending.delete(tracked);
+          if (isBrowserSignInNeeded(reason)) return;
           const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
           blocked.blocked = true; blocked.reason = reason;
         },
@@ -809,6 +813,7 @@ async function awaitMcpResultDelivery(
       await waitForAbort(approval.signal, tracked);
     }
   } catch (reason) {
+    if (isBrowserSignInNeeded(reason) && !approval.signal?.aborted) return browserSignInNeededResult(reason.site);
     if (!approval.signal?.aborted) {
       const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
       blocked.blocked = true; blocked.reason = reason;
@@ -818,6 +823,7 @@ async function awaitMcpResultDelivery(
   assertMcpResultDelivery(approval);
   approval.signal?.throwIfAborted();
   approval.assertCurrent?.();
+  return null;
 }
 
 /** `effectStarted`: the call was handed to the tool (builtin run, MCP request) — before that point an end has no effect. */
@@ -1059,10 +1065,14 @@ async function dispatchMainToolRawUnchecked(
   if(work && "unit" in work && effectSlot) effectSlot.liveAction=work.action.actionId;
   if(work && "reused" in work) {
     // Original custody avoids another effect; delivery still belongs to this run.
-    if (resolved.kind === "mcp") await awaitMcpResultDelivery(approval, {
+    const signIn = resolved.kind === "mcp" ? await awaitMcpResultDelivery(approval, {
       catalogId: resolved.server.catalogId ?? null,
       toolName: resolved.serverToolName, isError: work.reused.isError,
-    });
+    }) : null;
+    if (signIn) {
+      if(actionId)broker?.finishAction(actionId,"failed");
+      return {content:signIn,visionMessage:null,isError:true,canonicalWorkAction:{action_id:work.action.actionId,step_id:work.action.stepId}};
+    }
     if(actionId)broker?.finishAction(actionId,work.reused.isError ? "failed" : "succeeded");
     return {...work.reused,canonicalWorkAction:{action_id:work.action.actionId,step_id:work.action.stepId}} as MainToolDispatchResult;
   }
@@ -1300,9 +1310,9 @@ async function dispatchMainToolRawUnchecked(
   }
   // Outside the ordinary tool-error catch: rejection belongs to the host run
   // lifecycle, while the completed tool receipt above remains intact.
-  await awaitMcpResultDelivery(approval, { catalogId: resolved.server.catalogId ?? null,
+  const signIn = await awaitMcpResultDelivery(approval, { catalogId: resolved.server.catalogId ?? null,
     toolName: resolved.serverToolName, isError: mcpOutcome.isError });
-  return mcpOutcome;
+  return signIn ? { ...mcpOutcome, content: signIn, visionMessage: null, isError: true } : mcpOutcome;
 }
 
 /** OpenAI Chat Completions still needs the actual provider tool-call ID in its

@@ -375,6 +375,23 @@ function replayableSnapshot<T extends Pick<AgentContextSnapshot, "entries">>(sna
   for (const entry of snapshot.entries) if (entry.kind === "checkpoint-reference" && entry.payload.schema === FORWARD_BARRIER_SCHEMA) after = entry.seq;
   return after < 0 ? snapshot : { ...snapshot, entries: snapshot.entries.filter(entry => entry.seq > after) };
 }
+/**
+ * A failed attempt whose request the host sent again as the next turn (a typed journal row, written when the session was retired). The
+ * attempt's input row is skipped in replay only when a LATER user input row with the same text really is in the journal: a retry that
+ * never got that far (owner stop, refusal, store error) leaves the request shown.
+ */
+const ATTEMPT_SUPERSEDED_SCHEMA = "agentlas.attempt-superseded.v1";
+function supersededAttempts(entries: AgentContextSnapshot["entries"]): ReadonlySet<string> {
+  const marked = entries.flatMap(entry => entry.kind === "checkpoint-reference" && entry.payload.schema === ATTEMPT_SUPERSEDED_SCHEMA
+    && typeof entry.payload.turnId === "string" ? [entry.payload.turnId] : []);
+  if (!marked.length) return new Set();
+  const inputOf = new Map(entries.flatMap(entry => entry.kind === "message" && entry.payload.role === "user" && typeof entry.payload.turnId === "string"
+    && typeof entry.payload.text === "string" && entry.eventId === "turn:" + entry.payload.turnId + ":input" ? [[entry.payload.turnId, entry] as const] : []));
+  return new Set(marked.filter(id => {
+    const failed = inputOf.get(id);
+    return failed !== undefined && [...inputOf.values()].some(later => later.seq > failed.seq && later.payload.turnId !== id && later.payload.text === failed.payload.text);
+  }));
+}
 export function prepareAgentContextTurn(capability: AgentContextCapability, input: {
   turnId: string; provider: AgentContextProvider; signal?: AbortSignal;
   events: readonly AgentContextEvent[]; expectedRevision?: number;
@@ -487,8 +504,9 @@ export interface AgentContextUnsettledTurn {
   readonly resumable: boolean;
   /** The native handle the turn ran on or created, when one is known. */
   readonly handle: string | null;
-  /** Bumps the binding generation (decideGeneration symptom "resume_failed"); idempotent and never throws. */
-  retire(): void;
+  /** Bumps the binding generation (decideGeneration symptom "resume_failed", or "context_overflow" when the host saw the model's
+   * window exceeded); idempotent and never throws. */
+  retire(symptom?: "resume_failed" | "context_overflow", options?: { requestResent?: true }): void;
 }
 const BOUNDED_TURN_ENTRIES = 64;
 function remember<T>(map: Map<string, T>, key: string, value: T): void {
@@ -556,6 +574,7 @@ export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapsh
    * argument summary so an earlier outside action is not repeated blindly). The model re-reads a result if it needs one.
    */
   snapshot = replayableSnapshot(snapshot);
+  const superseded=supersededAttempts(snapshot.entries);
   const lastRowOfCall=new Map<string,number>();
   snapshot.entries.forEach((entry,index)=>{
     const callId=entry.kind==="tool"?entry.payload.callId:undefined;
@@ -581,8 +600,10 @@ export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapsh
         text:`${LEDGER_PREFIX}${JSON.stringify(ledger)}`,createdAt:typeof p.createdAt==="string"?p.createdAt:""}});
       continue;
     }
+    if(entry.kind==="checkpoint-reference"&&p.schema===ATTEMPT_SUPERSEDED_SCHEMA)continue;
     if(entry.kind==="checkpoint-reference"){rows.push({row:{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
       text:`${LEDGER_PREFIX}${JSON.stringify(p)}`,createdAt:typeof p.createdAt==="string"?p.createdAt:""}});continue;}
+    if(entry.kind==="message"&&p.role==="user"&&typeof p.turnId==="string"&&superseded.has(p.turnId)&&p.partial!==true)continue;
     if(entry.kind!=="message" || (excludeTurnId!==undefined && p.turnId===excludeTurnId) || !["user","assistant","system"].includes(String(p.role)) || typeof p.text!=="string")continue;
     const role=p.role as "user"|"assistant"|"system";
     // What was said, not the host blocks around it: hidden envelopes/markers out of answers (also in journals written
@@ -632,8 +653,9 @@ function boundToolLedger(rows:ReadonlyArray<{row:NonNullable<RunnerRequest["hist
   return out;
 }
 function materializeAttachments(entries: AgentContextSnapshot["entries"], excludeTurnId: string): NonNullable<RunnerRequest["images"]> {
+  const superseded=supersededAttempts(entries);
   return replayableSnapshot({ entries }).entries.flatMap(entry=>{
-    if(entry.kind==="attachment" && entry.payload.turnId!==excludeTurnId
+    if(entry.kind==="attachment" && entry.payload.turnId!==excludeTurnId && !superseded.has(String(entry.payload.turnId))
       && typeof entry.payload.mediaType==="string" && typeof entry.payload.data==="string")return [
       {mediaType:entry.payload.mediaType,data:entry.payload.data,...(typeof entry.payload.name==="string"?{name:entry.payload.name}:{})}];
     if(entry.kind==="tool" && typeof entry.payload.imageDataUrl==="string"){
@@ -723,7 +745,7 @@ function metaStore(): MetaStore | null {
 }
 const rotationMetaKey = (contextKey: string, bindingKey: string) => `agent-context-rotation:${contextKey}:${bindingKey}`;
 const hostFactsMetaKey = (contextKey: string, bindingKey: string) => `agent-context-host-facts:${contextKey}:${bindingKey}`;
-interface AgentContextRotationRecord { fromGeneration: number; toGeneration: number; reason: "context_ratio" | "resume_failed";
+interface AgentContextRotationRecord { fromGeneration: number; toGeneration: number; reason: "context_ratio" | "resume_failed" | "context_overflow";
   reportedInputTokens: number | null; contextWindowTokens: number | null; rotatedAt: string }
 function recordRotation(delivery: AgentContextDelivery, record: Omit<AgentContextRotationRecord, "fromGeneration" | "toGeneration" | "rotatedAt">,
   origin?: { runtime: string; agentId: string; windowSource: string }): void {
@@ -1084,11 +1106,17 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     let nativeDeliveredHashes: readonly string[] = [];
     const noteUnsettled=(observed:string|null)=>{
       const handle=observed??nativeHandle??null,stateful=nativeKind||!!policy;
-      remember(unsettledTurns,turnId,{resumable:stateful?!!handle:true,handle,retire(){
+      remember(unsettledTurns,turnId,{resumable:stateful?!!handle:true,handle,retire(symptom="resume_failed",options){
         // The same rule as a completed turn's rotation (session-generation.ts), with the symptom the host observed.
-        if(decideGeneration({kind:provider.kind,contextWindowTokens:null,lastInputTokens:null,symptom:"resume_failed"}).action!=="new_generation")return;
+        if(decideGeneration({kind:provider.kind,contextWindowTokens:null,lastInputTokens:null,symptom}).action!=="new_generation")return;
+        // The host sends this turn's request again as the next turn: the journal says so with a typed row, so every reader in any process
+        // shows the owner's request once (materializeAgentContextHistory). Nothing else of the failed turn is hidden.
+        if(options?.requestResent===true){
+          try{store.append(value.identity,sanitizeEvent({eventId:`turn:${turnId}:superseded`,kind:"checkpoint-reference",producerBinding:delivery.bindingKey,
+            payload:{schema:ATTEMPT_SUPERSEDED_SCHEMA,turnId}}));}catch{/* without the row the request shows twice; nothing is lost */}
+        }
         try{store.invalidateProvider(value.identity,adapter,delivery.generation);
-          recordRotation(delivery,{reason:"resume_failed",reportedInputTokens:null,contextWindowTokens:null},
+          recordRotation(delivery,{reason:symptom,reportedInputTokens:null,contextWindowTokens:null},
             {runtime:provider.kind,agentId:value.identity.agentId,windowSource:"none"});}catch{/* a concurrent delivery or generation owns the binding */}
       }});
     };

@@ -2229,7 +2229,15 @@ export function pullForwardNoProgressRetry(runId: string): boolean {
   try {
     const retry = pendingBlockedGoalRetry(runId);
     const run = getLongRun(runId);
-    if (!run || !retry || retry.fromReason !== VERIFICATION_NO_PROGRESS_REASON || Date.parse(retry.nextAt) <= Date.now()) return false;
+    if (!run || !retry || retry.fromReason !== VERIFICATION_NO_PROGRESS_REASON) return false;
+    // A retry whose time has passed is already running, unless it is the rest that delivered its result and waits for a signal
+    // (long-run/goal-no-progress-wait.ts): that one is still on its timer trigger, and this pull is the signal it waits for.
+    if (Date.parse(retry.nextAt) <= Date.now()) {
+      const row = getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND seq = ?").get(runId, retry.seq) as { payload_json: string } | undefined;
+      let trigger: unknown = null;
+      try { trigger = row ? (JSON.parse(row.payload_json) as { trigger?: unknown }).trigger : null; } catch { /* an unreadable event is not a timer rest */ }
+      if (trigger !== "verification-no-progress") return false;
+    }
     scheduleBlockedGoalRetry({ runId, expectedVersion: run.version, kind: retry.kind, fromReason: retry.fromReason,
       retryIndex: retry.retryIndex, nextAt: new Date().toISOString(), detail: "no_progress_pull_forward",
       trigger: "no-progress-pull-forward", requestedBy: "host" });

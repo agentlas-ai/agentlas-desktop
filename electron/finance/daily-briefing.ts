@@ -70,6 +70,8 @@ export async function revokeFinanceDailyCheckin(scope:FinanceScope,binding:Finan
     if(!row)return;
     db.prepare('UPDATE one_supervisor_checkins SET active=0 WHERE id=? AND one_id=? AND command_id=?').run(binding.checkinId,binding.oneId,binding.commandId);
     db.prepare("UPDATE one_supervisor_notices SET review_state='skipped',review_reason='finance_monitoring_disabled' WHERE one_id=? AND task_id=? AND (review_state IN ('pending','held') OR (?=1 AND review_state='claimed'))").run(binding.oneId,`checkin:${binding.checkinId}`,includeClaimed?1:0);
+    // The released row is ours and inactive: remove it unless a briefing was ever queued from it (those notices keep pointing at it, and the review gate finds the briefing through it).
+    db.prepare("DELETE FROM one_supervisor_checkins WHERE id=? AND one_id=? AND command_id=? AND active=0 AND NOT EXISTS (SELECT 1 FROM one_supervisor_notices WHERE one_id=? AND task_id=?)").run(binding.checkinId,binding.oneId,binding.commandId,binding.oneId,`checkin:${binding.checkinId}`);
   }).immediate();scope.assertCurrent();
 }
 /** Registration firing is not delivery. Only an exact durable assistant result confirms lastSentAt. */

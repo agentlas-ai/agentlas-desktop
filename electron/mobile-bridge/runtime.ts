@@ -15,7 +15,7 @@ import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
   type MobileBridgePairingPayload,
 } from "../../shared/mobile-bridge";
-import { createMobileBridgeAuthority, observeMobilePushNotices, type MobileBridgeAuthorityHandle } from "./authority";
+import { createMobileBridgeAuthority, durableMobileApprovalState, observeMobilePushNotices, oneMessagePreviewForPhone, type MobileBridgeAuthorityHandle } from "./authority";
 import {
   MobileBridgePairingManager,
   createMobileBridgePairingPayload,
@@ -321,6 +321,26 @@ async function startBridgeInternal(
       deviceWorkspaceId: (deviceId) => pairing.deviceWorkspaceId(deviceId),
       supportsPlatform: (platform) => relay?.supportsPush(platform) ?? false,
       publish: (payload) => relay?.publishPush(payload) ?? Promise.resolve("unavailable"),
+      // The owner's One Briefing quiet hours hold scheduled check-ins (never a chat answer); read lazily so the push store
+      // does not depend on the briefing module at load time.
+      quietHours: () => {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          return (require("../one/briefing") as typeof import("../one/briefing")).oneQuietHours();
+        } catch { return null; }
+      },
+      // A queued approval is announced again only while its card still waits; a store error keeps it queued.
+      revalidate: (notice) => {
+        if (notice.category !== "approval") return true;
+        const state = durableMobileApprovalState(notice.dedupeKey.slice(`tool-approval:${notice.hostId}:`.length), notice.entityId);
+        return state === "pending" ? true : state === "gone" ? false : "keep";
+      },
+      // A queued personal One answer keeps only its message id; the text is rebuilt from the saved message (gone: not sent).
+      resolveBody: (notice) => {
+        if (notice.category !== "oneMessage" || !notice.messageId) return {};
+        const preview = oneMessagePreviewForPhone(notice.messageId);
+        return preview === "unknown" ? {} : preview;
+      },
     });
   } catch { console.warn("[mobile-push] registration store unavailable; push capability disabled"); }
   const nativeToolApprovals = options.nativeToolApprovals ? createMobileNativeToolApprovalPort({
@@ -412,7 +432,11 @@ async function startBridgeInternal(
       hostId: identity.hostId,
       localEndpoint: manifest.url,
       certificateDer: tls.certificateDer,
-      onStatusChanged: () => emitMobileBridgeStateChange("runtime-started"),
+      // relay.ready (push capability known) and a reconnect both land here: what waited for FCM goes out now.
+      onStatusChanged: () => {
+        emitMobileBridgeStateChange("runtime-started");
+        void push?.flushPending().catch(() => console.warn("[mobile-push] queue flush unavailable"));
+      },
       onPairFrame: (frameText) => server!.handleRelayPairFrame(frameText),
     });
     if (push) {
@@ -423,6 +447,7 @@ async function startBridgeInternal(
     }
     running = { authority, pairing, accountPairing, server, relay, push, stopPushObserver, manifest, terminalControl };
     relay.start();
+    void push?.flushPending().catch(() => console.warn("[mobile-push] queue flush unavailable")); // a queue that survived a restart
     emitMobileBridgeStateChange("runtime-started");
     console.info(`[mobile-bridge] listening on ${address.url}`);
     return mobileBridgeRuntimeStatus();

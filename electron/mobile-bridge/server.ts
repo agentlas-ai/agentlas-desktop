@@ -1036,7 +1036,7 @@ export class AgentlasMobileBridgeServer {
       return;
     }
     // Reserve this connection's request budget for cancellation and control.
-    if ((parsed.value.method === "legacy.video.chunk" || parsed.value.method === "one.video.chunk" || parsed.value.method === "chat.video.chunk" || parsed.value.method === "science.video.chunk") && state.requestCount > MOBILE_CHUNK_REQUEST_BUDGET) {
+    if ((parsed.value.method === "legacy.video.chunk" || parsed.value.method === "chat.file.chunk" || parsed.value.method === "one.video.chunk" || parsed.value.method === "chat.video.chunk" || parsed.value.method === "science.video.chunk") && state.requestCount > MOBILE_CHUNK_REQUEST_BUDGET) {
       this.send(state, mobileBridgeFailure(parsed.value.id, "too_many_requests", "Video transfer is paused to reserve control capacity", true));
       return;
     }

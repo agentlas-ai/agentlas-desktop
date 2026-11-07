@@ -159,9 +159,12 @@ function sweepStalePastedAttachments(root: string): void {
 }
 
 export class FsAccessDeniedError extends Error {
-  constructor(message = "Filesystem read is outside the approved scope.") {
+  /** Machine marker: "missing" when the path does not exist (callers tell "gone" from "not admitted" by this, never by the sentence). */
+  readonly reason: "missing" | undefined;
+  constructor(message = "Filesystem read is outside the approved scope.", reason?: "missing") {
     super(message);
     this.name = "FsAccessDeniedError";
+    this.reason = reason;
   }
 }
 
@@ -491,7 +494,7 @@ export function resolveFsReadPath(absPath: string, scope: FsReadScope): string {
   try {
     targetLstat = fs.lstatSync(requested);
   } catch {
-    throw new FsAccessDeniedError("The requested path does not exist.");
+    throw new FsAccessDeniedError("The requested path does not exist.", "missing");
   }
   // A direct symlink is never surfaced. Ancestor symlink escapes are caught by
   // comparing the final realpath to the real authorized root below.
@@ -515,7 +518,7 @@ export function resolveMainOwnedReadPath(absPath: string, mainRoot: string): str
   try {
     targetLstat = fs.lstatSync(requested);
   } catch {
-    throw new FsAccessDeniedError("The requested path does not exist.");
+    throw new FsAccessDeniedError("The requested path does not exist.", "missing");
   }
   if (targetLstat.isSymbolicLink()) {
     throw new FsAccessDeniedError("Symbolic links are not readable through the renderer bridge.");

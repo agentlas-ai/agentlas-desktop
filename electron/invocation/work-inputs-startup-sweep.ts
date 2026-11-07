@@ -1,6 +1,8 @@
 import { getDb } from "../store/db";
 import { listProjects } from "../store/projects";
 import { sweepOrphanedWorkInputs } from "./work-attachments";
+import { chatInputScope, sweepChatInputSpills } from "../store/chat-input-spill";
+import { userDataPath } from "../runtime-paths";
 
 /**
  * At the app's start, remove the attachment copies a stopped process left in the folders Work runs use (work-attachments.ts). Staging
@@ -46,8 +48,35 @@ export async function sweepWorkInputsOfKnownFolders(
   return summary;
 }
 
+/**
+ * The same folders also hold the oversized inputs kept as files (store/chat-input-spill.ts); the ones no stored conversation owns and
+ * nobody touched for ORPHAN_TTL_MS go. It takes the folder list the work-input sweep already built (no second walk of the stores), each
+ * folder's wait is bounded and three folders that do not answer end the sweep, exactly like the work-input sweep. One folder at a time,
+ * the event loop in between. Never throws.
+ */
+export async function sweepChatInputSpillsOfKnownFolders(folders: readonly string[]): Promise<number> {
+  let removed = 0, unresponsive = 0;
+  try {
+    const live = new Map((getDb().prepare("SELECT id, updated_at AS updatedAt FROM chats").all() as Array<{ id: string; updatedAt: string | null }>)
+      .map((row) => [chatInputScope(row.id), Date.parse(row.updatedAt ?? "") || Date.now()] as const)); // an unreadable clock counts as active
+    for (const folder of folders) {
+      if (unresponsive >= MAX_UNRESPONSIVE_FOLDERS) break;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const outcome = await Promise.race([sweepChatInputSpills(folder, live), new Promise<"timeout">((resolve) => { timer = setTimeout(() => resolve("timeout"), FOLDER_TIMEOUT_MS); })]); // cleared below; the wait is bounded
+        if (outcome === "timeout") unresponsive += 1; else removed += outcome;
+      } finally { if (timer) clearTimeout(timer); }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  } catch { /* no chats table yet: nothing is judged an orphan */ }
+  return removed;
+}
+
 /** Called once at startup: the sweep runs shortly after, in the background. */
 export function scheduleWorkInputsStartupSweep(delayMs = 20_000): void {
-  const timer = setTimeout(() => { void sweepWorkInputsOfKnownFolders().catch(() => undefined); }, delayMs);
+  const timer = setTimeout(() => {
+    const folders = workInputFolders();
+    void sweepWorkInputsOfKnownFolders({ folders }).then(() => sweepChatInputSpillsOfKnownFolders([...folders, userDataPath("agent-cwd")])).catch(() => undefined);
+  }, delayMs);
   timer.unref?.();
 }

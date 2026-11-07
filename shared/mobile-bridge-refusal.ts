@@ -56,6 +56,18 @@ export const MOBILE_BRIDGE_SPECIFIC_REFUSAL_CODES = [
   "attachment_upload_busy",
   /** remote-build-attachments-v1: the build's uploaded files are gone, unfinished, already used, or another phone's. Attach again. */
   "build_attachments_unavailable",
+  /** chat.file.open (chat.file.v1): the file the answer names is gone from this Desktop. */
+  "chat_file_missing",
+  /** The file is larger than the 192 MB a phone transfer carries. */
+  "chat_file_too_large",
+  /** The Desktop would not open this location or name (outside the folders it shows this chat's files from, a folder, a link). */
+  "chat_file_not_openable",
+  /** The file's type is not one a phone receives. */
+  "chat_file_type_unsupported",
+  /** The file changed while it was being sent, or the answer's text moved on and the link no longer names this file. */
+  "chat_file_changed",
+  /** Desktop is already sending this phone a file (or four phones' files); the phone queues and tries again. */
+  "chat_file_busy",
 
 ] as const;
 export type MobileBridgeSpecificRefusalCode = (typeof MOBILE_BRIDGE_SPECIFIC_REFUSAL_CODES)[number];

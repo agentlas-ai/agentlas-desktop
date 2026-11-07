@@ -29,6 +29,17 @@ const CHECKIN_ADMISSION_GATES: ReadonlyArray<() => Promise<CheckinAdmissionGate>
   async () => (await import("../finance/daily-briefing")).FINANCE_DAILY_CHECKIN_GATE,
 ];
 
+/**
+ * Loading a gate registers the host-authored instructions its domain owns (host-checkin-instructions.ts), which the check-in cap
+ * exempts. A host calls this before it serves check-in commands, so the exemption never depends on which module was imported first.
+ * A failed load is not remembered: the next call tries again.
+ */
+let gatesLoaded: Promise<void> | undefined;
+export function loadCheckinGates(): Promise<void> {
+  gatesLoaded ??= (async () => { for (const load of CHECKIN_ADMISSION_GATES) await load(); })().catch(error => { gatesLoaded = undefined; throw error; });
+  return gatesLoaded;
+}
+
 export async function heldCheckinIds(): Promise<string[]> {
   const held: string[] = [];
   for (const load of CHECKIN_ADMISSION_GATES) held.push(...await (await load()).heldCheckins());

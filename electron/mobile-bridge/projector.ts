@@ -158,13 +158,13 @@ import {
   MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
   MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
   MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
-  MOBILE_BRIDGE_INLINE_UI_TEXT_BYTES,
   mobileBridgeDecisionTextCurrent,
   mobileBridgeDecisionTextUnchanged,
   mobileBridgeJsonBytes,
   sanitizeMobileBridgeText,
   stripMobileBridgeControlFences,
 } from "./sanitize";
+import { chatFileSourceText, cutChatFileText, rewriteChatFilePaths } from "./chat-file-links";
 
 const INITIAL_PROJECTION_BUDGET_MS = 2_500;
 const CHAT_ATTACHMENT_ID_PATTERN = "[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
@@ -965,6 +965,10 @@ export interface MobileBridgeHistoryConsumption { consumed: number; oldest?: { i
 export interface MobileBridgeHistoryOptions {
   /** The phone reported thread.composition.v1: system rows of a scheduled run's report carry their typed notice. */
   automationReportNotice?: boolean;
+  /** The most a typed result row (a drawn card) may carry. A history page allows a whole card; a polled snapshot keeps the smaller default. */
+  inlineUiTextBytes?: number;
+  /** The phone reported chat.file.v1: local file paths of a stored assistant answer become `[name](agentlas-file:<n>)` links. */
+  chatFileLinks?: boolean;
 }
 
 export function projectMobileBridgeHistory(
@@ -1027,6 +1031,13 @@ export function projectMobileBridgeHistory(
     const reportNotice = options.automationReportNotice && notice?.purpose === "automation-report"
       ? { purpose: "automation-report" as const, runId: notice.runId, automationId: notice.automationId }
       : undefined;
+    // chat.file.v1: a teammate's result carries its file links in `resultText` too (the phone draws that field in the result card
+    // and the row text from it). The same source text and tokenizer as chat.file.open: chat-file-links.ts chatFileSourceText.
+    const linkedResult = options.chatFileLinks && (message.role === "assistant" || message.role === "system") && notice && "dispatch" in notice && notice.dispatch?.resultText && hostNotice?.dispatch
+      ? sanitizeMobileBridgeText(cutChatFileText(rewriteChatFilePaths(chatFileSourceText(message.text, notice), true).text, 12000), 12000 + 4096)
+      : undefined;
+    const outNotice = linkedResult !== undefined && hostNotice?.dispatch
+      ? { ...hostNotice, dispatch: { ...hostNotice.dispatch, resultText: linkedResult } } : hostNotice;
     const shell: MobileBridgeChatMessageDto = {
       id: message.id,
       role: message.role,
@@ -1037,7 +1048,7 @@ export function projectMobileBridgeHistory(
         : {}),
       text: "",
       createdAt: message.createdAt,
-      ...(hostNotice ? { hostNotice } : reportNotice ? { hostNotice: reportNotice } : {}),
+      ...(outNotice ? { hostNotice: outNotice } : reportNotice ? { hostNotice: reportNotice } : {}),
       ...(message.role === "user" && promptRunIds.has(message.id)
         ? { runId: promptRunIds.get(message.id)! }
         : {}),
@@ -1047,8 +1058,8 @@ export function projectMobileBridgeHistory(
     const remaining = budget - outBytes - mobileBridgeJsonBytes(shell) - 16;
     if (remaining <= 0) break;
     // Older Mobile builds ignore typed notices. Preserve their existing room row and expose only verified output.
-    const messageText = hostNotice?.dispatch?.resultText
-      ? `${hostNotice.memberName} · ${hostNotice.dispatch.status}\n\n${hostNotice.dispatch.resultText}` : message.text;
+    const messageText = outNotice?.dispatch?.resultText
+      ? `${outNotice.memberName} · ${outNotice.dispatch.status}\n\n${outNotice.dispatch.resultText}` : message.text;
     const inlineFallback = inlineUiFallbacks?.get(message.id);
     // Typed views stay atomic. If boundary redaction would mutate their data,
     // use safe prose instead of sending corrupt JSON or sensitive HTML.
@@ -1062,7 +1073,7 @@ export function projectMobileBridgeHistory(
       ? fitInlineUiTranscriptText(
           typedUnchanged ? inlineMessageText : safeInlineFallback!,
           safeInlineFallback!,
-          MOBILE_BRIDGE_INLINE_UI_TEXT_BYTES,
+          options.inlineUiTextBytes ?? MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES,
           remaining,
         ) : undefined;
     // A card that does not fit what is left of this page waits for the next one whole: the older page reads it first, never as a bare label.
@@ -1080,7 +1091,10 @@ export function projectMobileBridgeHistory(
         stripProjectedChatAttachmentMarkdown(
           stripProjectedChatFileMarkers(message.role === "user"
             ? messageText
-            : stripMobileBridgeControlFences(messageText)),
+            // chat.file.v1: a stored answer's paths become file links (chat-file-links.ts); a row whose text the host made keeps the mask.
+            : options.chatFileLinks && message.role === "assistant" && linkedResult === undefined && messageText === message.text
+              ? cutChatFileText(rewriteChatFilePaths(chatFileSourceText(message.text, notice), true).text, Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining))
+              : stripMobileBridgeControlFences(messageText)),
           images,
         ),
         Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),

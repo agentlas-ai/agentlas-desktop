@@ -1,7 +1,7 @@
 import { supervisorDoneWhen, supervisorError } from "../../shared/one-supervisor";
 import { scienceRequestId, scienceStartNotSent } from "./supervisor-science";
 import { readOrdinaryOneTurn, type OrdinaryOneTurnSource } from "../invocation/ordinary-one-turn";
-import { createSupervisorNativeOrigin } from "./supervisor-native-runtime";
+import { createSupervisorNativeOrigin, supervisorCommandBinding } from "./supervisor-native-runtime";
 import { randomUUID } from "node:crypto";
 import type { ChatHistoryEntry, InvocationRunReceipt, McpInvocationRequest, RuntimeSelection, ImageAttachment } from "../../shared/types";
 import type { AgentlasUserDecisionRequest } from "../../shared/types";
@@ -239,18 +239,9 @@ export class OneSupervisorService {
       if (prior && !ordinaryNativeMarker(prior)) {
         // Existing supervised replies retain their original origin/observation path.
         // These are the existing origin validator's four-family binding checks, without minting another origin.
-        const originalPayload = JSON.parse(prior.payload_json);
-        let target: string | undefined;
-        if (prior.kind === "reply") target = prior.origin_chat_id;
-        else if (prior.kind === "work") target = originalPayload.workerChatId;
-        else if (prior.kind === "chat-send") target = originalPayload.chatId;
-        else if (prior.kind === "follow-up") {
-          const delegated = this.deps.store.db.prepare("SELECT payload_json FROM one_supervisor_requests WHERE one_id=? AND task_id=? AND kind='work' ORDER BY rowid LIMIT 1")
-            .get(oneId, prior.task_id) as {payload_json:string} | undefined;
-          if (delegated) target = JSON.parse(delegated.payload_json).workerChatId;
-        }
-        if (prior.one_id !== oneId || target !== request.chatId
-          || prior.state !== "dispatching" || originalPayload.text !== request.userPrompt
+        const binding = supervisorCommandBinding(this.deps.store, oneId, prior);
+        if (prior.one_id !== oneId || binding.target !== request.chatId
+          || prior.state !== "dispatching" || binding.prompt !== request.userPrompt
           || (prior.source_reply_run_id && !this.deps.store.db.prepare("SELECT 1 FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND kind='reply'").get(oneId, prior.source_reply_run_id)))
           throw supervisorError("supervisor_native_command_binding_changed");
         return prior;

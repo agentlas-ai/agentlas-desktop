@@ -10597,7 +10597,9 @@ function OneSessionsShell() {
                     const foldedIntoWork = housekeepingMessageIds.has(sourceMessageId) || settledFailureLineIds.has(sourceMessageId);
                     const messageHostNotice = normalizeChatHostNotice(message.role, message.hostNotice);
                     // Host status lines that report a failure or need the owner stay ordinary bubbles.
+                    // goal-incomplete carries what the owner must do next, so it is a normal Markdown bubble.
                     const drawsAsHostNotice = Boolean(messageHostNotice)
+                      && messageHostNotice?.purpose !== "goal-incomplete"
                       && (messageHostNotice?.purpose !== "host-status" || isHousekeepingHostNotice(messageHostNotice));
                     // Codex draws the turn's work above the answer it produced:
                     // the live block sits right before the streaming reply,

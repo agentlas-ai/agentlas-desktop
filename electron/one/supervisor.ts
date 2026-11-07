@@ -203,6 +203,8 @@ export function oneSupervisor():OneSupervisorService {
   // Schema migration role does not confer execution authority. The fenced
   // Supervisor domain owner alone may run the durable queue in either host.
   const hostsWork = openedStoreMigrationRole() !== null;
+  // The check-in cap exempts host-authored instructions that each domain's gate registers; load them as the host starts.
+  void import("./checkin-admission").then(module => module.loadCheckinGates()).catch(() => undefined);
   const workQueue = new OneSupervisorWorkQueue(getDb(), hostsWork);
   nativeWorkQueue=workQueue;
   const assertBudgetOwner=(oneId:string)=>{

@@ -37,6 +37,8 @@ import type {
 } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
 import { removeCanvasExports } from "../canvas/export-file";
+import { removeChatInputSpills } from "./chat-input-spill";
+import { userDataPath } from "../runtime-paths";
 import { applySeatSnapshotToChats, ensureSoloSeatForAgent } from "./seats";
 import {
   ensureCanonicalTaskForChat,
@@ -939,10 +941,18 @@ export function unarchiveChat(id: string): Chat {
 
 export function removeChat(id: string): void {
   const task = findCanonicalTaskForChat(id);
+  const folders = (() => {
+    try {
+      const row = getDb().prepare("SELECT project_id AS projectId, working_folder AS workingFolder FROM chats WHERE id = ?").get(id) as { projectId: string | null; workingFolder: string | null } | undefined;
+      return [row?.workingFolder, row?.projectId ? getProject(row.projectId)?.folderPath : null, userDataPath("agent-cwd")];
+    } catch { return []; }
+  })();
   const result = getDb().prepare("DELETE FROM chats WHERE id = ?").run(id);
   if (result.changes > 0) {
     if (task?.originChatId === id) removeCanonicalTaskForOriginChat(id);
     removeCanvasExports(id);
+    // The oversized inputs kept as files for this conversation (store/chat-input-spill.ts): in its working folder, its project folder and the default run folder.
+    void removeChatInputSpills(id, folders).catch(() => undefined);
     emitDesktopStoreChange({ entity: "chat", id });
   }
 }

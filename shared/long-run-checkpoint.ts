@@ -40,6 +40,8 @@ export interface CheckpointCriterion {
 export const NO_PROGRESS_RETRY_LIMIT = 2;
 /** Reason of the idle-spin rest (the ledger retry's fromReason and the verifier's requested blocked reason). Carries no counter. */
 export const VERIFICATION_NO_PROGRESS_REASON = "verification_no_progress";
+/** The wake cause a reader shows once that rest has delivered its result and waits for a signal instead of a time. */
+export const VERIFICATION_NO_PROGRESS_REST_CAUSE = "verification_no_progress_rest";
 
 export function goalVerificationDisposition(input: {
   completed: boolean;

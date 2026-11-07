@@ -3,7 +3,7 @@ import {retainHistoryWorkOrigin} from './history-work-dispatch';
 import { withOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
 import { getAuthenticatedActorIds } from "../auth";
 import { getDb, STORE_SCHEMA_VERSION } from "../store/db";
-import { ONE_SUPERVISOR_SCHEMA } from "../../shared/one-supervisor";
+import { ONE_SUPERVISOR_SCHEMA, withDoneWhen } from "../../shared/one-supervisor";
 import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, ONE_SUPERVISOR_EXTENSIONS_SCHEMA, sameSupervisorRuntimeCompatibility } from "../../shared/one-supervisor-runtime";
 import { importNativeJsonValue } from "../daemon/native-json-transfer";
 import { NATIVE_MAIN_PREPARATION_POLICY } from "../daemon/native-invocation-policy";
@@ -39,16 +39,10 @@ export function supervisorNativeNoticePurpose(origin: object, request: Readonly<
   authorizeSupervisorNativeOrigin(origin, request); return origins.get(origin)!.purpose;
 }
 
-/** Original durable command + exact identity/generation is the host producer.
- * This capability never crosses IPC and does not pretend to be a renderer. */
-export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: OneSupervisorOwner,
-  oneId: string, request: McpInvocationRequest, purpose?: SupervisorHostNoticePurpose, assertOriginal?: () => void): object {
-  assertOriginal?.();
-  const token = owner.assert(oneId),actor=JSON.stringify(getAuthenticatedActorIds());
-  const rows = store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND state='dispatching'")
-    .all(oneId, request.runId) as SupervisorRequestRow[];
-  if (rows.length !== 1) fail("supervisor_native_exact_command_required");
-  const row = rows[0], payload = JSON.parse(row.payload_json);
+/** The conversation a durable command runs in and the exact prompt its dispatch sends, for the four command families.
+ * A Work's prompt is its brief plus the finished-when list (withDoneWhen, the same function the Work executor sends). */
+export function supervisorCommandBinding(store: Pick<OneSupervisorStore, "db">, oneId: string, row: SupervisorRequestRow): { target: string | undefined; prompt: unknown } {
+  const payload = JSON.parse(row.payload_json);
   let target: string | undefined;
   if (row.kind === "reply") target = row.origin_chat_id;
   else if (row.kind === "work") target = payload.workerChatId;
@@ -58,7 +52,20 @@ export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: O
       .get(oneId, row.task_id) as { payload_json: string } | undefined;
     if (delegated) target = JSON.parse(delegated.payload_json).workerChatId;
   }
-  if (target !== request.chatId || payload.text !== request.userPrompt) fail("supervisor_native_command_binding_changed");
+  return { target, prompt: row.kind === "work" && typeof payload.text === "string" ? withDoneWhen(payload.text, payload.doneWhen) : payload.text };
+}
+
+/** Original durable command + exact identity/generation is the host producer.
+ * This capability never crosses IPC and does not pretend to be a renderer. */
+export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: OneSupervisorOwner,
+  oneId: string, request: McpInvocationRequest, purpose?: SupervisorHostNoticePurpose, assertOriginal?: () => void): object {
+  assertOriginal?.();
+  const token = owner.assert(oneId),actor=JSON.stringify(getAuthenticatedActorIds());
+  const rows = store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND state='dispatching'")
+    .all(oneId, request.runId) as SupervisorRequestRow[];
+  if (rows.length !== 1) fail("supervisor_native_exact_command_required");
+  const row = rows[0], binding = supervisorCommandBinding(store, oneId, row);
+  if (binding.target !== request.chatId || binding.prompt !== request.userPrompt) fail("supervisor_native_command_binding_changed");
   if (row.source_reply_run_id && !store.db.prepare("SELECT 1 FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND kind='reply'").get(oneId, row.source_reply_run_id)) {
     fail("supervisor_native_source_occurrence_missing");
   }
@@ -137,6 +144,7 @@ export function oneSupervisorEndpoint():{[K in keyof OneSupervisorService]:OneSu
   return new Proxy({} as any,{get(_target,method:string){return async(...args:unknown[])=>{
     if(mode==='handoff')fail('supervisor_runtime_handoff_pending');
     if(mode==='daemon')return callOneSupervisorRuntime('command',{method,args});
+    await (await import('./checkin-admission')).loadCheckinGates().catch(()=>undefined);
     const service=(await import('./supervisor')).oneSupervisor();
     return (service[method as keyof OneSupervisorService] as (...args:unknown[])=>unknown).apply(service,args);
   };}});

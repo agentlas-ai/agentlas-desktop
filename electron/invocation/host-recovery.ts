@@ -12,6 +12,10 @@ import { getDb } from "../store/db";
 import type { InvocationWorkspaceBinding } from "./workspace-binding";
 import type { InvocationExecutionContext } from "../mcp/client";
 import { bindIdleRetrySignals, registerIdleRetry, type IdleRetryHandle, type IdleRetrySignals } from "./idle-retry";
+import { getInvocationRunReceipt } from "../store/run-events";
+import { readRunTurnPlacement } from "./turn-placement";
+import { withEarlierAttempt } from "./earlier-attempt";
+import { isOwnerEndedInvocation } from "../../shared/invocation-host-stop";
 
 /**
  * The host-level safety net for an owner turn that fails INSIDE the app (owner rule: no internal harness code reaches
@@ -803,7 +807,10 @@ export function scheduleHostRecovery(ports: HostRecoveryPorts, job: {
       }
       if (!request) { finish("failed", "manual", "recovery_request_unavailable"); return; }
       const marker: HostRecoveryMarker = { ofRunId: originalRunId, userMessageId, ordinal: 1 };
-      const recoveryRequest = hostRecoveryRequestFor(request, marker);
+      // A retry the restart cut short while tools may already have run goes on from what exists (the existing earlier-attempt
+      // line: read the history, finish what remains, repeat nothing); a blind replay is only for a retry that provably acted on nothing.
+      const baseRequest = hostRecoveryRequestFor(request, marker);
+      const recoveryRequest = hostRecoveryEarlierAttempt(getDb(), originalRunId) ? withEarlierAttempt(baseRequest) : baseRequest;
       let started: { runId: string };
       // At most one start across restarts and processes: the one that did not get the claim leaves the recovery to the other.
       const recoveryRunId = recoveryRequest.runId as string;
@@ -834,13 +841,75 @@ export function scheduleHostRecovery(ports: HostRecoveryPorts, job: {
   ports.setTimer(tick, 150);
 }
 
+/** The claim says the restart cut a retry short after it may have acted: its next start carries the earlier-attempt line. */
+export function hostRecoveryEarlierAttempt(db: Db, originalRunId: string): boolean {
+  try {
+    const row = db.prepare("SELECT json_extract(payload_json, '$.earlierAttempt') AS e FROM run_events WHERE run_id = ? AND kind = ? LIMIT 1")
+      .get(originalRunId, HOST_RECOVERY_REQUESTED) as { e?: unknown } | undefined;
+    return row?.e === 1;
+  } catch { return false; }
+}
+
+/** A retry cut short by a restart is started again at most once per boot (one sweep per process) and this many times in all: a retry that takes the app down every time must end. */
+export const HOST_RECOVERY_INTERRUPTED_RESUMES = 3;
+
+type InterruptedRetryVerdict =
+  | { kind: "leave" }
+  | { kind: "close"; outcome: "completed" | "skipped"; reason: string }
+  | { kind: "resume"; mayHaveActed: boolean };
+
+/**
+ * What a started retry that left no outcome row turned into (the app quit or crashed before its settlement ran). Read from the retry
+ * run's own receipt, never from words:
+ *  - still running or waiting for the owner's input (this or another process owns it): left alone, its own settlement closes the claim;
+ *  - completed: closed quietly (its answer is already in the chat);
+ *  - ended on purpose by the owner (Stop, a steering message, a paused or deleted Goal): closed as skipped, never started again;
+ *  - anything else (cut short by the quit, an update restart, a crash, or failed with its settlement lost): started again once.
+ *    `mayHaveActed` is true unless the run provably acted on nothing: any tool or adapter effect row, or a turn the runtime took.
+ */
+function interruptedRetryVerdict(db: Db, originalRunId: string): InterruptedRetryVerdict {
+  try {
+    const latest = db.prepare(`SELECT run_id AS rid FROM run_events WHERE kind = ? AND json_extract(payload_json, '$.originalRunId') = ? ORDER BY ts DESC, rowid DESC LIMIT 1`)
+      .get(HOST_RECOVERY_LINK, originalRunId) as { rid?: unknown } | undefined;
+    const rid = typeof latest?.rid === "string" ? latest.rid : null;
+    if (!rid) return { kind: "leave" };
+    // A start another process just claimed (its link is written right after the start returns) is in flight, not dead.
+    const inFlight = db.prepare(`SELECT json_extract(payload_json, '$.recoveryRunId') AS rid FROM run_events WHERE run_id = ? AND kind = ?
+      AND json_extract(payload_json, '$.released') IS NULL ORDER BY rowid DESC LIMIT 1`).get(originalRunId, HOST_RECOVERY_START) as { rid?: unknown } | undefined;
+    if (typeof inFlight?.rid === "string" && inFlight.rid !== rid) return { kind: "leave" };
+    // A run some live process still holds (its chat lease is active or settling) is that process's to finish: the dead ones were released at boot.
+    if (db.prepare("SELECT 1 FROM invocation_run_owners WHERE run_id = ? AND state IN ('active', 'settling') LIMIT 1").get(rid)) return { kind: "leave" };
+    const receipt = getInvocationRunReceipt(rid);
+    // The start receipt is written before a start returns (and the link after it), so no receipt is a ledger this look cannot read: not proof of a dead run.
+    if (!receipt) return { kind: "leave" };
+    if (receipt.status === "running" || receipt.status === "cancelling" || receipt.status === "waiting_input") return { kind: "leave" };
+    if (receipt.status === "completed") return { kind: "close", outcome: "completed", reason: "retry_completed_settlement_lost" };
+    if (isOwnerEndedInvocation(receipt)) return { kind: "close", outcome: "skipped", reason: `retry_${receipt.status}` };
+    const acted = db.prepare("SELECT 1 FROM run_events WHERE run_id = ? AND kind IN ('mcp_tool-use', 'runtime_adapter_effect_started') LIMIT 1").get(rid);
+    return { kind: "resume", mayHaveActed: Boolean(acted) || readRunTurnPlacement(rid) === "placed" };
+  } catch { return { kind: "leave" }; }
+}
+
+/**
+ * Takes the one extra start of a retry the restart cut short: the claim becomes parked again (so the start claim ignores the dead
+ * attempt) and remembers that it was resumed and whether it may have acted. False when this claim was already resumed once (or
+ * another process took it first).
+ */
+function resumeInterruptedRetry(db: Db, originalRunId: string, mayHaveActed: boolean): boolean {
+  const moved = db.prepare(`UPDATE run_events SET payload_json = json_set(payload_json, '$.parked', 1, '$.interruptedResumes', COALESCE(json_extract(payload_json, '$.interruptedResumes'), 0) + 1, '$.earlierAttempt', ?)
+    WHERE run_id = ? AND kind = ? AND COALESCE(json_extract(payload_json, '$.interruptedResumes'), 0) < ? AND json_type(payload_json, '$.replay') = 'object'`)
+    .run(mayHaveActed ? 1 : 0, originalRunId, HOST_RECOVERY_REQUESTED, HOST_RECOVERY_INTERRUPTED_RESUMES) as { changes?: number };
+  return (moved.changes ?? 0) > 0;
+}
+
 /**
  * Boot sweep: a claim whose recovery never finished (the app quit in between, or the retry failed inside the app) must not leave
  * the owner's request closed. Claims without an outcome:
  *  - that kept their restart data (buildHostRecoveryReplay): rebuilt and scheduled again through scheduleHostRecovery (`resume`).
  *    Which ones: a claim that never started its retry (a day, or up to HOST_RECOVERY_KEEP_DAYS when it carries a `wait`), and a parked
  *    one (its retry failed with nothing sent). How often one is tried is not counted here: its `wait` decides (a signal, a stated time, a
- *    restart, one timed check; scheduleHostRecovery). A claim whose retry started and has no outcome is left alone (that turn may have acted). The owner's newer words, a removed message
+ *    restart, one timed check; scheduleHostRecovery). A claim whose retry started and has no outcome is read from that retry's receipt (interruptedRetryVerdict): live, it is left alone;
+ *    finished, it is closed; cut short by the restart, it is started again once, with the earlier-attempt line when it may have acted. The owner's newer words, a removed message
  *    or a started run are re-checked there. A removed message or chat closes it as skipped without a line;
  *  - without restart data (older rows, a request that cannot be rebuilt), younger than a day and older than two minutes (a live
  *    recovery of another process starts within seconds): the plain line and an outcome row, as before.
@@ -865,8 +934,29 @@ export function sweepOrphanedHostRecoveries(db: Db, say: (chatId: string, plan: 
       if (restored.kind === "job") {
         const claim = JSON.parse(row.payloadJson) as { parked?: unknown; wait?: unknown };
         const parked = claim.parked === 1;
-        // A retry that started and left no result may have acted: only a parked one (it failed with nothing sent) or one never started goes again.
-        if (row.linked && !parked) continue;
+        // A retry that started and left no result: its own receipt decides (see interruptedRetryVerdict). Only a parked one (it failed with
+        // nothing sent) or one never started goes again without that look.
+        if (row.linked && !parked) {
+          const verdict = interruptedRetryVerdict(db, row.runId);
+          if (verdict.kind === "close") { recordHostRecoveryOutcome(row.runId, row.chatId, verdict.outcome, verdict.reason); continue; }
+          if (verdict.kind === "leave") continue;
+          if (!resume) continue;
+          if (!resumeInterruptedRetry(db, row.runId, verdict.mayHaveActed)) {
+            // Spent its resumes and cut short again, or another process took it. The losing process of a Main/daemon pair must not
+            // judge a live retry: the verdict is read again, and only a latest run confirmed dead ends the claim here.
+            if (interruptedRetryVerdict(db, row.runId).kind !== "resume") continue;
+            const again = db.prepare("SELECT json_extract(payload_json, '$.interruptedResumes') AS n, json_extract(payload_json, '$.parked') AS parked FROM run_events WHERE run_id = ? AND kind = ? LIMIT 1")
+              .get(row.runId, HOST_RECOVERY_REQUESTED) as { n?: number | null; parked?: number | null } | undefined;
+            if ((again?.n ?? 0) >= HOST_RECOVERY_INTERRUPTED_RESUMES && again?.parked !== 1) {
+              // The retry STARTED and was cut short more than once: tools may have run, so the line says so (never the "nothing ran" one).
+              recordHostRecoveryOutcome(row.runId, row.chatId, "skipped", "recovery_interrupted_exhausted");
+              try { say(row.chatId, "interrupted_exhausted", row.runId); settled += 1; } catch { /* the outcome row stays */ }
+            }
+            continue;
+          }
+          try { resume({ ...restored.job, resumedAtBoot: true }); settled += 1; } catch { /* the claim stays parked: the next boot goes again */ }
+          continue;
+        }
         // A claim waiting for an outside cause keeps its request for the whole keeping time, not one day: the wait is its own clock.
         if (!row.linked && row.ts <= daySince && !parked && !(claim.wait && typeof claim.wait === "object")) continue;
         if (resume) {

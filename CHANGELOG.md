@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.3.132 — 2026-11-07
+
+- Phone push: a One message pushed to a closed phone carries the same masked preview the app shows when it is open, text only with no title (it needs the current server). A push the push service could not take for a moment is kept (newest 50, 24 hours, no message text stored) and sent again when the phone registers again, the relay reconnects or the app starts; approval cards are never dropped or held, and a scheduled check-in can be held while the One Briefing quiet hours (off by default) are on. A card is measured as it travels, and a whole big card goes to the phone only in a history page.
+- Phone files: a local file an answer names shows on the phone as a name chip, and tapping it fetches the file from the computer and opens it. It opens only what the chat's own local file access already allows: network paths, secret folders and key files are refused, and a phone without this feature gets the same text as before.
+- Personal agent: a reply can be shown as message bubbles that arrive one by one. It is on by default and "Show replies as bubbles" in settings turns it off. Hiding the window no longer cuts a reply in the middle of a sentence, and no dots are left under an answer that ended without text.
+- Team rooms: a room's finished report always reaches the owner, including rooms with a fixed contract (a prepared team, a benchmark, an Agent App). The host continues the steps that can be run again by itself, once per step, instead of asking the owner to say "continue"; when there is no report to show, a short notice says what is left.
+- Goal: a run that rests because nothing moved delivers its result once and then waits for a signal, instead of repeating a paid turn every six hours. A recovery retry that a quit cut off resumes once per start (three in all), a busy wait no longer writes a row every minute, and the One command log keeps 30 days.
+- Context window: a huge paste no longer ends the turn on the capacity line. The text is kept in a private, size-limited file in the chat's folder and the model is told where it is; a long chat that overflows gets one fresh-session retry that keeps the owner's request in every replay; a Science recovery turn is never rewritten.
+- Memory: the background English translation of memory no longer throws away answered calls, and no longer spends rows or the daily cap on calls that never ran. A translator that keeps failing rests for the rest of the day after six tries.
+- Finance: a scheduled-briefing registration that was undone leaves no rows behind.
+- Codex: when a turn ends without a completion receipt, the app reads Codex's own record of that turn before closing it. A finished answer is shown instead of a failure, and a turn Codex never received is sent again.
+- Work: a Work that came with a finished-when list no longer fails to start and retries every ten minutes; the start check and the dispatch now build the prompt with the same function.
+- One: a One conversation turn that meets a site sign-in only the owner can do (a social-media login wall, for example) now goes on — the model is told which site needs the owner and asks how to continue — instead of ending as an interrupted answer on every following message. Work, automations, Goals and unattended passes still wait for the sign-in and resume by themselves.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.131 — 2026-11-07
 
 Includes everything planned for 1.3.130, which was not published.

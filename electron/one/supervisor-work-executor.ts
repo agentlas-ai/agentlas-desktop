@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { UNCONFIRMED_MAX_RESENDS, unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
-import { supervisorDoneWhen, supervisorError } from "../../shared/one-supervisor";
+import { supervisorError, withDoneWhen } from "../../shared/one-supervisor";
 import type { InvocationRunReceipt, McpInvocationRequest } from "../../shared/types";
 import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
@@ -13,11 +13,6 @@ import {rebindSupervisorUnconfirmed, SUPERVISOR_UNCONFIRMED_MAX_SENDS, countSupe
 
 
 /** The brief as Work receives it: the brief itself, then One's checklist for "finished" when it gave one. */
-export function withDoneWhen(brief: string, doneWhen: unknown): string {
-  const items = supervisorDoneWhen(doneWhen);
-  return items ? `${brief}\n\nFinished when:\n${items.map((item) => `- ${item}`).join("\n")}` : brief;
-}
-
 export interface SupervisorWorkRuntime {
   start(request: McpInvocationRequest, hostNoticePurpose?: SupervisorHostNoticePurpose): {runId: string} | Promise<{runId: string}>;
   attach(chatId: string): {runId: string} | null;

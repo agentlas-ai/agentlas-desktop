@@ -51,6 +51,7 @@ import { abortReasonError } from "./abort-reason";
 import { withAgentContext } from "./agent-context";
 import { responsesContextPolicy } from "./responses-context-policy";
 import { withDaemonAgentContext } from "./agent-context-admission";
+import { withOversizedInputSpill } from "./oversized-input";
 import { currentModelCallScope, withModelCallLedger } from "./model-call-ledger";
 import { currentRunPriority, slotPriorityForCall } from "./run-priority";
 import { withRemoteCurationRuntime } from "./remote-curation-binding";
@@ -349,7 +350,10 @@ export function pickRunner(active: RuntimeStatus): { runner: Runner; label: stri
     : null;
   // Outer pass: pictures are resized before the agent context journals the turn or the daemon receives it (sizes only; the
   // inner pass above also fits the count, once earlier turns' pictures are added).
-  return picked ? { ...picked, runner: tagPickedRunnerKind(withModelImageBudget(picked.runner, active.kind, { combine: false }), active.kind) } : null;
+  // An input larger than half of the model's window is kept as a file and goes as a reference (runtime/oversized-input.ts); outermost, so the
+  // journal and the daemon only ever see the reference.
+  return picked ? { ...picked, runner: tagPickedRunnerKind(withOversizedInputSpill(withModelImageBudget(picked.runner, active.kind, { combine: false }),
+    { kind: active.kind, ...(active.backend ? { backend: active.backend } : {}) }), active.kind) } : null;
 }
 
 function pickRunnerWithoutHostGuidance(active: RuntimeStatus, acpSpec: AcpAgentSpec | null): { runner: Runner; label: string } | null {
@@ -652,11 +656,17 @@ export function runtimeFailureBlocksReplay(failure: Pick<RunnerFailure, "provide
 export function roleFallbackBlocked(options: {
   failedRuntime?: RuntimeStatus;
   failure?: Pick<RunnerFailure, "kind" | "providerCode">;
+  /**
+   * The caller holds proof that this unsettled turn acted on nothing (runtime/unsettled-fallback.ts decides, from the effect
+   * boundary and the pin). It lifts the unsettled-turn block only; an unsettled serving settlement and a no-progress loop stand.
+   */
+  unsettledNoEffectProven?: boolean;
 }): boolean {
   // The serving provider may already have generated billable tokens. An
   // unresolved settlement must stop this invocation, not replay the prompt on
   // another configured runtime.
-  if (runtimeFailureBlocksReplay(options.failure)) return true;
+  if (runtimeFailureBlocksReplay(options.failure)
+    && !(options.unsettledNoEffectProven === true && options.failure?.providerCode === "runtime_turn_unsettled")) return true;
   // The managed local runner has not processed these images. Team/controller
   // recovery must not forward them to another provider as an outage retry.
   if (options.failure?.kind === "unsupported"
@@ -683,6 +693,8 @@ export function rolePriorityRuntimes(
     exclude?: RuntimeStatus[];
     /** Post-dispatch paid fallback requires explicit evidence that replay is safe. */
     allowCreditFallback?: boolean;
+    /** See roleFallbackBlocked: the unsettled turn is proven to have acted on nothing. */
+    unsettledNoEffectProven?: boolean;
   } = {},
 ): RuntimeStatus[] {
   if (roleFallbackBlocked(options)) return [];

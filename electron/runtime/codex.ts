@@ -11,6 +11,7 @@ import { codexExecFallbackLedgerValue, codexExecFallbackStatus, codexExecTypedFa
   codexTurnStartRefusalFailure, codexTurnStartRefusalIsBusy, isCodexContextOverflowFailure, isCodexOutputLimitFailure,
   type CodexExecFallback } from "./codex-turn-failure";
 import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } from "./output-limit-continuation";
+import { INDETERMINATE_PROOF, readCodexTurnProof, type CodexTurnProof } from "./codex-turn-proof";
 import { UNSETTLED_CONTINUATION_PROMPT } from "./unsettled-continuation";
 import { recordNativeCompaction } from "./native-compaction-event";
 import { createRuntimePlanEmitter, planFromCodexTodoList, planFromCodexTurnPlan } from "./runtime-plan";
@@ -2019,6 +2020,10 @@ async function runCodexResidentTurn(input: {
   /** The client user message id this turn was sent with (schema-proven), and whether the session echoed it back. */
   let sentClientUserMessageId: string | null = null;
   let requestEchoed = false;
+  /** Item ids this turn's notifications reported, and the item count the last proof read showed (progress of an open turn). */
+  const turnItemIds = new Set<string>();
+  let lastProofStatus: string | undefined;
+  let proofActionItems: number | undefined;
   let terminalObserved = false;
   let terminalSucceeded = false;
   let terminalObservationFailed = false;
@@ -2184,6 +2189,8 @@ async function runCodexResidentTurn(input: {
     // request that survives a lost turn/start receipt (RuntimeTurnDelivery "accepted").
     if ((method === "item/started" || method === "item/completed") && sentClientUserMessageId && params?.threadId === session.threadId
       && params?.item?.type === "userMessage" && params.item.clientId === sentClientUserMessageId) requestEchoed = true;
+    if ((method === "item/started" || method === "item/completed") && params?.threadId === session.threadId
+      && typeof params?.item?.id === "string" && turnItemIds.size < 4096) turnItemIds.add(params.item.id);
     if ((method === "item/started" || method === "item/completed") && typeof params?.item?.id === "string"
       && !NON_TOOL_ITEM_TYPES.has(String(params?.item?.type ?? ""))) {
       // A started tool suspends the plain window until it completes (long builds/renders are silent).
@@ -2700,6 +2707,9 @@ async function runCodexResidentTurn(input: {
   /* ── host continuation turns (output limit, context overflow) ── */
   /** The typed failure of the last turn a host continuation followed, restored when that continuation cannot begin. */
   let cutResult: { failure: RunnerFailure; answerFrom: number; messageCount: number } | null = null;
+  /** Set once the turn loop is set up (it needs the notification state); the catch below reads it. */
+  let salvageUnsettled: () => Promise<{ result: RunnerResult } | null> = async () => null;
+  let finishCompleted: () => Promise<{ result: RunnerResult }> = async () => { throw new Error("codex_finish_before_turn"); };
   /** The turn carries a strict output schema (its continuation is then a whole typed answer, not a spliced tail). */
   let schemaBoundTurn = false;
   /** A busy turn/start refusal (another non-steerable turn holds the thread) already had its one retry. */
@@ -2946,6 +2956,161 @@ async function runCodexResidentTurn(input: {
     let outputLimitRounds = 0;
     let contextOverflowRecovered = false;
     schemaBoundTurn = Boolean(req.outputSchema && openAiStrictSchemaOrNull(req.outputSchema.schema));
+    /*
+     * Proof before giving up on a turn that has no terminal receipt: codex's own record of the thread says whether this
+     * turn (found by the client message id the host sent) completed, is still moving, or never arrived (codex-turn-proof.ts).
+     * Stop is checked first and after; an unreadable record is "indeterminate" and the existing ending stands. A Workforce
+     * turn keeps its single-turn observation contract and reads nothing.
+     */
+    /** The one ending of a turn Codex completed (also the ending of a completed turn found by proof): refusal text, normal-end rule, usage. */
+    finishCompleted = async (): Promise<{ result: RunnerResult }> => {
+      // Record both native inventories. Selected capability changes invalidate
+      // the invocation; unrelated host changes are evidence, never a replay.
+      if (workforceObservation) {
+        if (inspectCodexWorkforceGrant(req, mcpArgs) !== requestedConfigDigest) throw new Error("workforce_codex_observation_config_drift");
+        workforceObservation.observeInventory(await readCodexWorkforceInventory(
+          session.conn.request.bind(session.conn), session.threadId!, req.signal,
+        ));
+      }
+      const workforcePermissionEnforcement = workforceObservation
+        ? workforceObservedHostAuthorityEnforcement(req, KIND, workforceObservation.finish()) : undefined;
+      session.completedTurns += 1;
+      const text = bodyText().trim();
+      /*
+       * ★표식 없이 완주했는데 산출물이 거절 고지문인 경우 — exec 경로와 같은 한 자리에서만
+       * 텍스트 판별을 허용하고 출처를 heuristic 으로 남긴다(규칙은 runtime-refusal.ts 한 곳).
+       * app-server 는 대부분의 한도 소진을 codexErrorInfo=usageLimitExceeded 로 말하지만,
+       * 모델이 거절문을 답으로 내는 갈래는 exec 과 동일하게 남아 있다.
+       */
+      if (!failure) {
+        const refusal = detectRuntimeRefusal(text);
+        if (refusal) failure = { kind: refusal.kind, message: refusal.message, runtime: KIND, source: "heuristic" };
+      }
+      persistTurnCounters();
+      // A turn Codex itself completed is settled by the shared rule (R-065): a tool-only turn is complete with an empty
+      // text; only one that left neither text nor a tool call is the typed "empty" failure. Any other end keeps its own.
+      const normalEnd = terminalSucceeded && !failure && !interrupted && !req.signal?.aborted
+        ? settleNormalEnd({ text, toolCalls: startedTools.size }) : null;
+      if (!text && !failure && (!normalEnd || normalEnd.outcome === "empty")) {
+        // 빈 답은 실패다 — 표식으로 말한다(텍스트 길이로 판정하는 소비자를 만들지 않는다).
+        return {
+          result: {
+            text: "",
+            ownerControlTerminal: "uncertain",
+            failure: { kind: "empty", message: session.conn.lastStderr.slice(-500) || "codex app-server returned no message", runtime: KIND, source: "marker" },
+            sessionId: session.threadId ?? undefined,
+            appliedEffort,
+          },
+        };
+      }
+      return {
+        result: {
+          text,
+          ownerControlTerminal: terminalSucceeded && !failure && !interrupted && !req.signal?.aborted
+            ? "completed" : "uncertain",
+          ...(failure ? { failure } : {}),
+          sessionId: session.threadId ?? undefined,
+          tokens: usage.observed?.outputTokens ?? Math.ceil(estChars / 4),
+          ...(usage.observed ? { observedUsage: usage.observed } : {}),
+          ...(health.lastInputTokens ? { contextInputTokens: health.lastInputTokens } : {}),
+          ...(health.lastInputTokens && health.lastCachedInputTokens !== null ? { contextCachedInputTokens: health.lastCachedInputTokens } : {}),
+          // The window Codex reported for this session: the 80% rule reads it before any catalog number (NH14).
+          ...(health.contextWindowTokens ? { contextWindowTokens: health.contextWindowTokens } : {}),
+          ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
+          ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
+          appliedEffort,
+          // Reached only after the turn/start receipt: an uncertain result here is a turn the session holds.
+          turnDelivery: "accepted",
+        },
+      };
+    };
+    const readProof = async (): Promise<CodexTurnProof> => {
+      if (workforceObservation || !sentClientUserMessageId || req.signal?.aborted || interrupted) return INDETERMINATE_PROOF;
+      const proof = await readCodexTurnProof({
+        request: codexResidentSessionAlive(session) ? session.conn.request.bind(session.conn) : undefined,
+        threadId: session.threadId, clientUserMessageId: sentClientUserMessageId, turnId: acknowledgedTurnId || undefined,
+        codexHome: String(session.init?.codexHome ?? ""), signal: req.signal, stopped: () => interrupted });
+      // The diagnostics keep the most informative read: an unreadable one never replaces a read one, and actions seen once stay seen.
+      if (proof.status !== "indeterminate" || lastProofStatus === undefined) lastProofStatus = proof.status;
+      // Only a count read from a full item view (or a whole rollout) is a count; an unknown one never becomes zero.
+      if (typeof proof.actionItems === "number") proofActionItems = Math.max(proofActionItems ?? 0, proof.actionItems);
+      events.onStatus(`[turn-proof] kind=${KIND} status=${proof.status} source=${proof.source}`);
+      return proof;
+    };
+    /**
+     * A completed turn found by proof ends exactly as its own terminal would have: the answer item, then turn/completed. The
+     * answer codex recorded replaces what the stream delivered before it broke (a cut reply), never joins it.
+     */
+    const adoptCompletedProof = (proof: CodexTurnProof): boolean => {
+      if (proof.status !== "completed" || !proof.answer || terminalObserved || !session.threadId
+        || req.signal?.aborted || interrupted || (acknowledgedTurnId && proof.turnId !== acknowledgedTurnId) || !(acknowledgedTurnId || proof.turnId)) return false;
+      const turn = acknowledgedTurnId || proof.turnId!;
+      if (!acknowledgedTurnId) { turnId = turn; confirmedTurnId = turn; acknowledgedTurnId = turn; rememberCodexOwnership(ownedTurnIds, turn); }
+      for (const id of messageOrder.slice(answerFrom)) messages.set(id, "");
+      onNotification("item/completed", { threadId: session.threadId, turnId: turn, item: { type: "agentMessage", id: `proof:${turn}`, text: proof.answer } });
+      onNotification("turn/completed", { threadId: session.threadId, turn: { id: turn, status: "completed" } });
+      return terminalObserved;
+    };
+    /** At most this many silence windows in a row are waited out on proof of progress. */
+    const PROOF_MAX_CONSECUTIVE_WAITS = 3;
+    /** The first read of an open turn only sets the baseline; progress is more items than that baseline one short pause later. */
+    const PROOF_REPOLL_MS = 1_500;
+    let proofWaits = 0;
+    let proofBaseline: number | null = null;
+    /** The proof read at the silence trip: the ending below reuses it rather than reading again. */
+    let tripProof: CodexTurnProof | null = null;
+    /** The host's silence window ran out: an open turn that holds more than its baseline keeps running (bounded); anything else ends as before. */
+    const armSilence = (guardedChild: typeof session.child): void => {
+      silence?.stop();
+      silence = startCliSilenceGuard(guardedChild, {
+        label: "codex", onStatus: events.onStatus, windowMs: silenceWindowMs, toolWindowMs: cliToolSilenceWindowMs(env),
+        kill: () => { void onSilenceTrip(guardedChild); },
+      });
+    };
+    const onSilenceTrip = async (guardedChild: typeof session.child): Promise<void> => {
+      let verdict: "completed" | "waiting" | "none" = "none";
+      try {
+        let proof = await readProof();
+        const live = (): boolean => !terminalObserved && !req.signal?.aborted && !interrupted;
+        if (live() && proof.status === "in-progress" && proof.source === "app-server" && proofWaits < PROOF_MAX_CONSECUTIVE_WAITS) {
+          if (proofBaseline === null) {
+            proofBaseline = proof.itemCount;
+            await new Promise<void>((resolve) => { const timer = setTimeout(resolve, PROOF_REPOLL_MS); timer.unref?.(); req.signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true }); });
+            if (live()) proof = await readProof();
+          }
+          if (live() && proof.status === "in-progress" && proof.source === "app-server" && proof.itemCount > proofBaseline) {
+            proofBaseline = proof.itemCount;
+            proofWaits += 1;
+            verdict = "waiting";
+          }
+        }
+        if (live() && verdict !== "waiting" && adoptCompletedProof(proof)) verdict = "completed";
+        tripProof = proof;
+      } catch { /* the existing ending below */ }
+      // The turn's own terminal arrived while the proof was being read: it settled the turn, and nothing is ended.
+      if (verdict === "completed" || terminalObserved) return;
+      if (verdict === "waiting") { armSilence(guardedChild); return; }
+      try { killCliTree(guardedChild); } catch { /* the transport-closed settlement still runs */ }
+      settleTurn?.("closed");
+    };
+    /**
+     * A turn whose receipt never came: codex's record says it completed (it ends through the ordinary completion, refusal text,
+     * usage and counters included) or never arrived (not dispatched, only when no receipt was ever seen and both records agree).
+     */
+    salvageUnsettled = async (): Promise<{ result: RunnerResult } | null> => {
+      if (workforceObservation || req.signal?.aborted || interrupted) return null;
+      let proof: CodexTurnProof;
+      try { proof = await readProof(); } catch { return null; }
+      if (req.signal?.aborted || interrupted) return null;
+      if (proof.status === "request-absent" && !acknowledgedTurnId && !confirmedTurnId && !requestEchoed && !cutResult) {
+        return { result: { text: "", ownerControlTerminal: "uncertain", sessionId: session.threadId ?? undefined, appliedEffort,
+          turnDelivery: "not-dispatched", turnProof: proof.status,
+          failure: { kind: "unavailable", message: "codex did not receive this turn: its thread holds no message of this request", runtime: KIND,
+            source: "marker", providerCode: "codex_turn_not_received" } } };
+      }
+      if (adoptCompletedProof(proof)) return await finishCompleted();
+      return null;
+    };
     for (;;) {
     const turnPrompt = hostTurn ? hostTurn.text : promptText;
     const turnParams: Record<string, unknown> = {
@@ -3049,14 +3214,7 @@ async function runCodexResidentTurn(input: {
       throw new RuntimeTurnUnsettledError(KIND, req.locale, session.threadId);
     }
     // Dispatch is acknowledged: from here a child that stops emitting is the host's to end (single settlement below).
-    {
-      const guardedChild = session.child;
-      silence?.stop();
-      silence = startCliSilenceGuard(guardedChild, {
-        label: "codex", onStatus: events.onStatus, windowMs: silenceWindowMs, toolWindowMs: cliToolSilenceWindowMs(env),
-        kill: () => { try { killCliTree(guardedChild); } catch { /* the transport-closed settlement still runs */ } settleTurn?.("closed"); },
-      });
-    }
+    armSilence(session.child);
     const earlyCompletion = pendingTurnCompletions.get(acknowledgedTurnId);
     for (const bufferedTurnId of pendingTurnCompletions.keys()) if (bufferedTurnId !== acknowledgedTurnId)
       terminalDiagnostics.turnMismatch = Math.min(Number.MAX_SAFE_INTEGER, terminalDiagnostics.turnMismatch + 1);
@@ -3098,6 +3256,12 @@ async function runCodexResidentTurn(input: {
       broken = true;
       throw abortReasonError(req);
     }
+    // The app-server went away or the host ended it without this turn's terminal: codex's own record may hold the finished answer.
+    if (!terminalObserved && (silence?.tripped || reason === "closed")) {
+      let proof: CodexTurnProof = tripProof ?? INDETERMINATE_PROOF;
+      if (!tripProof) { try { proof = await readProof(); } catch { /* indeterminate: the existing ending */ } }
+      if (adoptCompletedProof(proof)) broken = true;
+    }
     if (silence?.tripped && !terminalObserved) {
       // The host ended a silent app-server: a typed timeout (single settlement), never a guessed exit.
       broken = true;
@@ -3105,7 +3269,7 @@ async function runCodexResidentTurn(input: {
       closeThinking();
       return { result: { text: bodyText().trim(), ownerControlTerminal: "uncertain",
         failure: runtimeSilentTimeoutFailure(KIND, silence.trippedWith?.limitMs ?? silenceWindowMs, { toolInFlight: silence.trippedWith?.toolInFlight === true }),
-        sessionId: session.threadId, appliedEffort } };
+        sessionId: session.threadId, appliedEffort, ...(lastProofStatus ? { turnProof: lastProofStatus } : {}), ...(proofActionItems !== undefined ? { turnActionItems: proofActionItems } : {}) } };
     }
     if (terminalObservationFailed) throw terminalObservationError;
     closeThinking();
@@ -3113,7 +3277,7 @@ async function runCodexResidentTurn(input: {
 
     if (modelSelectionError) throw modelSelectionError;
 
-    if (reason === "closed") {
+    if (reason === "closed" && !terminalObserved) {
       // A closed transport cannot prove that a dispatched tool-only turn did nothing.
       broken = true;
       if (looksLikeMissingAppServer(session.conn.lastStderr, new Error(closedReason))) {
@@ -3123,7 +3287,7 @@ async function runCodexResidentTurn(input: {
       // The exact turn/start receipt was received above: the session holds this turn's request.
       // The error notification this turn already carried (a provider "at capacity", a sign-in or limit verdict) rides along
       // as the typed cause: the host words the run from it, not from "no completion receipt".
-      throw unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId: session.threadId, cause: failure ?? undefined, turnDelivery: "accepted" });
+      throw unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId: session.threadId, cause: failure ?? undefined, turnDelivery: "accepted", proof: lastProofStatus, actionItems: proofActionItems });
     }
     const recoverable = Boolean(failure) && terminalObserved && !broken && !interrupted && !workforceObservation
       && !modelSelectionError && !req.signal?.aborted && codexResidentSessionAlive(session);
@@ -3155,72 +3319,18 @@ async function runCodexResidentTurn(input: {
     }
     break;
     }
-    // Record both native inventories. Selected capability changes invalidate
-    // the invocation; unrelated host changes are evidence, never a replay.
-    if (workforceObservation) {
-      if (inspectCodexWorkforceGrant(req, mcpArgs) !== requestedConfigDigest) throw new Error("workforce_codex_observation_config_drift");
-      workforceObservation.observeInventory(await readCodexWorkforceInventory(
-        session.conn.request.bind(session.conn), session.threadId!, req.signal,
-      ));
-    }
-    const workforcePermissionEnforcement = workforceObservation
-      ? workforceObservedHostAuthorityEnforcement(req, KIND, workforceObservation.finish()) : undefined;
-    session.completedTurns += 1;
-    const text = bodyText().trim();
-    /*
-     * ★표식 없이 완주했는데 산출물이 거절 고지문인 경우 — exec 경로와 같은 한 자리에서만
-     * 텍스트 판별을 허용하고 출처를 heuristic 으로 남긴다(규칙은 runtime-refusal.ts 한 곳).
-     * app-server 는 대부분의 한도 소진을 codexErrorInfo=usageLimitExceeded 로 말하지만,
-     * 모델이 거절문을 답으로 내는 갈래는 exec 과 동일하게 남아 있다.
-     */
-    if (!failure) {
-      const refusal = detectRuntimeRefusal(text);
-      if (refusal) failure = { kind: refusal.kind, message: refusal.message, runtime: KIND, source: "heuristic" };
-    }
-    persistTurnCounters();
-    // A turn Codex itself completed is settled by the shared rule (R-065): a tool-only turn is complete with an empty
-    // text; only one that left neither text nor a tool call is the typed "empty" failure. Any other end keeps its own.
-    const normalEnd = terminalSucceeded && !failure && !interrupted && !req.signal?.aborted
-      ? settleNormalEnd({ text, toolCalls: startedTools.size }) : null;
-    if (!text && !failure && (!normalEnd || normalEnd.outcome === "empty")) {
-      // 빈 답은 실패다 — 표식으로 말한다(텍스트 길이로 판정하는 소비자를 만들지 않는다).
-      return {
-        result: {
-          text: "",
-          ownerControlTerminal: "uncertain",
-          failure: { kind: "empty", message: session.conn.lastStderr.slice(-500) || "codex app-server returned no message", runtime: KIND, source: "marker" },
-          sessionId: session.threadId,
-          appliedEffort,
-        },
-      };
-    }
-    return {
-      result: {
-        text,
-        ownerControlTerminal: terminalSucceeded && !failure && !interrupted && !req.signal?.aborted
-          ? "completed" : "uncertain",
-        ...(failure ? { failure } : {}),
-        sessionId: session.threadId,
-        tokens: usage.observed?.outputTokens ?? Math.ceil(estChars / 4),
-        ...(usage.observed ? { observedUsage: usage.observed } : {}),
-        ...(health.lastInputTokens ? { contextInputTokens: health.lastInputTokens } : {}),
-        ...(health.lastInputTokens && health.lastCachedInputTokens !== null ? { contextCachedInputTokens: health.lastCachedInputTokens } : {}),
-        // The window Codex reported for this session: the 80% rule reads it before any catalog number (NH14).
-        ...(health.contextWindowTokens ? { contextWindowTokens: health.contextWindowTokens } : {}),
-        ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
-        ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
-        appliedEffort,
-        // Reached only after the turn/start receipt: an uncertain result here is a turn the session holds.
-        turnDelivery: "accepted",
-      },
-    };
+    return await finishCompleted();
   } catch (err) {
     diagnosticFailure = codexDiagnosticFailure(err);
     broken = true;
     try {
       if (turnDispatchAttempted) persistTurnCounters();
       if (req.signal?.aborted) throw abortReasonError(req);
-      if (turnDispatchAttempted && !terminalObserved) throw unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId: session.threadId,
+      if (turnDispatchAttempted && !terminalObserved) {
+        const salvaged = await salvageUnsettled();
+        if (salvaged) return salvaged;
+      }
+      if (turnDispatchAttempted && !terminalObserved) throw unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId: session.threadId, proof: lastProofStatus, actionItems: proofActionItems,
         // The typed failure the app-server reported before it went silent (the `error` notification) stays the cause; the
         // provider's own words lead the message, else the CLI's stderr.
         cause: failure ?? undefined,

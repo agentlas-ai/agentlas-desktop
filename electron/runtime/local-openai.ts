@@ -10,6 +10,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { resolveEffectiveContextWindow } from "../../shared/models";
+import { LOCAL_RUNTIME_UNKNOWN_WINDOW } from "./session-generation";
 import { reportModelEndpoint } from "./model-call-ledger";
 import { noModelSelectedResult, runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
 import { ownerControlHistoryImages } from "./owner-control-pump";
@@ -119,7 +120,7 @@ export function makeLocalOpenAiRunner(
     }
     const capacity = contextWindow === undefined && loadedContextLength === undefined
       ? resolveEffectiveContextWindow(runtimeKind, model, false) : null;
-    const estimatedWindow = loadedContextLength ?? (capacity ? capacity.contextWindow ?? 16_000 : undefined);
+    const estimatedWindow = loadedContextLength ?? (capacity ? capacity.contextWindow ?? LOCAL_RUNTIME_UNKNOWN_WINDOW : undefined);
     const recent = req.history;
     const systemText = req.systemPrompt;
 

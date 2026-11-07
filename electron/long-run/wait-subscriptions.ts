@@ -953,8 +953,12 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         const verdict = decideGoalWake({ runId: current.id, chatId: wait.chatId, source: "wait",
           gate: { isChatBusy: (chatId) => target.isChatBusy(chatId) } });
         if (!verdict.start) {
+          // Only a real change of when the next look happens is a stored transition (the daily limit names a time well ahead). A busy
+          // room, or a window that frees within the minute, is looked at again in a minute: that is held in memory, never a row per poll.
           const later = verdict.reason === "wake_budget_reached" ? Math.max(60_000, Date.parse(verdict.retryAt) - clock()) : 60_000;
-          next.nextCheckAt = new Date(clock() + later).toISOString(); persist(next); return;
+          if (later > 60_000) { next.nextCheckAt = new Date(clock() + later).toISOString(); persist(next); }
+          else quietWaitChecks.note(wait, clock());
+          return;
         }
       }
       next.cursor = observation.cursor; next.lastObservedDigest = observation.digest;

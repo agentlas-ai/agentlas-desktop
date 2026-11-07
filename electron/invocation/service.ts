@@ -4918,7 +4918,8 @@ export class InvocationService {
           kind: "runtime_native_diagnostic", sourceEventId: `native-runtime-diagnostic:${diagnostic.diagnosticAttemptId}:${diagnostic.phase}:${diagnostic.sequence}`,
           evidencePhase: "observed", payload: { ...diagnostic } }),
         begin: admission => { effectBoundary.adapterStarted(admission); record.semanticSteps.admitAdapter(admission); }, finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report),
-        hostControl: observation => effectBoundary.hostControl(observation), recordingFailed: () => effectBoundary.recordingFailed() }, () => Promise.resolve().then(() => {
+        hostControl: observation => effectBoundary.hostControl(observation), recordingFailed: () => effectBoundary.recordingFailed(),
+        provesNoOutsideEffect: () => effectBoundary.provesNoOutsideEffect() }, () => Promise.resolve().then(() => {
         if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
         const handoverLease = record.ownerLease;
         const nativeApprovalOwner = nativeController && record.ownerLease && (!isLocalInvocationPreparationPort(nativePreparation!.port) || record.ownerLease.ownerKind === "daemon")

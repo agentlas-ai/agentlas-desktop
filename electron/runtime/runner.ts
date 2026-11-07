@@ -804,6 +804,10 @@ export interface RunnerResult {
   /** Whether this turn reached the provider session (RuntimeTurnDelivery); absent = the runner cannot tell. A failure with
    * "not-dispatched" is a definite pre-dispatch refusal: hosts keep its provider code and never treat it as unsettled. */
   turnDelivery?: RuntimeTurnDelivery;
+  /** What the runner's proof read found for an unsettled turn (status only; codex-turn-proof.ts). Diagnostics, never a decision input. */
+  turnProof?: string;
+  /** Action items (commands, file changes, tool calls) codex's own record shows for this turn; absent when it could not be read. */
+  turnActionItems?: number;
   text: string;
   /**
    * 실려 있으면 text는 답이 아니다(표시용 고지문일 수 있다). 소비자는 이 칸으로만
@@ -871,6 +875,10 @@ export class RuntimeTurnUnsettledError extends Error {
   readonly sessionId?: string;
   /** RuntimeTurnDelivery, when the runner observed it (an unsettled turn was dispatched, so never "not-dispatched"). */
   readonly turnDelivery?: Exclude<RuntimeTurnDelivery, "not-dispatched">;
+  /** The status of the proof read the runner made before giving up on this turn (diagnostics only). */
+  proof?: string;
+  /** Action items codex's record shows for the turn (codex-turn-proof.ts); absent when unread. */
+  actionItems?: number;
   /**
    * `providerReason`: the provider's own final error for this turn when it sent one (e.g. "Selected model is at
    * capacity"). The owner saw only "no terminal receipt" while the real cause was a provider capacity refusal
@@ -1051,6 +1059,8 @@ export function unsettledTurnError(input: {
   sessionId?: string | null;
   providerReason?: string | null;
   turnDelivery?: RuntimeTurnDelivery;
+  proof?: string;
+  actionItems?: number;
 }): RuntimeTurnUnsettledError {
   const cause = input.cause;
   const failure = runnerFailureOfCause(cause);
@@ -1062,6 +1072,8 @@ export function unsettledTurnError(input: {
   const error = new RuntimeTurnUnsettledError(input.runtimeKind, input.locale, typeof sessionId === "string" ? sessionId : null, reason,
     delivery === "accepted" || delivery === "not-accepted" ? delivery : undefined, noToolRan);
   if (cause !== undefined) Object.defineProperty(error, "cause", { value: cause, configurable: true, writable: true });
+  if (typeof input.proof === "string" && /^[a-z-]{1,32}$/.test(input.proof)) error.proof = input.proof;
+  if (Number.isSafeInteger(input.actionItems) && (input.actionItems as number) >= 0) error.actionItems = input.actionItems;
   return error;
 }
 
@@ -1621,7 +1633,7 @@ export type HostJudgmentPromptProfile = "host-judgment";
 /** 표준 시스템 프롬프트 — 에이전트 프롬프트 앞에 붙는 안전 헤더.
  *  명시적으로 선택된 UI 언어를 모든 사용자 노출 텍스트의 기준으로 쓴다. */
 /** Runtimes whose tool loop is Agentlas's own (local-tool-loop.ts): MCP server instructions never reach the model there. */
-const LOCAL_LOOP_RUNTIME_KINDS: ReadonlySet<string> = new Set(["byok", "ollama", "lmstudio", "mlx", "agentlas", "agentlas-local"]);
+export const LOCAL_LOOP_RUNTIME_KINDS: ReadonlySet<string> = new Set(["byok", "ollama", "lmstudio", "mlx", "agentlas", "agentlas-local"]);
 
 export function wrapSystemPrompt(
   agentSystemPrompt: string,

@@ -312,7 +312,8 @@ import {
   stripMobileBridgeControlFences,
 } from "./sanitize";
 import { MobileScienceChat } from "./science-chat";
-import { LegacyChatVideoTransfers } from "./legacy-chat-video";
+import { ChatFileRefusal, LegacyChatVideoTransfers } from "./legacy-chat-video";
+import { chatFileSourceText } from "./chat-file-links";
 import { ArtifactVideoTransfers } from "./artifact-video-transfers";
 import { ChatVideoTransfers, type ChatVideoPrincipal } from "./chat-video-transfers";
 import { parseMobileBridgeRequest } from "../../shared/mobile-bridge";
@@ -1848,6 +1849,17 @@ function forgetRunContext(runId: string): void {
   runContextCache.delete(runId);
 }
 
+/** The run is a check-in One started on its own schedule (the request row the supervisor wrote carries its purpose). */
+export function isOneCheckinRun(runId: string, db: { prepare(sql: string): { get(...args: unknown[]): unknown } } = getDb()): boolean {
+  try {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_requests'").get()) return false;
+    const row = db.prepare("SELECT payload_json FROM one_supervisor_requests WHERE run_id=? LIMIT 1").get(runId) as { payload_json?: string } | undefined;
+    return !!row?.payload_json && (JSON.parse(row.payload_json) as { purpose?: unknown }).purpose === "one-checkin";
+  } catch {
+    return false;
+  }
+}
+
 function isPersonalOneConversation(chatId: string): boolean {
   try {
     const db = getDb();
@@ -1895,11 +1907,29 @@ export function hostedTeammatePartialForPhone(
 
 /** Lightweight saved-answer observer, independent of expensive phone snapshots. */
 export function durableMobileApprovalPending(id: string, chatId: string): boolean {
+  return durableMobileApprovalState(id, chatId) === "pending";
+}
+
+/** "unknown" is a store error: the caller must not read it as "answered". */
+export function durableMobileApprovalState(id: string, chatId: string): "pending" | "gone" | "unknown" {
   try {
-    return Boolean(getDb().prepare(`SELECT 1 FROM one_supervisor_tool_approvals
+    return getDb().prepare(`SELECT 1 FROM one_supervisor_tool_approvals
       WHERE id=? AND chat_id=? AND status='pending' AND expires_at>? AND lease_until>?`)
-      .get(id, chatId, Date.now(), Date.now()));
-  } catch { return false; }
+      .get(id, chatId, Date.now(), Date.now()) ? "pending" : "gone";
+  } catch { return "unknown"; }
+}
+
+/**
+ * The lock-screen text of a personal One answer, made again from the saved message (the push queue keeps only its id). null: the
+ * message no longer exists; "unknown": the store could not be read. Same projection as the live push.
+ */
+export function oneMessagePreviewForPhone(messageId: string, db: { prepare(sql: string): { get(...args: unknown[]): unknown } } = getDb()): { body?: string } | null | "unknown" {
+  try {
+    const row = db.prepare("SELECT text FROM chat_messages WHERE id=?").get(messageId) as { text?: string } | undefined;
+    if (!row) return null;
+    const projected = projectOneMessageForPhone({ kind: "final", agentId: undefined, durableMessageId: messageId, text: typeof row.text === "string" ? row.text : "" });
+    return projected?.preview ? { body: projected.preview } : {};
+  } catch { return "unknown"; }
 }
 
 /**
@@ -1926,9 +1956,15 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
     // one turn still rings once.
     const asksOwner = invocationEventRequestsDecision(event);
     if (isPersonalOneConversation(chatId)) {
+      // The lock screen shows only the text, the same redacted preview the phone gets (owner, "본문만"): no
+      // title is sent. An older relay ignores the body and shows its generic notice.
       listener({ category: "oneMessage", destination: "personalOne", hostId,
         entityId: hostId, messageId: message.messageId, dedupeKey: `one-message:${hostId}:${message.messageId}`,
-        subject: "One", occurredAt: new Date().toISOString(), ...(asksOwner ? { reason: "ownerAnswer" as const } : {}) });
+        subject: "One", ...(message.preview ? { body: message.preview } : {}),
+        occurredAt: new Date().toISOString(), ...(asksOwner ? { reason: "ownerAnswer" as const } : {}),
+        // A check-in One ran by itself waits for the owner's quiet hours; an answer to the owner's own message never does,
+        // and neither does a question that needs them.
+        ...(!asksOwner && isOneCheckinRun(runId) ? { quietEligible: true as const } : {}) });
       return;
     }
     if (!getChat(chatId) || personalAgentRoomPushWithheld(chatId)) return;
@@ -3880,6 +3916,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (request.method === "one.video.prepare") return asJsonValue(await transfers.prepare(principal, id), request.method);
         return asJsonValue(await transfers.read(principal, id, Number(params.offset)), request.method);
       }
+      case "chat.file.open":
+      case "chat.file.prepare":
+      case "chat.file.chunk":
+      case "chat.file.close":
       case "legacy.video.list":
       case "legacy.video.releaseList":
       case "legacy.video.open":
@@ -3904,7 +3944,46 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             const currentActor=getAuthenticatedActorIds();
             if(JSON.stringify(currentActor)!==actorKey || JSON.stringify(assertProjectDomainOwner(chatId,currentActor,binding))!==bindingKey)throw new Error('legacy_video_owner_changed');
           };
-        },chatId=>(require('../fs/access') as typeof import('../fs/access')).chatAssetRoots(chatId));
+        },chatId=>(require('../fs/access') as typeof import('../fs/access')).chatAssetRoots(chatId),
+        // chat.file.open admits a path exactly as the desktop chat does for a local file link: fs/access, scope chat-assets.
+        (absPath,chatId)=>(require('../fs/access') as typeof import('../fs/access')).resolveFsReadPath(absPath,{kind:'chat-assets',chatId}),
+        // The text a phone sees for a stored row: a teammate result row shows its result (the projector numbers tokens in it).
+        (chatId,text,noticeJson,role)=>{
+          let notice:unknown;try{notice=noticeJson?JSON.parse(noticeJson):undefined}catch{notice=undefined}
+          const {normalizeChatHostNotice}=require('../../shared/chat-host-notice') as typeof import('../../shared/chat-host-notice');
+          const {createOneDispatchNoticeProjector}=require('../one/dispatch-presentation') as typeof import('../one/dispatch-presentation');
+          const projected=createOneDispatchNoticeProjector(chatId)(normalizeChatHostNotice(role,notice));
+          return chatFileSourceText(text,projected);
+        });
+        if(request.method.startsWith('chat.file.')){
+          // Typed causes (shared/mobile-bridge-refusal.ts): the phone reads the code, never the sentence.
+          const typed=(error:unknown):never=>{
+            if(error instanceof ChatFileRefusal)throw new MobileBridgeRefusal(error.code,'The Desktop could not open this file');
+            const message=error instanceof Error?error.message:'';
+            if((error as {code?:unknown}|null)?.code==='ENOENT')throw new MobileBridgeRefusal('chat_file_missing','The file is no longer on this Desktop');
+            if(message==='legacy_video_changed')throw new MobileBridgeRefusal('chat_file_changed','The file changed while it was being sent');
+            throw error;
+          };
+          try{
+            if(request.method==='chat.file.close'){
+              const params=guardedParams(request,['transferId']);
+              await transfers.close(principal,requiredIdentifier(params,'transferId',/^[0-9a-f]{64}$/));
+              return asJsonValue({closed:true},request.method);
+            }
+            if(request.method==='chat.file.open'){
+              const params=guardedParams(request,['chatId','messageId','ordinal','name','transferId','parentChatId','dispatchId','runId']);
+              const hasDispatch=['parentChatId','dispatchId','runId'].some(key=>params[key]!==undefined);
+              const dispatch=hasDispatch?{parentChatId:requiredIdentifier(params,'parentChatId'),dispatchId:requiredIdentifier(params,'dispatchId'),runId:requiredIdentifier(params,'runId')}:undefined;
+              const ordinal=optionalInteger(params,'ordinal',0,10000);
+              if(ordinal===undefined)throw new TypeError('ordinal is required');
+              return asJsonValue(transfers.openFile(principal,requiredIdentifier(params,'chatId'),requiredIdentifier(params,'messageId'),ordinal,requiredBoundedString(params,'name',256),requiredIdentifier(params,'transferId',/^[0-9a-f]{64}$/),dispatch),request.method);
+            }
+            const params=guardedParams(request,request.method==='chat.file.chunk'?['transferId','offset']:['transferId']);
+            const id=requiredIdentifier(params,'transferId',/^[0-9a-f]{64}$/);
+            if(request.method==='chat.file.prepare')return asJsonValue(await transfers.prepare(principal,id),request.method);
+            return asJsonValue(await transfers.read(principal,id,Number(params.offset)),request.method);
+          }catch(error){return typed(error)}
+        }
         if(request.method==='legacy.video.releaseList'){
           const params=guardedParams(request,['listId']);
           transfers.releaseList(principal,requiredIdentifier(params,'listId',/^[0-9a-f]{64}$/));
@@ -4135,6 +4214,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ? undefined : requiredBoundedString(params, "cursor", 1024);
         return asJsonValue(await readMobileBridgeHistoryPage(chatId, limit, cursor, {
           automationReportNotice: this.clientHasCapability(context.deviceId, "thread.composition.v1"),
+          chatFileLinks: this.clientHasCapability(context.deviceId, "chat.file.v1"),
         }), request.method);
       }
       case "context.inspect": {

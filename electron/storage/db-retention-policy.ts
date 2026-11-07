@@ -38,8 +38,9 @@ export interface ClosedRowSpec {
   days: number;
   /** "iso": TEXT ISO-8601 timestamps; "ms": INTEGER epoch milliseconds. */
   timeUnit: "iso" | "ms";
-  stateColumn: string;
-  closedStates: readonly string[];
+  /** The state column and its final values; a table of immutable records (no state) omits both and is closed by age (`closedWhen`, `keepWhen`) alone. */
+  stateColumn?: string;
+  closedStates?: readonly string[];
   /** Extra SQL over the table alias `t` that says the row is reported/closed (not just in a final state). */
   closedWhen?: string;
   /** Rows kept while one of these holds (SQL over `t`); a clause whose `table` is missing from the store is skipped. */
@@ -361,6 +362,23 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     writer: "one/supervisor-store.ts notice inserts (INSERT OR IGNORE on one_id, task_id, run_id) and the review loop",
     readers: "the review loop reads pending and claimed rows only (supervisor-store.ts:293-349); the hand-off already-reported checks (supervisor-service.ts noticeDelegatedOutcome, sweepDeferredDelegations) read the newest notice of a task, which is kept",
     evidence: "supervisor-store.ts:317 reviewed, :340 unreviewed (three attempts spent) and 'skipped' are never claimed again; pending and claimed stay.",
+  },
+  {
+    id: "one_supervisor_command_events.closed",
+    table: "one_supervisor_command_events",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 30 * DAY, timeUnit: "iso",
+      // The newest event of each One stays: the journal's latestCursor is MAX(cursor) of the rows, and a phone whose cursor is ahead of it is told to reset.
+      keepWhen: [{ table: "one_supervisor_command_events", sql: "NOT EXISTS (SELECT 1 FROM one_supervisor_command_events n WHERE n.one_id = t.one_id AND n.cursor > t.cursor)" }],
+      timeColumns: ["recorded_at"], requires: ["cursor", "one_id", "recorded_at"],
+    } },
+    writer: "one/supervisor-store.ts triggers: one row for every receipt written or changed on one_supervisor_requests (the journal the phone pages through)",
+    readers: "one/supervisor-store.ts journal(afterCursor) and cursor(): the phone reads forward from the cursor it last stored; the request row itself keeps the latest receipt (kept)",
+    evidence: "The phone reads events newer than its own cursor within seconds to minutes; the desktop does not store that cursor, so age stands in for it: 30 days "
+      + "after recording an event is older than any reasonable phone absence, and a phone away longer re-reads each request's latest receipt from one_supervisor_requests. "
+      + "The newest event per One is kept so MAX(cursor) never moves back. The start-up backfill now runs only when the table is created, otherwise it re-inserted every trimmed row.",
   },
   {
     id: "store.vacuum",

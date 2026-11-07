@@ -1,4 +1,4 @@
-import { VERIFICATION_NO_PROGRESS_REASON } from "./long-run-checkpoint";
+import { VERIFICATION_NO_PROGRESS_REASON, VERIFICATION_NO_PROGRESS_REST_CAUSE } from "./long-run-checkpoint";
 
 /** The Goal's next host wake, as Main reports it (electron/long-run/goal-next-wake.ts). */
 export interface GoalNextWake {
@@ -27,6 +27,10 @@ export function goalNextWakeLabel(wake: GoalNextWake, locale: "ko" | "en", now =
   const clock = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
   const sameDay = new Date(now).toDateString() === at.toDateString();
   const when = sameDay ? clock : locale === "ko" ? `${at.getMonth() + 1}월 ${at.getDate()}일 ${clock}` : `${at.getMonth() + 1}/${at.getDate()} ${clock}`;
+  // Delivered and waiting for a signal: no time to show, because none will come.
+  if (wake.cause === VERIFICATION_NO_PROGRESS_REST_CAUSE) return locale === "ko"
+    ? "같은 결과가 반복돼 쉬는 중입니다. 새 지시나 입력 변화가 있으면 바로 이어갑니다."
+    : "Same result again; resting. I continue right away on a new instruction or changed input.";
   // The same result again: a rest, not a stop; a new instruction or Goal change looks at once.
   if (wake.cause === VERIFICATION_NO_PROGRESS_REASON) return locale === "ko"
     ? `같은 결과가 반복돼 ${when}에 다시 시도합니다. 새 지시가 있으면 바로 이어갑니다.`

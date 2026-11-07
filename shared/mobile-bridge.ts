@@ -187,6 +187,10 @@ export const MOBILE_BRIDGE_METHODS = [
   "legacy.video.prepare",
   "legacy.video.chunk",
   "legacy.video.close",
+  "chat.file.open",
+  "chat.file.prepare",
+  "chat.file.chunk",
+  "chat.file.close",
   "chat.attachments.begin",
   "chat.attachments.chunk",
   "chat.attachments.finish",
@@ -299,6 +303,12 @@ export const MOBILE_CLIENT_CAPABILITIES = [
   "thread.composition.v1",
   /** Reads the typed refusal codes of shared/mobile-bridge-refusal.ts instead of authority_error. */
   "refusal.specific.v1",
+  /**
+   * The phone draws `[name](agentlas-file:<n>)` links as file chips and opens one with chat.file.open. Only such a phone receives
+   * them in invoke.historyPage assistant text (electron/mobile-bridge/chat-file-links.ts); every other phone gets the same
+   * bytes as before (`[local-path]`).
+   */
+  "chat.file.v1",
 ] as const;
 export type MobileClientCapability = (typeof MOBILE_CLIENT_CAPABILITIES)[number];
 
@@ -4010,6 +4020,18 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params,["chatId","messageId","listId","cursor","parentChatId","dispatchId","runId"])
         ? firstError(requiredString(params,"chatId",256),requiredString(params,"messageId",256),typeof params.listId==='string' && /^[0-9a-f]{64}$/.test(params.listId) ? null : "legacy_video_list_invalid",optionalInteger(params,"cursor",0,10000),
           [params.parentChatId,params.dispatchId,params.runId].every(v=>v===undefined) ? null : firstError(requiredString(params,"parentChatId",128),requiredString(params,"dispatchId",128),requiredString(params,"runId",128))) : "legacy_video_scope_invalid";
+    case "chat.file.open":
+      return hasOnlyKeys(params,["chatId","messageId","ordinal","name","transferId","parentChatId","dispatchId","runId"])
+        ? firstError(requiredString(params,"chatId",256),requiredString(params,"messageId",256),requiredString(params,"name",256),
+          Number.isSafeInteger(params.ordinal) && Number(params.ordinal)>=0 && Number(params.ordinal)<=10000 ? null : "chat_file_ordinal_invalid",
+          typeof params.transferId==='string' && /^[0-9a-f]{64}$/.test(params.transferId) ? null : "chat_file_transfer_invalid",
+          [params.parentChatId,params.dispatchId,params.runId].every(v=>v===undefined) ? null : firstError(requiredString(params,"parentChatId",128),requiredString(params,"dispatchId",128),requiredString(params,"runId",128))) : "chat_file_open_fields_invalid";
+    case "chat.file.prepare":
+    case "chat.file.close":
+      return hasOnlyKeys(params,["transferId"]) && typeof params.transferId==='string' && /^[0-9a-f]{64}$/.test(params.transferId) ? null : "chat_file_transfer_invalid";
+    case "chat.file.chunk":
+      return hasOnlyKeys(params,["transferId","offset"]) && typeof params.transferId==='string' && /^[0-9a-f]{64}$/.test(params.transferId)
+        && Number.isSafeInteger(params.offset) && Number(params.offset)>=0 && Number(params.offset)<192*1024*1024 && Number(params.offset)%(1024*1024)===0 ? null : "chat_file_range_invalid";
     case "legacy.video.releaseList":
       return hasOnlyKeys(params,["listId"]) && typeof params.listId==='string' && /^[0-9a-f]{64}$/.test(params.listId) ? null : "legacy_video_list_invalid";
     case "legacy.video.open":

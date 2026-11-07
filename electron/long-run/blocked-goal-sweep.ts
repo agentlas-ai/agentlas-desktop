@@ -25,6 +25,7 @@ import {
   failDesktopLongRunResumeDispatch,
 } from "./app-runtime-coordinator";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
+import { settleNoProgressRest } from "./goal-no-progress-wait";
 import { followDaemonTurnGoal, settleDaemonTurnGoals, type DaemonTurnGoalResult } from "./daemon-turn-goal";
 import { reconcileGoalTree } from "./goal-tree-reconcile";
 import { type EffectObservationDispatcher } from "./effect-observation-tickets";
@@ -513,6 +514,9 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
       if (chatLive || liveLongRunAttemptCount(run.id) > 0) {
         return defer("chat_busy");
       }
+      // The idle-spin rest's time is not a reason to rerun the Goal: the owner first gets the result if it has not reached them, and
+      // the Goal then waits for a signal (goal-no-progress-wait.ts). A retry a signal pulled forward still runs.
+      if (settleNoProgressRest(run, retry)) return defer("no_progress_rest");
       run = reopenDueBlockedGoalRetry(run.id, run.version);
     } else if (run.status === "paused" && run.pauseReason === "runtime_unavailable") {
       // A host dispatch failure pause is not a person's decision: put it on the automatic retry schedule.

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
@@ -7,6 +8,7 @@ import { VideoCancelFence } from "./video-cancel-fence";
 import { repairMobileBridgeUtf16, sanitizeMobileBridgeText, stripMobileBridgeControlFences, truncateMobileBridgeUtf8 } from "./sanitize";
 import { isHousekeepingHostNotice, parseChatHostNotice } from "../../shared/chat-host-notice";
 import { sameFileIdentity } from "../../shared/file-identity";
+import { CHAT_FILE_MIME, chatFileSourceText, chatFileTokenAt, isChatFileNetworkPath, isChatFileSecretPath } from "./chat-file-links";
 
 const MAX_BYTES = 192 * 1024 * 1024, MAX_MESSAGE_BYTES = 4 * 1024 * 1024, TTL = 10 * 60_000;
 const CHAT_VIDEO_CHUNK_BYTES = 1024 * 1024;
@@ -17,7 +19,7 @@ type Identity = { dev: string; ino: string; size: string; mtime: string; ctime: 
 export type LegacyDispatchScope = { parentChatId:string; dispatchId:string; runId:string };
 /** A folder a listed video was found in: the chat's own folder, or one the desktop shows this chat's files from (chatAssetRoots). */
 type Root = { input:string; real:string; dev:string; ino:string; own:boolean };
-type Candidate = { principal: ChatVideoPrincipal; listId:string; chatId:string; messageId:string; dispatch?:LegacyDispatchScope; messageHash:string; workspaceInput:string|null; root:Root;
+type Candidate = { principal: ChatVideoPrincipal; listId:string; chatId:string; messageId:string; dispatch?:LegacyDispatchScope; messageHash:string; fileSource?:boolean; workspaceInput:string|null; root:Root;
   filename:string; relative:string; mime:string; identity:Identity; expires:number; assertChat:()=>void };
 type Transfer = { id:string; candidate:Candidate; closed:boolean; preparing:boolean; reader:fs.promises.FileHandle|null; abort:AbortController;
   timer:NodeJS.Timeout; digest?:string; reading:boolean };
@@ -27,6 +29,12 @@ function same(a:Identity,b:Identity):boolean { return sameFileIdentity(a,b) && O
 function samePrincipal(a:ChatVideoPrincipal,b:ChatVideoPrincipal):boolean { return a.deviceId===b.deviceId && a.connectionId===b.connectionId; }
 /** A markdown link target: `<…>` (how agents write a path with spaces) is unwrapped. */
 function linkTarget(raw:string):string { const angle=/^<([^<>\r\n]+)>$/.exec(raw.trim()); return angle ? angle[1]! : raw; }
+
+/** Why `chat.file.open` refused. The phone reads this code; it never parses the message. */
+export type ChatFileRefusalCode = "chat_file_missing" | "chat_file_too_large" | "chat_file_not_openable" | "chat_file_type_unsupported" | "chat_file_changed" | "chat_file_busy";
+export class ChatFileRefusal extends Error {
+  constructor(readonly code:ChatFileRefusalCode){super(code);this.name='ChatFileRefusal'}
+}
 
 /** Only explicit owner selection of a displayed message link can open this old workspace file. */
 export class LegacyChatVideoTransfers {
@@ -40,7 +48,13 @@ export class LegacyChatVideoTransfers {
     // The folders the desktop shows this chat's files from (fs/access chat-assets). observed in use: of 43 owner
     // answers naming a video, 39 named files that existed and the phone was offered none — teammate chats have no folder of
     // their own and their results sit in agent-cwd, outside Hope's folder; the desktop showed the same files.
-    private readonly assetRoots?:(chatId:string)=>string[]){this.fence=new VideoCancelFence(now)}
+    private readonly assetRoots?:(chatId:string)=>string[],
+    // The desktop's own judgement of whether this chat may read a path (fs/access resolveFsReadPath, scope chat-assets): throws when
+    // it may not, otherwise returns the real path. Without it only the folders above admit a file.
+    private readonly authorizePath?:(absPath:string,chatId:string)=>string,
+    // The text a phone sees for a stored row (teammate result rows show their result, not the row's own text): chat.file.open must
+    // number tokens in exactly that text. Without it the row's own text is used.
+    private readonly fileSource?:(chatId:string,text:string,noticeJson:string|null,role:string)=>string){this.fence=new VideoCancelFence(now)}
   private get database():Database.Database { return typeof this.db==='function' ? this.db() : this.db; }
 
   private roots(chatId:string,workspaceInput:string|null):Root[] {
@@ -54,7 +68,7 @@ export class LegacyChatVideoTransfers {
     return out;
   }
 
-  private message(chatId:string,messageId:string,dispatch?:LegacyDispatchScope):{text:Buffer;workspaceInput:string|null}|null {
+  private message(chatId:string,messageId:string,dispatch?:LegacyDispatchScope,files=false):{text:Buffer;workspaceInput:string|null;notice:string|null;role:string}|null {
     if(!chatId || chatId.length>256 || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(messageId))return null;
     if(dispatch){if(!this.assertDispatch)return null;this.assertDispatch(dispatch,chatId,messageId)}
     // Child conversations are intentionally absent from the normal chat sidebar. Their results require the
@@ -63,13 +77,13 @@ export class LegacyChatVideoTransfers {
       const exists=this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
       if(!dispatch && exists && this.database.prepare(`SELECT 1 FROM ${table} WHERE child_chat_id=? AND parent_chat_id<>? LIMIT 1`).get(chatId,chatId))return null;
     }
-    const row=this.database.prepare(`SELECT CAST(m.text AS BLOB) AS text,c.working_folder AS workspaceInput,m.host_notice_json AS notice
+    const row=this.database.prepare(`SELECT CAST(m.text AS BLOB) AS text,c.working_folder AS workspaceInput,m.host_notice_json AS notice,m.role AS role
       FROM chat_messages m JOIN chats c ON c.id=m.chat_id
-      WHERE m.id=? AND m.chat_id=? AND m.role='assistant' AND m.row_scope IS NOT 'view'
+      WHERE m.id=? AND m.chat_id=? AND (m.role='assistant' OR (?=1 AND m.role='system' AND m.host_notice_json IS NOT NULL)) AND m.row_scope IS NOT 'view'
         AND c.archived_at IS NULL AND length(CAST(m.text AS BLOB))<=?`)
-      .get(messageId,chatId,MAX_MESSAGE_BYTES) as {text:Buffer;workspaceInput:unknown;notice:unknown}|undefined;
+      .get(messageId,chatId,files?1:0,MAX_MESSAGE_BYTES) as {text:Buffer;workspaceInput:unknown;notice:unknown;role:unknown}|undefined;
     if(!row || isHousekeepingHostNotice(parseChatHostNotice('assistant',row.notice)) || !Buffer.isBuffer(row.text))return null;
-    return {text:row.text,workspaceInput:typeof row.workspaceInput==='string' && path.isAbsolute(row.workspaceInput) ? row.workspaceInput : null};
+    return {text:row.text,workspaceInput:typeof row.workspaceInput==='string' && path.isAbsolute(row.workspaceInput) ? row.workspaceInput : null,notice:typeof row.notice==='string' ? row.notice : null,role:String(row.role)};
   }
 
   list(principal:ChatVideoPrincipal,chatId:string,messageId:string,listId:string,offset=0,dispatch?:LegacyDispatchScope):{items:Array<{candidateId:string;relativePath:string}>;tooLarge:boolean;nextOffset:number|null} {
@@ -132,7 +146,7 @@ export class LegacyChatVideoTransfers {
   private current(c:Candidate):void {
     this.assertCurrent(c.principal);if(this.disposed || this.now()>=c.expires)throw Error('legacy_video_unavailable');
     c.assertChat();
-    const row=this.message(c.chatId,c.messageId,c.dispatch);if(!row || row.workspaceInput!==c.workspaceInput || sha(row.text)!==c.messageHash)throw Error('legacy_video_changed');
+    const row=this.message(c.chatId,c.messageId,c.dispatch,c.fileSource===true);if(!row || row.workspaceInput!==c.workspaceInput || (c.fileSource ? this.sourceHash(c.chatId,row) : sha(row.text))!==c.messageHash)throw Error('legacy_video_changed');
     // A folder the desktop no longer shows this chat's files from closes the transfer, as a changed folder does.
     if(!c.root.own && !(this.assetRoots?.(c.chatId) ?? []).some(root=>{try{return fs.realpathSync.native(root)===c.root.real}catch{return false}}))throw Error('legacy_video_changed');
     const root=fs.statSync(c.root.real,{bigint:true});if(!root.isDirectory() || String(root.dev)!==c.root.dev || String(root.ino)!==c.root.ino || fs.realpathSync.native(c.root.input)!==c.root.real)throw Error('legacy_video_changed');
@@ -140,10 +154,65 @@ export class LegacyChatVideoTransfers {
   }
   open(principal:ChatVideoPrincipal,candidateId:string,id:string):{transferId:string;expiresAt:number} {
     this.assertCurrent(principal);this.fence.assertOpen(principal,id);const c=this.candidates.get(candidateId);
-    if(!c || !samePrincipal(c.principal,principal) || this.transfers.has(id) || this.transfers.size>=4 || [...this.transfers.values()].some(t=>t.candidate.principal.deviceId===principal.deviceId))throw Error('legacy_video_unavailable');
-    this.current(c);this.candidates.delete(candidateId);
+    if(!c || !samePrincipal(c.principal,principal))throw Error('legacy_video_unavailable');
+    this.start(principal,c,id);this.candidates.delete(candidateId);
+    return {transferId:id,expiresAt:c.expires};
+  }
+  private start(principal:ChatVideoPrincipal,c:Candidate,id:string):void {
+    if(this.transfers.has(id) || this.transfers.size>=4 || [...this.transfers.values()].some(t=>t.candidate.principal.deviceId===principal.deviceId))throw Error('legacy_video_unavailable');
+    this.current(c);
     const transfer:Transfer={id,candidate:c,closed:false,preparing:false,reader:null,abort:new AbortController(),reading:false,timer:setTimeout(()=>{void this.closeOwned(transfer)},TTL)};
-    transfer.timer.unref();this.transfers.set(id,transfer);return {transferId:id,expiresAt:c.expires};
+    transfer.timer.unref();this.transfers.set(id,transfer);
+  }
+  /** The text the phone saw for this row, as chat-file-links.ts numbers it. */
+  private sourceText(chatId:string,row:{text:Buffer;notice:string|null;role:string}):string {
+    const raw=new TextDecoder('utf-8',{fatal:true}).decode(row.text);
+    return this.fileSource ? this.fileSource(chatId,raw,row.notice,row.role) : chatFileSourceText(raw);
+  }
+  private sourceHash(chatId:string,row:{text:Buffer;notice:string|null;role:string}):string { try{return sha(this.sourceText(chatId,row))}catch{return ''} }
+  /**
+   * chat.file.open: the n-th local path of the text the phone saw for one stored assistant row (the same tokenizer and the same
+   * source text the history projection used), bound to the file name the phone's link carried. Opened only when the desktop's own
+   * chat-assets judgement admits it. Nothing is listed first; the transfer starts here.
+   */
+  openFile(principal:ChatVideoPrincipal,chatId:string,messageId:string,ordinal:number,name:string,id:string,dispatch?:LegacyDispatchScope):{transferId:string;expiresAt:number;name:string;size:number;mediaType:string} {
+    this.assertCurrent(principal);this.fence.assertOpen(principal,id);if(this.disposed)throw Error('legacy_video_unavailable');
+    if(this.transfers.has(id) || this.transfers.size>=4 || [...this.transfers.values()].some(t=>t.candidate.principal.deviceId===principal.deviceId))throw new ChatFileRefusal('chat_file_busy');
+    const assertChat=this.captureChat?.(chatId) ?? (()=>{});assertChat();
+    const row=this.message(chatId,messageId,dispatch,true);if(!row)throw new ChatFileRefusal('chat_file_missing');
+    let source:string;try{source=this.sourceText(chatId,row)}catch{throw new ChatFileRefusal('chat_file_missing')}
+    const token=chatFileTokenAt(source,ordinal);
+    if(!token)throw new ChatFileRefusal('chat_file_missing');
+    // The text moved on since the phone drew its link (another path now holds this ordinal): the phone reloads and finds its file by name.
+    if(token.name!==name)throw new ChatFileRefusal('chat_file_changed');
+    // A folder-looking token, a masked name, a secret file and a network path are never opened, and no file system is touched for them.
+    if(!token.linkable || isChatFileNetworkPath(token.path) || isChatFileSecretPath(token.path))throw new ChatFileRefusal('chat_file_not_openable');
+    let requested=token.path;
+    if(requested==='~'||requested.startsWith('~/'))requested=path.join(os.homedir(),requested.slice(1));
+    if(!path.isAbsolute(requested) || /[\u0000-\u001f]/.test(requested))throw new ChatFileRefusal('chat_file_not_openable');
+    const mime=CHAT_FILE_MIME[path.extname(requested).toLowerCase()];
+    if(!mime)throw new ChatFileRefusal('chat_file_type_unsupported');
+    // The desktop's own judgement comes first and decides existence too: nothing is stat-ed outside what it admits. "Gone" is told from
+    // "not admitted" by the machine marker on the error (FsAccessDeniedError.reason, or ENOENT), never by its sentence.
+    let filename:string;
+    try{filename=this.authorizePath?this.authorizePath(path.resolve(requested),chatId):fs.realpathSync.native(path.resolve(requested))}
+    catch(error){const marker=error as {code?:unknown;reason?:unknown}|null;throw new ChatFileRefusal(marker?.code==='ENOENT' || marker?.reason==='missing' ? 'chat_file_missing' : 'chat_file_not_openable')}
+    if(isChatFileSecretPath(filename) || isChatFileNetworkPath(filename))throw new ChatFileRefusal('chat_file_not_openable');
+    const roots=this.roots(chatId,row.workspaceInput);
+    const inside=(root:Root)=>{const rel=path.relative(root.real,filename);return rel && rel!=='..' && !rel.startsWith('..'+path.sep) && !path.isAbsolute(rel) ? rel : null};
+    const root=roots.find(candidate=>inside(candidate)),rel=root?inside(root):null;
+    if(!root || !rel)throw new ChatFileRefusal('chat_file_not_openable');
+    let stat:fs.BigIntStats;
+    try{stat=fs.lstatSync(filename,{bigint:true})}catch{throw new ChatFileRefusal('chat_file_missing')}
+    // An empty file opens; a hard-linked one (another name may reach outside the folders) does not.
+    if(!stat.isFile() || stat.isSymbolicLink() || stat.nlink!==1n || fs.realpathSync.native(filename)!==filename)throw new ChatFileRefusal('chat_file_not_openable');
+    if(stat.size>BigInt(MAX_BYTES))throw new ChatFileRefusal('chat_file_too_large');
+    const candidate:Candidate={principal:{...principal},listId:id,chatId,messageId,...(dispatch?{dispatch:{...dispatch}}:{}),messageHash:sha(source),fileSource:true,workspaceInput:row.workspaceInput,root:{...root},filename,relative:rel,mime,identity:identity(stat),expires:this.now()+TTL,assertChat};
+    try{this.start(principal,candidate,id)}catch(error){
+      if(error instanceof Error && error.message==='legacy_video_changed')throw new ChatFileRefusal('chat_file_changed');
+      if(error instanceof Error && error.message==='legacy_video_unavailable')throw new ChatFileRefusal('chat_file_busy');
+      throw error}
+    return {transferId:id,expiresAt:candidate.expires,name:path.basename(filename),size:Number(stat.size),mediaType:mime};
   }
   private owned(principal:ChatVideoPrincipal,id:string):Transfer {const t=this.transfers.get(id);if(!t||t.closed||!samePrincipal(t.candidate.principal,principal))throw Error('legacy_video_unavailable');return t}
   private async check(t:Transfer):Promise<void>{if(t.closed||t.abort.signal.aborted||this.transfers.get(t.id)!==t)throw Error('legacy_video_closed');this.current(t.candidate);

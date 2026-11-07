@@ -6,7 +6,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents, grantForDroppedFile, grantForPastedAttachment, grantForPastedImage } from "@/lib/ipc";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { createStoreChangeThrottle, sameSnapshotIgnoring } from "@/lib/store-change-policy";
-import { ChatContinuationProjector } from "@/lib/chat-continuations";
+import { ChatContinuationProjector, type ChatContinuationRow } from "@/lib/chat-continuations";
+import { useChatCadence } from "@/lib/use-chat-cadence";
+import { CadenceCutCache, expandCadenceRows, type CadenceRow, type CadenceRowOps } from "@/lib/chat-cadence-rows";
+import { currentOffsetY, riseInto } from "@/lib/bubble-motion";
 import { useT } from "@/lib/i18n";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { mapInlineVisualProse } from "@shared/inline-visual";
@@ -91,6 +94,11 @@ type PersonalOneConversationMessage = ChatHistoryEntry & {
 // it as for every host-started or phone turn of this conversation (electron/runtime/room-chip-runtime.ts).
 // With the owner's opt-in front (shared/one-front.ts) Main runs the conversation on Agentlas's light model instead, and
 // the chip is a fixed label that opens the setting.
+/** One row of the appearance sheet: a title, a hint and a switch (the bubble settings). */
+function CadenceSwitchRow({id,title,hint,on,onToggle,testId}:{id:string;title:string;hint:string;on:boolean;onToggle:()=>void;testId:string}){
+  return <div className={styles.cadenceSetting} data-one-cadence-setting={testId}><div className={styles.cadenceSettingCopy}><strong id={`${id}-label`}>{title}</strong><span id={`${id}-hint`}>{hint}</span></div><button type="button" className={styles.cadenceSwitch} role="switch" aria-checked={on} aria-labelledby={`${id}-label`} aria-describedby={`${id}-hint`} data-on={on?"true":"false"} onClick={onToggle}><span/></button></div>;
+}
+
 export function PersonalOneWorkspace({ detached = false }: { detached?: boolean }) {
   const router=useRouter();const routeParams=useSearchParams();const requestedTaskId=routeParams.get("task");const consumedTask=useRef<string|null>(null);const taskReread=useRef<string|null>(null);
   const {locale}=useT(); const ko=locale==="ko"; const copy=(a:string,b:string)=>ko?a:b;
@@ -343,6 +351,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const dispatchNotices=useMemo(()=>(snapshot?.messages ?? []).filter(message=>message.role==="system"
     &&(message.hostNotice?.purpose==="one-dispatch-link"||message.hostNotice?.purpose==="one-dispatch-result")),[snapshot?.messages]);
   const continuationProjector=useRef(new ChatContinuationProjector());
+  const cadence=useChatCadence();
   const observedReplyTexts=useRef(new Map<string,string>());
   const conversationMessages=useMemo(()=>{
     if(live?.text){
@@ -367,7 +376,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       pendingCommandId:message.commandId,
     }))];
   },[activeReply?.runId,groups,historyScope,live?.runId,live?.text,pendingMessages]);
-  const conversationRows=useMemo(()=>{
+  const projectedRows=useMemo(()=>{
     const visible=new Set(visibleGroups.map(group=>group.message.id));
     return continuationProjector.current.project(historyScope ?? "personal-one-pending",conversationMessages,{
       key:message=>message.displayKey,role:message=>message.role,
@@ -376,6 +385,27 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       createdAt:message=>message.createdAt || undefined,run:message=>message.replyTurn?.runId,
     }).filter(row=>Boolean(row.message.pendingCommandId)||visible.has(row.message.historyGroupId!));
   },[activeReply?.runId,conversationMessages,historyScope,visibleGroups]);
+  // Message bubbles (shared/chat-cadence.ts through renderer/lib/chat-cadence-rows.ts). Off: the rows are exactly the projected ones.
+  // A reply that carries a card keeps its normal rendering: the card belongs to the first row and must not move between bubbles.
+  const inlineUiKey=inlineUi.map(item=>`${item.instanceId}:${item.turnId}:${item.state}`).join("|");
+  const cardRuns=useMemo(()=>{
+    const runs=new Set<string>();
+    if(inlineUi.length)for(const row of projectedRows){const turn=row.message.replyTurn;if(turn&&row.message.role==="assistant"&&inlineUiForReply(inlineUi,turn.runId,row.message.text).length)runs.add(turn.runId);}
+    return runs;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[projectedRows,inlineUiKey]);
+  const cadenceOps=useMemo<CadenceRowOps<ChatContinuationRow<PersonalOneConversationMessage>>>(()=>({
+    key:row=>row.continuation?row.id:row.message.displayKey,
+    eligible:row=>row.message.role==="assistant"&&!(row.message.replyTurn&&cardRuns.has(row.message.replyTurn.runId)),
+    live:row=>row.tail&&!row.frozen&&Boolean(row.message.replyTurn&&!row.message.hasDurableAnswer&&row.message.replyTurn.runId===activeReply?.runId),
+    sentAgoMs:row=>{const at=row.createdAt?Date.parse(row.createdAt):Number.NaN;return Number.isFinite(at)?Math.max(0,Date.now()-at):0;},
+  }),[activeReply?.runId,cardRuns]);
+  const cadenceCuts=useRef(new CadenceCutCache());
+  // The sessions are fed after the commit; a live reply with no session yet is drawn as the dots until then (no flash of the whole text).
+  useEffect(()=>{if(cadence.enabled)cadence.registry.sync(projectedRows,cadenceOps);},[cadence.enabled,cadence.registry,projectedRows,cadenceOps]);
+  const conversationRows=useMemo<CadenceRow<ChatContinuationRow<PersonalOneConversationMessage>>[]>(()=>cadence.enabled?expandCadenceRows(projectedRows,cadenceOps,cadence.registry,cadenceCuts.current):projectedRows,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cadence.enabled,cadence.registry,cadence.version,projectedRows,cadenceOps]);
   // Receipts sit between the rows by time: before the first row written after them, the rest at the end.
   const timeline=useMemo(()=>{
     if(!dispatchNotices.length)return conversationRows.map(row=>({row}));
@@ -392,6 +422,15 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     for(const notice of pending)merged.push({notice});
     return merged;
   },[conversationRows,dispatchNotices]);
+  // The list rises into place when a bubble comes out (renderer/lib/bubble-motion.ts). Anything that takes the scroll position over cancels it first.
+  const followMotion=useRef<Animation|null>(null);const lastRowBox=useRef<{id:string;top:number}|null>(null);const risen=useRef(new Set<string>());
+  const cancelFollowMotion=()=>{followMotion.current?.cancel();followMotion.current=null;};
+  const lastRowPosition=()=>{
+    const element=transcript.current,thread=element?.firstElementChild as HTMLElement|null;if(!element||!thread)return null;
+    const rows=element.querySelectorAll<HTMLElement>("[data-personal-one-message-id]");const last=rows[rows.length-1];if(!last)return null;
+    // Without the list's own transform, so a measurement taken during the motion is the same as one taken after it.
+    return {id:last.dataset.personalOneMessageId!,top:last.getBoundingClientRect().top-element.getBoundingClientRect().top-currentOffsetY(thread)};
+  };
   const captureHistoryAnchor=()=>{
     const element=transcript.current;if(!element)return;
     const top=element.getBoundingClientRect().top;
@@ -399,7 +438,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     historyAnchor.current=row?{scope:historyScope,id:row.dataset.personalOneMessageId!,top:row.getBoundingClientRect().top}:null;
   };
   const freezeHistory=()=>{
-    nearBottom.current=false;captureHistoryAnchor();
+    nearBottom.current=false;cancelFollowMotion();captureHistoryAnchor();
     if(historyScope&&historyGroups.length)setHistoryWindow(current=>{
       const ids=historyGroups.map(group=>group.message.id);
       if(current&&current===scopedWindow&&!current.followLatest&&current.ids.length===ids.length&&current.ids.every((id,index)=>id===ids[index]))return current;
@@ -407,7 +446,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     });
   };
   const revealHistory=(direction:"earlier"|"later")=>{
-    nearBottom.current=false;captureHistoryAnchor();
+    nearBottom.current=false;cancelFollowMotion();captureHistoryAnchor();
     const added=direction==="earlier"?groups.slice(Math.max(0,historyStart-24),historyStart):groups.slice(historyEnd,historyEnd+24);
     if(historyScope&&historyGroups.length){
       const included=new Set([...historyGroups,...added].map(group=>group.message.id));
@@ -415,11 +454,15 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     }
   };
   const handleHistoryWheel=(event:React.WheelEvent<HTMLDivElement>)=>{
+    // Scrolling down while the list rises into place is following it, not leaving the end (its transform inflates scrollHeight).
+    if(followMotion.current&&event.deltaY>0)return;
     const element=event.currentTarget;
     if(Math.abs(event.deltaY)<=Math.abs(event.deltaX)||element.scrollHeight<=element.clientHeight+1)return;
     if(event.deltaY<0?element.scrollTop>0:element.scrollHeight-element.scrollTop-element.clientHeight>1)freezeHistory();
   };
   const handleHistoryScroll=(element:HTMLDivElement)=>{
+    // While the list rises into place its transform makes the end look far away; that is not the owner scrolling up.
+    if(followMotion.current)return;
     const distance=element.scrollHeight-element.scrollTop-element.clientHeight;
     if(distance<=4&&historyEnd===groups.length){
       nearBottom.current=true;captureHistoryAnchor();
@@ -428,16 +471,36 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     else captureHistoryAnchor();
   };
   const latestHistory=()=>{
-    const scope=historyScope;historyAnchor.current=null;nearBottom.current=true;setHistoryWindow(null);setOwnVisibleCommands({scope,ids:[]});
+    const scope=historyScope;cancelFollowMotion();historyAnchor.current=null;nearBottom.current=true;setHistoryWindow(null);setOwnVisibleCommands({scope,ids:[]});
     requestAnimationFrame(()=>{if(historyScopeRef.current===scope)transcript.current?.scrollTo({top:transcript.current.scrollHeight});});
   };
   useLayoutEffect(()=>{
     if(historyAnchor.current?.scope!==historyScope){historyAnchor.current=null;nearBottom.current=true;}
     const element=transcript.current;if(!element)return;
-    if(nearBottom.current)element.scrollTop=element.scrollHeight;
-    else if(historyAnchor.current){const anchor=historyAnchor.current;const row=Array.from(element.querySelectorAll<HTMLElement>("[data-personal-one-message-id]")).find(item=>item.dataset.personalOneMessageId===anchor.id);if(row)element.scrollTop+=row.getBoundingClientRect().top-anchor.top;}
+    // A bubble that just came out (and only then): the list ends where it always did, and rises from where it was.
+    const entering=conversationRows.filter(row=>row.cadence?.enter&&!risen.current.has(`${row.cadence.sourceKey}#${row.cadence.index}`));
+    const before=lastRowBox.current,residual=element.firstElementChild?currentOffsetY(element.firstElementChild):0;
+    if(entering.length){
+      for(const row of entering)risen.current.add(`${row.cadence!.sourceKey}#${row.cadence!.index}`);
+      while(risen.current.size>200)risen.current.delete(risen.current.values().next().value!);
+      cancelFollowMotion();
+    }
+    // A running motion owns the end of the list (its transform would inflate scrollHeight); it is cancelled before anything else moves the list.
+    if(nearBottom.current&&!followMotion.current)element.scrollTop=element.scrollHeight;
+    else if(!nearBottom.current&&historyAnchor.current){const anchor=historyAnchor.current;const row=Array.from(element.querySelectorAll<HTMLElement>("[data-personal-one-message-id]")).find(item=>item.dataset.personalOneMessageId===anchor.id);if(row)element.scrollTop+=row.getBoundingClientRect().top-anchor.top;}
+    const thread=element.firstElementChild as HTMLElement|null;
+    if(entering.length&&nearBottom.current&&!cadence.reducedMotion&&thread&&before){
+      const after=Array.from(element.querySelectorAll<HTMLElement>("[data-personal-one-message-id]")).find(item=>item.dataset.personalOneMessageId===before.id);
+      if(after){
+        const top=after.getBoundingClientRect().top-element.getBoundingClientRect().top-currentOffsetY(thread);
+        const motion=riseInto(thread,before.top+residual-top);
+        if(motion){followMotion.current=motion;const done=()=>{if(followMotion.current===motion){followMotion.current=null;if(nearBottom.current&&transcript.current)transcript.current.scrollTop=transcript.current.scrollHeight;}};motion.addEventListener("finish",done);motion.addEventListener("cancel",()=>{if(followMotion.current===motion)followMotion.current=null;});}
+      }
+    }
     captureHistoryAnchor();
+    lastRowBox.current=lastRowPosition();
   },[historyScope,conversationRows,scopedWindow,messageFiles,viewportWidth,shownPanelWidth,tasksOpen,artifactOpen,file]);
+  useEffect(()=>()=>cancelFollowMotion(),[]);
   useEffect(()=>{loadedGroups.current.clear();setMessageFiles({});},[snapshot?.conversationChatId]);
   useEffect(()=>{
     const bridge=chatFilesBridge();if(!snapshot||!bridge)return;
@@ -480,7 +543,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       if(answer===undefined){for(const item of attachments)if(item.preview)URL.revokeObjectURL(item.preview);setAttachments([]);}setAttachmentError(null);
     }catch(cause){setAttachmentError(cause instanceof Error?cause.message:String(cause));setAttachmentBusy(false);submitting.current=false;return;}
     setAttachmentBusy(false);submitting.current=false;
-    if(inFlight.current.has(intent.commandId))return;inFlight.current.add(intent.commandId);setOwnVisibleCommands(current=>({scope:historyScope,ids:[...(current.scope===historyScope?current.ids:[]),intent.commandId].slice(-24)}));setSavedRequests(outbox.current.list());setText(current=>current===submittedText?"":current);nearBottom.current=true;
+    if(inFlight.current.has(intent.commandId))return;inFlight.current.add(intent.commandId);setOwnVisibleCommands(current=>({scope:historyScope,ids:[...(current.scope===historyScope?current.ids:[]),intent.commandId].slice(-24)}));setSavedRequests(outbox.current.list());setText(current=>current===submittedText?"":current);nearBottom.current=true;cadence.registry.flushFinished();
     setOptimistic(prior=>prior.some(item=>item.commandId===intent.commandId)?prior:[...prior,{commandId:intent.commandId,text:message,acknowledged:false}]);
     try{const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);if(!mounted.current)return;setSavedRequests(outbox.current.list());showReceipt(value);
       if(value.acknowledgement!=="unknown"&&["stored","dispatching","accepted","completed"].includes(value.state))setMessageReply(current=>current===submittedReply?null:current);
@@ -646,7 +709,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             const displayedText=message.role==="assistant"?row.text:displayMessageReply(parseChatFileMessage(row.text).visibleText,locale);
             const markdownText=message.role==="assistant"?row.markdownText ?? displayedText:displayedText;
             const replyPresentation=turn?personalOneReplyPresentation(turn,Boolean(message.hasDurableAnswer),activeReply?.runId):null;
-            const typing=row.tail&&replyPresentation==="answering"&&!displayedText;
+            // Message bubbles: the dots stay under the last bubble until the answer is done and the last bubble is out (cadence); otherwise only while nothing is written yet.
+            const typing=row.cadence?row.cadence.typing:row.tail&&replyPresentation==="answering"&&!displayedText;
             const delegated=row.tail&&turn?snapshot?.delegations?.filter(item=>item.originReplyRunId===turn.runId) ?? []:[];
             const imageUrls=row.tail?message.imageDataUrls ?? []:[];
             const fileGroups=row.tail?parseChatFileMessage(message.text).groupIds:[];
@@ -658,9 +722,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             // The sender's name goes above a reply only where it says something: Hope speaking first in a time group (a check-in or a hand-off result).
             const sender=message.role==="assistant"&&!row.continuation&&(stamp!==null||shownRole===null)?name:"";
             if(Number.isFinite(at))shownAt=at;shownRole=message.role;
-            return <Fragment key={displayId}>{stamp&&<div className={styles.stamp}><time dateTime={row.createdAt}><b>{stamp.day}</b> {stamp.time}</time></div>}<div className={styles.turn} data-role={message.role} data-personal-one-message-id={displayId} data-personal-one-source-id={sourceMessageId} data-personal-one-history-id={message.historyGroupId} data-command-id={turn?.commandId} data-optimistic-message={message.pendingCommandId}>
+            return <Fragment key={displayId}>{stamp&&<div className={styles.stamp}><time dateTime={row.createdAt}><b>{stamp.day}</b> {stamp.time}</time></div>}<div className={styles.turn} data-role={message.role} data-personal-one-message-id={displayId} data-personal-one-source-id={sourceMessageId} data-personal-one-history-id={message.historyGroupId} data-command-id={turn?.commandId} data-optimistic-message={message.pendingCommandId} data-cadence-enter={row.cadence?.enter||undefined} onAnimationEnd={row.cadence?.enter?event=>{if(event.target===event.currentTarget)cadence.registry.seen(row.cadence!.sourceKey,row.cadence!.index);}:undefined}>
             {sender&&<small className={styles.sender}>{sender}</small>}
-            {(markdownText||ownedUi.length>0)&&<MessageActions messageId={sourceMessageId} author={message.role==="user"?copy("나","You"):name} text={displayedText} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role={message.role} data-run-id={turn?.runId}>
+            {(markdownText||ownedUi.length>0)&&<MessageActions messageId={sourceMessageId} author={message.role==="user"?copy("나","You"):name} text={row.cadence?.sourceText ?? displayedText} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role={message.role} data-run-id={turn?.runId}>
               {message.role==="assistant"&&turn
                 ?<StreamingMarkdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={prepareUiFollowup} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>
                 :<Markdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={message.role==="assistant"?prepareUiFollowup:undefined} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>}
@@ -746,7 +810,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
           {front.view&&!front.view.effective&&<p className={styles.feedback} data-one-personal-model-scope="true" title={copy("개인 One과의 대화에 사용할 모델입니다. Work 업무의 실행 모델은 업무별로 선택합니다.","The model for your personal One conversation. Choose the execution model separately for each Work task.")}>{copy("개인 대화 모델","Personal chat model")}</p>}
           <div className={styles.trail}>{front.view?.effective?<OneFrontChip locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>:<OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} />}</div>
         </div>
-        {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("이 답변 중지","Stop this reply")}</button>}
+        {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>{cadence.registry.flush();void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true));}}>{copy("이 답변 중지","Stop this reply")}</button>}
         {waitingReply?.runId&&<div role="status" data-waiting-retry-stop="true" className={styles.feedback}><span>{copy("메시지를 앱이 다시 보내는 중이에요.","The app is sending your message again.")}</span> <button className={styles.stopReply} data-waiting-retry-stop-button="true" onClick={()=>void write("stopReply",{runId:waitingReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("중지","Stop")}</button></div>}
       </div>
     </main>
@@ -790,7 +854,10 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     {identityError&&<p role="alert" className={styles.feedback}>{copy("프로필을 열지 못했습니다. 다시 눌러 주세요.","Could not open the profile. Please try again.")}</p>}
     {identityProfile&&<OneIdentityEditor open identityOnly locale={ko?"ko":"en"} editOne={{oneId:identityProfile.oneId,displayName:identityProfile.displayName,role:identityProfile.role,profileContext:identityProfile.profileContext,avatarIcon:identityProfile.avatarIcon ?? "character:orange-dino",expectedVersion:identityProfile.version}} onClose={closeIdentity} onCreated={()=>{}} onAddExisting={()=>{}} onSavedOne={async()=>{await sync();}}/>}
     <OneBottomSheet open={appearanceOpen} onClose={()=>setAppearanceOpen(false)} closeLabel={copy("설정 닫기","Close appearance")} ariaLabel={copy("나의 One","Your One")} title={copy("나의 One","Your One")} icon={<IconSettings size={20} />} size="compact" footer={<button className={styles.saveAppearance} disabled={!profile||savingProfile||!profileName.trim()} onClick={()=>void saveAppearance()}>{copy("저장","Save")}</button>}>
-      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")}</p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:bubbleHex(color as OneBubbleColor)}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:bubbleHex(bubbleColor)}}>{profileName||name}</p><OneFrontSetting controller={front} locale={ko?"ko":"en"}/></div>
+      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")}</p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:bubbleHex(color as OneBubbleColor)}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:bubbleHex(bubbleColor)}}>{profileName||name}</p>
+        <CadenceSwitchRow id="one-cadence-enabled" testId="enabled" title={copy("답을 말풍선으로 나눠 보기","Show replies as separate bubbles")} hint={copy("끄면 답을 말풍선으로 나누지 않고, 예전처럼 한 덩어리로 보여 줍니다.","When off, a reply is shown as one block instead of being split into bubbles.")} on={cadence.enabled} onToggle={()=>cadence.setEnabled(!cadence.enabled)}/>
+        {cadence.enabled&&<CadenceSwitchRow id="one-cadence-instant" testId="instant" title={copy("답을 바로 보기","Show replies instantly")} hint={copy("켜면 말풍선 사이에 쉬는 시간 없이, 문단이 끝나는 대로 보여 줍니다.","When on, each bubble appears as soon as its paragraph is written, with no pause between them.")} on={cadence.instant} onToggle={()=>cadence.setInstant(!cadence.instant)}/>}
+        <OneFrontSetting controller={front} locale={ko?"ko":"en"}/></div>
     </OneBottomSheet>
     <OneFrontNotice controller={front} locale={ko?"ko":"en"}/>
     <PersonalOneBudget open={budgetsOpen} oneId={snapshot?.oneId} locale={ko?"ko":"en"} items={budgets.items} unconfirmed={budgets.unconfirmed} onRefresh={budgets.refresh} onClose={()=>setBudgetsOpen(false)}/>

@@ -20,6 +20,7 @@ import {
   type OpenOneBriefingTaskInput,
   type OpenOneBriefingTaskResult,
   type OneProactiveBriefing,
+  isOneQuietHour,
 } from "../../shared/one-briefing";
 import type { Automation, AutomationRunRecord, CanonicalTask, FailureEventUi, InvocationRunReceipt, Project } from "../../shared/types";
 import { tryRecordOneDomainEvent } from "./domain-events";
@@ -822,13 +823,7 @@ export function getOneBriefingSnapshot(deps: OneBriefingDetectorDependencies = {
 }
 
 function quietHoursActive(preferences: OneBriefingPreferences, now: Date): boolean {
-  const quiet = preferences.quietHours;
-  if (!quiet.enabled) return false;
-  if (quiet.startHour === quiet.endHour) return true;
-  const hour = now.getHours();
-  return quiet.startHour < quiet.endHour
-    ? hour >= quiet.startHour && hour < quiet.endHour
-    : hour >= quiet.startHour || hour < quiet.endHour;
+  return isOneQuietHour(preferences.quietHours, now.getHours());
 }
 
 /**
@@ -836,6 +831,11 @@ function quietHoursActive(preferences: OneBriefingPreferences, now: Date): boole
  * now: the owner's briefing channel choice and quiet hours, read-only. New mail
  * does not get its own notification setting — it follows this one.
  */
+/** The owner's saved quiet hours (read-only), for the phone push service: it holds scheduled check-ins in this window. */
+export function oneQuietHours(now = new Date()): { enabled: boolean; startHour: number; endHour: number } {
+  return { ...loadState(now).preferences.quietHours };
+}
+
 export function oneDesktopNotificationAllowed(now = new Date()): boolean {
   const state = loadState(now);
   return state.preferences.channels.includes("desktop_notification") && !quietHoursActive(state.preferences, now);

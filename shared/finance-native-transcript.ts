@@ -8,8 +8,10 @@ import { financeReportCompositionSpec, financeReportComputeMetrics, financeRepor
 import { screenInlineVisualHtml, validateInlineUiPresentationContent, type InlineUiPresentationContent } from './inline-ui-presentation';
 import { INTELLECT_UI_LIMITS, type IntellectUiNode } from './intellect-ui';
 
-/** The largest drawn card (HTML bytes) one phone message carries: the message text cap in electron/mobile-bridge/sanitize.ts leaves room for the fence around it. */
+/** The largest drawn card one phone message carries, measured as the wire carries it (JSON-escaped): the message text cap in electron/mobile-bridge/sanitize.ts leaves room for the label and the fence around it. */
 export const MOBILE_VISUAL_HTML_BYTES = 180 * 1024;
+/** Whether a drawn card fits [limit] as it is sent: quotes and backslashes in it are escaped on the wire and count twice. */
+export const mobileVisualFits = (html: string, limit: number = MOBILE_VISUAL_HTML_BYTES): boolean => new TextEncoder().encode(JSON.stringify(html)).byteLength <= limit;
 const text = (value: string): IntellectUiNode => ({ type: 'text', text: value });
 const native = (children: IntellectUiNode[], title?: string): InlineUiPresentationContent => ({ kind: 'native', document: { version: 1, ...(title ? { title } : {}), children } });
 const unavailable = () => [native([text('This Finance result cannot be displayed here.')])];
@@ -100,7 +102,7 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
     const canvas = financeCanvasFromLegacy(view as { kind: string } & Record<string, unknown>);
     // A drawn card the phone's visual limits refuse is still shown, as the card's own plain-text lines, never as an empty "cannot be displayed".
     // A card past the phone's wire budget is shown the same way, so a big card is a readable summary and never a bare label.
-    if (canvas) { const html = financeCanvasDocument(canvas); blocks.push(screenInlineVisualHtml(html).ok && new TextEncoder().encode(html).byteLength <= (options.maxVisualBytes ?? MOBILE_VISUAL_HTML_BYTES) ? { kind: 'visual', html } : native(canvasSummaryLines(canvas).map(line => text(clipText(line, INTELLECT_UI_LIMITS.textChars))), canvas.title)); }
+    if (canvas) { const html = financeCanvasDocument(canvas); blocks.push(screenInlineVisualHtml(html).ok && mobileVisualFits(html, options.maxVisualBytes) ? { kind: 'visual', html } : native(canvasSummaryLines(canvas).map(line => text(clipText(line, INTELLECT_UI_LIMITS.textChars))), canvas.title)); }
   } else if (view.kind === 'report') {
     const locale = financeReportLocale(view.report, 'en');
     if (view.coverage?.missingPositions) blocks.push(native([text(`${view.coverage.pricedPositions}/${view.coverage.positions} priced holdings · ${view.coverage.missingPositions} unavailable`)]));

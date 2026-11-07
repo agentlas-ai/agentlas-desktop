@@ -78,6 +78,11 @@ export function normalizeChatHostNotice(role: string, value: unknown): ChatHostN
     return { purpose: "host-status", runId: item.runId, status: item.status as HostStatusKind,
       ...(item.verdict === "done" || item.verdict === "not_done" ? { verdict: item.verdict } : {}) };
   }
+  if (item.purpose === "goal-incomplete") {
+    if (role !== "assistant" && role !== "system") return undefined;
+    if (Object.keys(item).some((key) => key !== "purpose" && key !== "runId") || (item.runId !== undefined && !validId(item.runId))) return undefined;
+    return { purpose: "goal-incomplete", ...(item.runId !== undefined ? { runId: item.runId } : {}) };
+  }
   if (role !== "system") return undefined;
   if (item.purpose === "automation-report") {
     if (Object.keys(item).some(key => !["purpose", "runId", "automationId", "withdrawn"].includes(key)) || !validId(item.runId) || !validId(item.automationId)

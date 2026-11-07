@@ -84,6 +84,8 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
       }).immediate();
       host.configureOneSupervisorDaemonHost({ownerKind:"work-daemon",ownerEpoch:options.bootId,assertAuthority:authority});
       if(options.science)host.configureOneSupervisorScience(options.science);
+      // Host-authored check-in instructions are known before the first command can reach the store.
+      await (await import("../one/checkin-admission")).loadCheckinGates().catch(()=>undefined);
       service=host.oneSupervisor();closeHost=host.closeOneSupervisorHostAdmission;
       db.exec(`CREATE TABLE IF NOT EXISTS one_supervisor_question_answers (
         request_id TEXT PRIMARY KEY,one_id TEXT NOT NULL,run_id TEXT NOT NULL,revision TEXT NOT NULL,

@@ -373,3 +373,15 @@ export function isOneBriefingActionPacket(value: unknown): value is OneBriefingA
   }
   return true;
 }
+
+/**
+ * Whether `hour` (0-23, the owner's local clock) falls in the owner's quiet hours. One definition for the Desktop notice and the
+ * phone push: a disabled setting is never quiet, and a start equal to the end means the whole day is quiet.
+ */
+export function isOneQuietHour(quiet: { enabled: boolean; startHour: number; endHour: number }, hour: number): boolean {
+  if (!quiet.enabled) return false;
+  if (quiet.startHour === quiet.endHour) return true;
+  return quiet.startHour < quiet.endHour
+    ? hour >= quiet.startHour && hour < quiet.endHour
+    : hour >= quiet.startHour || hour < quiet.endHour;
+}

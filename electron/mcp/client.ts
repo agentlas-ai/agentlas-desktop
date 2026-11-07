@@ -1,4 +1,5 @@
 import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
+import { browserSignInNeeded } from "../../shared/browser-sign-in-needed";
 import { composeTracedPrompt } from "../runtime/prompt-composition-trace";
 import { CHANNEL_PRIVACY_RULE } from "../runtime/session-channel";
 import { workMainOwnsRouting, workSessionMainPolicy } from "../work/session-policy";
@@ -11,7 +12,7 @@ import { captureNativeOsCuratorRun } from "../runtime/os-memory-curator-binding"
 import { placeTurnContextForRuntime } from "../runtime/serving-prefix";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { withOneHistoryNativeInvocation } from "../one/personal-integrations-runtime";
-import { withAdapterEffectObserver } from "../invocation/adapter-effect-context";
+import { invocationProvesNoOutsideEffect, withAdapterEffectObserver } from "../invocation/adapter-effect-context";
 import { runWithOwnerControl } from "../runtime/owner-control-pump";
 import { assertGraphWorkerAttempt, noteGraphWorkerDispatch, noteGraphWorkerReturnedFailure, noteGraphWorkerAdapterStart, noteGraphWorkerAdapterFinish, noteGraphWorkerCoverageUnknown, noteGraphWorkerActivity, noteGraphWorkerTool, noteGraphWorkerPrepare, noteGraphWorkerSelection, noteGraphWorkerFailure, settleGraphWorkerAttempt, type GraphWorkerAttempt, type GraphWorkerFailureReceipt } from "../workflow/graph-worker-fallback";
 import { prepareWorkAttachmentContext, mainWorkAttachmentContext, redactWorkAttachmentText, isWorkAttachmentInput } from "../invocation/work-attachments";
@@ -75,6 +76,8 @@ import { nativeBrowserGrantFailureDegrades } from "./native-browser-grant-degrad
 import { hostRecoveryOf, noteRuntimeWaitFacts, recordHarnessDefect } from "../invocation/host-recovery";
 import { mayRunWithoutToolTable } from "./config-build-degrade";
 import { invokeWithUnsettledContinuation, unsettledContinuationCarriesRequest, unsettledContinuationPrompt } from "../runtime/unsettled-continuation";
+import { dispatchWithUnsettledMove } from "../runtime/unsettled-move";
+import { isTransientExternalFailure } from "../../shared/transient-provider-failure";
 import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextContinuationHandle, type AgentContextCapability } from "../runtime/agent-context";
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
 import { detectRuntimes } from "../runtime/detect";
@@ -2536,6 +2539,14 @@ async function runMcpInvocationInContext(
         sourceEventId: `browser-login-observation:${randomUUID()}`, payload: { catalogId: input.catalogId, toolName: input.toolName, code } });
       return;
     }
+    // The owner's own One conversation turn goes on past a sign-in only the owner can do: the model is told the site and asks the
+    // owner how to go on (shared/browser-sign-in-needed.ts). Every other turn waits below and resumes after the sign-in: a Work,
+    // automation or unattended pass, a host-started One turn (Goal resume, wait follow-up, team brief or report: system prompt or
+    // host notice; nobody is there to answer), and agentlas-local (its daemon relay cannot carry the typed result yet).
+    const ownerTurn = req.oneMode === true && !isUnattendedExecution(executionContext) && req.promptOrigin !== "system"
+      && hostNoticePurpose === undefined && active.kind !== "agentlas-local";
+    const ownerWall = ownerTurn ? outcomes.find((outcome) => outcome.state === "awaiting-owner") : undefined;
+    if (ownerWall?.state === "awaiting-owner") throw browserSignInNeeded(ownerWall.site);
     login.observe(outcomes);
     login.assertRunnable();
     } finally { observed(); }
@@ -7061,6 +7072,10 @@ async function runMcpInvocationInContext(
       return added;
     };
     collectDurableToolImages = collectToolImages;
+    // Tool events of the LAST runtime dispatch (invokeCurrentRuntime resets it): the context-overflow retry runs only when none came.
+    let dispatchToolEvents = 0;
+    /** Tool events of every dispatch of this invocation (the unsettled-turn move reads it beside the effect boundary). */
+    let invocationToolEvents = 0;
     const runnerEvents = {
       onStatus: (status: string, activity?: McpInvocationEvent["activity"]) => sink({
         kind: "tool-use",
@@ -7078,6 +7093,8 @@ async function runMcpInvocationInContext(
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
       // `_toolKind` (typed ACP/agy kind, runner.ts) is accepted so the forwarding wrapper keeps the runner signature.
       onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, dispatchedOrigin?: ToolInvocationOrigin, _toolKind?: RuntimeToolKind) => {
+        dispatchToolEvents += 1;
+        invocationToolEvents += 1;
         let sourceUrls: string[] | undefined;
         if (!isError && req.runId && !req.agentAppMode) {
           try {
@@ -7925,8 +7942,11 @@ async function runMcpInvocationInContext(
      */
     const invokeCurrentRuntime = (request: RunnerRequest, hostAuthored?: string): Promise<Awaited<ReturnType<Runner>>> => {
       lastJournalTurnId = null;
-      return invokeWithUnsettledContinuation<RunnerRequest>({
-        dispatch(r, purpose, handle) { lastJournalTurnId = null; return runCurrentRuntimeOnce(r, purpose, handle); },
+      // B-lite (runtime/unsettled-move.ts): after the continuation also ends unsettled, a proven no-effect turn goes to the pool's next
+      // candidate, exactly as the pool's other fallbacks send a request.
+      return dispatchWithUnsettledMove<RunnerRequest, Awaited<ReturnType<Runner>>>({
+        dispatch: (r) => invokeWithUnsettledContinuation<RunnerRequest>({
+        dispatch(r, purpose, handle) { lastJournalTurnId = null; dispatchToolEvents = 0; return runCurrentRuntimeOnce(r, purpose, handle); },
         continuationRequest: (r, sessionId, delivery) => {
           // The interrupted request rides along (with its images) unless the session acknowledged that turn: an accepted
           // request is in the resumed transcript and is not re-sent (runner.ts RuntimeTurnDelivery; owner 2026-10-16:
@@ -7939,9 +7959,11 @@ async function runMcpInvocationInContext(
         aborted: () => signal?.aborted === true,
         noModelWork: () => runtimeTerminalEvidence.closedHttpRefusal || runtimeTerminalEvidence.locallyRejected,
         leftBehind: () => (lastJournalTurnId ? agentContextUnsettledTurn(lastJournalTurnId) : null),
-        record(phase, delivery, cause) {
+        toolRan: () => dispatchToolEvents > 0,
+        record(phase, delivery, cause, proof) {
           if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "runtime_unsettled_continuation",
-            payload: { runtime: active.kind, phase, ...(delivery ? { turnDelivery: delivery } : {}), ...(cause ? { cause } : {}) } });
+            payload: { runtime: active.kind, phase, ...(delivery ? { turnDelivery: delivery } : {}), ...(cause ? { cause } : {}),
+              ...(proof ? { proof } : {}) } });
         },
         // A transient cause outside the app (the provider at capacity, a lost stream): wait a little, say so, then continue in the same
         // session. The wait ends at once on the owner's stop (the continuation then never starts).
@@ -7956,7 +7978,49 @@ async function runMcpInvocationInContext(
             if (signal?.aborted) done(); else signal?.addEventListener("abort", done, { once: true });
           });
         },
-      }, request, hostAuthored);
+      }, r, hostAuthored),
+        inspect: (outcome) => {
+          const endedWith: unknown = !outcome.ok
+            ? (outcome.error instanceof RuntimeTurnUnsettledError ? outcome.error : null)
+            : outcome.result.ownerControlTerminal !== "completed" && outcome.result.turnDelivery !== "not-dispatched"
+              && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected
+              && (!outcome.result.failure || outcome.result.failure.providerCode === RUNTIME_TURN_UNSETTLED_CODE || isTransientExternalFailure(outcome.result.failure))
+              ? (outcome.result.failure ?? unsettledTurnError({ runtimeKind: active.kind, locale })) : null;
+          return !outcome.ok
+            ? { endedWith, proofStatus: (outcome.error as RuntimeTurnUnsettledError).proof, actionItems: (outcome.error as RuntimeTurnUnsettledError).actionItems }
+            : { endedWith, proofStatus: outcome.result.turnProof, actionItems: outcome.result.turnActionItems };
+        },
+        facts: () => ({ runtimeKind: active.kind, boundaryProvesNoEffect: invocationProvesNoOutsideEffect(),
+          toolEvents: invocationToolEvents, runtimeFixed: ownerPinnedRuntime || !directRuntimeFallbackAllowed, aborted: signal?.aborted === true }),
+        candidate: (endedWith) => {
+          const failure = runnerFailureFromError(endedWith, active.kind);
+          const activeKey = runtimeAttemptKey(active);
+          const fallback = rolePriorityRuntimes(runtimes, "orchestrator", { failedRuntime: active, failure, allowCreditFallback: false,
+            unsettledNoEffectProven: true }).find((candidate) => {
+            const key = runtimeAttemptKey(candidate);
+            return key !== activeKey && !attemptedRuntimeKeys.has(key);
+          });
+          const fallbackPicked = fallback ? pickRunner(fallback) : null;
+          if (!fallback || !fallbackPicked) return null;
+          return { commit: (proof) => {
+            if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "runtime_unsettled_continuation",
+              payload: { runtime: active.kind, phase: "moved", to: fallback.kind, ...(proof ? { proof } : {}) } });
+            const fromLabel = `${active.kind}${active.model ? ` · ${active.model}` : ""}`;
+            const toLabel = `${fallback.kind}${fallback.model ? ` · ${fallback.model}` : ""}`;
+            const koMessage = `선택한 실행 환경 ${fromLabel}을 사용할 수 없어 오케스트레이터 우선순위 모델 ${toLabel}로 이어갑니다. 저장된 선택은 변경하지 않았습니다.`;
+            const enMessage = `The selected runtime ${fromLabel} is unavailable; continuing on orchestrator-priority model ${toLabel}. The saved selection was not changed.`;
+            runnerEvents.onNotice({ level: "warning", code: "runtime-fallback-attempt", message: locale === "ko" ? koMessage : enMessage,
+              i18n: { ko: koMessage, en: enMessage },
+              details: JSON.stringify({ from: { kind: active.kind, backend: active.backend, model: active.model ?? null },
+                to: { kind: fallback.kind, backend: fallback.backend, model: fallback.model ?? null }, reason: failure.kind, runtime: failure.runtime,
+                failureSource: failure.source, providerCode: failure.providerCode ?? null }) });
+            active = fallback;
+            picked = fallbackPicked;
+            // The first runtime's native session is not the next one's: it starts from the request, as the pool's other fallbacks do.
+            return carryRunnerTurnContext(request, { ...request, runtimeSessionId: undefined });
+          } };
+        },
+      }, request);
     };
     let activeRunnerReq = runnerRequestForRuntime(active, picked);
     modelTurnStarted = true;

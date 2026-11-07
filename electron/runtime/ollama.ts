@@ -12,6 +12,7 @@ import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { resolveEffectiveContextWindow } from "../../shared/models";
+import { LOCAL_RUNTIME_UNKNOWN_WINDOW } from "./session-generation";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent, noModelSelectedResult } from "./local-tool-loop";
 import { ownerControlHistoryImages } from "./owner-control-pump";
 
@@ -120,7 +121,7 @@ const runOllamaCall = async (
       renderOutputSchemaSystem: () => ({ system: renderSystem(true) }),
       host,
       model,
-      estimatedContextWindow: capacity.contextWindow ?? 16_000,
+      estimatedContextWindow: capacity.contextWindow ?? LOCAL_RUNTIME_UNKNOWN_WINDOW,
       // A thinking model spends part of this on reasoning before the first tool call or word of the answer.
       estimatedOutputReserve: req.maxOutputTokens ?? 8_192,
       ollamaContext: true,

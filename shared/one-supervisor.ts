@@ -121,6 +121,12 @@ export function supervisorDoneWhen(value: unknown): string[] | undefined {
     .filter(Boolean).map((item) => item.slice(0, SUPERVISOR_DONE_WHEN_LIMITS.chars)).slice(0, SUPERVISOR_DONE_WHEN_LIMITS.items);
   return items.length ? items : undefined;
 }
+/** The text a Work's worker receives: the brief, then the finished-when list. Without a list the brief, byte for byte.
+ * The dispatch builds the request with it and the binding check compares against it: one function, so they cannot differ. */
+export function withDoneWhen(brief: string, doneWhen: unknown): string {
+  const items = supervisorDoneWhen(doneWhen);
+  return items ? `${brief}\n\nFinished when:\n${items.map((item) => `- ${item}`).join("\n")}` : brief;
+}
 export interface SupervisorScienceInput { commandId: string; text: string; projectId: string; oneId?:string }
 /**
  * One speaks first only when it matters (dots parity, owner 2026-10-04). A host-started One turn — a finished

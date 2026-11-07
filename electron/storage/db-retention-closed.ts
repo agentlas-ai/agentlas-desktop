@@ -53,7 +53,7 @@ export function closedPredicate(db: Database.Database, table: string, spec: Clos
   const cutoff = spec.timeUnit === "ms" ? now - spec.days * DAY_MS : new Date(now - spec.days * DAY_MS).toISOString();
   const empty = spec.timeUnit === "ms" ? "0" : "''";
   const parts = [
-    `t.${ident(spec.stateColumn)} IN (${spec.closedStates.map(quote).join(", ")})`,
+    ...(spec.stateColumn && spec.closedStates ? [`t.${ident(spec.stateColumn)} IN (${spec.closedStates.map(quote).join(", ")})`] : []),
     ...(spec.closedWhen ? [spec.closedWhen] : []),
     ...(spec.keepWhen ?? []).filter((keep) => columnsOf(db, keep.table) !== null).map((keep) => `NOT (${keep.sql})`),
     ...spec.timeColumns.map((column) => `COALESCE(t.${ident(column)}, ${empty}) < @cutoff`),

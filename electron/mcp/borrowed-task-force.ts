@@ -3330,8 +3330,6 @@ export function taskForceIncompleteMessage(input: {
   locale: "ko" | "en";
   remaining: TaskForceRemainingRow[];
   requiredSurfaceMissing: boolean;
-  /** The turn is tied to a Goal: the host continues it, so the message neither promises nor asks the owner to say "continue". */
-  goalBound: boolean;
 }): string {
   const ko = input.locale === "ko";
   // A reported item that is one code-, id- or path-shaped token is machine state, not owner copy.
@@ -3373,17 +3371,12 @@ export function taskForceIncompleteMessage(input: {
   const decisionPending = input.remaining.some((entry) => entry.decisions.some((question) => readable(question)));
   const accessNeedsChip = input.remaining.some((entry) => entry.access?.reason === "owner_denied" || entry.access?.reason === "approval_unavailable");
   const accessExpired = input.remaining.some((entry) => entry.access?.reason === "approval_expired");
-  const onlyLiftedAccess = input.remaining.length > 0 && input.remaining.every(liftedAccess) && !input.requiredSurfaceMissing;
   const closing = accessNeedsChip
     ? ko ? "작성창에서 권한을 올린 뒤 \"계속해줘\"라고 하시면 남은 일부터 계속합니다." : "Raise the permission in the composer, then say \"continue\" and the remaining work picks up from here."
     : accessExpired
       ? ko ? "\"계속해줘\"라고 하시면 권한을 다시 묻고 계속합니다." : "Say \"continue\" and it asks for the access again and picks up from here."
-    : input.goalBound ? (decisionPending ? (ko ? "결정을 알려주세요." : "Please answer the decision above.") : "")
-    : onlyLiftedAccess
-      ? ko ? "필요한 권한으로 한 번 더 실행했지만 끝나지 않아 여기서 멈췄습니다." : "It ran once more with the access it needed and still did not finish, so it stopped here."
-      : decisionPending
-        ? ko ? "답하시거나 \"계속해줘\"라고 하시면 남은 일부터 계속합니다." : "Answer, or say \"continue\", and the remaining work picks up from here."
-        : ko ? "\"계속해줘\"라고 하시면 남은 일부터 계속합니다." : "Say \"continue\" and the remaining work picks up from here.";
+    : decisionPending ? (ko ? "결정을 알려주세요." : "Please answer the decision above.")
+    : "";
   return [
     ko ? "이 작업은 아직 완료되지 않았습니다." : "This task is not complete yet.",
     lines.length > 0
@@ -3403,11 +3396,33 @@ export function taskForceRanStepCount(results: Array<Pick<BorrowedAgentResult, "
     && withoutExecutionFailureReport(stripTaskForceControlEnvelopes(result!.text ?? "")).trim().length > 0).length;
 }
 
-/** Whether an unverified room still shows its synthesis (above the host's remaining-work note). */
+/** A step that was run again keeps the fact that an earlier attempt acted outward: the guards that read it (review repair, resume) must not lose it. */
+function withEarlierOutwardFact(result: BorrowedAgentResult, earlier: BorrowedAgentResult): BorrowedAgentResult {
+  return earlier.actedOutward === true || taskForceUnitActedOutward({ usedTools: earlier.usedTools, externalEffects: earlier.externalEffects })
+    ? { ...result, actedOutward: true } : result;
+}
+
+/**
+ * A step the room runs again by itself before it reports: it did not finish, and nothing it left needs the owner or may not be
+ * repeated. Not resumable: a typed provider failure (the worker pool was already walked), a step that acted outward, an
+ * installed team (a rerun restarts every worker), a step that threw or reported itself failed (it was already tried twice), a lifted-access block and an
+ * ask for the owner. What is left is a step that reported unfinished work, and a step withheld behind one. Typed fields only.
+ */
+export function taskForceStepResumable(result: Pick<BorrowedAgentResult, "ok" | "spec" | "runtimeFailure" | "actedOutward" | "usedTools" | "externalEffects" | "failureReports" | "completionStatus" | "accessBlock" | "accessNeeded" | "blockingRemaining"> | undefined): boolean {
+  if (!result || result.ok || result.runtimeFailure || result.accessBlock || result.accessNeeded || result.failureReports?.length || result.completionStatus === "failed") return false;
+  if (result.actedOutward === true || taskForceUnitActedOutward({ usedTools: result.usedTools, externalEffects: result.externalEffects })) return false;
+  if ((result.spec.source === "firm" && Boolean(result.spec.firmId)) || result.spec.entityKind === "team") return false;
+  return taskForceOwnerDecisions(result.blockingRemaining).length === 0;
+}
+
+/**
+ * Whether an unverified room still shows its synthesis (above the host's remaining-work note), in every mode: a fixed contract
+ * (prepared Workforce, benchmark, Agent App) keeps its receipt as it was recorded, and the owner still reads the finished report.
+ */
 export function taskForceKeepsPartialSynthesis(input: {
-  fixedContract: boolean; ranSteps: number; synthesisReplacedByHost: boolean; synthesis: string;
+  ranSteps: number; synthesisReplacedByHost: boolean; synthesis: string;
 }): boolean {
-  return !input.fixedContract && input.ranSteps > 0 && !input.synthesisReplacedByHost && input.synthesis.trim().length > 0;
+  return input.ranSteps > 0 && !input.synthesisReplacedByHost && input.synthesis.trim().length > 0;
 }
 
 export function hostDerivedWorkspaceAccess(
@@ -8060,6 +8075,18 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     }
     return after;
   };
+  // The same two context lines for the content retry and the room's resume pass: the earlier report is reused, not restarted.
+  const packetWithPreviousReport = (packet: (typeof plan.packets)[number], previous: BorrowedAgentResult): (typeof plan.packets)[number] => ({
+    ...packet,
+    context: [
+      ...(packet.context ?? []),
+      p.locale === "ko"
+        ? "이 단계의 이전 완료 보고는 수락되지 않았습니다. 같은 공유 작업공간과 기존 산출물을 재사용하고, 아래 보고에 적힌 blocking remaining/미충족 조건을 실제로 끝내세요. 처음부터 다시 시작하지 마세요. 좁은 패킷 밖에서 발견했더라도 원래 사용자 결과를 막는 항목은 이번 재시도 범위에 포함됩니다."
+        : "previous completion report rejected: reuse the shared workspace and artifacts; finish the blocking remaining work or unmet conditions named below; no restart; any item blocking the original user result is in scope even outside this packet",
+      `Previous completion report:\n${boundedTaskForceMessage(previous.text)}`,
+    ],
+  });
+  let resumePass = false;
   const runPacketWithRetry = async (
     packet: (typeof plan.packets)[number],
     peerResults: BorrowedAgentResult[] = [],
@@ -8069,7 +8096,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     const failedRuntimes: RuntimeStatus[] = [];
     const reviewDrafts: TaskForceObservedReviewDraft[] = [];
     const producerInvocationIds = new Set<string>();
-    const retainReviewDrafts = (result: BorrowedAgentResult): BorrowedAgentResult => {
+    let actedOutwardBefore = false;
+    const retainReviewDrafts = (attempt: BorrowedAgentResult): BorrowedAgentResult => {
+      // Every later attempt of this step keeps the fact that an earlier one acted outward (the review-repair and resume guards read it).
+      const result = actedOutwardBefore ? { ...attempt, actedOutward: true as const } : attempt;
+      if (result.actedOutward === true || taskForceUnitActedOutward({ usedTools: result.usedTools, externalEffects: result.externalEffects })) actedOutwardBefore = true;
       producerInvocationIds.add(result.invocationId);
       for (const draft of result.observedReviewDrafts ?? []) {
         if (!reviewDrafts.some((known) => known.binding.artifactRef === draft.binding.artifactRef
@@ -8128,6 +8159,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     }
     if (result.ok || p.signal?.aborted) return result;
     if (result.runtimeFailure) return result;
+    // The room's resume pass is itself the further attempt: one run of the step, not a run plus the content retry below.
+    if (resumePass) return result;
     // A step whose only open items are owner decisions is settled as it is: the content retry below asks the worker to
     // "finish the blocking remaining work", and nobody can answer an owner question in a worker seat (274ed968). Running
     // it again only repeats the question or makes the worker guess the owner's answer. The decision reaches the owner as
@@ -8165,16 +8198,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           : `Retrying a blocked step… (${result.spec.slug})`,
       });
     }
-    const retryPacket = ownExceptionRetry ? packet : {
-      ...packet,
-      context: [
-        ...(packet.context ?? []),
-        p.locale === "ko"
-          ? "이 단계의 이전 완료 보고는 수락되지 않았습니다. 같은 공유 작업공간과 기존 산출물을 재사용하고, 아래 보고에 적힌 blocking remaining/미충족 조건을 실제로 끝내세요. 처음부터 다시 시작하지 마세요. 좁은 패킷 밖에서 발견했더라도 원래 사용자 결과를 막는 항목은 이번 재시도 범위에 포함됩니다."
-          : "previous completion report rejected: reuse the shared workspace and artifacts; finish the blocking remaining work or unmet conditions named below; no restart; any item blocking the original user result is in scope even outside this packet",
-        `Previous completion report:\n${boundedTaskForceMessage(result.text)}`,
-      ],
-    };
+    const retryPacket = ownExceptionRetry ? packet : packetWithPreviousReport(packet, result);
     // Content repair stays on the provider that actually answered. A failure
     // here uses the same packet-local exclusion set, never a refused provider.
     const retried = await runWithRecovery(retryPacket);
@@ -8270,7 +8294,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       phase: "delegate",
     });
   };
-  while (pending.size > 0) {
+  const runPendingWaves = async (): Promise<void> => { while (pending.size > 0) {
     p.signal?.throwIfAborted();
     const waveCache = new Map<string, Promise<boolean>>();
     // Withholding is transitive within the wave (W6, 2026-10-18): a step after a withheld one is withheld too, before the
@@ -8334,6 +8358,45 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       emitOneReplyMessage(packet, resultMessageId);
     });
     for (const index of ready) pending.delete(index);
+  } };
+  await runPendingWaves();
+  // The room continues what is left by itself, in this turn and with the same roster, instead of asking the owner to say
+  // "continue": the steps that can run again go through the same waves (so a withheld step whose input now exists runs after
+  // it). Progress is the number of finished steps: a pass that finishes no further step ends the loop, so a step that stays
+  // stuck costs one more attempt, never a loop. A step that fails again keeps its earlier report for the owner.
+  // Each step is resumed at most once, so the passes cost at most one further run per step and its context carries one earlier report.
+  const resumed = new Set<number>();
+  for (let finishedBefore = results.filter((result) => result?.ok).length; !p.signal?.aborted;) {
+    const canRun = results.flatMap((result, index) => taskForceStepResumable(result) && !result.withheldBy?.length && !resumed.has(index) ? [index] : []);
+    // A withheld step is queued only behind steps that will run again; behind anything else it would only be withheld again.
+    const resumable = [...canRun, ...results.flatMap((result, index) => result?.withheldBy?.length
+      && result.withheldBy.every((dependency) => canRun.includes(stepIds.indexOf(dependency))) ? [index] : [])];
+    if (canRun.length === 0) break;
+    p.sink({ kind: "tool-use", done: true, agentId: orchestratorId, runtimeAgentId: p.orchestratorAgent.id, agentName: orchestratorName,
+      role: "orchestrator", tier: 1, phase: "delegate",
+      status: ownerLocale === "ko" ? "남은 단계를 이어서 진행합니다" : "Continuing the remaining steps" });
+    const earlier = new Map(resumable.map((index) => [index, results[index]]));
+    for (const index of canRun) resumed.add(index);
+    for (const index of resumable) {
+      const previous = results[index];
+      if (previous.model !== "not-run") executionPackets[index] = packetWithPreviousReport(executionPackets[index], previous);
+      resultByStepId.delete(stepIds[index]);
+      pending.add(index);
+    }
+    resumePass = true;
+    try { await runPendingWaves(); } finally { resumePass = false; }
+    for (const [index, previous] of earlier) {
+      if (results[index]?.ok || previous.model === "not-run") continue;
+      const kept = withEarlierOutwardFact(previous, results[index]);
+      results[index] = kept;
+      resultByStepId.set(stepIds[index], kept);
+    }
+    const finishedNow = results.filter((result) => result?.ok).length;
+    tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id, nodeId: orchestratorId,
+      agentId: p.orchestratorAgent.id, kind: "task_force_resume_pass",
+      payload: { schemaVersion: 1, resumedSteps: resumable.length, finishedBefore, finishedNow } });
+    if (finishedNow <= finishedBefore) break;
+    finishedBefore = finishedNow;
   }
   // The planner's "review, then repair" loops the merge folded into a unit: when that review completed and named
   // repairable defects, the unit runs once more with the findings and the review checks once more (typed receipt).
@@ -9185,22 +9248,24 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   if (oneTaskForceSurfaces.length > 0 && !taskForceExecutionVerified) {
     oneTaskForceSurfaces = [];
   }
+  // True when the owner's message is the host's remaining-work note alone: readers must not count it as the delivered result.
+  let noteOnlyMessage = false;
   if (!taskForceExecutionVerified) {
     const incomplete = taskForceIncompleteMessage({
       locale: ownerLocale,
       remaining: taskForceRemainingForOwner(ownerLocale, results, unclearedBlockers),
       requiredSurfaceMissing: Boolean(requiredSurfaceMissing),
-      goalBound: Boolean(p.goalContext?.goalId || p.chat.goalId),
     });
     // Real work finished: the owner gets the room's synthesis over it, then the host's short note of what is left (typed
-    // per step, room names). Production 1.3.49 run 5d37e4cc: four finished steps were replaced by a failure line. A fixed
-    // contract (prepared Workforce, benchmark, Agent App) or a synthesis the host already replaced keeps the note alone.
-    displayText = taskForceKeepsPartialSynthesis({
-      fixedContract: Boolean(p.workforceSelectionReceipt || p.benchmarkMode || p.req.agentAppMode),
+    // per step, room names). Production 1.3.49 run 5d37e4cc: four finished steps were replaced by a failure line. Only a
+    // synthesis the host already replaced keeps the note alone. The receipt above was recorded before this text is composed.
+    const keepsSynthesis = taskForceKeepsPartialSynthesis({
       ranSteps: taskForceRanStepCount(results),
       synthesisReplacedByHost,
       synthesis: displayText,
-    }) ? `${displayText.trim()}\n\n${incomplete}` : incomplete;
+    });
+    displayText = keepsSynthesis ? `${displayText.trim()}\n\n${incomplete}` : incomplete;
+    noteOnlyMessage = !keepsSynthesis;
   }
   // What the room decided for the owner, so the owner can change it (settleTaskForceOwnerChoices): host-written,
   // typed, once per question — never a reason to call the result incomplete.
@@ -9231,7 +9296,8 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
   const synthesisEscalationMarker = hasPermissionEscalationMarker(displayText);
   displayText = stripStrayProtocolTokens(stripPermissionEscalationMarker(displayText));
   const durableAssistantEntry = emitFinal && !p.req.agentAppMode
-    ? appendChatMessage(p.chat.id, "assistant", redactWorkAttachmentText(p.req, displayText))
+    ? appendChatMessage(p.chat.id, "assistant", redactWorkAttachmentText(p.req, displayText),
+      noteOnlyMessage ? { hostNotice: { purpose: "goal-incomplete", ...(p.req.runId ? { runId: p.req.runId } : {}) } } : undefined)
     : undefined;
   const durableTextForVerification = durableAssistantEntry?.text;
   p.sink({

@@ -2113,7 +2113,12 @@ export type ChatHostNotice =
    * cycle verified). The row text stays as written; `status` is the only thing the screen reads to
    * decide whether it folds into the turn's quiet line or stays a prominent bubble.
    */
-  | { purpose: "host-status"; runId: string; status: HostStatusKind; verdict?: "done" | "not_done" };
+  | { purpose: "host-status"; runId: string; status: HostStatusKind; verdict?: "done" | "not_done" }
+  /**
+   * A team turn's message that is ONLY the host's remaining-work note (no deliverable body). Readers never count it as the
+   * delivered result; a message that carries the room's synthesis never has this purpose.
+   */
+  | { purpose: "goal-incomplete"; runId?: string };
 
 /**
  * Closed vocabulary of host status lines. Quiet kinds need nothing from the owner; the rest report a

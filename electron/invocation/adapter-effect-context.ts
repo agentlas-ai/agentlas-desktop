@@ -43,6 +43,8 @@ interface Scope {
   finish: (scopeId: string, report: AdapterEffectReport) => void;
   hostControl?: (observation: MainHostControlObservation) => void;
   recordingFailed?: () => void;
+  /** Main's effect boundary of this invocation: true only when it proves no tool acted outside (effect-boundary.ts). */
+  provesNoOutsideEffect?: () => boolean;
   childDispatchId?: string;
   parentEffectScopeId?: string;
   activeEffectScopeId?: string;
@@ -99,6 +101,11 @@ export function bindNativeRuntimeDiagnosticObserver(input: { chatId?: string; ag
     if (!validatedHostNativeRuntimeDiagnostic(item)) return;
     try { scope.nativeRuntimeDiagnostic?.(item); } catch { /* Optional observation must not change a run or Stop. */ }
   };
+}
+
+/** Whether Main's effect boundary proves, from what it has seen so far, that nothing of this invocation acted outside. Not proven outside Main's scope. */
+export function invocationProvesNoOutsideEffect(): boolean {
+  try { return context.getStore()?.provesNoOutsideEffect?.() === true; } catch { return false; }
 }
 
 /** Only Main enters this scope. Providers cannot select a run or borrow another run's receipt. */
