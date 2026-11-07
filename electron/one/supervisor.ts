@@ -6,9 +6,10 @@ import { createHash } from 'node:crypto';
 import { chatFilePrompt, chatFileDisplayImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { readRunTurnPlacement } from "../invocation/turn-placement";
+import { latestInvocationBrowserLoginWait } from "../invocation/browser-login-wait";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
 import { oneFrontRuntimeSelection } from "./front";
-import { createChat, createProjectWorkChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
+import { createChat, createProjectWorkChat, getChat, appendChatMessage, moveHostPromptMessage, listChatMessages, normalizeChatRuntimeSelection, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
 import { ensurePersonalOneWorkspace, exportPersonalSession } from "./personal-workspace";
 import { ensureCanonicalTaskForChat, listCanonicalTasks, getCanonicalTaskForChat, hasPassedTaskForceExecutionVerification } from "../store/tasks";
 import { getProject } from "../store/projects";
@@ -284,7 +285,7 @@ export function oneSupervisor():OneSupervisorService {
     store,owner,budget,executor:hostOptions?.executor,identity:getOneProfile,assertAuthority:()=>hostOptions?.assertAuthority(),workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>queueMicrotask(()=>workExecutor?.kick()),
     createConversation:()=>{const id=createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id;bindPersonalFolder(id);return id;},
     history:chatId=>listChatMessages(chatId,100),
-    noticeOwner:(chatId,runId,text)=>{appendChatMessage(chatId,"assistant",text,{hostNotice:{purpose:"host-status",runId,status:"needs-owner"}});},
+    noticeOwner:(chatId,runId,text,kind)=>{appendChatMessage(chatId,"assistant",text,kind==="info" ? undefined : {hostNotice:{purpose:"host-status",runId,status:"needs-owner"}});},
     appendUser:(chatId,text,images,selectedGroupId)=>{
       // Legacy rows may still display their images, but only the typed selection creates new file authority.
       const groupId=selectedGroupId ?? /<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
@@ -301,10 +302,9 @@ export function oneSupervisor():OneSupervisorService {
       if (hostOptions?.executor === "agentlas-cloud") bindPersonalFolder(chat.id);
       const task=ensureCanonicalTaskForChat(chat.id);
       if (!task) throw supervisorError('supervisor_work_task_missing');
-      // The native Work invocation persists its own human input once. The
-      // atomic supervisor request already durably owns this brief before dispatch.
+      // The owner's own brief is persisted once by the native Work invocation; One's brief is written at hand-off (handoffBrief).
       return {chatId:chat.id,taskId:task.id};
-    },graphTasks:oneId=>personalGraphTasks(getDb(),oneId,{automations:listAutomations,
+    },handoffBrief:(chatId,text,runId)=>{appendChatMessage(chatId,"system",text,{hostNotice:{purpose:"one-dispatch-brief",runId}});},graphTasks:oneId=>personalGraphTasks(getDb(),oneId,{automations:listAutomations,
       liveRunId:id=>getAutomationLiveRunState(id)==="running" ? getAutomationLiveRunId(id) : null}),
     alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),
     delegatedWorkPending,
@@ -356,8 +356,16 @@ export function oneSupervisor():OneSupervisorService {
       assertOneHistoryCommandCurrent(job.command_id, 'claim');
       const chat=getChat(job.chat_id),task=getCanonicalTaskForChat(job.chat_id);
       if (!chat || chat.originSurface!=="work" || chat.kind!=="user" || task?.id!==job.task_id) throw supervisorError('supervisor_work_native_binding_changed');
-    },runtime:{start:startNative,attach,receipt,onSettled,noStartProof,placement:readRunTurnPlacement,unconfirmedRetryAllowed,cancel:cancelNative},
+    },runtime:{start:startNative,attach,receipt,onSettled,noStartProof,placement:readRunTurnPlacement,unconfirmedRetryAllowed,cancel:cancelNative,
+      // A parked sign-in wait resumes under a new run id (invocation/service resumeParkedBrowserLoginWait): the job follows it.
+      // A store that cannot be read yet knows no successor: the job keeps its own run (and is settled when it can be read).
+      successorRun:runId=>{try{const wait=latestInvocationBrowserLoginWait(runId);return wait?.state==="dispatched" && wait.successorInvocationId ? wait.successorInvocationId : null;}catch{return null;}},
+      // The resume handle lives in the process that parked the run: an app restart blocks the wait (service preserveWaiting), and then
+      // nothing can resume it. A wait still "waiting" may belong to a live process (Main or the daemon), so only "blocked" counts.
+      parkedEnded:runId=>{try{return latestInvocationBrowserLoginWait(runId)?.state==="blocked";}catch{return false;}}},
     onFailure:error=>console.warn("[one-supervisor] worker admission deferred",error instanceof Error ? error.message : "unknown"),
+    rebindHandoffBrief:(chatId,fromRunId,toRunId)=>moveHostPromptMessage(chatId,fromRunId,toRunId,"one-dispatch-brief"),
+    noticeSettled:(row,receipt)=>supervisor!.noticeSettledHandOff(row,receipt),
   });
   // Dots parity (owner 2026-10-04): One speaks first on a check-in it was asked to run, or when a worker it
   // delegated to is waiting for the owner. The listener is not an answer surface (it returns false).

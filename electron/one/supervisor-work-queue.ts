@@ -66,6 +66,9 @@ export class OneSupervisorWorkQueue {
   forTask(taskId: string): SupervisorWorkLease | null {
     return this.db.prepare("SELECT * FROM one_supervisor_work_jobs WHERE task_id=?").get(taskId) as SupervisorWorkLease | undefined ?? null;
   }
+  forChat(chatId: string): SupervisorWorkLease | null {
+    return this.db.prepare("SELECT * FROM one_supervisor_work_jobs WHERE chat_id=?").get(chatId) as SupervisorWorkLease | undefined ?? null;
+  }
   forRun(runId: string): SupervisorWorkLease | null {
     return this.db.prepare("SELECT * FROM one_supervisor_work_jobs WHERE run_id=?").get(runId) as SupervisorWorkLease | undefined ?? null;
   }

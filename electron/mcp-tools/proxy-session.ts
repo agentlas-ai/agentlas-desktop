@@ -762,11 +762,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       recordMcpProxyEvent("result_withheld", { server: gate.serverKey, handle, initialized, reason: error, where: "result_boundary",
         inflight: native.size, wireAgeMs: Date.now() - wireOpenedAt });
       // A sign-in only the owner can do, in the owner's own One turn: the model is told the site and the turn goes on.
-      const signIn = isBrowserSignInNeeded(error) ? error.site : null;
+      const signIn = isBrowserSignInNeeded(error) ? error : null;
       try {
         deliver({ jsonrpc: "2.0", id: frame.id, result: { isError: true,
           _meta: { agentlasProxyFailure: signIn ? BROWSER_SIGN_IN_NEEDED : "result_withheld", agentlasProxyReason: code },
-          content: [{ type: "text", text: signIn ? browserSignInNeededResult(signIn)
+          content: [{ type: "text", text: signIn ? browserSignInNeededResult(signIn.site, signIn.step)
             : `MCP_PROXY_RESULT_WITHHELD (${code}): the tool ran, but its result was not released to you. Do not repeat the call blindly; its effect may already have happened.` }] } });
       } catch (deliverError) { close(deliverError, "deliver"); }
     };

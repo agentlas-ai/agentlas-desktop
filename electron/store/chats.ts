@@ -1093,6 +1093,30 @@ export function emitHostNoticeCommitted(chatId: string): void {
   emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
+/**
+ * The prompt row a host-started run already has in this chat, or null: the host wrote it before the start (One's brief, written
+ * into the Work room when it was handed over, so the room is never empty while the Work waits) or an earlier attempt of the same
+ * run did. The run finds it by its own run id and purpose and does not write it again (electron/mcp/client.ts persistUserMessage).
+ */
+export function hostPromptMessageForRun(chatId: string, runId: string, purpose: string): string | null {
+  const row = getDb().prepare(`SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'system' AND host_notice_json IS NOT NULL
+    AND json_extract(host_notice_json, '$.purpose') = ? AND json_extract(host_notice_json, '$.runId') = ? ORDER BY rowid LIMIT 1`)
+    .get(chatId, purpose, runId) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+/**
+ * A Work resent under a new run id after its first start never began: the brief written at hand-off becomes the new run's prompt
+ * row (only the run id in its notice changes), so the room keeps one brief and the new run does not write a second one.
+ */
+export function moveHostPromptMessage(chatId: string, fromRunId: string, toRunId: string, purpose: string): void {
+  const changed = getDb().prepare(`UPDATE chat_messages SET host_notice_json = json_set(host_notice_json, '$.runId', ?)
+    WHERE chat_id = ? AND role = 'system' AND host_notice_json IS NOT NULL
+      AND json_extract(host_notice_json, '$.purpose') = ? AND json_extract(host_notice_json, '$.runId') = ?`)
+    .run(toRunId, chatId, purpose, fromRunId).changes;
+  if (changed) emitDesktopStoreChange({ entity: "chat", id: chatId });
+}
+
 export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",

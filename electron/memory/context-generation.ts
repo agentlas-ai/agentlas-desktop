@@ -8,6 +8,7 @@ import { currentModelCallScope } from "../runtime/model-call-ledger";
 import { getMemoryStoreInfo } from "./database";
 import { currentMemorySourceCustody, memorySourceSnapshot } from "./source-custody";
 import { sessionCheckpointStore } from "./session-checkpoints";
+import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 
 export interface MemoryContextGeneration { readonly schema: "agentlas.memory-context-generation.v1" }
 export interface MemoryGenerationState {
@@ -66,7 +67,8 @@ export function captureMemoryContextGeneration(input: {
     const canonical = goal ? null : findCanonicalTaskForChat(chatId);
     const criteria: unknown = goal ? JSON.parse(goal.acceptance_criteria_json) : [];
     const task = goal ? { id: `goal:${goal.goal_id}`, revision: Date.parse(goal.updated_at) || 0, goal: goal.objective,
-      constraints: Array.isArray(criteria) ? criteria.filter((v): v is string => typeof v === "string") : [] }
+      // The host-scope sentence an older Goal still stores is not a constraint a model can work with (shared/goal-scope.ts).
+      constraints: Array.isArray(criteria) ? effectiveAcceptanceCriteria(criteria.filter((v): v is string => typeof v === "string")) : [] }
       : canonical ? { id: `task:${canonical.id}`, revision: canonical.version, goal: canonical.title, constraints: [] } : null;
     const cp = sessionCheckpointStore.read(identity);
     if (!task && !head && !cp) return { generation: null, reason: "task-or-journal-boundary-unavailable" };

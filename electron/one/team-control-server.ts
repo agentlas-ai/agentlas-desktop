@@ -152,7 +152,9 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
       case "one_supervisor_checkin": return service.checkin({commandId:String(input.command_id ?? ""),action:input.action as "create"|"cancel"|"list",
         ...(input.instruction !== undefined ? {instruction:String(input.instruction)} : {}),...(input.every_minutes !== undefined ? {everyMinutes:Number(input.every_minutes)} : {}),
         ...(input.daily_at !== undefined ? {dailyAt:String(input.daily_at)} : {}),...(input.notify !== undefined ? {notify:input.notify as "important"|"always"} : {}),
-        ...(input.checkin_id !== undefined ? {checkinId:String(input.checkin_id)} : {})});
+        ...(input.checkin_id !== undefined ? {checkinId:String(input.checkin_id)} : {}),
+        // The model's create is a proposal the owner turns on from a card (supervisor-service checkin); the id is the host's, never the model's.
+        ...(input.action === "create" && binding.supervisorReplyRunId ? {modelReplyRunId:binding.supervisorReplyRunId} : {})});
       // The app-control catalog (every bridge operation) loads only when One first uses it.
       case "one_app_operations": return (require("../app-control/service") as typeof import("../app-control/service")).appControlOperations(input);
       // The operation's input as app.call reads it: `args` or its own fields next to `operation` (call-aliases.ts appCallInputOf).

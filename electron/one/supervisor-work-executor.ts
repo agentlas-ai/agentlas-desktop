@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { UNCONFIRMED_MAX_RESENDS, unconfirmedRunShouldBeSentAgain, withEarlierAttempt } from "../invocation/earlier-attempt";
 import { supervisorError, withDoneWhen } from "../../shared/one-supervisor";
+import { reportHostAlertToOne } from "./host-alerts";
 import type { InvocationRunReceipt, McpInvocationRequest } from "../../shared/types";
 import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
@@ -24,6 +25,10 @@ export interface SupervisorWorkRuntime {
   placement?(runId: string): "placed" | "not-dispatched" | "unconfirmed";
   /** Goal-owned execution keeps its own continuation authority; the Work lane must not duplicate it. */
   unconfirmedRetryAllowed?(chatId: string, sinceMs?: number): boolean;
+  /** The run that continued this one after the owner's sign-in (a parked sign-in wait resumes under a new run id), or null. */
+  successorRun?(runId: string): string | null;
+  /** The run's sign-in wait can no longer resume (an app restart blocked it, or it belonged to an earlier app process). */
+  parkedEnded?(runId: string): boolean;
 }
 export interface SupervisorWorkExecutorOptions {
   queue: OneSupervisorWorkQueue;
@@ -39,6 +44,10 @@ export interface SupervisorWorkExecutorOptions {
   reconcileMs?: number;
   now?(): number;
   onFailure?(error: unknown): void;
+  /** Moves the brief written at hand-off to the run that replaces one that never began (store/chats.ts moveHostPromptMessage). */
+  rebindHandoffBrief?(chatId: string, fromRunId: string, toRunId: string): void;
+  /** The notice a settled Work leaves for One, decided where every hand-off's is (OneSupervisorService.noticeSettledHandOff). */
+  noticeSettled?(row: SupervisorRequestRow, receipt: InvocationRunReceipt): void;
 }
 const terminal = (status: string) => ["completed", "failed", "cancelled", "interrupted"].includes(status);
 /** Holds the executor wrote itself when it lost track of a start (a restart, an owner that went away): no refusal of the brief. */
@@ -50,6 +59,9 @@ const BOOKKEEPING_HOLDS: ReadonlySet<string> = new Set(["work_owner_unconfirmed"
  * The adapter's lifetime determines whether this is a Main host worker or a
  * daemon worker; a queue/table alone never establishes daemon ownership.
  */
+/** How long a hand-off may be refused at its start before One is told (it keeps retrying either way). */
+export const WORK_START_STALL_MS = 5 * 60_000;
+
 export class OneSupervisorWorkExecutor {
   private closed = false;
   private started = false;
@@ -69,8 +81,9 @@ export class OneSupervisorWorkExecutor {
       if (this.closed || !this.started) return;
       try {
         deps.assertOwner();
-        const job = deps.queue.forRun(event.runId);
-        if (job?.one_id===deps.queue.activeIdentity() && job?.chat_id === event.chatId) this.settle(job, event.receipt);
+        // A sign-in wait continues the job under a successor run in the same conversation: its end is the job's end.
+        const job = deps.queue.forRun(event.runId) ?? deps.queue.forChat(event.chatId);
+        if (job?.one_id===deps.queue.activeIdentity() && job?.chat_id === event.chatId && this.carrier(job.run_id).runId === event.runId) this.settle(job, event.receipt);
         this.tick(false);
       } catch (error) { deps.onFailure?.(error); }
     });
@@ -253,7 +266,7 @@ export class OneSupervisorWorkExecutor {
    * clear (never listed by preStartRefusal) ends it. */
   private retryAfterRefusal(job: SupervisorWorkLease, code: string, beforeBegin = false): void {
     const now = this.deps.now?.() ?? Date.now();
-    this.deps.store.db.transaction(() => {
+    const waited = this.deps.store.db.transaction(() => {
       const current = this.deps.queue.get(job.command_id);
       let row = this.deps.store.get(job.command_id);
       if (!current || current.one_id!==this.deps.queue.activeIdentity() || current.generation !== job.generation || current.owner_epoch !== job.owner_epoch
@@ -265,7 +278,17 @@ export class OneSupervisorWorkExecutor {
       const delay = supervisorRefusalDelay(this.deps.store, row, now, startRefusalWaitsLong(code));
       if (!this.deps.queue.retryRefused(current, delay, code)) throw supervisorError("supervisor_work_owner_fenced");
       if (row.state !== "stored") this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: code});
+      return row;
     }).immediate();
+    // A hand-off still refused at its start after a few minutes is One's to manage, not something to wait out in silence: One is told
+    // (once per job and cause) what the app saw, and tells the owner or takes the work over. The app keeps retrying by itself.
+    const after = waited ? this.deps.store.get(job.command_id) : undefined;
+    const retry = after ? supervisorDispatchRetry(after) : null;
+    if (retry && now - retry.firstAt >= WORK_START_STALL_MS) {
+      const minutes = Math.round((now - retry.firstAt) / 60_000);
+      reportHostAlertToOne({ chatId: job.chat_id, code: "work-not-started", key: job.run_id,
+        detail: `A Work handed over ${minutes} minutes ago has not started yet (${retry.attempts} tries; last cause ${code}). The app keeps trying by itself.` });
+    }
   }
   /** A held job whose hold is a refusal that clears by itself, or the executor's own lost-track bookkeeping, and for which the run left no
    * receipt and the admission ledger proves no start: nothing ever started it again. */
@@ -333,6 +356,8 @@ export class OneSupervisorWorkExecutor {
       const nextRunId=randomUUID(),delay=rebindSupervisorUnconfirmed(this.deps.store,this.deps.store.get(row.command_id)!,nextRunId,now);
       if(delay===null)return false;
       if(!this.deps.queue.retryUnconfirmed(current,nextRunId,delay))throw supervisorError("supervisor_work_owner_fenced");
+      // The first run never began (no receipt): the brief already in the room is the new run's prompt, not a second copy of it.
+      if(!observed)this.deps.rebindHandoffBrief?.(job.chat_id,job.run_id,nextRunId);
       return true;
     }).immediate();
   }
@@ -370,8 +395,19 @@ export class OneSupervisorWorkExecutor {
       this.deps.store.notice(saved,"failed");return true;
     }).immediate();
   }
+  /** The run that carries the job now and its receipt: its own, or the successor a sign-in wait resumed it under (followed for a few
+   * hops). Only a run that stopped to wait for the owner (waiting_input) can have one; the receipt read is the one reconcile needs. */
+  private carrier(runId: string): { runId: string; receipt: InvocationRunReceipt | null } {
+    let current = runId, receipt = this.deps.runtime.receipt(current);
+    for (let hop = 0; hop < 8 && this.deps.runtime.successorRun && receipt?.status === "waiting_input"; hop += 1) {
+      const next = this.deps.runtime.successorRun(current);
+      if (!next || next === current) break;
+      current = next; receipt = this.deps.runtime.receipt(current);
+    }
+    return { runId: current, receipt };
+  }
   private settle(job: SupervisorWorkLease, receipt: InvocationRunReceipt): void {
-    if (receipt.runId !== job.run_id || receipt.chatId !== job.chat_id || !terminal(receipt.status)) return;
+    if (receipt.runId !== this.carrier(job.run_id).runId || receipt.chatId !== job.chat_id || !terminal(receipt.status)) return;
     if (this.retryUnconfirmed(job,receipt)) return;
     this.deps.queue.db.transaction(() => {
       this.deps.assertOwner();
@@ -383,7 +419,10 @@ export class OneSupervisorWorkExecutor {
       const row = this.deps.store.get(job.command_id)!;
       if (["stored", "dispatching", "accepted", "held"].includes(row.state)) {
         this.deps.store.update(row, {state: phase, acknowledgement: "settled", reason});
-        this.deps.store.notice(row, receipt.status);
+        // The review reads the answer of the run that finished the work (a successor after a sign-in has its own run id).
+        if (this.deps.noticeSettled) this.deps.noticeSettled(row, receipt);
+        else if (receipt.runId === row.run_id) this.deps.store.notice(row, receipt.status);
+        else this.deps.store.noticeRun(row, receipt.runId, receipt.status);
       }
     }).immediate();
   }
@@ -421,8 +460,14 @@ export class OneSupervisorWorkExecutor {
     if (this.closeStopped(job)) return;
     const refused = this.heldRefusalRecoverable(job);
     if (refused) { this.retryAfterRefusal(job, refused); return; }
-    const receipt = this.deps.runtime.receipt(job.run_id);
-    if (receipt && receipt.runId === job.run_id && receipt.chatId === job.chat_id && terminal(receipt.status)) {
+    const { runId: carrier, receipt } = this.carrier(job.run_id);
+    // A sign-in wait an app restart cut can no longer resume: the hand-off ends as interrupted, so One is woken to continue it
+    // (a follow-up resumes it in the same conversation) instead of the card staying open with nothing running.
+    if (carrier === job.run_id && receipt?.status === "waiting_input" && receipt.chatId === job.chat_id && this.deps.runtime.parkedEnded?.(carrier)) {
+      this.settle(job, { ...receipt, status: "interrupted" });
+      return;
+    }
+    if (receipt && receipt.runId === carrier && receipt.chatId === job.chat_id && terminal(receipt.status)) {
       this.settle(job, receipt);
       return;
     }

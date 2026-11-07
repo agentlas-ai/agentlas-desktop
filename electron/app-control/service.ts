@@ -61,6 +61,34 @@ const RESULT_LIMIT = 24_000;
 const SCIENCE_EXTENSION_ID = "agentlas-science";
 
 let host: AppControlHost | null = null;
+/** Calls that find no live window share one wait; a missing window is opened, a hidden one (background hold) is only waited for. */
+let interactionWindowOpening: Promise<BrowserWindow | null> | null = null;
+/** Windows app control opened that the owner has not touched yet (keyboard or mouse input): nobody there to answer a dialog. */
+const openedByAppControl = new WeakSet<BrowserWindow>();
+const INTERACTION_WINDOW_WAIT_MS = 20_000;
+function openInteractionWindow(): Promise<BrowserWindow | null> {
+  interactionWindowOpening ??= waitForInteractionWindow().finally(() => { interactionWindowOpening = null; });
+  return interactionWindowOpening;
+}
+async function waitForInteractionWindow(): Promise<BrowserWindow | null> {
+  try {
+    const existing = host?.interactionWindow?.() ?? host?.mainWindow() ?? null;
+    // showMain leaves the background hold (tray) and creates the window: only when there is none, never for one that is just hidden.
+    const opened = existing && !existing.isDestroyed() ? existing : await host?.showMain?.("") ?? null;
+    // A window opened here has nobody in front of it until the owner touches it: no native dialog on it before then (later calls too).
+    if (opened && opened !== existing && !opened.isDestroyed()) {
+      openedByAppControl.add(opened);
+      try { opened.webContents.once("before-input-event", () => openedByAppControl.delete(opened)); } catch { /* it stays dialog-free */ }
+    }
+    const deadline = Date.now() + INTERACTION_WINDOW_WAIT_MS;
+    for (;;) {
+      const candidate = host?.interactionWindow?.() ?? host?.mainWindow() ?? opened;
+      if (appControlInteractionWindowAvailable(candidate) || !candidate || candidate.isDestroyed() || Date.now() >= deadline) return candidate;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  } catch { return null; }
+}
+
 export function configureAppControlHost(next: AppControlHost): void {
   host = next;
 }
@@ -274,10 +302,13 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
   let area = typeof input.area === "string" ? input.area.trim() : "";
   let query = typeof input.query === "string" ? input.query.trim().slice(0, 200) : "";
   const exact = typeof input.operation === "string" ? input.operation.trim() : "";
+  // A closed window is not "unavailable" where an owner's call opens it (openInteractionWindow): the listing must not steer the model away.
+  const canOpen = !!host?.showMain;
   const available = (operation: Operation) => operation.surface === "app"
-    ? !!(host?.interactionWindow?.() ?? host?.mainWindow()) && !(host?.interactionWindow?.() ?? host?.mainWindow())!.isDestroyed()
+    ? canOpen || !!(host?.interactionWindow?.() ?? host?.mainWindow()) && !(host?.interactionWindow?.() ?? host?.mainWindow())!.isDestroyed()
     : !!operation.entry && appControlHandlerRegistered(operation.entry.channel)
-      && (appControlDomainHandlerRegistered(operation.entry.channel) || appControlInteractionWindowAvailable(host?.interactionWindow?.() ?? host?.mainWindow() ?? null));
+      && (appControlDomainHandlerRegistered(operation.entry.channel) || canOpen
+        || appControlInteractionWindowAvailable(host?.interactionWindow?.() ?? host?.mainWindow() ?? null));
   const restricted = () => APP_CONTROL_CATALOG.flatMap((entry) => {
     // An operation the model's catalog does not carry is not listed here either (policy.ts MODEL_CATALOG_OMITTED).
     if (appControlOmittedFromModelCatalog(entry)) return [];
@@ -703,7 +734,9 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
       return { ...result, effect: operation.effect, ...await recordAppCallReceipt({ operation: path, effect: operation.effect, named: { route },
         status: result.ok ? "ok" : "refused", ...(result.ok ? {} : { code: result.code }), ownerTurn: caller.ownerTurn }) };
     }
-    if (!window || window.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas interaction window is closed.");
+    // The owner's request opens a closed window for these too (the language, the sidebar, One's model choice live in it).
+    const appWindow = (!window || window.isDestroyed()) && caller.ownerTurn ? await openInteractionWindow() : window;
+    if (!appWindow || appWindow.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas interaction window is closed.");
     const enumRefusal = hostEnumRefusal(path, named);
     if (enumRefusal) throw new AppControlError("invalid-arguments", enumRefusal);
     if (path === "app.setSidebar" && (named.collapsed === undefined && named.width === undefined
@@ -716,7 +749,7 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
       catch (error) { throw new AppControlError("invalid-arguments", error instanceof Error ? error.message : "Invalid UI preference."); }
     }
     let result: AppControlRendererReply;
-    try { result = await rendererCall(window, path as AppControlRendererOperation, named); }
+    try { result = await rendererCall(appWindow, path as AppControlRendererOperation, named); }
     catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw error; }
     const receipt = await recordAppCallReceipt({ operation: path, effect: operation.effect, named, status: result.ok ? "ok" : "refused",
       ...(result.ok ? {} : { code: result.code }), ownerTurn: caller.ownerTurn });
@@ -732,8 +765,16 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   if (!appControlHandlerRegistered(entry.channel)) throw new AppControlError("operation-unavailable", `${path} is not available in this app session.`);
   const decoded = decodeAppControlArguments(named, APP_CONTROL_ARGUMENT_SCHEMAS[path]) as Record<string, unknown>;
   const args = entry.invokeArgs.map((arg) => build(arg, decoded));
+  // A handler that runs on the owner's window (not a windowless domain handler) needs a live one. macOS keeps the app running
+  // after its window is closed, and then about four hundred operations One may call were refused with no way on (the owner
+  // asking from the phone has no window to open). An owner's request opens the window first, as app.navigate does; an automatic
+  // turn (a check-in, a review) never opens a window by itself.
+  // A window opened for this call has nobody in front of it: it never shows a native dialog (the owner on the phone could not answer
+  // one, and the call would hang); a dialog operation is refused needs-owner-dialog at once.
+  const opening = caller.ownerTurn && !appControlDomainHandlerRegistered(entry.channel) && !appControlInteractionWindowAvailable(window);
+  const target = opening ? await openInteractionWindow() ?? window : window;
   let value: unknown;
-  try { value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn, permission: effectiveInvocationPermission(caller.permission, false) }); }
+  try { value = await invokeAppControlIpc({ window: target, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn && !opening && !(target && openedByAppControl.has(target)), permission: effectiveInvocationPermission(caller.permission, false) }); }
   catch (error) { await recordAppCallReceipt({ operation: path, effect: operation.effect, named: decoded, status: "failed", code: errorCode(error), ownerTurn: caller.ownerTurn }); throw withArgumentHints(withPlainFailure(error), path, decoded); }
   // The experience maps carry owner-local titles for the owner's renderer; an agent's copy drops them (safeLabel stays).
   if (OWNER_LOCAL_MAP_OPERATIONS.has(path)) value = (await import("../experience/relation-index")).withoutOwnerLocalLabels(value);

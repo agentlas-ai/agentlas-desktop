@@ -20,7 +20,7 @@ export interface ChatFileToken {
   directory: boolean;
   /**
    * False (name only, no link, never opened) for a folder, a credential-looking name (the bridge mask wins), a secret file or
-   * folder (.ssh, .gnupg, .aws, .env*, *.pem, id_*), or a network path (UNC, \\?\, \\.\).
+   * folder (isChatFileSecretPath: login/key folders, .env*, key files, id_*, names with a secret word), or a network path (UNC, \\?\, \\.\).
    */
   linkable: boolean;
 }
@@ -74,15 +74,24 @@ function decodePath(raw: string): string {
   return value;
 }
 
-/** Secret material a phone must never be offered or sent: key folders, env files, private keys. Judged from the path text only. */
-const CHAT_FILE_SECRET_FOLDERS = new Set([".ssh", ".gnupg", ".aws", ".docker", ".codex", ".claude", ".agentlas", ".config", "credentials", "signing", "secrets"]);
+/** Secret material a phone must never be offered or sent: login and key folders, env files, keys. Judged from the path text only. */
+const CHAT_FILE_SECRET_FOLDERS = new Set([".ssh", ".gnupg", ".aws", ".azure", ".docker", ".kube", ".codex", ".claude", ".agentlas", "credentials", "signing", "secrets"]);
+/** Whole words of a file name (camelCase and separators split): "tokens.css" and "tokenizer.json" are not "token". */
+const CHAT_FILE_SECRET_WORDS = new Set(["token", "secret", "secrets", "credential", "credentials", "password", "passwords", "passwd", "apikey"]);
+const CHAT_FILE_SECRET_NAMES = new Set([".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials", "auth.json", "google-services.json", "googleservice-info.plist"]);
+// Not ".key": a Keynote deck shares it (and .key is no openable type, CHAT_FILE_MIME).
+const CHAT_FILE_KEY_FILE = /\.(?:pem|p12|pfx|keystore|jks|ppk)$/;
 export function isChatFileSecretPath(path: string): boolean {
-  const parts = path.split(/[\\/]+/).filter(Boolean).map((part) => part.toLowerCase());
+  const written = path.split(/[\\/]+/).filter(Boolean);
+  const parts = written.map((part) => part.toLowerCase());
   const base = parts[parts.length - 1] ?? "";
-  if (parts.some((part) => CHAT_FILE_SECRET_FOLDERS.has(part))) return true;
-  return base.startsWith(".env") || base.endsWith(".pem") || /^id_[a-z0-9_-]+$/.test(base)
-    || /credential|secret|token/.test(base) || base === "auth.json" || base === "google-services.json"
-    || /^service[-_]?account.*\.json$/.test(base);
+  // ~/.config holds other tools' logins; on Linux it also holds this app's own data folder (userData ~/.config/Agentlas*),
+  // where, as on macOS and Windows, the read grants decide which folders a phone can open.
+  if (parts.some((part, index) => CHAT_FILE_SECRET_FOLDERS.has(part) || (part === ".config" && !(parts[index + 1] ?? "").startsWith("agentlas")))) return true;
+  const words = (written[written.length - 1] ?? "").replace(/\.[^.]*$/, "").replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/);
+  return base.startsWith(".env") || CHAT_FILE_SECRET_NAMES.has(base) || CHAT_FILE_KEY_FILE.test(base) || /^id_[a-z0-9_-]+$/.test(base)
+    || /^(?:service[-_]?account|client[-_]?secret).*\.json$/.test(base)
+    || words.some((word, index) => CHAT_FILE_SECRET_WORDS.has(word) || (word === "api" && words[index + 1] === "key"));
 }
 
 /** UNC, \\?\ and \\.\ paths: they may reach a network share, so the desktop touches no file system for them. */

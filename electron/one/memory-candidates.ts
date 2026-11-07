@@ -933,16 +933,28 @@ export function selectApprovedOneMemoryAssets(
   });
 }
 
+export interface ApprovedOneMemoryContextParts { heading: string; items: Array<{ text: string; at: string }>; automatic: string }
+/** The approved-memory block as its pieces (heading, one entry per memory with its time, the automatic context). */
+export function approvedOneMemoryContextParts(
+  scope: OneMemoryInvocationScope = {},
+  state: OneMemoryState = getOneMemoryState(),
+): ApprovedOneMemoryContextParts {
+  const memories = selectApprovedOneMemoryAssets(scope, state);
+  return {
+    heading: "[Approved One Memory]",
+    items: memories.map((memory) => ({
+      text: `- [${memory.scope}${memory.scopeRef ? `:${memory.scopeRef}` : ""}] ${legacyOneMemoryText(memory)} (source ${memory.sourceRef})`,
+      at: memory.updatedAt || memory.createdAt || "",
+    })),
+    automatic: buildLegacyOneAutomaticContext(scope),
+  };
+}
+
 export function buildApprovedOneMemoryContext(
   scope: OneMemoryInvocationScope = {},
   state: OneMemoryState = getOneMemoryState(),
 ): string {
-  const memories = selectApprovedOneMemoryAssets(scope, state);
-  const automatic = buildLegacyOneAutomaticContext(scope);
-  if (memories.length === 0) return automatic;
-  return [
-    "[Approved One Memory]",
-    ...memories.map((memory) =>
-      `- [${memory.scope}${memory.scopeRef ? `:${memory.scopeRef}` : ""}] ${legacyOneMemoryText(memory)} (source ${memory.sourceRef})`),
-  ].concat(automatic ? [automatic] : []).join("\n");
+  const parts = approvedOneMemoryContextParts(scope, state);
+  if (parts.items.length === 0) return parts.automatic;
+  return [parts.heading, ...parts.items.map((item) => item.text)].concat(parts.automatic ? [parts.automatic] : []).join("\n");
 }

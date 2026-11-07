@@ -813,7 +813,7 @@ async function awaitMcpResultDelivery(
       await waitForAbort(approval.signal, tracked);
     }
   } catch (reason) {
-    if (isBrowserSignInNeeded(reason) && !approval.signal?.aborted) return browserSignInNeededResult(reason.site);
+    if (isBrowserSignInNeeded(reason) && !approval.signal?.aborted) return browserSignInNeededResult(reason.site, reason.step);
     if (!approval.signal?.aborted) {
       const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
       blocked.blocked = true; blocked.reason = reason;

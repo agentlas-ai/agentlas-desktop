@@ -14,6 +14,7 @@
  * owner-paused, or that every tactic is done or retired, and the Goal's own loop (stall window, verification) takes it from there.
  */
 import { getDb } from "../store/db";
+import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 import { appendChatMessage, getChat } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getChatGoalRevision } from "../store/chat-goals";
@@ -132,7 +133,8 @@ export function readGoalPanel(chatId: string, nowMs = Date.now()): GoalPanelView
       budget: { maxCycles: run.budget.maxCycles, maxCostUsd: run.budget.maxCostUsd, wallclockDeadline: run.budget.wallclockDeadline },
       cycleCount: run.cycleCount, costUsedUsd: run.costUsedUsd } : null,
     revision: revision ? { revision: revision.revision, objective: revision.objective, lifecycle: revision.lifecycle,
-      acceptanceCriteria: revision.acceptanceCriteria.map((criterion) => criterion.text) } : null,
+      // A Goal stored before still carries the host-scope sentence: the panel (and One's goalPanel.view) shows what is judged.
+      acceptanceCriteria: effectiveAcceptanceCriteria(revision.acceptanceCriteria).map((criterion) => criterion.text) } : null,
     plan,
     deadlineAt: (() => { try { return goalDeadlineAt(goalId); } catch { return null; } })(),
     pendingAmendments: (() => { try { return pendingOwnerGoalAmendmentCount(goalId); } catch { return 0; } })(),

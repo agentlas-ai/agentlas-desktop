@@ -29,6 +29,7 @@ import { sessionCheckpointStore, type SessionTaskBoundary, type SessionHostObser
 import { getMemoryStoreInfo } from "../memory/database";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { estimateTransportTokens } from "./compact";
+import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 
 declare const contextCapability: unique symbol;
 /** A private host object, never an identity or grant accepted from JSON. */
@@ -53,7 +54,8 @@ function checkpointTask(req: RunnerRequest): SessionTaskBoundary | null {
     if (goal) {
       const criteria: unknown = JSON.parse(goal.acceptance_criteria_json);
       return { id: `goal:${goal.goal_id}`, revision: Date.parse(goal.updated_at) || 0, goal: goal.objective,
-        constraints: Array.isArray(criteria) ? criteria.filter((v): v is string => typeof v === "string") : [] };
+        // The host-scope sentence an older Goal still stores is not a constraint a model can work with (shared/goal-scope.ts).
+        constraints: Array.isArray(criteria) ? effectiveAcceptanceCriteria(criteria.filter((v): v is string => typeof v === "string")) : [] };
     }
     const task = findCanonicalTaskForChat(req.chatId);
     return task ? { id: `task:${task.id}`, revision: task.version, goal: task.title, constraints: [] } : null;

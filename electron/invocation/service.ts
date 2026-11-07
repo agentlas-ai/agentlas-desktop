@@ -23,7 +23,7 @@ import { createNativePreparationLifetime, withNativePreparationLifetime, runNati
 import { assertNativeOneStartPort, isLocalInvocationPreparationPort, driveLocalOneStart, driveNativeOneStart, oneStartCheckpoint, nativeOneStartCheckpointFailureKind, type NativeOneStartCheckpoint, type NativeOneStartPort, type NativeOneStartBinding } from "./native-start-checkpoints";
 import { canResumeInvocationBrowserLoginWait, claimInvocationBrowserLoginWait, registerInvocationBrowserLoginWait, settleInvocationBrowserLoginWait,
   type BrowserLoginWaitHandle, type InvocationBrowserLoginWait } from "./browser-login-wait";
-import { isOneQuietReply } from "../../shared/one-supervisor";
+import { isHostQuietReply } from "../../shared/one-supervisor";
 import { decideOneExecutionLane, ONE_LANE_REFUSAL_MESSAGE } from "./one-execution-lane";
 import { bindWorkAttachmentRun, goalSourceAttachmentGroupIds, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
 import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
@@ -5440,7 +5440,7 @@ export class InvocationService {
           // One's quiet reply on a host-started review or check-in is deliberately not saved (dots parity): its
           // durable record is the one_quiet_reply run event, not a transcript row. Treating it as a lost result
           // failed every quiet turn and retried the review until its attempts ran out (QA 2026-10-04).
-          && !((hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin") && isOneQuietReply(event.text))
+          && !isHostQuietReply(hostNoticePurpose, event.text)
         ) {
           // A native/IO failure can occur between model completion and the transcript write. Never publish or ledger a
           // successful completion unless reopening this chat can read the result back. Reading it back does not demand a
@@ -5470,7 +5470,7 @@ export class InvocationService {
           && !remoteWorkspaceBinding
           && typeof event.text === "string"
           && event.text.trim()
-          && !((hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin") && isOneQuietReply(event.text))
+          && !isHostQuietReply(hostNoticePurpose, event.text)
           && !confirmedResult
         ) {
           event = {

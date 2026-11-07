@@ -13,8 +13,9 @@
  * Nothing is summarized: the model reads the file itself, in slices. No spill (the input goes as before) when the run has no file-read
  * tool this turn, when the folder cannot take the file, or when the input is a host judgment whose parser needs it inline.
  *
- * Two measured facts decide beyond the estimate: a local or API runner that refused the turn before sending anything for capacity
- * (turn 0, "not-dispatched") gets the same input as a reference once more, because its own exact measurement is better than this estimate.
+ * The estimate decides alone, once: a runner that refuses the turn for capacity before sending anything is not given a second, forced
+ * pass. The first pass already journaled the turn's input, so a different body under the same turn id would be refused by the agent
+ * context store as an event collision, replacing the capacity answer with a pre-dispatch exception.
  */
 import type { Runner, RunnerRequest } from "./runner";
 import { LOCAL_LOOP_RUNTIME_KINDS } from "./runner";

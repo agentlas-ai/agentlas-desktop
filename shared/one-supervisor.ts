@@ -147,6 +147,16 @@ export function isOneQuietReply(text: string): boolean {
   return before.length <= ONE_QUIET_PREAMBLE_MAX_CHARS && before.split(/\n/u).filter((line) => line.trim()).length <= 1;
 }
 
+/**
+ * The one test every site uses for "this host-started review or check-in ended quietly" (mcp/client.ts decides whether to save,
+ * invocation/service.ts decides whether the saved row must exist). Until the check was an exact match of the whole reply, so a
+ * model that wrote a progress line before the marker was saved and alerted every time (108 of 111 check-in reviews in one observed in use);
+ * one helper keeps the save site and the verification site from disagreeing again.
+ */
+export function isHostQuietReply(purpose: unknown, text: string): boolean {
+  return (purpose === "one-delegation-review" || purpose === "one-checkin") && isOneQuietReply(text);
+}
+
 /** A check-in the owner asked One to run on its own: every N minutes, or daily at a local HH:MM. */
 export type OneCheckinCadence = { kind: "interval"; minutes: number } | { kind: "daily"; time: string };
 export interface OneCheckin {
@@ -160,6 +170,39 @@ export interface OneCheckin {
   fires: number;
 }
 export const ONE_CHECKIN_LIMITS = { active: 20, minMinutes: 5, maxMinutes: 7 * 24 * 60 } as const;
+/**
+ * What bounds the model-made check-ins' cost and consent. minMinutes above stays the validity floor (an older row below the new
+ * minimum must still parse, or its sweep would cancel it); the policy floor is applied where a cadence is created and where one fires.
+ * A request below the floor is raised to it and shown that way on the owner's card, never refused.
+ */
+export const ONE_CHECKIN_POLICY = {
+  minIntervalMinutes: 60,
+  perCheckinPerDay: 24,
+  perOnePerDay: 48,
+  /** A missed slot fires once only inside this allowance (half the interval, at most 2 h; daily: 2 h), else it moves to the next slot. */
+  staleCapMs: 2 * 60 * 60_000,
+  /** An unanswered owner card expires with its proposal. */
+  proposalTtlMs: 24 * 60 * 60_000,
+  maxPendingProposals: 5,
+  /** Check-ins that come due together are queued a few per sweep, not all at once. */
+  maxFiresPerSweep: 2,
+} as const;
+/** The cadence as it will run: an interval below the policy floor is raised to it. Invalid cadences pass through for nextCheckinAt to refuse. */
+export function clampCheckinCadence(cadence: OneCheckinCadence): { cadence: OneCheckinCadence; raisedFrom: number | null } {
+  if (cadence.kind !== "interval" || !Number.isFinite(cadence.minutes) || !Number.isInteger(cadence.minutes) || cadence.minutes > ONE_CHECKIN_LIMITS.maxMinutes
+    || cadence.minutes >= ONE_CHECKIN_POLICY.minIntervalMinutes) return { cadence, raisedFrom: null };
+  return { cadence: { kind: "interval", minutes: ONE_CHECKIN_POLICY.minIntervalMinutes }, raisedFrom: Math.max(1, cadence.minutes) };
+}
+/** The owner's own UI and the host are not held to the model's floor, only to the validity floor: a faster request is raised to it, never refused. */
+export function raiseToValidityFloor(cadence: OneCheckinCadence): { cadence: OneCheckinCadence; raisedFrom: number | null } {
+  if (cadence.kind !== "interval" || !Number.isFinite(cadence.minutes) || cadence.minutes >= ONE_CHECKIN_LIMITS.minMinutes) return { cadence, raisedFrom: null };
+  return { cadence: { kind: "interval", minutes: ONE_CHECKIN_LIMITS.minMinutes }, raisedFrom: Math.max(0, cadence.minutes) };
+}
+/** How late a due check-in may still fire (a slot missed while the app was closed or asleep is skipped beyond this). */
+export function checkinStaleAllowanceMs(cadence: OneCheckinCadence): number {
+  return cadence.kind === "daily" ? ONE_CHECKIN_POLICY.staleCapMs
+    : Math.min(ONE_CHECKIN_POLICY.staleCapMs, Math.max(1, Math.floor(Math.max(cadence.minutes, ONE_CHECKIN_POLICY.minIntervalMinutes) * 60_000 / 2)));
+}
 /** The next time a check-in runs strictly after `from` (local time for daily). Throws on an invalid cadence. */
 export function nextCheckinAt(cadence: OneCheckinCadence, from: number): number {
   if (cadence.kind === "interval") {
@@ -178,6 +221,8 @@ export function nextCheckinAt(cadence: OneCheckinCadence, from: number): number 
 export interface SupervisorCheckinInput {
   commandId: string; action: "create" | "cancel" | "list";
   instruction?: string; everyMinutes?: number; dailyAt?: string; notify?: "important" | "always"; checkinId?: string; oneId?: string;
+  /** Set only by the model tool path (team-control-server): the reply run that asked. A create from it is a proposal the owner must turn on. */
+  modelReplyRunId?: string;
 }
 
 /** A new turn in a delegated Work session after its run settled (live runs are steered instead). */

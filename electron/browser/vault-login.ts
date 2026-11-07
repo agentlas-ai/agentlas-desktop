@@ -125,13 +125,16 @@ export async function vaultFillSignIn(page: VaultFillPage, vault: VaultCredentia
     if (current.origin !== permitted.origin) return { state: "failed", reason: "vault-origin-changed", urlAfter };
     return null;
   };
+  // "The saved login went in" is said only when the password was typed: a page past the identifier that shows no field (a CAPTCHA, a
+  // passkey prompt) is the owner's to finish, not an approval wait.
+  let passTyped = false;
   for (let phase = 0; phase < 2; phase += 1) {
     const denied = await checkOrigin();
     if (denied) return denied;
     const probe = asProbe(await page.evaluate(VAULT_PROBE_SOURCE).catch(() => null));
     if (!probe) return { state: "failed", urlAfter };
     if (probe.otp) return { state: "second-factor", urlAfter };
-    if (!probe.user && !probe.pass) return phase === 0 ? { state: "failed", urlAfter } : { state: "submitted", urlAfter };
+    if (!probe.user && !probe.pass) return phase === 0 || !passTyped ? { state: "failed", urlAfter } : { state: "submitted", urlAfter };
     const secret = await vault.read(id).catch(() => null);
     if (!secret) return { state: "unavailable" };
     // A vault read may yield while the page navigates. Recheck before sending any secret to that document;
@@ -144,12 +147,21 @@ export async function vaultFillSignIn(page: VaultFillPage, vault: VaultCredentia
     if (!filled || filled.submitted !== true) return { state: "failed", urlAfter };
     urlAfter = await page.settled().catch(() => null);
     if (filled.pass === true) {
+      passTyped = true;
       const after = asProbe(await page.evaluate(VAULT_PROBE_SOURCE).catch(() => null));
       if (after?.otp) return { state: "second-factor", urlAfter };
+      if (after?.pass) {
+        // A slow sign-in still shows the form for a moment: let the page settle once more and look again before calling the saved
+        // password rejected (it is never typed again either way).
+        urlAfter = await page.settled().catch(() => urlAfter);
+        const again = asProbe(await page.evaluate(VAULT_PROBE_SOURCE).catch(() => null));
+        if (again?.otp) return { state: "second-factor", urlAfter };
+        if (again?.pass) return { state: "rejected", urlAfter };
+      }
       return { state: "submitted", urlAfter };
     }
   }
-  return { state: "submitted", urlAfter };
+  return passTyped ? { state: "submitted", urlAfter } : { state: "failed", urlAfter };
 }
 
 /** Production vault access (Main only). */

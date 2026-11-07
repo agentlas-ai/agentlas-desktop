@@ -44,7 +44,7 @@ const DEFAULT_DAILY_CAP = 400;
 const BATCH_MAX_ITEMS = 20;
 const BATCH_MAX_CHARS = 6_000;
 const MAX_ATTEMPTS = 2;
-/** Unparseable answers (text came back) before a row is given up. Runner failures never count. */
+/** Unparseable answers (text came back), or runner failures on the row alone while the runner works, before a row stays native. */
 const MAX_CALL_FAILURES = 5;
 const BATCHES_PER_TICK = 5;
 const TICK_MS = 5 * 60 * 1000;
@@ -264,9 +264,9 @@ function dailyCap(): number {
 /** Calls that really started but produced nothing (aborted by a run, or the runner failed) before the day is closed. */
 const NO_PROGRESS_CAP = 6;
 
-function readBudget(): { day?: string; rows?: number; noProgress?: number } {
+function readBudget(): { day?: string; rows?: number; noProgress?: number; lastCallOk?: boolean } {
   try {
-    return JSON.parse(getMeta(BUDGET_KEY) ?? "{}") as { day?: string; rows?: number; noProgress?: number };
+    return JSON.parse(getMeta(BUDGET_KEY) ?? "{}") as { day?: string; rows?: number; noProgress?: number; lastCallOk?: boolean };
   } catch {
     return {};
   }
@@ -283,16 +283,19 @@ function noProgressToday(): number {
   return raw.day === today() ? Number(raw.noProgress) || 0 : 0;
 }
 
-function writeBudget(rows: number, noProgress: number): void {
-  setMeta(BUDGET_KEY, JSON.stringify({ day: today(), rows, noProgress }));
+/** Whether the translator's last real call gave text: kept across days (it describes the runner, not the day). */
+function lastCallOk(): boolean {
+  return readBudget().lastCallOk === true;
 }
 
-function spendBudget(rows: number): void {
-  writeBudget(budgetUsed() + rows, noProgressToday());
+function writeBudget(rows: number, noProgress: number, callOk: boolean | undefined = readBudget().lastCallOk): void {
+  setMeta(BUDGET_KEY, JSON.stringify({ day: today(), rows, noProgress, ...(callOk === undefined ? {} : { lastCallOk: callOk }) }));
 }
 
-function countNoProgress(): void {
-  writeBudget(budgetUsed(), noProgressToday() + 1);
+/** One write per batch: rows spent, a no-progress call, and how the call went. */
+function recordBatch(receipt: BatchReceipt): void {
+  writeBudget(budgetUsed() + receipt.attempted + receipt.reused, noProgressToday() + (receipt.noProgress ? 1 : 0),
+    receipt.callOk ?? readBudget().lastCallOk);
 }
 
 // ── sweep: find every untranslated non-English row ──────────────────────────
@@ -463,6 +466,15 @@ interface Job {
   id: string;
   sourceHash: string;
   attempts: number;
+  /** The row's last reason; only the batch builder reads it (a split cap). */
+  reason?: string | null;
+}
+
+/** `split:<n>`: the row was in a batch the runner failed on while it worked for others; it goes in batches of at most n. */
+const SPLIT_REASON = /^split:(\d+)$/;
+function splitCap(reason: string | null | undefined): number | null {
+  const match = reason ? SPLIT_REASON.exec(reason) : null;
+  return match ? Math.max(1, Number(match[1])) : null;
 }
 
 interface LoadedJob extends Job {
@@ -639,8 +651,12 @@ export interface BatchReceipt {
   retryAfterHint?: string;
   /** A model run really happened for the refused/failed call; without a hint the tick then waits DEFAULT_HOLD_MS. */
   invoked?: boolean;
-  /** The call really started and produced nothing (aborted by a run, or the runner failed): counted toward the day's no-progress cap. */
+  /** The call really started and produced nothing (aborted, provider refusal of a real call, runner failure): counted toward the day's no-progress cap. */
   noProgress?: boolean;
+  /** Why the tick waits before the next call: interrupted by a run, refused by the provider, or the runner failed. */
+  hold?: "aborted" | "provider" | "failed";
+  /** A real call ended: true when text came back, false when the runner produced none. Absent when nothing was learned. */
+  callOk?: boolean;
 }
 
 /** Why a call produced no answer that says anything about the rows. Machine fields only; prose is never parsed. */
@@ -692,6 +708,13 @@ export function translateResultFromJudgment(result: {
   return { text: null, invoked: true };
 }
 
+/**
+ * Translate calls this job has in flight. A call through a subscription CLI holds a run slot of its own (runtime/selection.ts
+ * withRunSlot), so the watchdog must not read that slot as "a run started": it did, and every call longer than one watchdog
+ * period aborted itself (owner log: 151 of 172 haiku calls cancelled at ~15 s, one translated).
+ */
+let ownCallsInFlight = 0;
+
 async function defaultTranslateCall(input: Parameters<TranslateCall>[0]): Promise<TranslateCallResult> {
   const { callConnectedModelDetailed } = await import("../system-agents/judgment");
   const result = await callConnectedModelDetailed({
@@ -730,7 +753,7 @@ export async function runEnglishMigrationBatch(options: {
   const receipt: BatchReceipt = { attempted: 0, translated: 0, reused: 0, keptNative: 0, stale: 0, translator: null, elapsedMs: 0 };
   const limit = Math.max(1, Math.min(BATCH_MAX_ITEMS, options.maxItems ?? BATCH_MAX_ITEMS));
   const jobs = db.prepare(
-    `SELECT target_kind AS kind, target_id AS id, source_hash AS sourceHash, attempts
+    `SELECT target_kind AS kind, target_id AS id, source_hash AS sourceHash, attempts, reason
        FROM memory_translation_jobs
       WHERE state = 'pending'
       ORDER BY CASE target_kind WHEN 'memory_entry' THEN 0 WHEN 'experience_candidate' THEN 1 ELSE 2 END,
@@ -741,6 +764,7 @@ export async function runEnglishMigrationBatch(options: {
 
   const toModel: LoadedJob[] = [];
   let chars = 0;
+  let batchCap = limit;
   for (const job of jobs) {
     if (options.signal?.aborted) break;
     const loaded = loadText(db, job);
@@ -770,8 +794,10 @@ export async function runEnglishMigrationBatch(options: {
         continue;
       }
     }
-    if (toModel.length >= limit || chars + loaded.text.length > BATCH_MAX_CHARS) continue;
+    const cap = Math.min(batchCap, splitCap(job.reason) ?? limit);
+    if (toModel.length >= cap || chars + loaded.text.length > BATCH_MAX_CHARS) continue;
     toModel.push(loaded);
+    batchCap = cap;
     chars += loaded.text.length;
   }
   if (toModel.length === 0 || options.signal?.aborted) {
@@ -794,6 +820,9 @@ export async function runEnglishMigrationBatch(options: {
   const intakeEpoch = currentMemoryForgetEpoch();
   let output: string | null = null;
   let call: TranslateCallResult = { text: null, invoked: true };
+  // Only a subscription-CLI translator holds a slot of the run pool (runtime/selection.ts withRunSlot); a local model has its own pool.
+  const holdsRunSlot = translator.tier === "cli";
+  if (holdsRunSlot) ownCallsInFlight += 1;
   try {
     call = normalizeTranslateResult(await (options.translate ?? defaultTranslateCall)({
       systemPrompt: TRANSLATOR_SYSTEM_PROMPT,
@@ -805,20 +834,26 @@ export async function runEnglishMigrationBatch(options: {
   } catch {
     // A call that threw produced no text: handled below like any runner failure.
     call = { text: null, invoked: true };
+  } finally {
+    if (holdsRunSlot) ownCallsInFlight -= 1;
   }
   if (options.signal?.aborted) {
     // Interrupted by a run taking a slot: the rows stay as they were and spend nothing.
     const reason = options.signal.reason instanceof Error ? options.signal.reason.message : "aborted";
     receipt.failure = `aborted:${reason}`.slice(0, 100);
     receipt.noProgress = true;
+    receipt.hold = "aborted";
     receipt.elapsedMs = Date.now() - started;
     return receipt;
   }
   if (output === null && (!call.invoked || call.cause)) {
     // Not called, or the provider refused (cooldown/quota/rate limit/unavailable): not the rows' fault.
-    // Rows, attempts and the daily cap stay untouched; the tick stops and waits out the hint.
+    // Rows, attempts and the row budget stay untouched; the tick stops and waits out the hint.
     receipt.failure = `translator-${(call.cause ?? "unavailable").replace("_", "-")}`;
     receipt.invoked = call.invoked;
+    receipt.hold = "provider";
+    // A refusal of a call that really ran (a process, a request) is a call that produced nothing: the day's cap bounds them.
+    if (call.invoked) receipt.noProgress = true;
     if (call.retryAfterHint) receipt.retryAfterHint = call.retryAfterHint;
     receipt.elapsedMs = Date.now() - started;
     return receipt;
@@ -830,16 +865,36 @@ export async function runEnglishMigrationBatch(options: {
     receipt.failure = "translator-failed";
     receipt.invoked = true;
     receipt.noProgress = true;
-    // Rotate: a batch that keeps killing the runner goes behind the others (attempts and state untouched, rows never given up).
+    receipt.hold = "failed";
+    receipt.callOk = false;
+    // A failed batch of several rows is halved (no attempt is counted): a row that kills the runner no longer holds the others,
+    // and halving costs no call the retry would not make anyway. A row alone is charged an attempt only when the runner is
+    // shown to work (it gave text on its last call) or nothing else is left to show it; otherwise it only rotates.
     const rotatedAt = new Date().toISOString();
-    const touch = db.prepare("UPDATE memory_translation_jobs SET updated_at = ? WHERE target_kind = ? AND target_id = ?");
-    db.transaction(() => { for (const job of toModel) touch.run(rotatedAt, job.kind, job.id); })();
+    const touch = db.prepare("UPDATE memory_translation_jobs SET reason = ?, updated_at = ? WHERE target_kind = ? AND target_id = ?");
+    if (toModel.length > 1) {
+      const split = `split:${Math.ceil(toModel.length / 2)}`;
+      db.transaction(() => { for (const job of toModel) touch.run(split, rotatedAt, job.kind, job.id); })();
+    } else if (lastCallOk() || pendingCount(db) <= 1) {
+      // Alone and still failing: after MAX_CALL_FAILURES it stays in its own language (recall reads it as written).
+      const job = toModel[0];
+      const exhausted = job.attempts + 1 >= MAX_CALL_FAILURES;
+      finishJob(db, job, exhausted ? "kept_native" : "pending", {
+        reason: exhausted ? "translator-failed-alone" : "split:1",
+        translator: translator.label,
+        attempt: true,
+      });
+      if (exhausted) receipt.keptNative += 1;
+    } else {
+      touch.run("split:1", rotatedAt, toModel[0].kind, toModel[0].id);
+    }
     if (call.retryAfterHint) receipt.retryAfterHint = call.retryAfterHint;
     receipt.elapsedMs = Date.now() - started;
     return receipt;
   }
   // Text came back: from here a failure is the rows' (and counts against the cap).
   receipt.attempted = toModel.length;
+  receipt.callOk = true;
   const parsed = parseTranslatorOutput(output, new Set(shortIds.keys()));
   if (!parsed) {
     // Unparseable answer: count the attempt; give up on a row only after repeated failures.
@@ -987,12 +1042,12 @@ export async function runEnglishMigrationTick(overrides: Partial<EnglishMigratio
   running = true;
   let batches = 0;
   const controller = new AbortController();
-  // A run taking a slot aborts the call (this job never competes with a run). The owner coming back does not: the call
-  // in flight finishes and its result is applied; only the next batch is not started.
+  // A run taking a slot aborts the call (this job never competes with a run); the slot this job's own call holds is not a run.
+  // The owner coming back does not abort: the call in flight finishes and its result is applied; only the next batch is not started.
   let userReturned = false;
   const watchdog = setInterval(() => {
     const slots = env.slots();
-    if (slots.inUse > 0 || slots.queued > 0) controller.abort(new Error("run-started"));
+    if (slots.inUse > ownCallsInFlight || slots.queued > 0) controller.abort(new Error("run-started"));
     else if (!quietWindow && env.idleSeconds() < 30) userReturned = true;
   }, quietWindow ? 2_000 : 15_000);
   watchdog.unref?.();
@@ -1013,7 +1068,7 @@ export async function runEnglishMigrationTick(overrides: Partial<EnglishMigratio
         ...(env.translate ? { translate: env.translate } : {}),
       });
       batches += 1;
-      spendBudget(receipt.attempted + receipt.reused);
+      recordBatch(receipt);
       const record = readRecord();
       if (record) {
         const db = getDb();
@@ -1025,13 +1080,10 @@ export async function runEnglishMigrationTick(overrides: Partial<EnglishMigratio
           completedAt: pendingCount(db) === 0 ? record.completedAt ?? new Date().toISOString() : null,
         });
       }
-      if (receipt.noProgress) {
-        countNoProgress();
-        // An aborted call waits like a failed one: the next tick must not start another real call right away.
-        if (receipt.failure?.startsWith("aborted:")) translatorHoldUntil = env.now() + DEFAULT_HOLD_MS;
-      }
-      const heldFailure = receipt.failure !== undefined && /^(translator-(cooldown|quota|rate-limit|unavailable|failed)|aborted:)/.test(receipt.failure);
-      if (heldFailure && receipt.failure?.startsWith("translator-")) {
+      // An aborted call waits like a failed one: the next tick must not start another real call right away.
+      if (receipt.hold === "aborted") translatorHoldUntil = env.now() + DEFAULT_HOLD_MS;
+      const heldFailure = receipt.hold !== undefined;
+      if (receipt.hold === "provider" || receipt.hold === "failed") {
         // The hint when there is one; otherwise a real call that failed waits a default (a not-invoked ask is free: next tick).
         const waitUntil = parseRetryHint(receipt.retryAfterHint, env.now());
         if (waitUntil > 0) translatorHoldUntil = waitUntil;

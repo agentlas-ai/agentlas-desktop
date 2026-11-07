@@ -130,7 +130,7 @@ export function classifyRolloutTail(text: string, input: { clientUserMessageId: 
     if (!payload) continue;
     if (row.type === "event_msg" && payload.type === "task_started") inTurn = payload.turn_id === turnId;
     if (inTurn && row.type === "response_item" && typeof payload.type === "string"
-      && /(_call|call)$/.test(payload.type) && !/output$/.test(payload.type)) actions += 1;
+      && /call$/.test(payload.type) && !/output$/.test(payload.type)) actions += 1; // function_call, local_shell_call, …; not *_output
     if (inTurn && row.type === "event_msg" && (payload.type === "item_started" || payload.type === "item_completed") && isObj(payload.item)
       && payload.turn_id === turnId && actionCount([payload.item]) > 0) actions += 1;
     if (row.type !== "event_msg" || payload.turn_id !== turnId) continue;

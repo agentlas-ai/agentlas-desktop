@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.133 — 2026-11-07
+
+- One: when you ask for work inside the conversation, One now does it there with its own tools and asks with choices when a decision or a sign-in is needed. It hands work to a background Work only when the work must go on without you (long, scheduled, or asked to run separately), and after a hand-off it stays in charge: the real status, what happened, and the Work's questions to you.
+- Sign-in: when a site needs you (a social-media login, for example), One is told exactly what is needed — sign in, approve on your phone, type a code, or that the saved password was not accepted — and asks with choices. This holds for messages sent from the phone and from the personal window too. A saved login that reaches a device-approval step now says so instead of "not signed in" and leaves the approval page open, a slow sign-in is no longer reported as a rejected password, and the saved password is not typed again for ten minutes after the site answered, so a new message cannot trigger another approval push.
+- Hand-offs: One is told when a hand-off waits on a sign-in or has not started after five minutes, and tells you. A hand-off that waited for a sign-in ends when its resumed run ends, a wait that an app restart cut ends as interrupted so One continues it, a Work's brief shows in its room at once, a Work that ended on a question or finished after you answered tells One, and a review that answers only the quiet marker is reviewed again instead of being closed in silence.
+- Check-ins: a check-in the model proposes starts only after you turn it on from a card that says what it does and when, runs read-only, is held to at least one hour between runs and 24 runs a day, and skips a slot that is far past due.
+- App: a request from the phone or One that needs a closed app window now opens the window instead of refusing about 400 operations; an automatic turn never opens a window, and a window opened that way never shows a native dialog.
+- Memory: the background English translation no longer cancels its own call as "a run started", and one row that breaks the translator no longer holds its whole batch.
+- Phone files: on Linux, files in the app's own folders under `~/.config` can be opened from the phone, and file names are judged by whole words (`tokens.css` is a link again, `api_key.txt` is not), and `~/.azure` is a secret folder.
+- Goal: a Goal stored before the scope fix no longer shows models a receipt check that nobody can do, in the Goal panel as well.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 ## 1.3.132 — 2026-11-07
 
 - Phone push: a One message pushed to a closed phone carries the same masked preview the app shows when it is open, text only with no title (it needs the current server). A push the push service could not take for a moment is kept (newest 50, 24 hours, no message text stored) and sent again when the phone registers again, the relay reconnects or the app starts; approval cards are never dropped or held, and a scheduled check-in can be held while the One Briefing quiet hours (off by default) are on. A card is measured as it travels, and a whole big card goes to the phone only in a history page.

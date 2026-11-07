@@ -1,5 +1,6 @@
 import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
-import { browserSignInNeeded } from "../../shared/browser-sign-in-needed";
+import { browserSignInNeeded, ownerAnswersSignIn } from "../../shared/browser-sign-in-needed";
+import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 import { composeTracedPrompt } from "../runtime/prompt-composition-trace";
 import { CHANNEL_PRIVACY_RULE } from "../runtime/session-channel";
 import { workMainOwnsRouting, workSessionMainPolicy } from "../work/session-policy";
@@ -139,6 +140,7 @@ import {
   getChat,
   getChatGoalId,
   getChatWorkingFolder,
+  hostPromptMessageForRun,
   listChatMessages,
   repairRootChatSurfaceController,
   setChatRuntimeSelection,
@@ -156,7 +158,9 @@ import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../
 import { carriedFollowupMessageIds } from "../invocation/carried-owner-followups";
 import { runtimeCostClass } from "../runtime/model-pricing";
 import { EARLIER_ATTEMPT_LINE, EARLIER_ATTEMPT_VERIFY_LINE, hasEarlierAttempt, hasEarlierAttemptVerify } from "../invocation/earlier-attempt";
-import { isOneQuietReply } from "../../shared/one-supervisor";
+import { isHostQuietReply } from "../../shared/one-supervisor";
+import { checkinTurnFacts } from "../one/checkin-session";
+import { ONE_PROFILE_CONTEXT_LIMIT } from "../../shared/one-profile-context-trim";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { stripAgentControlMarkers } from "../../shared/agent-control-markers";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
@@ -564,7 +568,12 @@ function readMidTurnPluginRequests(chatId: string, currentRunId?: string): strin
 
 function mainOneProfileContext(req: McpInvocationRequest): string {
   const value = (req as McpInvocationRequest & { oneProfileContext?: unknown }).oneProfileContext;
-  return typeof value === "string" && value.length > 0 && value.length <= 16_000 ? value : "";
+  if (typeof value === "string" && value.length > ONE_PROFILE_CONTEXT_LIMIT) {
+    // Main already cuts the personal assembly to the limit (shared/one-profile-context-trim.ts); a longer one comes from another builder.
+    console.warn(`[one-context] profile context of ${value.length} chars is over the ${ONE_PROFILE_CONTEXT_LIMIT} limit and was not sent`);
+    return "";
+  }
+  return typeof value === "string" && value.length > 0 ? value : "";
 }
 
 type MainBoundOneInvocationRequest = McpInvocationRequest & {
@@ -2539,14 +2548,14 @@ async function runMcpInvocationInContext(
         sourceEventId: `browser-login-observation:${randomUUID()}`, payload: { catalogId: input.catalogId, toolName: input.toolName, code } });
       return;
     }
-    // The owner's own One conversation turn goes on past a sign-in only the owner can do: the model is told the site and asks the
-    // owner how to go on (shared/browser-sign-in-needed.ts). Every other turn waits below and resumes after the sign-in: a Work,
-    // automation or unattended pass, a host-started One turn (Goal resume, wait follow-up, team brief or report: system prompt or
-    // host notice; nobody is there to answer), and agentlas-local (its daemon relay cannot carry the typed result yet).
-    const ownerTurn = req.oneMode === true && !isUnattendedExecution(executionContext) && req.promptOrigin !== "system"
-      && hostNoticePurpose === undefined && active.kind !== "agentlas-local";
-    const ownerWall = ownerTurn ? outcomes.find((outcome) => outcome.state === "awaiting-owner") : undefined;
-    if (ownerWall?.state === "awaiting-owner") throw browserSignInNeeded(ownerWall.site);
+    // The owner's own One message goes on past a sign-in only the owner can do: the model is told the site and asks the owner how
+    // to go on. Every other turn waits below and resumes after the sign-in (shared/browser-sign-in-needed.ts ownerAnswersSignIn).
+    const ownerWall = outcomes.find((outcome) => outcome.state === "awaiting-owner");
+    if (ownerWall?.state === "awaiting-owner" && ownerAnswersSignIn({ oneMode: req.oneMode, promptOrigin: req.promptOrigin,
+      unattended: isUnattendedExecution(executionContext), hostNotice: hostNoticePurpose !== undefined, agentlasLocal: active.kind === "agentlas-local",
+      ownerMessageId: () => { try { return supervisorIngressMessage(getDb(), req.chatId, req.runId); } catch { return null; } } })) {
+      throw browserSignInNeeded(ownerWall.site, ownerWall.card.reason);
+    }
     login.observe(outcomes);
     login.assertRunnable();
     } finally { observed(); }
@@ -2682,6 +2691,11 @@ async function runMcpInvocationInContext(
   // they are not history too (invocation/carried-owner-followups.ts).
   const carriedFollowupMessages = carriedFollowupMessageIds(getDb(), chat.id, req.runId);
   for (const id of carriedFollowupMessages) excludedSupervisorInputs.add(id);
+  // This run's own host-written prompt may already be in the conversation (One's brief written at hand-off, or an earlier attempt
+  // of the same run): it is the prompt, not history, and it is not written a second time.
+  const ownHostPrompt = req.promptOrigin === "system" && req.runId && hostNoticePurpose
+    ? hostPromptMessageForRun(chat.id, req.runId, hostNoticePurpose) : null;
+  if (ownHostPrompt) excludedSupervisorInputs.add(ownHostPrompt);
   const history = req.agentAppMode || executionContext?.source === "automation" || scienceRecovery
     ? []
     : listChatMessages(chat.id, 80).filter(message => !excludedSupervisorInputs.has(message.id));
@@ -2698,7 +2712,7 @@ async function runMcpInvocationInContext(
     ?? carriedFollowupMessages.at(-1)
     // A host recovery turn answers the owner's message that is already in the transcript (invocation/host-recovery.ts): no second copy.
     ?? hostRecoveryOf(req)?.userMessageId ?? null;
-  let userMessagePersisted = persistedUserMessageId !== null;
+  let userMessagePersisted = persistedUserMessageId !== null || ownHostPrompt !== null;
   // A product-authored continuation is not the person's turn. It stays durable
   // so the next turn keeps the context, but it is written as a system turn:
   // replaying the conversation must never attribute our wording to the user,
@@ -4051,7 +4065,8 @@ async function runMcpInvocationInContext(
           return {
             goalId, revision: revision.revision, permission: normalizedPermission,
             objective: contract.objective,
-            acceptanceCriteria: contract.acceptanceCriteria,
+            // A Goal stored before still carries the host-scope sentence no model can check: tool choice never sees it.
+            acceptanceCriteria: effectiveAcceptanceCriteria(contract.acceptanceCriteria),
           };
         },
         readGoalSelection: (scope: Omit<GoalToolSelectionReceipt, "selectedIds">): string[] => {
@@ -5997,8 +6012,13 @@ async function runMcpInvocationInContext(
     }
   }
 
+  // A check-in review runs on its own native session (one/checkin-session.ts): not the conversation's journal and session, empty history,
+  // a bounded host-made context block instead. Read from the store the review was claimed in; null (the turn runs as before) when this is
+  // not exactly one claimed check-in.
+  const checkinTurn = hostNoticePurpose === "one-checkin" && req.runId && !req.agentAppMode && !executionContext && !chat.goalId && !effectObservationRun
+    ? checkinTurnFacts(getDb(), req.runId) : null;
   const persistentAgentContext = Boolean(req.runId && agent.id === chat.agentId && !req.agentAppMode
-    && !scienceCollectionCurrent && !effectObservationRun);
+    && !scienceCollectionCurrent && !effectObservationRun && !checkinTurn);
   // Agent instructions are stable; task-selected host context is transported per turn.
   let systemPrompt = effectivePromptFor(agent);
   const systemContextParts: DeclaredPromptPart[] = [mainHostSystemPart("agent-definition", "versioned-content",
@@ -6597,6 +6617,7 @@ async function runMcpInvocationInContext(
         }
       }
     }
+    if (checkinTurn) { turnContextParts.push(checkinTurn.contextBlock); declareLastTurnContext("checkin.context", "turn-context", ["task"]); }
     // 세션 지원 러너(claude-code/codex/kimi)는 턴 컨텍스트를 분리 전달해 러너가
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
     // Composition order (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.turn-context.collector): every block carries
@@ -6635,12 +6656,13 @@ async function runMcpInvocationInContext(
       // the whole chat into a fresh native session is neither recovery nor state.
       // The no-checkpoint fallback above is intentionally bounded and only
       // covers the period before a Goal checkpoint can carry that state.
-      history: scienceCollectionCurrent || isAliveControllerRun || (activeGoalId && goalCheckpoint) ? [] : history,
+      history: scienceCollectionCurrent || isAliveControllerRun || (activeGoalId && goalCheckpoint) || checkinTurn ? [] : history,
       // A Main-issued effect observation is one look, not a turn of this conversation. Resuming the
       // chat's native session carried its whole accumulated context into every look (measured
       // 2026-09-24: 79k-500k input tokens per observation, growing with each retry). Its own isolated
       // session owner starts fresh and never replaces the conversation's stored session.
       ...(effectObservationRun && req.runId ? { runtimeSessionOwnerId: `effect-observation:${req.runId}` } : {}),
+      ...(checkinTurn ? { runtimeSessionOwnerId: checkinTurn.owner } : {}),
       // Alive decisions continue this controller's context. Work/run identity
       // stays in the existing effect/Goal ledgers, separate from native session identity.
       ...(isAliveControllerRun ? { runtimeSessionOwnerId: `alive-controller:${chat.id}:${agent.id}` } : {}),
@@ -8281,7 +8303,7 @@ async function runMcpInvocationInContext(
         // "중단된 답변"으로 또 저장했다(2026-09-27 X 마케팅 실측).
         sink(livePartialCommitBoundary(committedPass.id));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
-        if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
+        if (sessionCapableRuntime && !checkinTurn) touchRuntimeSession(chat.id, active.kind, agent.id);
         sink({
           kind: "tool-use",
           status: goalDrivenPass
@@ -9395,8 +9417,7 @@ async function runMcpInvocationInContext(
        * 중간 턴이 길이 0 assistant 메시지로 저장됨).
        * 삼키지도 않는다 — 빈 답 자체가 진단 신호이므로 사실은 원장에 남긴다.
        */
-      const quietOneReply = (hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin")
-        && isOneQuietReply(persistedDisplay);
+      const quietOneReply = isHostQuietReply(hostNoticePurpose, persistedDisplay);
       // Any other reply is saved and shown without the host markers. The same text is the verification copy below.
       if (!quietOneReply) persistedDisplay = stripAgentControlMarkers(persistedDisplay);
       if (quietOneReply) {
@@ -9424,7 +9445,7 @@ async function runMcpInvocationInContext(
       unbindRunKeyChallenge();
       // 세션 워터마크 전진 — 이 kind의 세션은 방금 답변까지 봤다. 다음 resume 턴의
       // gap-replay가 자기 답변을 중복 주입하지 않고, 스웜/다른 러너 턴만 메우게 된다.
-      if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
+      if (sessionCapableRuntime && !checkinTurn) touchRuntimeSession(chat.id, active.kind, agent.id);
     }
     };
     await runWithStoreBusyPatience(saveFinalAnswer);

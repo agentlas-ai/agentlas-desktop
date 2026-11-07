@@ -355,9 +355,10 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
       // The newest notice of a hand-off task stays: noticeDelegatedOutcome / sweepDeferredDelegations (one/supervisor-service.ts) report a
       // completed hand-off only while no notice at or after it exists, and one_supervisor_requests is kept, so without this row a later turn
       // of the same Work room would report the old hand-off to One again as new.
-      keepWhen: [{ table: "one_supervisor_requests", sql: `NOT EXISTS (SELECT 1 FROM one_supervisor_notices n WHERE n.one_id = t.one_id AND n.task_id = t.task_id AND n.rowid > t.rowid)
+      // A "waiting for the owner" notice (needs-owner) is not an outcome: those readers skip it, so the newest OUTCOME notice is the one kept.
+      keepWhen: [{ table: "one_supervisor_requests", sql: `t.state <> 'needs-owner' AND NOT EXISTS (SELECT 1 FROM one_supervisor_notices n WHERE n.one_id = t.one_id AND n.task_id = t.task_id AND n.rowid > t.rowid AND n.state <> 'needs-owner')
         AND EXISTS (SELECT 1 FROM one_supervisor_requests r WHERE r.one_id = t.one_id AND r.task_id = t.task_id AND r.kind IN ('work', 'follow-up', 'chat-send') AND r.state = 'completed')` }],
-      timeColumns: ["created_at", "reviewed_at"], requires: ["review_state", "created_at", "reviewed_at", "one_id", "task_id"],
+      timeColumns: ["created_at", "reviewed_at"], requires: ["review_state", "state", "created_at", "reviewed_at", "one_id", "task_id"],
     } },
     writer: "one/supervisor-store.ts notice inserts (INSERT OR IGNORE on one_id, task_id, run_id) and the review loop",
     readers: "the review loop reads pending and claimed rows only (supervisor-store.ts:293-349); the hand-off already-reported checks (supervisor-service.ts noticeDelegatedOutcome, sweepDeferredDelegations) read the newest notice of a task, which is kept",

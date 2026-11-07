@@ -77,6 +77,8 @@ export type LoginRecoveryReason =
   | "vault-submitted"
   | "vault-origin-changed"
   | "vault-page-unavailable"
+  | "vault-sign-in-rejected"
+  | "sign-in-approval-required"
   | "second-factor-required";
 
 export interface LoginRecoveryEvent {
@@ -100,7 +102,8 @@ export interface LoginRecoveryEvent {
  * value); only this state comes back. A one-time-code step is the owner's (second-factor → card).
  */
 export interface VaultFillReport {
-  state: "submitted" | "no-credential" | "unavailable" | "second-factor" | "failed";
+  /** submitted: the form went in and is gone; rejected: the page still asks for the password after it settled. */
+  state: "submitted" | "rejected" | "no-credential" | "unavailable" | "second-factor" | "failed";
   reason?: "vault-origin-changed" | "vault-page-unavailable";
   /** Page URL after the submit settled (null when unknown). */
   urlAfter?: string | null;
@@ -115,7 +118,7 @@ export interface TargetedImportReport {
 export interface OwnerLoginCard {
   site: string;
   surface: BrowserCookieSurface;
-  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required" | "destination-protected" | "destination-unreadable" | "site-auth-unverified">;
+  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required" | "sign-in-approval-required" | "vault-sign-in-rejected" | "destination-protected" | "destination-unreadable" | "site-auth-unverified">;
   signInUrl: string;
   /** 오너에게 보이는 한 줄. */
   message: { ko: string; en: string };
@@ -218,6 +221,23 @@ function sameSite(a: string, b: string): boolean {
  * 어느 저장소를 무엇으로 채울지 — 순수 판정.
  * 쓰는 쪽에 세션 쿠키가 없고 다른 쪽에 있으면 "다른 쪽 → 쓰는 쪽".
  */
+/** The last saved-password attempt per site and what the site answered: not repeated for ten minutes (process memory only, bounded). */
+const VAULT_ATTEMPT_TTL_MS = 10 * 60_000;
+const vaultAttempts = new Map<string, { at: number; reason: "vault-sign-in-rejected" | "sign-in-approval-required" | "second-factor-required" }>();
+function noteVaultAttempt<R extends "vault-sign-in-rejected" | "sign-in-approval-required" | "second-factor-required">(site: string, reason: R): R {
+  if (vaultAttempts.size >= 50) vaultAttempts.delete(vaultAttempts.keys().next().value as string);
+  vaultAttempts.set(site, { at: Date.now(), reason });
+  return reason;
+}
+/** Tests only. */
+export function resetVaultAttemptsForTests(): void { vaultAttempts.clear(); }
+function recentVaultAttempt(site: string): "vault-sign-in-rejected" | "sign-in-approval-required" | "second-factor-required" | null {
+  const hit = vaultAttempts.get(site);
+  if (!hit) return null;
+  if (Date.now() - hit.at >= VAULT_ATTEMPT_TTL_MS) { vaultAttempts.delete(site); return null; }
+  return hit.reason;
+}
+
 export function decideStoreFeed(input: {
   surface: BrowserCookieSurface;
   counts: Record<BrowserCookieSurface, number>;
@@ -238,6 +258,10 @@ export function ownerLoginCardFor(input: {
   const name = siteDisplayName(input.site);
   const ko = input.reason === "second-factor-required"
     ? `${name} 로그인에 2단계 인증 코드가 필요합니다 — 이 창에서 코드를 한 번 입력해 주세요`
+    : input.reason === "sign-in-approval-required"
+      ? `${name}에 저장된 로그인 정보로 로그인했고, 승인이 남았습니다 — 폰 등 다른 기기에 온 승인 알림을 누르거나 이 창에서 남은 단계를 마쳐 주세요`
+    : input.reason === "vault-sign-in-rejected"
+      ? `${name}에 저장된 비밀번호가 받아들여지지 않았습니다 — 이 창에서 한 번 로그인해 주세요(비밀번호가 바뀌었다면 금고도 고쳐 주세요)`
     : input.reason === "site-auth-unverified"
       ? `${name}의 로그인 상태를 자동으로 확인하지 못했습니다 — 이 창에서 계정을 확인해 주세요`
     : input.reason === "destination-protected" || input.reason === "destination-unreadable"
@@ -247,6 +271,10 @@ export function ownerLoginCardFor(input: {
       : `${name} 로그인이 크롬에도 없습니다 — 이 창에서 한 번 로그인해 주세요`;
   const en = input.reason === "second-factor-required"
     ? `${name} needs a one-time sign-in code — please enter it once in this window`
+    : input.reason === "sign-in-approval-required"
+      ? `Signed in to ${name} with the saved login; an approval is left — tap the approval on your phone or other device, or finish the remaining step in this window`
+    : input.reason === "vault-sign-in-rejected"
+      ? `The saved password for ${name} was not accepted — please sign in once in this window (and fix the vault entry if the password changed)`
     : input.reason === "site-auth-unverified"
       ? `Could not verify the ${name} sign-in automatically — please check the account in this window`
     : input.reason === "destination-protected" || input.reason === "destination-unreadable"
@@ -440,6 +468,10 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     // ── 1b) 저장된 자격증명(오너 금고) — Main 에서 채우고 제출, 모델은 값을 모른다 ──────────
     if (ctx.vaultFill && !destinationBlocked) {
       if (!current(ctx)) return { state: "not-a-wall" };
+      // The saved password went in for this site a few minutes ago and the site answered (rejected, or one more step): typing it again on
+      // the next owner message would repeat a device-approval push or lock the account. The same card is shown again instead.
+      const recent = recentVaultAttempt(wall.site);
+      if (recent) return openCard(wall, ctx, recent);
       let report: VaultFillReport;
       try { report = await ctx.vaultFill({ site: wall.site, domains }); }
       catch { report = { state: "failed" }; }
@@ -451,15 +483,22 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
         reason: report.state === "no-credential" ? "vault-no-credential"
           : report.state === "unavailable" ? "vault-unavailable"
             : report.state === "second-factor" ? "second-factor-required"
+              : report.state === "rejected" ? "vault-sign-in-rejected"
               : report.state === "failed" ? report.reason ?? "import-failed"
                 : cleared ? "cleared" : "vault-submitted",
       });
       if (!current(ctx)) return { state: "not-a-wall" };
       if (cleared) {
+        vaultAttempts.delete(wall.site);
         event(ctx, "recovered", wall, { reason: "cleared" });
         return { state: "recovered", via: "vault-autofill", site: wall.site };
       }
-      if (report.state === "second-factor") return openCard(wall, ctx, "second-factor-required");
+      if (report.state === "second-factor") return openCard(wall, ctx, noteVaultAttempt(wall.site, "second-factor-required"));
+      // The saved login went in. Still asking for the password: it was not accepted. The form gone but no session yet: the site
+      // wants one more step from the owner (an approval on another device, a check). Both are told as they are, never as "not signed
+      // in anywhere"; the session watcher continues the goal the moment the sign-in completes.
+      if (report.state === "rejected") return openCard(wall, ctx, noteVaultAttempt(wall.site, "vault-sign-in-rejected"));
+      if (report.state === "submitted") return openCard(wall, ctx, noteVaultAttempt(wall.site, "sign-in-approval-required"));
     }
 
     // ── 2) 저장소 대조 ───────────────────────────────────────────────
@@ -588,7 +627,10 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     if (!current(ctx)) return { state: "not-a-wall" };
     event(ctx, "owner-card", wall, { reason });
     try { ctx.notify?.(card); } catch { /* 알림 실패가 카드를 없애지 않는다 */ }
-    if (reason !== "destination-protected" && reason !== "destination-unreadable" && reason !== "site-auth-unverified") {
+    // The remaining step (a device approval, a code) is on the page the saved login reached: re-opening the sign-in address there would
+    // reload the tab back to the form and lose it.
+    if (reason !== "destination-protected" && reason !== "destination-unreadable" && reason !== "site-auth-unverified"
+      && reason !== "sign-in-approval-required" && reason !== "second-factor-required") {
       try { await (ctx.openSignIn ?? deps.openSignIn)(card); } catch { /* 창 열기 실패 — 카드는 남는다 */ }
     }
     return done || !pendingCurrent(ctx) ? { state: "not-a-wall" }

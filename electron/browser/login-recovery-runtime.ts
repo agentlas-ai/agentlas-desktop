@@ -16,6 +16,7 @@ import type { NativeBrowserRelayGrant } from "./native-cdp-relay";
 import type { BrowserCookieSurface, CookieMetadata } from "./login-wall";
 import { automaticRecoveryDestination, detectLoginWall, recoveryCookieDomains, sessionCookieNamesFor } from "./login-wall";
 import { productionVaultSource, vaultFillSignIn } from "./vault-login";
+import { reportHostAlertToOne } from "../one/host-alerts";
 import {
   createLoginRecoveryLadder,
   type LoginRecoveryContext,
@@ -286,6 +287,23 @@ export async function dedicatedBrowserWindowBounds(): Promise<Array<{ x: number;
 }
 
 /** Wait (bounded) for a dedicated-Chrome page to settle after a submit, then read where it is. */
+/** The in-app page after a sign-in submit: the address it moves to once it stops changing and the document is complete (bounded),
+ * the same rule as settledCdpPage. A fixed short wait read a slow sign-in as still on the form. */
+async function settledNativePage(evaluate: (expression: string) => Promise<unknown>): Promise<string | null> {
+  const href = async () => String(await evaluate("location.href").catch(() => "") || "") || null;
+  const deadline = Date.now() + 10_000;
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  let last = await href();
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    const now = await href();
+    const state = await evaluate("document.readyState").catch(() => null);
+    if (now === last && state === "complete") return now;
+    last = now;
+  }
+  return last;
+}
+
 async function settledCdpPage(target: CdpPageTarget): Promise<string | null> {
   const deadline = Date.now() + 15_000;
   let last = target.url;
@@ -733,6 +751,14 @@ export async function recoverLoginWallsNow(input: {
   // Restoration reaches the waiting run only through its exact handle (onPrerequisiteRestored). The global
   // "resume goals" handler this used to pass was removed in 1.2.53 (3a60b734) and had done nothing since.
   const verificationSignal = input.signal ?? new AbortController().signal;
+  // A sign-in only the owner can do, met in another room (a Work, a team room), is told to the owner by One (one/host-alerts: in
+  // One's own conversation the live turn already has it). Once per room, card reason, site and day (a session that expires again
+  // another day is told again); the room keeps its own card.
+  const notify = (card: OwnerLoginCard): void => {
+    try { input.notify?.(card); } catch { /* notification cannot invalidate recovery */ }
+    if (input.chatId) reportHostAlertToOne({ chatId: input.chatId, code: `browser-login:${card.reason}`,
+      key: `${card.site}:${new Date().toISOString().slice(0, 10)}`, detail: card.message.en });
+  };
   const outcomes: LoginRecoveryOutcome[] = [];
   if (input.signal?.aborted) return outcomes;
   // A daemon cannot access Electron's session or vault. Its broker fixes Main's
@@ -741,7 +767,7 @@ export async function recoverLoginWallsNow(input: {
     const remote = await input.nativeGrant.recoverLoginWalls({ nodeId: input.nodeId, onPrerequisiteRestored: input.onPrerequisiteRestored });
     for (const outcome of remote) {
       if (outcome.state === "awaiting-owner" && outcome.newCard && !input.signal?.aborted) {
-        try { input.notify?.(outcome.card); } catch { /* notification cannot invalidate recovery */ }
+        notify(outcome.card);
       }
     }
     return remote;
@@ -781,10 +807,9 @@ export async function recoverLoginWallsNow(input: {
           return { ...lease, ...(lease.evaluate ? { verifyAuthenticated: (evidence: { site: string; url: string; returnUrl?: string | null }) =>
             verifyGoogleBrowserSession(lease.evaluate!, evidence) } : {}) };
         } } : {}),
-        notify: input.notify, openSignIn: (card) => page.navigate(card.signInUrl),
+        notify, openSignIn: (card) => page.navigate(card.signInUrl),
         ...(evaluate ? { vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluate("location.href") || "") || null, evaluate,
-          settled: async () => { await new Promise((r) => setTimeout(r, 1_500)); return String(await evaluate("location.href").catch(() => "") || "") || null; } },
-        productionVaultSource()) } : {}),
+          settled: () => settledNativePage(evaluate) }, productionVaultSource()) } : {}),
       });
       outcomes.push(outcome);
       batch.outcome(slotId, outcome);
@@ -803,7 +828,7 @@ export async function recoverLoginWallsNow(input: {
       nodeId: input.nodeId, signal: input.signal, slotId: page.id, profileId,
       onPendingScopeReleased: batch.callback(page.id), onPrerequisiteRestored: input.onPrerequisiteRestored,
       consentGeneration, isCurrent: consentCurrent,
-      notify: input.notify,
+      notify,
       vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluateCdpPage(page, "location.href") || "") || null, evaluate: (expression) => evaluateCdpPage(page, expression),
         settled: () => settledCdpPage(page) }, productionVaultSource()),
     });

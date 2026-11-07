@@ -1,8 +1,9 @@
 import { supervisorError } from "../../shared/one-supervisor";
 import { createHash } from "node:crypto";
 import { isHostCheckinInstruction } from "./host-checkin-instructions";
+import { purgeCheckinSessions, purgeOrphanCheckinSessions } from "./checkin-session";
 import type Database from "better-sqlite3";
-import { ONE_CHECKIN_LIMITS, nextCheckinAt, type OneCheckin, type OneCheckinCadence, type SupervisorCommandReceipt, type SupervisorNotice, type SupervisorRequestState } from "../../shared/one-supervisor";
+import { ONE_CHECKIN_LIMITS, ONE_CHECKIN_POLICY, checkinStaleAllowanceMs, clampCheckinCadence, nextCheckinAt, type OneCheckin, type OneCheckinCadence, type SupervisorCommandReceipt, type SupervisorNotice, type SupervisorRequestState } from "../../shared/one-supervisor";
 import { ONE_SUPERVISOR_JOURNAL_SCHEMA, type SupervisorJournalPage, type SupervisorJournalEvent } from "../../shared/one-supervisor-runtime";
 
 export interface SupervisorRequestRow {
@@ -249,17 +250,100 @@ export class OneSupervisorStore {
       const prior = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE command_id=?").get(input.commandId) as Parameters<OneSupervisorStore["checkinRow"]>[0] & {one_id:string} | undefined;
       if (prior) { if (prior.one_id !== oneId) throw supervisorError('supervisor_command_identity_conflict'); return this.checkinRow(prior); }
       // The cap bounds the model's check-ins: one active check-in per host-authored instruction (host-checkin-instructions.ts) is exempt, the rest count.
-      const active = this.db.prepare("SELECT instruction FROM one_supervisor_checkins WHERE one_id=? AND active=1").all(oneId) as {instruction:string}[];
-      const exempt = new Set<string>();
-      let counted = 0;
-      for (const row of active) { if (isHostCheckinInstruction(row.instruction) && !exempt.has(row.instruction)) exempt.add(row.instruction); else counted++; }
-      if (!(isHostCheckinInstruction(input.instruction) && !exempt.has(input.instruction)) && counted >= ONE_CHECKIN_LIMITS.active) {
-        throw supervisorError('supervisor_checkin_limit');
-      }
+      if (this.checkinCapReached(oneId, input.instruction)) throw supervisorError('supervisor_checkin_limit');
       const id = `checkin_${supervisorHash([oneId,input.commandId]).slice(0,24)}`;
       this.db.prepare(`INSERT INTO one_supervisor_checkins(id,one_id,instruction,cadence_json,notify,next_at,created_at,command_id) VALUES(?,?,?,?,?,?,?,?)`)
         .run(id,oneId,input.instruction,JSON.stringify(input.cadence),input.notify,nextCheckinAt(input.cadence,now),new Date(now).toISOString(),input.commandId);
       return this.checkinRow(this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE id=?").get(id) as Parameters<OneSupervisorStore["checkinRow"]>[0]);
+    }).immediate();
+  }
+  /** Active check-ins count against the cap (a pending owner proposal is not active and does not). One per host-authored instruction is exempt. */
+  private checkinCapReached(oneId: string, instruction: string): boolean {
+    const active = this.db.prepare("SELECT instruction FROM one_supervisor_checkins WHERE one_id=? AND active=1").all(oneId) as {instruction:string}[];
+    const exempt = new Set<string>();
+    let counted = 0;
+    for (const row of active) { if (isHostCheckinInstruction(row.instruction) && !exempt.has(row.instruction)) exempt.add(row.instruction); else counted++; }
+    return !(isHostCheckinInstruction(instruction) && !exempt.has(instruction)) && counted >= ONE_CHECKIN_LIMITS.active;
+  }
+  /** An unanswered proposal expires with its card: nothing reads it after that, so it is deleted (called by every reader and by the sweep). */
+  purgeExpiredProposals(oneId: string, now = Date.now()): number {
+    return Number(this.db.prepare("DELETE FROM one_supervisor_checkins WHERE one_id=? AND active=2 AND created_at<?")
+      .run(oneId, new Date(now - ONE_CHECKIN_POLICY.proposalTtlMs).toISOString()).changes);
+  }
+  /**
+   * A check-in the model asked for is stored inactive (active=2) until the owner turns it on from the card. The same command id, or the same
+   * instruction/cadence/notify already waiting, returns the stored proposal and is not fresh: the caller posts one card per fresh proposal.
+   * At most maxPendingProposals wait; a new one replaces the oldest.
+   */
+  proposeCheckin(oneId: string, input: {commandId: string; instruction: string; cadence: OneCheckinCadence; notify: "important" | "always"}, now = Date.now()): {checkin: OneCheckin; fresh: boolean; evicted: OneCheckin[]} {
+    return this.db.transaction(() => {
+      this.purgeExpiredProposals(oneId, now);
+      type Row = Parameters<OneSupervisorStore["checkinRow"]>[0];
+      const prior = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE command_id=?").get(input.commandId) as Row & {one_id:string} | undefined;
+      if (prior) { if (prior.one_id !== oneId) throw supervisorError('supervisor_command_identity_conflict'); return {checkin: this.checkinRow(prior), fresh: false, evicted: []}; }
+      const cadenceJson = JSON.stringify(input.cadence);
+      const same = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND active=2 AND instruction=? AND cadence_json=? AND notify=?")
+        .get(oneId, input.instruction, cadenceJson, input.notify) as Row | undefined;
+      if (same) return {checkin: this.checkinRow(same), fresh: false, evicted: []};
+      const next = nextCheckinAt(input.cadence, now); // refuses an invalid cadence before anything is stored
+      const waiting = this.db.prepare("SELECT id FROM one_supervisor_checkins WHERE one_id=? AND active=2 ORDER BY created_at DESC, rowid DESC").all(oneId) as {id:string}[];
+      const evictedRows = waiting.slice(Math.max(0, ONE_CHECKIN_POLICY.maxPendingProposals - 1));
+      const evicted = evictedRows.map(old => this.checkinRow(this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE id=?").get(old.id) as Row));
+      for (const old of evictedRows) this.db.prepare("DELETE FROM one_supervisor_checkins WHERE id=? AND active=2").run(old.id);
+      const id = `checkin_${supervisorHash([oneId,input.commandId]).slice(0,24)}`;
+      this.db.prepare(`INSERT INTO one_supervisor_checkins(id,one_id,instruction,cadence_json,notify,next_at,active,created_at,command_id) VALUES(?,?,?,?,?,?,2,?,?)`)
+        .run(id,oneId,input.instruction,cadenceJson,input.notify,next,new Date(now).toISOString(),input.commandId);
+      return {checkin: this.checkinRow(this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE id=?").get(id) as Row), fresh: true, evicted};
+    }).immediate();
+  }
+  /** Whether the check-in was created by the model's tool path (its create request is marked as a proposal). */
+  modelMade(commandId: string): boolean {
+    try {
+      const row = this.db.prepare("SELECT payload_json FROM one_supervisor_requests WHERE command_id=?").get(commandId) as {payload_json: string} | undefined;
+      return !!row && JSON.parse(row.payload_json).proposal === true;
+    } catch { return false; }
+  }
+  /**
+   * Once per check-in, true the first time it is asked: the owner is told that a check-in now runs read-only (one line, the first time an
+   * already-active check-in runs that way). The mark is a meta row, deleted with the check-in's other leftovers by the owner's cancel.
+   */
+  markReadOnlyTold(checkinId: string): boolean {
+    try {
+      if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").get()) return false;
+      return this.db.prepare("INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)").run(`checkin.readonly-told:${checkinId}`, "1").changes === 1;
+    } catch { return false; }
+  }
+  /** Proposals still waiting for the owner, newest first. */
+  proposedCheckins(oneId: string, now = Date.now()): Array<OneCheckin & {createdAt: string}> {
+    this.purgeExpiredProposals(oneId, now);
+    return (this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND active=2 ORDER BY created_at DESC, rowid DESC").all(oneId) as Array<Parameters<OneSupervisorStore["checkinRow"]>[0] & {created_at:string}>)
+      .map(row => ({...this.checkinRow(row), createdAt: row.created_at}));
+  }
+  /**
+   * The owner's decision on a proposal. enable: active=2 -> 1 in one compare-and-set (a second tap or a replay finds nothing to change),
+   * the first run is one cadence step from now. decline: the proposal is deleted. Both answer "missing" for an expired or already decided one.
+   */
+  decideCheckin(oneId: string, id: string, decision: "enable" | "decline", now = Date.now()): {state: "enabled"; checkin: OneCheckin} | {state: "declined" | "missing" | "limit"} {
+    return this.db.transaction(() => {
+      this.purgeExpiredProposals(oneId, now);
+      type Row = Parameters<OneSupervisorStore["checkinRow"]>[0];
+      const row = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND id=? AND active=2").get(oneId, id) as Row | undefined;
+      if (!row) return {state: "missing" as const};
+      if (decision === "decline") {
+        this.db.prepare("DELETE FROM one_supervisor_checkins WHERE id=? AND active=2").run(id);
+        return {state: "declined" as const};
+      }
+      if (this.checkinCapReached(oneId, row.instruction)) {
+        this.db.prepare("DELETE FROM one_supervisor_checkins WHERE id=? AND active=2").run(id);
+        return {state: "limit" as const};
+      }
+      // The proposal was stored with the cadence the card showed (clamped when the model asked for it): that is what turns on.
+      const cadence = JSON.parse(row.cadence_json) as OneCheckinCadence;
+      const moved = this.db.prepare("UPDATE one_supervisor_checkins SET active=1,next_at=? WHERE id=? AND active=2")
+        .run(nextCheckinAt(cadence, now), id).changes;
+      if (moved !== 1) return {state: "missing" as const};
+      this.markReadOnlyTold(id); // the card already said "read-only"; no second line for a check-in the owner turned on
+      return {state: "enabled" as const, checkin: this.checkinRow(this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE id=?").get(id) as Row)};
     }).immediate();
   }
   checkins(oneId: string): OneCheckin[] {
@@ -269,25 +353,78 @@ export class OneSupervisorStore {
     const row = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND id=?").get(oneId,id) as (Parameters<OneSupervisorStore["checkinRow"]>[0] & {active:number}) | undefined;
     return row ? {...this.checkinRow(row),active:row.active===1} : null;
   }
+  /** Cancelling is never confirmed: an active check-in stops, and a proposal still waiting for the owner is dropped. */
   cancelCheckin(oneId: string, id: string): boolean {
-    return this.db.prepare("UPDATE one_supervisor_checkins SET active=0 WHERE one_id=? AND id=? AND active=1").run(oneId,id).changes === 1;
+    const stopped = this.db.prepare("UPDATE one_supervisor_checkins SET active=0 WHERE one_id=? AND id=? AND active=1").run(oneId,id).changes === 1
+      || this.db.prepare("DELETE FROM one_supervisor_checkins WHERE one_id=? AND id=? AND active=2").run(oneId,id).changes === 1;
+    if (stopped) { purgeCheckinSessions(this.db, id); try { if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").get()) this.db.prepare("DELETE FROM meta WHERE key=?").run(`checkin.readonly-told:${id}`); } catch { /* the mark is a leftover only */ } }
+    return stopped;
   }
-  /** Moves every due check-in to its next time (CAS on next_at) and queues one notice per firing. A check-in that was
-   * due several times while the app was closed fires once, then resumes its cadence from now. */
-  fireDueCheckins(oneId: string, chatId: string, now = Date.now(), hold?: readonly string[]): number {
+  /**
+   * Moves due check-ins to their next time (CAS on next_at) and queues one notice per firing.
+   * - A slot missed while the app was closed fires only inside its allowance (half the interval, at most 2 h; daily 2 h); beyond it the
+   *   check-in moves to its next slot without a run, so a long sleep does not queue a run.
+   * - A model-made check-in runs at most perCheckinPerDay times a day and the owner's check-ins perOnePerDay together; at the cap the
+   *   day's remaining slots are skipped and it resumes on the next local day (a skip is not a failure).
+   * - At most maxFiresPerSweep model-made check-ins are queued per sweep; the rest stay due for the next sweep. Host-authored ones
+   *   (a feature's own briefing) are outside the caps.
+   * - An interval below the policy floor (older rows) runs at the floor.
+   */
+  private orphanSessionsChecked = false;
+  fireDueCheckins(oneId: string, chatId: string, now = Date.now(), hold?: readonly string[], onCap?: (info: {checkinId: string; scope: "checkin" | "all"}) => void): number {
+    if (!this.orphanSessionsChecked) { this.orphanSessionsChecked = true; purgeOrphanCheckinSessions(this.db); }
     return this.db.transaction(() => {
-      let fired = 0;
-      const due = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND active=1 AND next_at<=? ORDER BY next_at LIMIT 20").all(oneId,now) as Array<Parameters<OneSupervisorStore["checkinRow"]>[0] & {id:string}>;
+      this.purgeExpiredProposals(oneId, now);
+      let fired = 0, modelFired = 0;
+      const due = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND active=1 AND next_at<=? ORDER BY next_at LIMIT 20").all(oneId,now) as Array<Parameters<OneSupervisorStore["checkinRow"]>[0] & {id:string;instruction:string;command_id:string}>;
+      if (!due.length) return 0;
+      const dayStart = new Date(now); dayStart.setHours(0,0,0,0);
+      const dayStartIso = dayStart.toISOString();
+      const nextDay = new Date(now); nextDay.setHours(24,0,0,0);
+      const countFired = (taskId?: string): number => taskId
+        ? (this.db.prepare("SELECT COUNT(*) AS n FROM one_supervisor_notices WHERE one_id=? AND task_id=? AND run_id LIKE 'fire:%' AND created_at>=?").get(oneId,taskId,dayStartIso) as {n:number}).n
+        : (this.db.prepare(`SELECT c.instruction AS instruction FROM one_supervisor_notices n JOIN one_supervisor_checkins c ON n.task_id='checkin:'||c.id
+            WHERE n.one_id=? AND n.run_id LIKE 'fire:%' AND n.created_at>=?`).all(oneId,dayStartIso) as Array<{instruction:string}>).filter(r => !isHostCheckinInstruction(r.instruction)).length;
+      let firedToday: number | null = null;
       for (const row of due) {
         if (hold?.includes(row.id)) continue;
+        let cadence: OneCheckinCadence;
         let next: number;
-        try { next = nextCheckinAt(JSON.parse(row.cadence_json) as OneCheckinCadence, now); } catch { this.cancelCheckin(oneId,row.id); continue; }
+        try {
+          cadence = JSON.parse(row.cadence_json) as OneCheckinCadence;
+          // Only a check-in the model made is held to the floor; a row from the host or the owner's UI runs the cadence it has.
+          const floored = this.modelMade(row.command_id) ? clampCheckinCadence(cadence) : { cadence, raisedFrom: null };
+          if (floored.raisedFrom !== null) this.db.prepare("UPDATE one_supervisor_checkins SET cadence_json=? WHERE id=?").run(JSON.stringify(floored.cadence), row.id); // the list shows what runs
+          cadence = floored.cadence;
+          next = nextCheckinAt(cadence, now);
+        } catch { this.cancelCheckin(oneId,row.id); continue; }
+        const advance = (to: number): void => { this.db.prepare("UPDATE one_supervisor_checkins SET next_at=? WHERE id=? AND next_at=?").run(to,row.id,row.next_at); };
+        const host = isHostCheckinInstruction(row.instruction);
+        // The caps and the missed-slot skip are for check-ins the model made; one the owner set in the UI (or a host briefing) runs as set.
+        const capped = !host && this.modelMade(row.command_id);
+        if (capped && now - row.next_at > checkinStaleAllowanceMs(cadence)) { advance(next); continue; }
+        if (capped) {
+          if (modelFired >= ONE_CHECKIN_POLICY.maxFiresPerSweep) continue;
+          firedToday ??= countFired();
+          const perCheckinHit = countFired(`checkin:${row.id}`) >= ONE_CHECKIN_POLICY.perCheckinPerDay;
+          if (perCheckinHit || firedToday >= ONE_CHECKIN_POLICY.perOnePerDay) {
+            // The first cap of the local day is told to the owner once (a skipped notice row is the once-a-day mark; it is never reviewed).
+            const day = `${dayStart.getFullYear()}-${dayStart.getMonth() + 1}-${dayStart.getDate()}`;
+            if (this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
+              VALUES(?,?,?,?,?,'skipped',?,'skipped','daily_cap_told')`).run(supervisorHash([oneId,"checkin-cap",day]),oneId,"checkin-cap",chatId,`cap:${day}`,new Date(now).toISOString()).changes === 1) {
+              try { onCap?.({checkinId: row.id, scope: perCheckinHit ? "checkin" : "all"}); } catch { /* telling the owner is best effort */ }
+            }
+            advance(cadence.kind === "daily" ? nextCheckinAt(cadence, nextDay.getTime() - 1) : nextDay.getTime());
+            continue;
+          }
+        }
         const moved = this.db.prepare("UPDATE one_supervisor_checkins SET next_at=?,last_fired_at=?,fires=fires+1 WHERE id=? AND next_at=?").run(next,now,row.id,row.next_at).changes;
         if (moved !== 1) continue;
         const firing = `fire:${row.next_at}`;
         this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state)
           VALUES(?,?,?,?,?,'scheduled',?,'pending')`).run(supervisorHash([oneId,`checkin:${row.id}`,firing]),oneId,`checkin:${row.id}`,chatId,firing,new Date(now).toISOString());
         fired += 1;
+        if (!host) { if (capped) modelFired += 1; if (firedToday !== null) firedToday += 1; }
       }
       return fired;
     }).immediate();
@@ -307,12 +444,18 @@ export class OneSupervisorStore {
   /** Binds up to `limit` unreviewed results to one review run. The run id is the generation: a notice is claimed once,
    * and only that run's settlement may close it, so a late or replayed outcome cannot report it twice (D07). */
   claimReview(oneId: string, reviewRunId: string, limit = 5): SupervisorNotice[] {
-    const ids = (this.db.prepare("SELECT id FROM one_supervisor_notices WHERE one_id=? AND review_state='pending' ORDER BY rowid LIMIT ?")
-      .all(oneId, Math.max(1, Math.min(5, limit))) as Array<{id: string}>).map(row => row.id);
+    // A review is either check-ins (read-only, no computer use) or finished work (may follow up): the first waiting notice picks the class.
+    const first = this.db.prepare("SELECT state FROM one_supervisor_notices WHERE one_id=? AND review_state='pending' ORDER BY rowid LIMIT 1").get(oneId) as {state: string} | undefined;
+    const ids = (this.db.prepare("SELECT id FROM one_supervisor_notices WHERE one_id=? AND review_state='pending' AND ((state='scheduled')=?) ORDER BY rowid LIMIT ?")
+      .all(oneId, first?.state === "scheduled" ? 1 : 0, first?.state === "scheduled" ? 1 : Math.max(1, Math.min(5, limit))) as Array<{id: string}>).map(row => row.id);
     for (const id of ids) {
       this.db.prepare(`UPDATE one_supervisor_notices SET review_state='claimed',review_run_id=?,review_attempts=review_attempts+1
         WHERE id=? AND review_state='pending'`).run(reviewRunId, id);
     }
+    return this.claimedByReview(reviewRunId);
+  }
+  /** The results this review run holds (claimed and not yet closed). */
+  claimedByReview(reviewRunId: string): SupervisorNotice[] {
     return this.db.prepare(`SELECT id,task_id AS taskId,origin_chat_id AS originChatId,run_id AS runId,state,created_at AS createdAt
       FROM one_supervisor_notices WHERE review_run_id=? AND review_state='claimed' ORDER BY rowid`).all(reviewRunId) as SupervisorNotice[];
   }

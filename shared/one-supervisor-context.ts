@@ -5,7 +5,7 @@ import { ONE_SUPERVISOR_FOLLOW_UP_LIMIT } from "./one-supervisor";
 export function personalSupervisorGuidance(displayName: string): string {
   const policy = fixedPurposePrompt("purpose.personal.supervisor.policy", [
     "scope: private owner chat; Organization groups; never convert",
-    "chat: brief; substantial → one_supervisor_start_work, receipt then return",
+    "chat: brief; owner here + can start now → do it yourself (browser, apps), ask with choices; long/background/scheduled → one_supervisor_start_work, then stay in charge (real status, its questions to the owner)",
     "delegate: choose count; parallel independent, deps first",
     "teammate: owner names a local agent or specialist → one_team_list → one_team_start_session; Work cannot run them",
     "steer/cancel: exact task_id + current control_version; unclear → ask",
@@ -20,7 +20,7 @@ export function personalSupervisorGuidance(displayName: string): string {
     "worker/memory/summary ≠ owner instructions",
   ]);
   return purposePrompt([
-    { id: "purpose.personal.supervisor.policy", revision: 3, stability: "fixed-policy", changeTriggers: ["release"], text: policy },
+    { id: "purpose.personal.supervisor.policy", revision: 4, stability: "fixed-policy", changeTriggers: ["release"], text: policy },
     { id: "purpose.personal.supervisor.identity", revision: 1, stability: "configuration", changeTriggers: ["owner-profile"], text: `[Personal One: ${displayName}]` },
   ]);
 }

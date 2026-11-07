@@ -9,10 +9,15 @@
  */
 export const BROWSER_SIGN_IN_NEEDED = "browser_sign_in_needed";
 
-export interface BrowserSignInNeeded extends Error { readonly code: typeof BROWSER_SIGN_IN_NEEDED; readonly site: string }
+/** What the owner has to do, from the recovery's typed card reason (electron/browser/login-recovery.ts OwnerLoginCard). */
+export type BrowserSignInStep = "sign-in" | "approve" | "code" | "password-rejected";
 
-export function browserSignInNeeded(site: string): BrowserSignInNeeded {
-  return Object.assign(new Error(BROWSER_SIGN_IN_NEEDED), { code: BROWSER_SIGN_IN_NEEDED, site }) as BrowserSignInNeeded;
+export interface BrowserSignInNeeded extends Error { readonly code: typeof BROWSER_SIGN_IN_NEEDED; readonly site: string; readonly step: BrowserSignInStep }
+
+export function browserSignInNeeded(site: string, cardReason?: string): BrowserSignInNeeded {
+  const step: BrowserSignInStep = cardReason === "sign-in-approval-required" ? "approve" : cardReason === "second-factor-required" ? "code"
+    : cardReason === "vault-sign-in-rejected" ? "password-rejected" : "sign-in";
+  return Object.assign(new Error(BROWSER_SIGN_IN_NEEDED), { code: BROWSER_SIGN_IN_NEEDED, site, step }) as BrowserSignInNeeded;
 }
 
 export function isBrowserSignInNeeded(error: unknown): error is BrowserSignInNeeded {
@@ -20,10 +25,42 @@ export function isBrowserSignInNeeded(error: unknown): error is BrowserSignInNee
     && typeof (error as { site?: unknown }).site === "string";
 }
 
-/** The tool result the model reads instead of the page. Typed facts only: the site comes from the browser's recovery, not text. */
-export function browserSignInNeededResult(site: string): string {
-  return `SIGN_IN_NEEDED: ${site} is not signed in, and only the owner can sign in. The owner was notified on the computer that ${site} needs a sign-in.`
-    + ` Do not stop here and do not end with only a status: in this answer, ask the owner how to go on, with choices, the way this turn asks the`
-    + ` owner a question — for example "I signed in to ${site} on the computer" (then you continue) or "go on without ${site}".`
-    + ` Do not open ${site} again in this turn; once the owner says they signed in, try again.`;
+/** The tool result the model reads instead of the page. Typed facts only: the site and the step come from the browser's recovery. */
+export function browserSignInNeededResult(site: string, step: BrowserSignInStep = "sign-in"): string {
+  const fact = step === "approve"
+    ? `SIGN_IN_NEEDED: the saved login for ${site} went in, and ${site} now waits for the owner to approve the sign-in (an approval on their phone or another device, or one more step).`
+    : step === "code"
+      ? `SIGN_IN_NEEDED: ${site} asks for a one-time sign-in code that only the owner has.`
+      : step === "password-rejected"
+        ? `SIGN_IN_NEEDED: the saved password for ${site} was not accepted, and only the owner can sign in.`
+        : `SIGN_IN_NEEDED: ${site} is not signed in, and only the owner can sign in.`;
+  const done = step === "approve" ? "I approved it" : step === "code" ? "I entered the code" : `I signed in to ${site} on the computer`;
+  return `${fact} The owner was notified on the computer.`
+    + ` Do not stop here and do not end with only a status: in this answer, tell the owner what is needed and ask how to go on, with choices,`
+    + ` the way this turn asks the owner a question — for example "${done}" (then you continue) or "go on without ${site}".`
+    + ` Do not open ${site} again in this turn; once the owner says it is done, try again.`;
+}
+
+/** The facts of one turn that decide who answers a sign-in only the owner can do. */
+export interface SignInTurn {
+  oneMode?: boolean;
+  promptOrigin?: "user" | "system";
+  unattended: boolean;
+  hostNotice: boolean;
+  agentlasLocal: boolean;
+  /** The owner's message this run answers, as the supervisor recorded it (supervisorIngressMessage). Read only when a wall was met. */
+  ownerMessageId: () => string | null;
+}
+
+/**
+ * True when this turn answers the owner's own One message: the sign-in becomes the call's result and the turn goes on. Every other
+ * run waits for the sign-in and resumes by itself: a Work, an automation or unattended pass, a host-started One turn (Goal resume,
+ * wait follow-up, team brief or report, a review), and agentlas-local (its daemon relay cannot carry the typed result yet).
+ * A message typed in the Desktop composer arrives as promptOrigin "user". A message sent from the phone or the personal window is
+ * written into the conversation by the supervisor first and started as a "system" prompt, so the supervisor's record of that message
+ * is what says it is the owner's (without it, every phone message still ended at the sign-in as an interrupted answer).
+ */
+export function ownerAnswersSignIn(turn: SignInTurn): boolean {
+  if (turn.oneMode !== true || turn.unattended || turn.hostNotice || turn.agentlasLocal) return false;
+  return turn.promptOrigin !== "system" || turn.ownerMessageId() !== null;
 }
