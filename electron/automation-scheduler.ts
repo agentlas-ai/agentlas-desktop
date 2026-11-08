@@ -238,13 +238,7 @@ import {
 import { notifyTelegramAutomationDone } from "./telegram/connect";
 import {
   MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS,
-  automationWatchdogError,
-  automationWatchdogOwnerText,
   awaitAutomationRunnerWithAbortGrace,
-  createAutomationWatchdogState,
-  evaluateAutomationWatchdog,
-  noteAutomationWatchdogEvent,
-  type AutomationWatchdogDecision,
 } from "./automation-watchdog";
 import { recoverStaleAutomationRuns } from "./store/db";
 import { detectRuntimes } from "./runtime/detect";
@@ -580,19 +574,15 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
 // 자동화 챗에 system 메시지로 표출, (3) 자동화 enabled 상태는 유지,
 // (4) 수리 못 한 반복 실패는 System Optimizer(LLM) 원샷 진단 발사.
 const OPTIMIZER_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000; // 자동화당 최대 6시간에 1회
-// 무활동 워치독 — 러너 이벤트가 이 시간 이상 끊기면 행(hang)으로 판정하고 자동 중단한다.
-// 프로세스가 안 죽는 행은 실패 이벤트가 영영 안 와서 닥터/피드백 경로에 도달하지 못한다
-// (실사고: Run now 후 중간 무반응 — 사용자는 30분 auto-abort까지 아무것도 못 봄).
-// 긴 단일 툴 실행(빌드 등)도 있으므로 짧게 잡지 않는다. env로 조정 가능.
+// Legacy diagnostic values retained for compatibility. Graph node timeouts
+// are enforced by runGraph; these limits do not stop a graph.
 const STALL_INACTIVITY_MS = boundedIntegerEnv(
   "AGENTLAS_AUTOMATION_STALL_MS",
   8 * 60 * 1000,
   30_000,
   2 * 60 * 60 * 1000,
 );
-// Tool start/result events let us distinguish a dead idle runner from a healthy long-running
-// single tool. Only the latter gets the wider silence budget; globally raising the idle timeout
-// would merely hide real hangs for longer.
+// Legacy active-tool limit, retained in scheduler diagnostics for compatibility.
 const ACTIVE_TOOL_STALL_MS = boundedIntegerEnv(
   "AGENTLAS_AUTOMATION_ACTIVE_TOOL_STALL_MS",
   Math.max(STALL_INACTIVITY_MS, 20 * 60 * 1000),
@@ -661,7 +651,7 @@ export function assertAutomationRemovalSafe(automationId: string): void {
   }
 }
 
-/** 운영 진단/결정론 회귀용 — 실제로 적용된 유한 스케줄러 한계를 노출한다. */
+/** Scheduler diagnostics; legacy stall values are retained for compatibility and do not stop graph runs. */
 export function automationSchedulerDiagnostics(): {
   maxConcurrentAutomations: number;
   stallInactivityMs: number;
@@ -1305,13 +1295,6 @@ async function runOne(
   /** The last agent node's goal-loop signals (continue marker, completion claim). */
   /** 호스트가 센 "제자리 돌기" — 걸리면 이 실행만 멈추고 기계 표식으로 남긴다(사용자 중지와 구분). */
   let noProgressLoop: NoProgressDecision | null = null;
-  /**
-   * 무활동 감시견이 멈춘 실행(P0-7, A12). 감시견은 예전에 **사용자의 중지 손잡이(controller)**를 당겼다 — 그래서
-   * 바깥 catch 가 `controller.signal.aborted` 를 보고 "사용자가 멈췄다(automation_stopped_by_user)"로 적었고,
-   * 복구 경로(`!controller.signal.aborted` 조건)도 건너뛰었다. 이제 감시견은 자기 손잡이를 당기고 타입 원인을 남긴다.
-   */
-  let watchdogStall: AutomationWatchdogDecision | null = null;
-  const watchdogController = new AbortController();
   let graphRunAttempted = false;
   /** 커널/러너가 예외 없이 끝까지 돌았는가(판정 전) — 자기 보류 판정의 호스트 사실. */
   let runCompleted = false;
@@ -1598,13 +1581,9 @@ async function runOne(
           console.error("[automation] pending run input could not be bound:", error);
         }
       }
-      // 무활동 워치독 — 그래프 경로도 이벤트가 끊기면 행으로 판정한다(노드 자체 타임아웃
-      // 1800s보다 훨씬 먼저 사용자에게 실패 피드백이 가도록).
-      const graphWatchdog = createAutomationWatchdogState();
+      // Each graph node owns its timeout; preserve the owner's stop signal.
       const graphProgressGuard = createNoProgressGuard({ observationMode: "completed" });
-      // 사용자 중지(controller)와 섞지 않는다 — 섞으면 catch 가 "사용자가 멈췄다"로 적는다.
-      const noProgressController = new AbortController();
-      const graphSignal = AbortSignal.any([controller.signal, noProgressController.signal, watchdogController.signal]);
+      const graphSignal = controller.signal;
       let lastDurableHeartbeatAt = 0;
       const persistGraphHeartbeat = (at = Date.now()): void => {
         if (at - lastDurableHeartbeatAt < RUN_HEARTBEAT_INTERVAL_MS) return;
@@ -1612,23 +1591,9 @@ async function runOne(
         try {
           touchGraphRun(runId, new Date(at));
         } catch {
-          // The live watchdog remains authoritative for this process. A later
-          // event/tick can retry the durable cross-process heartbeat.
+          // A later event can retry the durable cross-process heartbeat.
         }
       };
-      let graphStall: AutomationWatchdogDecision | null = null;
-      const graphStallTimer = setInterval(() => {
-        const decision = evaluateAutomationWatchdog(
-          graphWatchdog,
-          STALL_INACTIVITY_MS,
-          ACTIVE_TOOL_STALL_MS,
-        );
-        if (decision.stalled) {
-          graphStall = decision;
-          watchdogStall = decision;
-          // Each node owns its timeout. A Graph check cannot abort all siblings.
-        }
-      }, 30_000);
       let result;
       let acceptGraphEvents = true;
       try {
@@ -1675,7 +1640,6 @@ async function runOne(
               // boundary. Do not revive watchdog/live state after this run has been finalized.
               if (!acceptGraphEvents) return;
               recordAutomationQuotaReset(runId, a.id, ev);
-              noteAutomationWatchdogEvent(graphWatchdog, ev);
               persistGraphHeartbeat();
               if (!noProgressLoop) {
                 const loop = noteNoProgressEvent(graphProgressGuard, ev);
@@ -1719,15 +1683,10 @@ async function runOne(
         });
         result = await awaitAutomationRunnerWithAbortGrace(graphRun, graphSignal);
       } catch (err) {
-        // abort로 runGraph가 던지면 스톨 메시지로 바꿔 닥터 timeout 분류에 태운다.
-        if (graphStall) {
-          throw new Error(automationWatchdogError(graphStall));
-        }
         if (noProgressLoop && !controller.signal.aborted) console.warn("[automation] Graph no-progress remains advisory");
         throw err;
       } finally {
         acceptGraphEvents = false;
-        clearInterval(graphStallTimer);
       }
       // 그래프가 중단 신호를 받고도 결과를 돌려준 경우 — 멈춘 이유는 호스트가 센 반복이다.
       if (noProgressLoop) tryRecordRunEvent({ runId, automationId: a.id, kind: "graph_no_progress_advisory", payload: { code: AUTOMATION_NO_PROGRESS_LOOP } });
@@ -1735,14 +1694,12 @@ async function runOne(
         failure && typeof failure === "object" && "code" in failure
         && (failure as { code?: unknown }).code === "MUTATION_UNVERIFIED",
       );
-      const graphError = graphStall
-        ? automationWatchdogError(graphStall)
-        : result.error ?? null;
+      const graphError = result.error ?? null;
       unconfirmedFacts = unconfirmedEffectFacts(result.nodeFailures, a.graph);
-      runStatus = result.ok && !graphStall ? "ok" : "error";
+      runStatus = result.ok ? "ok" : "error";
       runError = graphError;
-      graphStepNotes = result.ok && !graphStall && result.stepNotes?.length ? result.stepNotes.join("\n").slice(0, 1_000) : null;
-      if (!result.ok && !graphStall && result.automaticRetry?.allowed === false) {
+      graphStepNotes = result.ok && result.stepNotes?.length ? result.stepNotes.join("\n").slice(0, 1_000) : null;
+      if (!result.ok && result.automaticRetry?.allowed === false) {
         automaticRetryStopped = result.automaticRetry;
         tryRecordRunEvent({ runId, automationId: a.id, nodeId: result.automaticRetry.nodeId, kind: "automation_retry_stopped",
           payload: { schemaVersion: "agentlas.automation-retry-stop.v1", reasonCode: result.automaticRetry.reasonCode,
@@ -1872,21 +1829,17 @@ async function runOne(
     // 없다. 원문을 따로 붙들어 둔다.
     machineError = requiresGraphReconciliation(machineError) ? machineError : rawError;
     const loopStopped = noProgressLoop !== null && !a.graph && !controller.signal.aborted;
-    const watchdogStopped = watchdogStall !== null && !controller.signal.aborted;
     let classified = workspaceFailure
       ? { status: "needs_input" as const, reasonCode: workspaceFailure.code, reason: automationWorkspaceOwnerText(workspaceFailure, currentUiLocale()) }
       : appClosedControllers.has(controller)
       ? appCloseClassification()
       : controller.signal.aborted
       ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: L("직접 멈춘 실행이에요. 다시 실행하면 멈춘 자리부터 이어서 해요.", "You stopped this run. Run it again to continue from where it stopped.") }
-      : watchdogStopped
-      // 호스트가 잰 사실(무활동 시간)이다 — 판정 모델에게 묻지 않고, 사용자 중지로도 적지 않는다. 복구 경로로 간다.
-      ? { status: "error" as const, reasonCode: AUTOMATION_WATCHDOG_STALL, reason: automationWatchdogOwnerText(watchdogStall!, currentUiLocale()) }
       : loopStopped
       // 판정 모델에게 묻지 않는다 — 호스트가 센 사실이고, 표식(reasonCode)이 다음 실행의 핸드오프를 연다.
       ? { status: "error" as const, reasonCode: AUTOMATION_NO_PROGRESS_LOOP, reason: noProgressLoopOwnerText(noProgressLoop!, currentUiLocale()) }
       : { status: "error" as const, reasonCode: "automation_judgment_pending", reason: rawError };
-    if (!workspaceFailure && !controller.signal.aborted && !watchdogStopped && !loopStopped && !appClosedControllers.has(controller)) {
+    if (!workspaceFailure && !controller.signal.aborted && !loopStopped && !appClosedControllers.has(controller)) {
       const failedRunId = currentRunId;
       pendingClassifications.push(() => classifyInBackground({ automation: a, runId: failedRunId, phase: "failure", sourceSignal: controller.signal,
         assertCurrent: assertGoalCurrent, classify: signal => classifyAccountedAutomationFailure(a, failedRunId, rawError, signal) }));

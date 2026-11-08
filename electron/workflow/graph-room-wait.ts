@@ -55,8 +55,9 @@ export async function claimRoomWhenFree<T>(input: {
   const longWaitMs = input.longWaitMs ?? ROOM_WAIT_LONG_MS;
   const sleep = input.sleep ?? ((ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
     const timer = setTimeout(() => { signal.removeEventListener("abort", stop); resolve(); }, ms);
-    const stop = (): void => { clearTimeout(timer); resolve(); };
+    const stop = (): void => { clearTimeout(timer); signal.removeEventListener("abort", stop); resolve(); };
     signal.addEventListener("abort", stop, { once: true });
+    if (signal.aborted) stop();
   }));
   const key = holdKey(input.runId, input.nodeId);
   const startedAt = now();
@@ -64,6 +65,10 @@ export async function claimRoomWhenFree<T>(input: {
   let reportedLong = false;
   try {
     for (;;) {
+      if (input.signal.aborted) {
+        if (waitingCode) input.onWait?.({ phase: "gave-up", code: waitingCode, waitedMs: now() - startedAt });
+        input.signal.throwIfAborted();
+      }
       try {
         const lease = input.claim();
         if (waitingCode) input.onWait?.({ phase: "claimed", code: waitingCode, waitedMs: now() - startedAt });

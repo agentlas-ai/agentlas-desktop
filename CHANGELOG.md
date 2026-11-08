@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.137 — 2026-11-08
+
+- Graph runs: stop waiting for a busy conversation as soon as work is cancelled and preserve the final result when a stalled run recovers.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.136 — 2026-11-08
 
 - Settings: navigate Desktop, project, Finance, and One settings in a menu and content workspace while keeping conversations and drafts available. Mobile pairing can be opened inside settings.

@@ -5469,6 +5469,9 @@ export async function runGraph(
                   payload: { phase, code, waitedMs, chatId: nodeChat.id } });
               } });
             try {
+            // A synchronous claim/onWait may have completed just as the node stopped.
+            // Keep this check inside the lease's finally so the room is released.
+            nodeAbort.signal.throwIfAborted();
             if (!dryRun && !graphTeamContinuation) {
               const scope = commonScope(node, prompt);
               commonScopes.set(node.id, scope);
