@@ -5,7 +5,7 @@ import type { RuntimeSelection } from "./types";
  * (owner decision 2026-10-21). Pure, with no Electron, Node or renderer imports, so Main, the daemon and the renderers
  * read the same rules.
  *
- * - "own-lane" is the default and changes nothing: Hope runs the runtime the owner chose (subscription CLI, API key,
+ * - "own-lane" runs the runtime the owner chose (subscription CLI, API key,
  *   local model).
  * - "agentlas" runs Hope's conversation turns on the Agentlas serving endpoint at the light tier. It takes effect only
  *   after the owner has confirmed the one-time notice (`notice === "confirmed"`), because it sends the conversation to
@@ -88,9 +88,9 @@ export function oneFrontEffective(state: Pick<OneFrontState, "front" | "notice">
   return state.front === "agentlas" && state.notice === "confirmed";
 }
 
-/** The stored default: nothing changes until the owner opts in. */
+/** New accounts are offered Agentlas first; it takes effect only after the notice is confirmed. */
 export function defaultOneFrontState(now = new Date()): OneFrontState {
-  return { contractVersion: ONE_FRONT_CONTRACT_VERSION, version: 1, front: "own-lane", notice: "unseen", fallback: null,
+  return { contractVersion: ONE_FRONT_CONTRACT_VERSION, version: 1, front: "agentlas", notice: "unseen", fallback: null,
     updatedAt: now.toISOString() };
 }
 
@@ -136,27 +136,27 @@ type Locale = "ko" | "en";
  * ("Claude", "Codex" …) when the caller knows it; the sentence reads without it.
  */
 export function oneFrontFallbackCopy(cause: OneFrontFallbackCause, locale: Locale, own?: string): { lead: string; next: string } {
-  const to = own?.trim() ? (locale === "ko" ? `${own.trim()}(내 CLI)` : `${own.trim()} (your CLI)`) : (locale === "ko" ? "내 CLI" : "your own CLI");
+  const to = locale === "ko" ? `설정한 실행 환경${own?.trim() ? ` (${own.trim()})` : ""}으` : `your configured runtime${own?.trim() ? ` (${own.trim()})` : ""}`;
   if (locale === "ko") {
     switch (cause) {
-      case "credits": return { lead: `현재 무료 사용량과 크레딧으로 처리할 수 없어, 이번 답변은 ${to}로 처리했습니다.`,
+      case "credits": return { lead: `현재 무료 사용량과 크레딧으로 처리할 수 없어, 이번 답변을 ${to}로 이어갑니다.`,
         next: "빠른 답변을 다시 사용하려면 사용 가능한 무료 사용량이나 크레딧을 확인해 주세요." };
-      case "signin": return { lead: `Agentlas에 로그인되어 있지 않아, 이번 답변은 ${to}로 처리했습니다.`,
+      case "signin": return { lead: `Agentlas에 로그인되어 있지 않아, 이번 답변을 ${to}로 이어갑니다.`,
         next: "다시 로그인하면 빠른 답변을 자동으로 다시 씁니다." };
-      case "busy": return { lead: `Agentlas 서버가 잠시 붐벼서, 이번 답변은 ${to}로 처리했습니다.`,
+      case "busy": return { lead: `Agentlas 서버가 잠시 붐벼서, 이번 답변을 ${to}로 이어갑니다.`,
         next: "잠시 뒤에는 빠른 답변을 자동으로 다시 씁니다." };
-      default: return { lead: `Agentlas 서버에 연결하지 못해, 이번 답변은 ${to}로 처리했습니다.`,
+      default: return { lead: `Agentlas 서버에 연결하지 못해, 이번 답변을 ${to}로 이어갑니다.`,
         next: "연결이 돌아오면 빠른 답변을 자동으로 다시 씁니다." };
     }
   }
   switch (cause) {
-    case "credits": return { lead: `Available free use and credits could not cover this reply, so it went to ${to}.`,
+    case "credits": return { lead: `Available free use and credits cannot cover this reply, so it is continuing on ${to}.`,
       next: "To use fast replies again, check your available free use or credits." };
-    case "signin": return { lead: `You are not signed in to Agentlas, so this reply went to ${to}.`,
+    case "signin": return { lead: `You are not signed in to Agentlas, so this reply is continuing on ${to}.`,
       next: "Fast replies come back on their own once you sign in again." };
-    case "busy": return { lead: `The Agentlas server is busy for a moment, so this reply went to ${to}.`,
+    case "busy": return { lead: `The Agentlas server is busy for a moment, so this reply is continuing on ${to}.`,
       next: "Fast replies come back on their own in a moment." };
-    default: return { lead: `The Agentlas server could not be reached, so this reply went to ${to}.`,
+    default: return { lead: `The Agentlas server could not be reached, so this reply is continuing on ${to}.`,
       next: "Fast replies come back on their own once the connection returns." };
   }
 }

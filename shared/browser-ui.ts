@@ -19,6 +19,8 @@ export interface BrowserUiResult {
   reason?: BrowserUiReason;
 }
 
+export type BrowserActionResult = BrowserUiResult | { ok: false; reason: "outcome-unconfirmed" };
+
 export interface BrowserNativeSessionReadiness {
   schemaVersion: typeof BROWSER_UI_SCHEMA_VERSION;
   state: "ready" | "confirmed-empty" | "unknown";
@@ -87,7 +89,7 @@ export interface BrowserUiAPI {
   zoom: (input: BrowserUiTarget & { action: "get" | "in" | "out" | "reset" }) => Promise<BrowserZoomResult>;
   devTools: (input: BrowserUiTarget & { open: boolean }) => Promise<BrowserUiResult>;
   deviceEmulation: (input: BrowserUiTarget & { preset: BrowserDevicePreset | "get" }) => Promise<BrowserDeviceEmulationResult>;
-  print: (input: BrowserUiTarget) => Promise<BrowserUiResult>;
+  print: (input: BrowserUiTarget) => Promise<BrowserActionResult>;
   saveScreenshot: (input: BrowserUiTarget) => Promise<BrowserUiResult & { fileName?: string }>;
   history: (input: BrowserUiTarget & { limit?: number }) => Promise<BrowserUiResult & { entries: BrowserHistoryEntry[] }>;
   historyAll: (input: { taskScopeId: string; query?: string; limit?: number }) => Promise<BrowserUiResult & { entries: BrowserDurableHistoryEntry[] }>;

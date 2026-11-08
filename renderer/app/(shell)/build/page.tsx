@@ -16,6 +16,7 @@ import {
 } from "@/components/Icon";
 import { BuildLaunch, BuildResources } from "@/components/build/BuildLaunch";
 import styles from "@/components/build/BuildWorkbench.module.css";
+import connectionsStyles from "@/components/build/BuildConnectionsSettings.module.css";
 import { IconArrowLeft } from "@/components/Icon";
 import { grantForDroppedFile, grantForPastedAttachment, ipc } from "@/lib/ipc";
 import { MediaStrip, mediaKindOf, type MediaStripItem } from "@/components/media/MediaStrip";
@@ -290,6 +291,11 @@ export default function BuildPage() {
   const [reattaching, setReattaching] = useState(() => getBuildSnapshot().phase === "idle" && !getBuildSnapshot().request);
   const [reattachProblem, setReattachProblem] = useState(false);
   const [screen, setScreen] = useState<"home" | "intro" | "editor">(() => getBuildSnapshot().phase === "idle" && !getBuildSnapshot().request ? "home" : "editor");
+  const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const connectionsBack = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (connectionsOpen) connectionsBack.current?.focus(); }, [connectionsOpen]);
+  const [connectionsTarget, setConnectionsTarget] = useState<HTMLDivElement | null>(null);
+  const [connectionsCloseRequest, setConnectionsCloseRequest] = useState(0);
   const [inspectorTab, setInspectorTab] = useState<"settings" | "preview">("settings");
   const [status, setStatus] = useState<HephaestusStatus | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
@@ -757,7 +763,7 @@ export default function BuildPage() {
   return (
     <div className={`rd build-root ${styles.root}`} data-build-screen={screen}>
       <div className="titlebar-drag build-window-drag" />
-      <main className="build-scroll">
+      <main className="build-scroll" hidden={connectionsOpen}>
           <Suspense fallback={null}>
             <OneSuggestionReviewHandoffBanner surface="build" locale={locale} onReviewSeed={applyOneReviewSeed} />
           </Suspense>
@@ -1122,7 +1128,7 @@ export default function BuildPage() {
           </header>
 
           <KeyStatusBanner mode="banner" relevantProvider={selectedRuntimeProviderLabel} relevantRuntime={selectedRuntimeBannerRuntime} />
-          <BuildResources ko={ko} canAttach={phase === "idle" && !editingLocked} canConfigure={!editingLocked && !reattaching} onStop={busy ? cancelBuild : undefined} onAttachFolder={() => void attachFolder()} registered={result && registered ? registeredEntity : null} />
+          <BuildResources connectionsActive={connectionsOpen} connectionsTarget={connectionsTarget} onConnectionsOpenChange={setConnectionsOpen} connectionsCloseRequest={connectionsCloseRequest} ko={ko} canAttach={phase === "idle" && !editingLocked} canConfigure={!editingLocked && !reattaching} onStop={busy ? cancelBuild : undefined} onAttachFolder={() => void attachFolder()} registered={result && registered ? registeredEntity : null} />
 
 
             <div className="build-card build-composer" data-tour-id="build.request">
@@ -1389,6 +1395,10 @@ export default function BuildPage() {
           </div>
         </div>}
       </main>
+      <section className={connectionsStyles.screen} hidden={!connectionsOpen} aria-label={ko ? "서비스 연결 설정" : "Service connection settings"}>
+        <header className={connectionsStyles.header}><button ref={connectionsBack} className="titlebar-nodrag" type="button" onClick={() => setConnectionsCloseRequest(value => value + 1)}>{ko ? "← 제작으로 돌아가기" : "← Back to Build"}</button><h1>{ko ? "서비스 연결" : "Service connections"}</h1></header>
+        <div className={connectionsStyles.layout}><nav aria-label={ko ? "설정 메뉴" : "Settings menu"}><span aria-current="page">{ko ? "서비스 연결" : "Service connections"}</span></nav><div className={connectionsStyles.content} ref={setConnectionsTarget} /></div>
+      </section>
       <CloudSaveChoiceDialog
         open={Boolean(cloudSaveChoice && (cloudSaveChoice.status === "pending" || cloudSaveChoice.status === "presented" || cloudSaveChoice.status === "uploading"))}
         choiceId={cloudSaveChoice?.id ?? ""}

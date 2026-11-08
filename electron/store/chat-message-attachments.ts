@@ -593,6 +593,11 @@ export function chatFileImages(chatId:string,groupId?:string):ImageAttachment[] 
  * before; a larger group is shown from its files alone (no second copy of hundreds of megabytes, and nothing is refused).
  */
 export function chatFileDisplayImages(chatId:string,groupId?:string,inlineImages:readonly ImageAttachment[]=[]):ImageAttachment[] {
+  return chatFileDisplayImageCopies(chatId, groupId, inlineImages).map(copy => copy.image);
+}
+
+/** The exact source ID travels only with a copy produced here, never inferred from image bytes. */
+export function chatFileDisplayImageCopies(chatId:string,groupId?:string,inlineImages:readonly ImageAttachment[]=[]):Array<{image:ImageAttachment; fileId:string}> {
   if (!groupId) return [];
   const files=listChatFileSnapshot({chatId,groupId});
   const pictures=files.filter(item=>ALLOWED_IMAGE_TYPES.has(item.mediaType));
@@ -600,7 +605,26 @@ export function chatFileDisplayImages(chatId:string,groupId?:string,inlineImages
   if (files.length+inlineImages.length>ONE_ATTACHMENT_LEGACY_LIMITS.maxCount
     || pictures.some(item=>item.size>ONE_ATTACHMENT_LEGACY_LIMITS.maxImageBytes)
     || pictures.reduce((sum,item)=>sum+item.size,0)+inlineBytes>ONE_ATTACHMENT_LEGACY_LIMITS.maxTotalBytes) return [];
-  return chatFileImages(chatId,groupId);
+  const inputs=workChatFileInputs(chatId,groupId);
+  return pictures.map(item => {
+    const source=inputs.find(input=>input.id===item.id);
+    if (!source) throw new Error("chat_file_image_copy_mismatch");
+    return { fileId:item.id, image:{name:item.name,mediaType:item.mediaType as ImageAttachment["mediaType"],data:readWorkChatFileEntry(source,source.entries[0]).toString("base64")} };
+  });
+}
+
+/** Read only host-recorded provenance. Rows predating it intentionally have no aliases. */
+export function chatMessageFileCopyIds(chatId: string, messageId: string): Map<string,string> {
+  const db=getDb();
+  const tables=db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name IN ('chat_message_file_copies','chat_file_message_bindings')").get() as {n:number};
+  if (tables.n !== 2) return new Map();
+  const rows=db.prepare(`SELECT c.image_id,c.file_id FROM chat_message_file_copies c
+    JOIN chat_messages m ON m.id=c.message_id AND m.chat_id=? AND m.role='user'
+    JOIN chat_message_attachments a ON a.id=c.image_id AND a.message_id=m.id AND a.chat_id=m.chat_id
+    JOIN chat_file_items f ON f.id=c.file_id AND f.chat_id=m.chat_id
+    JOIN chat_file_message_bindings b ON b.message_id=m.id AND b.chat_id=m.chat_id AND b.group_id=f.group_id
+    WHERE m.id=? AND a.sha256=f.sha256 AND a.size_bytes=f.size_bytes AND a.media_type=f.media_type`).all(chatId,messageId) as Array<{image_id:string;file_id:string}>;
+  return new Map(rows.map(row=>[row.image_id,row.file_id]));
 }
 
 /**
@@ -862,12 +886,20 @@ export function readBoundChatMessageAttachment(input: {
     || !input.chatId
     || input.chatId.length > 256
   ) return null;
-  const row = getDb().prepare(
+  const read = getDb().prepare(
     `SELECT a.id, a.message_id, a.media_type, a.size_bytes, a.sha256, a.data
        FROM chat_message_attachments a
        JOIN chat_messages m ON m.id = a.message_id AND m.chat_id = a.chat_id
       WHERE a.id = ? AND a.message_id = ? AND a.chat_id = ?`,
-  ).get(input.attachmentId, input.messageId, input.chatId) as AttachmentRow | undefined;
+  );
+  let row = read.get(input.attachmentId, input.messageId, input.chatId) as AttachmentRow | undefined;
+  if (!row) {
+    // A projected file alias keeps the original inline image's full-quality
+    // response, but only when host-recorded provenance proves this exact pair.
+    const copies = chatMessageFileCopyIds(input.chatId, input.messageId);
+    const original = [...copies].find(([, fileId]) => fileId === input.attachmentId)?.[0];
+    if (original) row = read.get(original, input.messageId, input.chatId) as AttachmentRow | undefined;
+  }
   if (!row || !ALLOWED_IMAGE_TYPES.has(row.media_type) || !Buffer.isBuffer(row.data)) return null;
   if (row.data.length !== row.size_bytes || row.data.length > ONE_ATTACHMENT_LIMITS.maxImageBytes) return null;
   const digest = createHash("sha256").update(row.data).digest("hex");

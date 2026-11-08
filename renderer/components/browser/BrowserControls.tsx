@@ -95,8 +95,9 @@ export function BrowserControls({ target, ko, onImport, onNavigate, onPrepareOve
     };
     try {
       const result = await call(api, current);
-      if (!result.ok && result.reason !== "dialog-cancelled") await showNotice(ko ? "이 작업을 완료하지 못했습니다. 다시 시도하세요." : "This action did not finish. Try again.");
-    } catch { await showNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection."); }
+      if (!result.ok && result.reason === "outcome-unconfirmed") await showNotice(ko ? "작업 결과를 확인하지 못했습니다. 현재 상태를 확인해 주세요." : "The action outcome could not be confirmed. Check its current state.");
+      else if (!result.ok && result.reason !== "dialog-cancelled") await showNotice(ko ? "이 작업을 완료하지 못했습니다. 다시 시도하세요." : "This action did not finish. Try again.");
+    } catch { await showNotice(ko ? "작업 결과를 확인하지 못했습니다. 현재 상태를 확인해 주세요." : "The action outcome could not be confirmed. Check its current state."); }
   };
   const refreshDownloads = useCallback(async () => {
     const current = targetRef.current;

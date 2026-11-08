@@ -7,6 +7,25 @@
   padding: 24px;
 }
 
+.inlineLayer {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  background: var(--paper);
+}
+
+.inlineCard {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 960px);
+  min-height: 0;
+  padding: 24px clamp(16px, 4vw, 40px);
+  color: var(--ink);
+  outline: none;
+}
+
 .scrim {
   position: absolute;
   inset: 0;

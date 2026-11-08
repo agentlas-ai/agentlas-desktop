@@ -500,6 +500,16 @@ export interface KeyStepState {
   result: PluginPickerResult;
 }
 
+export type KeySavePhase = "before-write" | "write-started";
+export function keySaveInterruptionText(phase: KeySavePhase, ko: boolean): string {
+  return phase === "before-write"
+    ? ko ? "인증 상태가 바뀌어 저장이 중단됐습니다. 이번 저장에서는 아직 요청을 보내지 않았습니다." : "The authentication state changed, so saving stopped. No save request was sent in this attempt."
+    : ko ? "인증 상태가 바뀌어 남은 저장이 중단됐습니다. 이미 시작한 저장의 결과를 확인해 주세요." : "The authentication state changed, so remaining saves stopped. Check the result of any save that already started.";
+}
+export function keySaveSessionIdentity(session: { signedIn: boolean; accountFingerprint?: string; workspaceId?: string }): string | null {
+  return session.signedIn ? session.accountFingerprint && session.workspaceId ? JSON.stringify([session.accountFingerprint, session.workspaceId]) : null : "signed-out";
+}
+
 /**
  * 설치된 서버가 요구하는 환경변수를 받는다.
  *
@@ -514,6 +524,9 @@ export function KeyStep({
   chrome = "modal",
   onDone,
   onAdvance,
+  onSavePhase,
+  onSaveInterrupted,
+  isSaveOwnerCurrent,
 }: {
   ko: boolean;
   state: KeyStepState;
@@ -521,6 +534,9 @@ export function KeyStep({
   chrome?: "modal" | "inline";
   onDone: (result: PluginPickerResult) => void;
   onAdvance: (next: KeyStepState) => void;
+  onSavePhase?: (phase: KeySavePhase | null) => void;
+  onSaveInterrupted?: (phase: KeySavePhase) => void;
+  isSaveOwnerCurrent?: () => boolean;
 }) {
   const api = ipc();
   const current = state.queue[state.index];
@@ -536,14 +552,12 @@ export function KeyStep({
     let identity: string | null | undefined;
     let events = 0;
     let disposed = false;
-    const identify = (session: { signedIn: boolean; accountFingerprint?: string; workspaceId?: string }) =>
-      session.signedIn ? session.accountFingerprint && session.workspaceId ? JSON.stringify([session.accountFingerprint, session.workspaceId]) : null : "signed-out";
-    void window.agentlas?.auth?.getSession?.().then(session => {
-      if (!disposed && events === 0) identity = identify(session);
+    if (!isSaveOwnerCurrent) void window.agentlas?.auth?.getSession?.().then(session => {
+      if (!disposed && events === 0) identity = keySaveSessionIdentity(session);
     }).catch(() => undefined);
-    const unsubscribe = ipc()?.auth?.onSessionChanged?.(session => {
+    const unsubscribe = isSaveOwnerCurrent ? undefined : ipc()?.auth?.onSessionChanged?.(session => {
       events += 1;
-      const next = identify(session);
+      const next = keySaveSessionIdentity(session);
       const changed = identity === undefined || next === null || identity !== next;
       identity = next;
       if (!changed) return;
@@ -552,9 +566,13 @@ export function KeyStep({
       setBusy(false);
       setValues({});
       setError(null);
-      if (interrupted) setNotice(interrupted.issued ? "write-started" : "before-write");
+      if (interrupted) {
+        const phase = interrupted.issued ? "write-started" : "before-write";
+        if (onSaveInterrupted) onSaveInterrupted(phase); else setNotice(phase);
+        onSavePhase?.(null);
+      }
     });
-    return () => { disposed = true; mounted.current = false; activeSave.current = null; unsubscribe?.(); };
+    return () => { disposed = true; mounted.current = false; activeSave.current = null; onSavePhase?.(null); unsubscribe?.(); };
   }, []);
 
   // 다음 플러그인으로 넘어갈 때 앞 항목의 입력값이 남아 있으면 안 된다.
@@ -579,10 +597,11 @@ export function KeyStep({
   };
 
   const save = async () => {
-    if (!api || !mounted.current || activeSave.current) return;
+    if (!api || !mounted.current || activeSave.current || (isSaveOwnerCurrent && !isSaveOwnerCurrent())) return;
     const saveToken = { issued: false };
     activeSave.current = saveToken;
-    const isCurrent = () => mounted.current && activeSave.current === saveToken;
+    onSavePhase?.("before-write");
+    const isCurrent = () => mounted.current && activeSave.current === saveToken && (isSaveOwnerCurrent?.() ?? true);
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -600,14 +619,15 @@ export function KeyStep({
         for (const target of connectionKeySaveTargets(servers, current.serverIds, key)) {
           if (!isCurrent()) return;
           saveToken.issued = true;
+          onSavePhase?.("write-started");
           await api.env.set(target, value);
         }
       }
-      if (isCurrent()) advance(deferred);
+      if (isCurrent()) { onSavePhase?.(null); advance(deferred); }
     } catch (saveError) {
       if (isCurrent()) setError(saveError instanceof Error ? saveError.message : "save failed");
     } finally {
-      if (isCurrent()) { activeSave.current = null; setBusy(false); }
+      if (isCurrent()) { activeSave.current = null; onSavePhase?.(null); setBusy(false); }
     }
   };
 
@@ -646,9 +666,7 @@ export function KeyStep({
 
       {error && <p className={styles.error}>{error}</p>}
 
-      {notice && <p className={styles.keyNote} role="status">{notice === "before-write"
-        ? ko ? "인증 상태가 바뀌어 저장이 중단됐습니다. 이번 저장에서는 아직 요청을 보내지 않았습니다." : "The authentication state changed, so saving stopped. No save request was sent in this attempt."
-        : ko ? "인증 상태가 바뀌어 남은 저장이 중단됐습니다. 이미 시작한 저장의 결과를 확인해 주세요." : "The authentication state changed, so remaining saves stopped. Check the result of any save that already started."}</p>}
+      {notice && <p className={styles.keyNote} role="status">{keySaveInterruptionText(notice, ko)}</p>}
 
       <p className={styles.keyNote}>
         {ko

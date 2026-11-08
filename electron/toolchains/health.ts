@@ -9,7 +9,7 @@
 import { getDb } from "../store/db";
 import type { ToolchainAsset, ToolchainCallReceipt } from "../../shared/toolchain-asset";
 import { TOOLCHAIN_HEALTH_POLICY, healthOutcomeFrom, healthVerdict, type HealthLedger, type HealthVerdict } from "../../shared/toolchain-health";
-import { getToolchainAsset } from "./assets";
+import { getToolchainAsset, TOOLCHAIN_ASSET_META_PREFIX } from "./assets";
 
 const HEALTH = "toolchain.health.v1:";
 const key = (id: string, version: number) => `${HEALTH}${id}@${version}`;
@@ -44,21 +44,35 @@ export function recordToolchainHealthOutcome(receipt: Readonly<ToolchainCallRece
   try {
     const outcome = healthOutcomeFrom(receipt);
     if (!outcome) return;
-    const asset = getToolchainAsset(receipt.toolchainId);
-    const release = asset?.versions.find(item => item.version === receipt.version);
-    // Only the stable version of a callable asset has a record.
-    if (!asset || !release || asset.status !== "callable" || asset.stableVersion !== receipt.version || release.contentHash !== receipt.contentHash) return;
-    const prior = readToolchainHealth(asset.id, release.version);
-    const base: HealthLedger = prior && prior.contentHash === release.contentHash ? prior
-      : { schema: "agentlas.toolchain-health.v1", toolchainId: asset.id, version: release.version, contentHash: release.contentHash, outcomes: [], updatedAt: "" };
-    if (base.outcomes.some(item => item.callId === outcome.callId)) return;
-    const outcomes = [...base.outcomes, outcome].slice(-TOOLCHAIN_HEALTH_POLICY.keep);
-    const verdict = healthVerdict(outcomes);
-    const pull = verdict.state === "degraded" && base.pulledBack !== true;
-    const ledger: HealthLedger = { ...base, outcomes, ...(pull ? { pulledBack: true as const } : {}), updatedAt: new Date().toISOString() };
-    getDb().prepare("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)").run(key(asset.id, release.version), JSON.stringify(ledger));
-    if (!pull) return;
-    console.info(`[toolchain-health] pulled back ${asset.id}@${release.version}: ${verdict.reason} (${verdict.failures} of ${verdict.counted} counted calls failed, ${verdict.ignored} environment failures ignored)`);
+    // Validate the potentially large release outside the write lock. Compare its
+    // exact stored snapshot inside the transaction before applying the outcome.
+    const db = getDb();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const asset = getToolchainAsset(receipt.toolchainId);
+      const release = asset?.versions.find(item => item.version === receipt.version);
+      if (!asset || !release || asset.status !== "callable" || asset.stableVersion !== receipt.version || release.contentHash !== receipt.contentHash) return;
+      const keyOfAsset = `${TOOLCHAIN_ASSET_META_PREFIX}${asset.id}`;
+      const snapshot = db.prepare("SELECT value FROM meta WHERE key=?").get(keyOfAsset) as { value: string } | undefined;
+      if (!snapshot || JSON.stringify(JSON.parse(snapshot.value)) !== JSON.stringify(asset)) continue;
+      const updated = db.transaction(() => {
+        const current = db.prepare("SELECT value FROM meta WHERE key=?").get(keyOfAsset) as { value: string } | undefined;
+        if (!current || current.value !== snapshot.value) return { changed: true as const };
+        const prior = readToolchainHealth(asset.id, release.version);
+        const base: HealthLedger = prior && prior.contentHash === release.contentHash ? prior
+          : { schema: "agentlas.toolchain-health.v1", toolchainId: asset.id, version: release.version, contentHash: release.contentHash, outcomes: [], updatedAt: "" };
+        if (base.outcomes.some(item => item.callId === outcome.callId)) return { changed: false as const };
+        const outcomes = [...base.outcomes, outcome].slice(-TOOLCHAIN_HEALTH_POLICY.keep);
+        const verdict = healthVerdict(outcomes);
+        const pull = verdict.state === "degraded" && base.pulledBack !== true;
+        const ledger: HealthLedger = { ...base, outcomes, ...(pull ? { pulledBack: true as const } : {}), updatedAt: new Date().toISOString() };
+        db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)").run(key(asset.id, release.version), JSON.stringify(ledger));
+        return { changed: false as const, ...(pull ? { verdict } : {}) };
+      }).immediate();
+      if (updated.changed) continue;
+      if (updated.verdict) console.info(`[toolchain-health] pulled back ${asset.id}@${release.version}: ${updated.verdict.reason} (${updated.verdict.failures} of ${updated.verdict.counted} counted calls failed, ${updated.verdict.ignored} environment failures ignored)`);
+      return;
+    }
+    console.warn("[toolchain-health] outcome not recorded: asset changed during verification");
   } catch (error) {
     console.warn("[toolchain-health] outcome not recorded:", error instanceof Error ? error.message : error);
   }

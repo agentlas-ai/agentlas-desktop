@@ -345,3 +345,14 @@
 .cadenceSwitch[data-on=true]>span{transform:translateX(16px)}
 .cadenceSwitch:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
 @media (prefers-reduced-motion:reduce){.cadenceSwitch,.cadenceSwitch>span{transition:none}}
+
+/* Settings are a page in the same workspace, preserving the conversation underneath. */
+.conversation[hidden],.outputPanel[hidden],.settingsScreen[hidden]{display:none}
+.settingsScreen{display:flex;flex:1;min-width:0;min-height:0;background:var(--im-bg);color:var(--im-ink)}
+.settingsNav{display:flex;flex:0 0 220px;flex-direction:column;gap:5px;padding:28px 12px;background:var(--im-side);border-right:1px solid var(--im-hair);overflow:auto}
+.settingsNav h1{font-size:18px;margin:16px 8px}
+.settingsNav button{border:0;border-radius:9px;background:transparent;padding:10px;text-align:left;cursor:pointer}
+.settingsNav button[aria-current="page"]{background:color-mix(in srgb,var(--im-ink) 10%,transparent);font-weight:600}
+.settingsContent{flex:1;min-width:0;overflow:auto;padding:28px clamp(16px,4vw,48px)}
+.settingsContent>div[hidden]{display:none}
+@media(max-width:600px){.settingsScreen{flex-direction:column}.settingsNav{flex:0 0 auto;flex-direction:row;align-items:center;overflow:auto;padding:8px;border-right:0;border-bottom:1px solid var(--im-hair)}.settingsNav h1{display:none}.settingsNav button{white-space:nowrap}.settingsContent{padding:18px 16px}}

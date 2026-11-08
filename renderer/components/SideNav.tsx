@@ -98,7 +98,7 @@ export function SideNav({
   const scienceReady = scienceCoreReady(scienceSuite);
   const scienceInstalled = scienceCoreInstalled(scienceSuite);
   const searchGenerationRef = useRef(0);
-  // 텔레그램 항목은 이동이 아니라 팝업이라, 활성 표시가 pathname 이 아니라 팝업 상태를 따른다.
+  // 텔레그램은 셸 안의 연결 화면이므로 pathname 대신 열림 상태를 따른다.
   const telegramOneDialogOpen = useSyncExternalStore(
     subscribeTelegramOneDialog,
     () => getTelegramOneDialogSnapshot().open,
@@ -214,7 +214,7 @@ export function SideNav({
       {
         id: "connect",
         label: t("nav.group.connect"),
-        // 텔레그램은 라우트가 아니라 팝업이므로, 그룹 자체는 실재하는 /browser 를 가리킨다
+        // 텔레그램은 별도 라우트가 아니므로, 그룹 자체는 실재하는 /browser 를 가리킨다
         // (접힌 레일에서는 그룹 머리만 링크로 렌더된다).
         href: "/browser",
         icon: IconAtSign,
@@ -513,7 +513,7 @@ export function SideNav({
                             type="button"
                             className="sidenav-subitem"
                             data-active={active2 ? "true" : "false"}
-                            onClick={() => onSelect()}
+                            onClick={() => { onSelect(); if (compactViewport) setCompactOpen(false); }}
                           >
                             <span className="sidenav-sub-dot" />
                             <span className="sidenav-label">{sub.label}</span>

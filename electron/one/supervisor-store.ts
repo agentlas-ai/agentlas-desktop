@@ -441,13 +441,20 @@ export class OneSupervisorStore {
   noticeDetail(id: string): string | null {
     return (this.db.prepare("SELECT detail FROM one_supervisor_notices WHERE id=?").get(id) as {detail:string|null}|undefined)?.detail ?? null;
   }
+  /** The same bounded batch claimReview will select, without claiming it. */
+  reviewCandidates(oneId: string, limit = 5, allowedScienceIds?: string[], offset = 0): SupervisorNotice[] {
+    const allowed = [...new Set(allowedScienceIds ?? [])].slice(0, 5);
+    const scienceGate = allowedScienceIds === undefined ? "" : ` AND (task_id NOT LIKE 'science-turn:%' OR state<>'completed'${allowed.length ? ` OR id IN (${allowed.map(() => "?").join(",")})` : ""})`;
+    const first = this.db.prepare(`SELECT state FROM one_supervisor_notices WHERE one_id=? AND review_state='pending'${scienceGate} ORDER BY rowid LIMIT 1`).get(oneId, ...allowed) as {state: string} | undefined;
+    return this.db.prepare(`SELECT id,task_id AS taskId,origin_chat_id AS originChatId,run_id AS runId,state,created_at AS createdAt
+      FROM one_supervisor_notices WHERE one_id=? AND review_state='pending'${scienceGate} AND ((state='scheduled')=?) ORDER BY rowid LIMIT ? OFFSET ?`)
+      .all(oneId, ...allowed, first?.state === "scheduled" ? 1 : 0, first?.state === "scheduled" ? 1 : Math.max(1, Math.min(5, limit)), Math.max(0, Math.min(1000, Math.floor(offset)))) as SupervisorNotice[];
+  }
   /** Binds up to `limit` unreviewed results to one review run. The run id is the generation: a notice is claimed once,
    * and only that run's settlement may close it, so a late or replayed outcome cannot report it twice (D07). */
-  claimReview(oneId: string, reviewRunId: string, limit = 5): SupervisorNotice[] {
-    // A review is either check-ins (read-only, no computer use) or finished work (may follow up): the first waiting notice picks the class.
-    const first = this.db.prepare("SELECT state FROM one_supervisor_notices WHERE one_id=? AND review_state='pending' ORDER BY rowid LIMIT 1").get(oneId) as {state: string} | undefined;
-    const ids = (this.db.prepare("SELECT id FROM one_supervisor_notices WHERE one_id=? AND review_state='pending' AND ((state='scheduled')=?) ORDER BY rowid LIMIT ?")
-      .all(oneId, first?.state === "scheduled" ? 1 : 0, first?.state === "scheduled" ? 1 : Math.max(1, Math.min(5, limit))) as Array<{id: string}>).map(row => row.id);
+  claimReview(oneId: string, reviewRunId: string, limit = 5, allowedScienceIds?: string[]): SupervisorNotice[] {
+    // A review is either check-ins or finished work; the first eligible notice picks the class.
+    const ids = this.reviewCandidates(oneId, limit, allowedScienceIds).map(row => row.id);
     for (const id of ids) {
       this.db.prepare(`UPDATE one_supervisor_notices SET review_state='claimed',review_run_id=?,review_attempts=review_attempts+1
         WHERE id=? AND review_state='pending'`).run(reviewRunId, id);

@@ -1158,6 +1158,24 @@ export function appendChatMessage(
     if (options?.images?.length) {
       const persisted = persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
       persistedImageUrls = persisted.map((item) => item.url);
+      const copies = options.legacyFileCopyIds;
+      if (copies?.length) {
+        if (!options.fileGroupId || copies.length > persisted.length || new Set(copies).size !== copies.length) throw new Error("chat_file_copy_invalid");
+        db.exec(`CREATE TABLE IF NOT EXISTS chat_message_file_copies (
+          message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+          image_id TEXT NOT NULL REFERENCES chat_message_attachments(id) ON DELETE CASCADE,
+          file_id TEXT NOT NULL REFERENCES chat_file_items(id) ON DELETE CASCADE,
+          PRIMARY KEY(message_id, image_id), UNIQUE(message_id, file_id))`);
+        const bind = db.prepare(`INSERT INTO chat_message_file_copies(message_id,image_id,file_id)
+          SELECT m.id,a.id,f.id FROM chat_messages m
+          JOIN chat_message_attachments a ON a.message_id=m.id AND a.chat_id=m.chat_id
+          JOIN chat_file_items f ON f.chat_id=m.chat_id AND f.group_id=? AND f.id=?
+          WHERE m.id=? AND m.chat_id=? AND a.id=? AND a.sha256=f.sha256 AND a.size_bytes=f.size_bytes AND a.media_type=f.media_type`);
+        const offset = persisted.length - copies.length;
+        copies.forEach((fileId, index) => {
+          if (bind.run(options.fileGroupId, fileId, id, chatId, persisted[offset + index].id).changes !== 1) throw new Error("chat_file_copy_mismatch");
+        });
+      }
     }
     db.prepare("UPDATE chats SET updated_at = ?, used_at = COALESCE(used_at, ?) WHERE id = ?").run(now, now, chatId);
   });
@@ -1191,6 +1209,8 @@ export function appendChatMessage(
 type ChatMessageAppendOptions = {
   /** Exact group selected by the owner at intake; never inferred from message text. */
   fileGroupId?: string;
+  /** Host-created trailing compatibility copies, in exact file order; never supplied by a client. */
+  legacyFileCopyIds?: readonly string[];
   images?: readonly ImageAttachment[];
   /**
    * A screen pack's composed prompt (PLAN Science S6): what the runtime took, not what the pack's screen shows; the pack's own

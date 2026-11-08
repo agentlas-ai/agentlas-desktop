@@ -225,6 +225,10 @@ export class OneSupervisorService {
   private chatSendTimer: ReturnType<typeof setTimeout> | undefined;
   private chatSendTimerAt = 0;
   private chatSendDraining = false;
+  private scienceReviewPrepared: {oneId: string; chatId: string; key: string; tasks: SupervisorTask[]; allowedScienceIds: string[]; bindings: Array<{taskId:string;runId:string;commandId:string;payloadJson:string;requestState:string}>; ownerToken: ReturnType<OneSupervisorOwner["current"]> | undefined} | null = null;
+  private scienceReviewPreparing = false;
+  private readonly scienceReviewReads = new Map<string, {promise:Promise<SupervisorTask | null>; expired:boolean}>();
+  private scienceReviewCursor: {oneId:string;offset:number} | null = null;
   private readonly unsubscribe: () => void;
   private readonly stopWakes: Array<() => void> = [];
   private signalFloorSeen = 0;
@@ -248,6 +252,8 @@ export class OneSupervisorService {
   }
   close(): void {
     this.closed = true;
+    this.scienceReviewPrepared = null;
+    this.scienceReviewReads.clear();
     if (this.retryTimer) clearTimeout(this.retryTimer); this.retryTimer = undefined;
     if (this.chatSendTimer) clearTimeout(this.chatSendTimer); this.chatSendTimer = undefined;
     this.unsubscribe();
@@ -1001,14 +1007,39 @@ export class OneSupervisorService {
     try {
       const {oneId,chatId} = this.binding();
       // Never release a live chat lock or infer process death from an Abort signal.
-      if (this.deps.runtime.attach(chatId)) return;
+      if (this.deps.runtime.attach(chatId)) { this.scienceReviewPrepared = null; return; }
       // A held start is never replayed, and it no longer blocks every later message: once recover() found no live run
       // for it, the chat lock above is the guard. (Before, one unconfirmed start silenced One until a reset.)
-      if (this.deps.store.pending(oneId).some(row => row.kind === "reply" && !ordinaryNativeMarker(row) && ["dispatching","accepted"].includes(row.state))) return;
+      if (this.deps.store.pending(oneId).some(row => row.kind === "reply" && !ordinaryNativeMarker(row) && ["dispatching","accepted"].includes(row.state))) { this.scienceReviewPrepared = null; return; }
       const stored = this.deps.store.list(oneId,"stored").filter(item => item.kind === "reply" && !ordinaryNativeMarker(item));
+      if (stored.length) this.scienceReviewPrepared = null;
       // The owner's own messages go first; a review of finished delegations waits for them.
       // New review claims wait out a refused review's backoff (holdOffReviews) so its results keep their three attempts.
-      const row = stored.find(item => !isReview(item)) ?? stored[0] ?? (Date.now() < this.reviewHoldOffUntil ? null : this.queueReview(oneId, chatId));
+      let row: SupervisorRequestRow | null = stored.find(item => !isReview(item)) ?? stored[0] ?? null;
+      if (!row && Date.now() >= this.reviewHoldOffUntil) {
+        if (this.scienceReviewCursor?.oneId !== oneId) this.scienceReviewCursor = {oneId,offset:0};
+        const offset = this.scienceReviewCursor.offset;
+        const candidates = this.deps.store.reviewCandidates(oneId, 5, undefined, offset);
+        const key = this.reviewCandidateKey(candidates);
+        const needsScience = candidates.some(notice => notice.taskId.startsWith("science-turn:"));
+        if (needsScience) {
+          const prepared = this.scienceReviewPrepared;
+          if (this.deps.science?.turn && (!prepared || prepared.oneId !== oneId || prepared.chatId !== chatId || prepared.key !== key)) {
+            this.prepareScienceReview(oneId, chatId, key, candidates);
+            return;
+          }
+          row = this.queueReview(oneId, chatId, prepared?.tasks ?? [], key, prepared?.ownerToken, prepared?.bindings, prepared?.allowedScienceIds ?? [], offset);
+          const waitingForScience = !prepared || prepared.allowedScienceIds.length < candidates.filter(n => n.taskId.startsWith("science-turn:") && n.state === "completed").length;
+          const more = waitingForScience && candidates.length === 5 && offset < 1000;
+          this.scienceReviewCursor.offset = more ? offset + 5 : 0;
+          this.scienceReviewPrepared = null;
+          if (!row && this.deps.store.hasPendingReview(oneId)) this.armDrain(more || !waitingForScience ? 0 : 30_000);
+        } else {
+          this.scienceReviewCursor.offset = 0;
+          row = this.queueReview(oneId, chatId, [], undefined, undefined, [], []);
+          if (!row && this.deps.store.hasPendingReview(oneId)) this.armDrain(30_000);
+        }
+      }
       if (!row) return;
       // The owner stopped this reply (a Stop taken while its start was on its way, or before a restart brought it back): it is not started.
       if (row.run_id && this.replyWasStopped(row)) { this.withdrawStoppedReply(row); this.armDrain(0); return; }
@@ -1046,12 +1077,83 @@ export class OneSupervisorService {
   private frontSelection():RuntimeSelection|undefined {
     try {const front=this.deps.frontRuntime?.();return front ? this.deps.normalizeRuntimeSelection(front) ?? undefined : undefined;} catch {return undefined;}
   }
+  private reviewCandidateKey(notices: SupervisorNotice[]): string {
+    return JSON.stringify(notices.map(n => [n.id,n.taskId,n.runId,n.state,n.originChatId]));
+  }
+
+  /** Read only exact, already acknowledged Science turns for the batch about to be reviewed. */
+  private prepareScienceReview(oneId: string, chatId: string, key: string, notices: SupervisorNotice[]): void {
+    if (this.scienceReviewPreparing || !this.deps.science?.turn) return;
+    this.scienceReviewPreparing = true;
+    const ownerToken = this.deps.owner?.current();
+    void Promise.all(notices.filter(n => n.taskId.startsWith("science-turn:")).map(async notice => {
+      try {
+        const request = this.deps.store.db.prepare(`SELECT command_id,payload_json,state FROM one_supervisor_requests
+          WHERE one_id=? AND task_id=? AND run_id=? AND kind='science' AND state IN ('completed','failed','cancelled') ORDER BY rowid DESC LIMIT 1`)
+          .get(oneId, notice.taskId, notice.runId) as {command_id:string;payload_json:string;state:string} | undefined;
+        if (!request) return null;
+        const expectedState = notice.state === "completed" ? "completed" : notice.state === "cancelled" ? "cancelled" : "failed";
+        if (request.state !== expectedState) return null;
+        const payload = JSON.parse(request.payload_json) as {projectId?:string;conversationId?:string};
+        if (!payload.projectId) return null;
+        const readKey = supervisorHash([oneId,notice.taskId,notice.runId,request.command_id,request.payload_json,ownerToken?.ownerEpoch,ownerToken?.generation]);
+        let read = this.scienceReviewReads.get(readKey);
+        if (read?.expired) return null; // An older timed-out read is still outstanding; never consume its late answer.
+        if (!read) {
+          if (this.scienceReviewReads.size >= 100) return null;
+          const promise = Promise.resolve().then(() => this.deps.science!.turn!({projectId:payload.projectId!,turnId:notice.taskId.slice("science-turn:".length),
+            ...(payload.conversationId ? {conversationId:payload.conversationId} : {})}));
+          read = {promise,expired:false};
+          this.scienceReviewReads.set(readKey,read);
+          const entry = read;
+          void promise.then(() => { if (this.scienceReviewReads.get(readKey) === entry) this.scienceReviewReads.delete(readKey); },
+            () => { if (this.scienceReviewReads.get(readKey) === entry) this.scienceReviewReads.delete(readKey); });
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let task: SupervisorTask | null;
+        try {
+          const entry = read;
+          task = await Promise.race([entry.promise,
+            new Promise<null>(resolve => { timer = setTimeout(() => { entry.expired = true; resolve(null); }, 4000); timer.unref?.(); }),
+          ]);
+        } finally { if (timer) clearTimeout(timer); }
+        return task && task.surface === "science" && task.projectId === payload.projectId && task.taskId === notice.taskId
+          && task.runId === notice.runId && task.sourceCommandId === scienceRequestId(request.command_id) && task.state === notice.state
+          ? {task,noticeId:notice.id,taskId:notice.taskId,runId:notice.runId,commandId:request.command_id,payloadJson:request.payload_json,requestState:request.state} : null;
+      } catch { return null; }
+    })).then(tasks => {
+      if (this.closed) return;
+      if (ownerToken) this.deps.owner!.assertToken(ownerToken);
+      const current = this.binding();
+      if (current.oneId !== oneId || current.chatId !== chatId) return;
+      const bound = tasks.filter((item): item is NonNullable<typeof item> => item !== null);
+      this.scienceReviewPrepared = {oneId,chatId,key,ownerToken,tasks:bound.map(item => item.task),bindings:bound,
+        allowedScienceIds:bound.filter(item => typeof item.task.result === "string" && item.task.result.trim() !== "").map(item => item.noticeId)};
+    }).catch(() => {}).finally(() => {
+      this.scienceReviewPreparing = false;
+      if (!this.closed) {
+        if (!this.scienceReviewPrepared) this.armDrain(1000);
+        else { try { this.drain(); } catch { /* next wake retries */ } }
+      }
+    });
+  }
+
   /** Claims finished delegations into one host-started review turn. The claim and its request row commit together, so a
    * crash cannot strand a claimed result without the run that will close it (D06). */
-  private queueReview(oneId: string, chatId: string): SupervisorRequestRow | null {
+  private queueReview(oneId: string, chatId: string, scienceTasks: SupervisorTask[] = [], candidateKey?: string, ownerToken?: ReturnType<OneSupervisorOwner["current"]>, bindings: Array<{taskId:string;runId:string;commandId:string;payloadJson:string;requestState:string}> = [], allowedScienceIds?: string[], candidateOffset = 0): SupervisorRequestRow | null {
     return this.deps.store.db.transaction(() => {
+      if (candidateKey !== undefined && this.reviewCandidateKey(this.deps.store.reviewCandidates(oneId, 5, undefined, candidateOffset)) !== candidateKey) return null;
+      for (const binding of bindings) {
+        const row = this.deps.store.db.prepare(`SELECT payload_json FROM one_supervisor_requests
+          WHERE one_id=? AND task_id=? AND run_id=? AND command_id=? AND kind='science' AND state=?`)
+          .get(oneId,binding.taskId,binding.runId,binding.commandId,binding.requestState) as {payload_json:string} | undefined;
+        if (!row || row.payload_json !== binding.payloadJson) return null;
+      }
+      this.deps.assertAuthority?.();
+      if (ownerToken) this.deps.owner!.assertToken(ownerToken);
+      if (this.deps.identity().oneId !== oneId) throw supervisorError("supervisor_identity_changed");
       const runId = randomUUID();
-      const notices = this.deps.store.claimReview(oneId, runId);
+      const notices = this.deps.store.claimReview(oneId, runId, 5, allowedScienceIds);
       if (!notices.length) return null;
       const commandId = `review:${runId}`;
       // A check-in alone leaves no visible line in the conversation; only One's own message, if any, appears.
@@ -1066,7 +1168,7 @@ export class OneSupervisorService {
       // A check-in runs read-only (no writes, no computer use): the owner's check-in costs a whole One turn each time, and what it finds
       // that needs an action it offers to the owner in its report.
       return this.deps.store.receive({commandId,oneId,kind:"reply",originChatId:chatId,runId,
-        payload:{commandId,text:this.reviewPrompt(oneId,notices),notices:notices.map(notice=>notice.id),purpose,...(purpose === "one-checkin" ? {reportOnly:true} : {})}});
+        payload:{commandId,text:this.reviewPrompt(oneId,notices,scienceTasks),notices:notices.map(notice=>notice.id),purpose,...(purpose === "one-checkin" ? {reportOnly:true} : {})}});
     }).immediate();
   }
   /**
@@ -1219,8 +1321,8 @@ export class OneSupervisorService {
       : notice.taskId.startsWith("graph:") && notice.state === "completed"
         && parseGraphResultDetail(this.deps.store.noticeDetail(notice.id))?.reportInConversation === true);
   }
-  private reviewPrompt(oneId: string, notices: SupervisorNotice[]): string {
-    const tasks = new Map(this.deps.tasks().map(task => [task.taskId, task]));
+  private reviewPrompt(oneId: string, notices: SupervisorNotice[], scienceTasks: SupervisorTask[] = []): string {
+    const tasks = new Map(this.deps.tasks().concat(scienceTasks).map(task => [task.taskId, task]));
     const finished = notices.filter(notice => notice.state !== "scheduled" && notice.state !== "needs-owner");
     const isHostAlert = (notice: SupervisorNotice): boolean => notice.state === "needs-owner" && notice.taskId.startsWith("host:");
     const waiting = notices.filter(notice => notice.state === "needs-owner" && !isHostAlert(notice));

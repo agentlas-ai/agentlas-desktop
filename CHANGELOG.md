@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.138 — 2026-11-09
+
+- One: manage profile, capabilities, execution budgets and monitoring from settings while preserving drafts. Agentlas is offered for the front agent with an explicit choice before activation.
+- Connections: manage Telegram, automation and Build service connections in their settings; preserve and report interrupted key saves.
+- Research and files: include available Science results in One reviews and keep image copies tied to their original files.
+- Runtime: protect newer connection attempts from late events and preserve concurrent toolchain health updates.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.137 — 2026-11-08
 
 - Graph runs: stop waiting for a busy conversation as soon as work is cancelled and preserve the final result when a stalled run recovers.

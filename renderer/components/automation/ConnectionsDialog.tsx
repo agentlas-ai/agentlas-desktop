@@ -17,7 +17,7 @@
 // 전부 보여주고, 각각 옆에 "같은 일을 할 수 있는 다른 것"을 둔다.
 // 다만 **할 수 없는 것으로는 안 바꿔준다** — 검사는 main에서 한다(여기서 막는 게 아니라).
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -35,7 +35,7 @@ import { Select } from "@/components/Select";
 export function ConnectionsDialog({ automationId, locale, onClose }: {
   automationId: string;
   locale: "ko" | "en";
-  onClose: () => void;
+  onClose: (keySaveUnconfirmed?: boolean) => void;
 }) {
   const ko = locale === "ko";
   const [report, setReport] = useState<GraphConnectionReportShape | null>(null);
@@ -45,22 +45,53 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
   const [refusal, setRefusal] = useState<{ reason: string; nextAction: string } | null>(null);
   /** 방금 무엇이 무엇으로 바뀌었는지. 눌렀는데 아무 말이 없으면 사람은 안 바뀐 줄 안다. */
   const [swapped, setSwapped] = useState<string | null>(null);
+  const [section, setSection] = useState<"required" | "tools" | "agents">("required");
+  const sections = useRef<Record<string, HTMLElement | null>>({});
+  const page = useRef<HTMLElement>(null);
+  const keySave = useRef({ generation: 0, active: new Set<{ started: boolean }>() });
+  const readGeneration = useRef(0);
+  const ownerNotice = useRef(false);
+  const [keySaveNotice, setKeySaveNotice] = useState(false);
+  const [ownerRevision, setOwnerRevision] = useState(0);
+  const close = useCallback(() => {
+    const unconfirmed = ownerNotice.current || [...keySave.current.active].some(attempt => attempt.started);
+    keySave.current.generation++;
+    keySave.current.active.clear();
+    onClose(unconfirmed);
+  }, [onClose]);
+  useEffect(() => { page.current?.focus(); return () => { readGeneration.current++; keySave.current.generation++; keySave.current.active.clear(); }; }, []);
+  useEffect(() => {
+    let owner: string | null | undefined; let events = 0; let disposed = false;
+    const identify = (session: { signedIn: boolean; accountFingerprint?: string; workspaceId?: string }) => session.signedIn
+      ? (session.accountFingerprint && session.workspaceId ? JSON.stringify([session.accountFingerprint, session.workspaceId]) : null) : "signed-out";
+    const auth = ipc()?.auth;
+    void auth?.getSession?.().then(session => { if (!disposed && events === 0) owner = identify(session); }).catch(() => undefined);
+    const off = auth?.onSessionChanged?.(session => {
+      events++; const next = identify(session); const changed = owner === undefined || next === null || owner !== next; owner = next;
+      if (!changed) return;
+      if ([...keySave.current.active].some(attempt => attempt.started)) { ownerNotice.current = true; setKeySaveNotice(true); }
+      readGeneration.current++; keySave.current.generation++; keySave.current.active.clear();
+      setReport(null); setFailed(false); setRefusal(null); setSwapped(null); setOwnerRevision(value => value + 1);
+    });
+    return () => { disposed = true; off?.(); };
+  }, []);
 
   const load = useCallback(async () => {
+    const generation = ++readGeneration.current;
     const api = ipc();
     if (!api) { setFailed(true); setLoading(false); return; }
     setLoading(true);
     try {
-      setReport(await api.automations.connectionReport(automationId));
-      setFailed(false);
+      const value = await api.automations.connectionReport(automationId);
+      if (generation === readGeneration.current) { setReport(value); setFailed(false); }
     } catch {
-      setFailed(true);
+      if (generation === readGeneration.current) setFailed(true);
     } finally {
-      setLoading(false);
+      if (generation === readGeneration.current) setLoading(false);
     }
   }, [automationId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); }, [load, ownerRevision]);
 
   /*
    * ★대화상자는 Escape 로 닫혀야 한다 (실측 2026-09-08).
@@ -71,11 +102,11 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.stopPropagation();
-      onClose();
+      close();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [close]);
 
 
   /** 교체의 답을 한 곳에서 받는다 — 성공이면 새 상태로 갈아끼우고, 거절이면 사유를 띄운다. */
@@ -92,31 +123,24 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
   }, []);
 
   const ready = report?.activation.canActivate === true;
+  const currentOwner = keySave.current.generation;
 
   return (
-    <div
+    <section ref={page} tabIndex={-1}
       data-testid="connections-dialog"
-      className={styles.backdrop}
-      role="dialog"
-      aria-modal="true"
+      className={styles.page}
       aria-label={locale === "ko" ? "연결 설정" : "Connections"}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-      style={{
-        position: "fixed", inset: 0, zIndex: 400, display: "flex",
-        alignItems: "center", justifyContent: "center", padding: 24,
-        background: "var(--popup-backdrop, rgb(31 42 34 / 24%))",
-      }}
     >
+      <nav className={styles.sidebar} aria-label={ko ? "연결 설정 메뉴" : "Connection settings"}>
+        <button type="button" onClick={close}>{ko ? "← 자동화로 돌아가기" : "← Back to automation"}</button>
+        <strong>{ko ? "연결 설정" : "Connections"}</strong>
+        {([ ["required", ko ? "필요한 연결" : "Required connections"], ["tools", ko ? "도구 바꾸기" : "Change tools"], ["agents", ko ? "에이전트 바꾸기" : "Change agents"] ] as const).map(([id, label]) =>
+          <button key={id} type="button" aria-current={section === id ? "page" : undefined} disabled={id === "tools" ? !report?.bindings?.length : id === "agents" ? !report?.agents?.length : false} onClick={() => { setSection(id); sections.current[id]?.scrollIntoView({ block: "start" }); }}>{label}</button>)}
+      </nav>
       <section
         className={`titlebar-nodrag ${styles.dialog}`}
-        style={{
-          width: "var(--popup-3-width)", maxHeight: "82vh", overflowY: "auto",
-          background: "var(--paper)", border: "1px solid var(--paper-edge)",
-          borderRadius: "var(--radius-md)", padding: 20, display: "grid", gap: 14,
-          boxShadow: "var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d)",
-        }}
       >
-        <header className={styles.header}><span className={styles.mark} aria-hidden="true"><IconRoute size={22} /></span><div>
+        <header ref={node => { sections.current.required = node; }} className={styles.header}><span className={styles.mark} aria-hidden="true"><IconRoute size={22} /></span><div>
           <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>
             {ko ? "필요한 연결" : "Required connections"}
           </div>
@@ -124,8 +148,9 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
             {ko
               ? "계정별 도구와 에이전트"
               : "Accounts, tools and agents"}
-          </div></div><button type="button" className={styles.close} onClick={onClose} aria-label={ko ? "닫기" : "Close"}><IconClose size={17} /></button>
+        </div></div><button type="button" className={styles.close} onClick={close} aria-label={ko ? "닫기" : "Close"}><IconClose size={17} /></button>
         </header>
+        {keySaveNotice && <p role="status">{ko ? "계정이 바뀌어 나머지 키 저장을 중단했습니다. 이미 시작된 저장은 완료됐을 수 있으니 연결을 확인해 주세요." : "The account changed, so the remaining key saves were stopped. A started save may have completed; check the connection."}</p>}
 
         {loading ? (
           <div style={{ fontSize: 13, color: "var(--muted-deep)", display: "grid", gap: 5 }}>
@@ -149,6 +174,7 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
           </div>
         ) : (
           <div style={{ display: "grid", gap: 12 }}>
+            <div>
             {ready ? (
               <div data-testid="connections-ready" className={styles.state}><IconCheck size={24} aria-hidden="true" />
                 {ko
@@ -157,28 +183,29 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
               </div>
             ) : (
               (report?.tasks ?? []).map((task) => (
-                <ProviderCard key={task.group} task={task} ko={ko} onChanged={() => void load()} />
+                <ProviderCard key={`${ownerRevision}:${task.group}`} task={task} ko={ko} onChanged={() => { if (currentOwner === keySave.current.generation) void load(); }} keySave={keySave} />
               ))
             )}
+            </div>
 
             {/* 쓰는 것 전부 — 준비된 것도 여기 있어야 바꿀 수 있다. */}
             {(report?.bindings ?? []).length ? (
-              <SwapSection
+              <div ref={node => { sections.current.tools = node; }}><SwapSection key={ownerRevision}
                 automationId={automationId}
                 bindings={report?.bindings ?? []}
                 ko={ko}
-                onOutcome={applySwap}
-              />
+                onOutcome={outcome => { if (currentOwner === keySave.current.generation) applySwap(outcome); }}
+              /></div>
             ) : null}
 
             {(report?.agents ?? []).length ? (
-              <AgentSwapSection
+              <div ref={node => { sections.current.agents = node; }}><AgentSwapSection key={ownerRevision}
                 automationId={automationId}
                 agents={report?.agents ?? []}
                 ko={ko}
                 locale={locale}
-                onOutcome={applySwap}
-              />
+                onOutcome={outcome => { if (currentOwner === keySave.current.generation) applySwap(outcome); }}
+              /></div>
             ) : null}
 
             {swapped ? (
@@ -208,25 +235,27 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
         ) : null}
 
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button data-testid="connections-close" onClick={onClose} style={btn(false)}>
+          <button data-testid="connections-close" onClick={close} style={btn(false)}>
             {/* Cal.com "I'll connect my calendar later" — 나중에 하기는 있어야 한다.
                 다만 그때는 못 켠다는 사실이 위에 그대로 적혀 있다. */}
             {ready ? (ko ? "닫기" : "Close") : (ko ? "나중에 하기" : "I'll do this later")}
           </button>
         </div>
       </section>
-    </div>
+    </section>
   );
 }
 
-function ProviderCard({ task, ko, onChanged }: {
+function ProviderCard({ task, ko, onChanged, keySave }: {
   task: ProviderTask;
   ko: boolean;
   onChanged: () => void;
+  keySave: React.MutableRefObject<{ generation: number; active: Set<{ started: boolean }> }>;
 }) {
   const [busy, setBusy] = useState(false);
   const [keyFormOpen, setKeyFormOpen] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
+  const [saveError, setSaveError] = useState(false);
   const count = task.providers.reduce((sum, row) => sum + row.gaps.length, 0);
   const helpUrls = [...new Set(task.providers
     .map((row) => row.provider?.keyHelpUrl)
@@ -236,17 +265,26 @@ function ProviderCard({ task, ko, onChanged }: {
   async function saveKeys() {
     const api = ipc();
     if (!api) return;
+    const generation = keySave.current.generation;
+    const attempt = { started: false }; keySave.current.active.add(attempt);
+    const current = () => keySave.current.generation === generation;
+    setSaveError(false);
     setBusy(true);
     try {
       for (const key of task.missing.envKeys) {
+        if (!current()) return;
         const value = (values[key] ?? "").trim();
-        if (value) await api.env.set(key, value);
+        if (value) { attempt.started = true; await api.env.set(key, value); }
       }
+      if (!current()) return;
       setValues({});
       setKeyFormOpen(false);
       onChanged();
+    } catch {
+      if (current()) setSaveError(true);
     } finally {
-      setBusy(false);
+      keySave.current.active.delete(attempt);
+      if (current()) setBusy(false);
     }
   }
 
@@ -344,6 +382,7 @@ function ProviderCard({ task, ko, onChanged }: {
       {/* 키 방식 — 한 묶음이 요구하는 것을 **한 번에** 받는다. */}
       {keyFormOpen && task.authKind === "api-key" ? (
         <div data-testid={`connections-keyform-${task.group}`} style={{ display: "grid", gap: 6 }}>
+          {saveError && <p role="status">{ko ? "저장 결과를 확인하지 못했습니다. 일부 키가 저장됐을 수 있으니 다시 시도하기 전에 연결을 확인해 주세요." : "The save was not confirmed. Some keys may have been saved; check the connection before trying again."}</p>}
           {task.missing.envKeys.map((key) => (
             <label key={key} style={{ display: "grid", gap: 3 }}>
               <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{key}</span>

@@ -294,6 +294,7 @@ function killProcessTree(child: ChildProcess | null): void {
 export function createRuntimeConnector(deps: RuntimeConnectDeps) {
   const killTree = deps.killLogin ?? killProcessTree;
   const sessions = new Map<ConnectableRuntime, { snap: RuntimeConnectSnapshot; abort: AbortController; login: ChildProcess | null }>();
+  const failing = new WeakSet<object>();
   let seq = 0;
 
   function publish(kind: ConnectableRuntime, patch: Partial<RuntimeConnectSnapshot>): void {
@@ -309,95 +310,111 @@ export function createRuntimeConnector(deps: RuntimeConnectDeps) {
   }
   function fail(kind: ConnectableRuntime, reasonCode: RuntimeConnectReasonCode, message: string, extra?: Partial<RuntimeConnectSnapshot>): void {
     const s = sessions.get(kind);
-    if (!s || s.snap.phase !== "running") return;
-    killTree(s.login);
-    s.login = null;
-    publish(kind, { phase: "failed", reasonCode, message, endedAt: new Date().toISOString(), ...extra });
+    if (!s || s.snap.phase !== "running" || failing.has(s)) return;
+    failing.add(s);
+    try {
+      const login = s.login;
+      s.login = null;
+      killTree(login);
+      if (sessions.get(kind) === s && s.snap.phase === "running") publish(kind, { phase: "failed", reasonCode, message, endedAt: new Date().toISOString(), ...extra });
+    } finally { failing.delete(s); }
   }
 
   async function drive(kind: ConnectableRuntime, sessionId: string): Promise<void> {
     const plan = PLANS[kind];
-    const alive = () => sessions.get(kind)?.snap.sessionId === sessionId && sessions.get(kind)?.snap.phase === "running";
-    const s = () => sessions.get(kind)!;
+    const session = sessions.get(kind)!;
+    const alive = () => sessions.get(kind) === session && session.snap.sessionId === sessionId && session.snap.phase === "running";
+    const s = () => session;
+    const publishCurrent = (patch: Partial<RuntimeConnectSnapshot>) => { if (alive()) publish(kind, patch); };
+    const logCurrent = (line: string) => { if (alive()) log(kind, line); };
+    const failCurrent = (reason: RuntimeConnectReasonCode, message: string, extra?: Partial<RuntimeConnectSnapshot>) => {
+      if (alive()) fail(kind, reason, message, extra);
+    };
+    if (!alive()) return;
 
     // ① 확인 중
     let probe = await deps.probe(kind);
     if (!alive()) return;
-    publish(kind, { probe });
-    log(kind, `check: ${probe.evidence}`);
+    publishCurrent({ probe });
+    logCurrent(`check: ${probe.evidence}`);
     if (probe.state === "signed-in") {
-      publish(kind, { step: "done", phase: "done", endedAt: new Date().toISOString() });
+      publishCurrent({ step: "done", phase: "done", endedAt: new Date().toISOString() });
       return;
     }
 
     // ② 설치 중
     if (probe.state === "not-installed") {
       if (!plan.installable) {
-        publish(kind, { step: "installing" });
-        fail(kind, "install_manual_only", plan.manualInstall ?? "", { manualInstall: plan.manualInstall ?? null });
+        publishCurrent({ step: "installing" });
+        failCurrent("install_manual_only", plan.manualInstall ?? "", { manualInstall: plan.manualInstall ?? null });
         return;
       }
-      publish(kind, { step: "installing" });
-      const result = await deps.install(kind as InstallableCli, { onOutput: (line) => log(kind, line), signal: s().abort.signal });
+      publishCurrent({ step: "installing" });
+      if (!alive()) return;
+      const result = await deps.install(kind as InstallableCli, { onOutput: (line) => logCurrent(line), signal: s().abort.signal });
       if (!alive()) return;
       if (!result.ok) {
-        fail(kind, (result.reasonCode as RuntimeConnectReasonCode | undefined) ?? "install_failed", result.message, { manualInstall: result.command ?? null });
+        failCurrent((result.reasonCode as RuntimeConnectReasonCode | undefined) ?? "install_failed", result.message, { manualInstall: result.command ?? null });
         return;
       }
-      log(kind, result.message.replace(os.homedir(), "~"));
+      logCurrent(result.message.replace(os.homedir(), "~"));
+      if (!alive()) return;
       probe = await deps.probe(kind);
       if (!alive()) return;
-      publish(kind, { probe });
-      log(kind, `check: ${probe.evidence}`);
+      publishCurrent({ probe });
+      logCurrent(`check: ${probe.evidence}`);
       if (probe.state === "signed-in") {
-        publish(kind, { step: "done", phase: "done", endedAt: new Date().toISOString() });
+        publishCurrent({ step: "done", phase: "done", endedAt: new Date().toISOString() });
         return;
       }
       if (probe.state === "not-installed") {
-        fail(kind, "install_verify_failed", "installed binary not found after install");
+        failCurrent("install_verify_failed", "installed binary not found after install");
         return;
       }
     }
 
     // ③ 로그인 — 브라우저가 공식 로그인 페이지로 열린다.
-    publish(kind, { step: "login" });
+    publishCurrent({ step: "login" });
+    if (!alive()) return;
     let exited: number | null | undefined;
     if (plan.loginArgs) {
       const child = deps.spawnLogin(kind, plan.loginArgs);
+      if (!alive()) { killTree(child); return; }
       if (!child) {
-        fail(kind, "login_spawn_failed", "login command did not start");
+        failCurrent("login_spawn_failed", "login command did not start");
         return;
       }
       s().login = child;
       let opened = false;
       const onData = (chunk: Buffer) => {
+        if (!alive()) return;
         const text = stripAnsi(chunk.toString("utf8"));
         for (const line of text.split(/\r?\n/)) {
           const clean = line.trim();
           if (!clean) continue;
           const url = /https:\/\/[^\s"'<>\u0007]+/.exec(clean)?.[0] ?? null;
           if (url && !s().snap.loginUrl) {
-            publish(kind, { loginUrl: url });
-            if (plan.openUrlFromOutput && !opened) {
+            publishCurrent({ loginUrl: url });
+            if (alive() && plan.openUrlFromOutput && !opened) {
               opened = true;
               deps.openExternal(url);
             }
           }
-          log(kind, url ? clean.replace(url, new URL(url).origin + "/…") : clean.slice(0, 300));
+          logCurrent(url ? clean.replace(url, new URL(url).origin + "/…") : clean.slice(0, 300));
         }
       };
       child.stdout?.on("data", onData);
       child.stderr?.on("data", onData);
-      child.on("error", (e) => fail(kind, "login_spawn_failed", e.message));
+      child.on("error", (e) => failCurrent("login_spawn_failed", e.message));
       child.on("exit", (code) => { exited = code; });
     } else {
       const opened = await deps.terminalLogin(kind);
       if (!alive()) return;
       if (!opened.ok) {
-        fail(kind, "login_spawn_failed", opened.message);
+        failCurrent("login_spawn_failed", opened.message);
         return;
       }
-      log(kind, "login: opened in Terminal");
+      logCurrent("login: opened in Terminal");
     }
 
     // ④ 확인 중 — 인증 상태 폴링. 타이머로 성공을 선언하지 않는다.
@@ -408,24 +425,25 @@ export function createRuntimeConnector(deps: RuntimeConnectDeps) {
       probe = await deps.probe(kind);
       if (!alive()) return;
       if (probe.state === "signed-in") {
-        publish(kind, { step: "verifying", probe });
-        log(kind, `check: ${probe.evidence}`);
+        publishCurrent({ step: "verifying", probe });
+        logCurrent(`check: ${probe.evidence}`);
+        if (!alive()) return;
         killTree(s().login);
         s().login = null;
-        publish(kind, { step: "done", phase: "done", endedAt: new Date().toISOString() });
+        publishCurrent({ step: "done", phase: "done", endedAt: new Date().toISOString() });
         return;
       }
       if (exited === 0 && !plan.probeArgs && kind !== "kimi") {
         // 로그인 명령은 끝났지만 이 런타임엔 인증 상태를 물을 명령이 없다 — 초록으로 올리지 않는다.
-        fail(kind, "probe_unavailable", "login finished; this runtime has no auth-status command to confirm it", { probe });
+        failCurrent("probe_unavailable", "login finished; this runtime has no auth-status command to confirm it", { probe });
         return;
       }
       if (exited !== undefined && exited !== 0) {
-        fail(kind, "login_exited", `login exited (${exited ?? "signal"})`, { probe });
+        failCurrent("login_exited", `login exited (${exited ?? "signal"})`, { probe });
         return;
       }
       if (Date.now() > deadline) {
-        fail(kind, "login_timeout", `sign-in not confirmed within ${Math.round(deps.loginTimeoutMs() / 1000)}s`, { probe });
+        failCurrent("login_timeout", `sign-in not confirmed within ${Math.round(deps.loginTimeoutMs() / 1000)}s`, { probe });
         return;
       }
     }
@@ -443,7 +461,9 @@ export function createRuntimeConnector(deps: RuntimeConnectDeps) {
       };
       sessions.set(kind, { snap, abort: new AbortController(), login: null });
       deps.emit(snap);
-      void drive(kind, sessionId).catch((error) => fail(kind, "probe_failed", error instanceof Error ? error.message : String(error)));
+      void drive(kind, sessionId).catch((error) => {
+        if (sessions.get(kind)?.snap.sessionId === sessionId) fail(kind, "probe_failed", error instanceof Error ? error.message : String(error));
+      });
       return snap;
     },
     cancel(kind: ConnectableRuntime): RuntimeConnectSnapshot | null {
@@ -454,7 +474,7 @@ export function createRuntimeConnector(deps: RuntimeConnectDeps) {
       s.abort.abort();
       killTree(s.login);
       s.login = null;
-      publish(kind, { phase: "cancelled", reasonCode: "cancelled", partialInstall: wasInstalling, endedAt: new Date().toISOString() });
+      if (sessions.get(kind) === s) publish(kind, { phase: "cancelled", reasonCode: "cancelled", partialInstall: wasInstalling, endedAt: new Date().toISOString() });
       return s.snap;
     },
     get(kind: ConnectableRuntime): RuntimeConnectSnapshot | null {

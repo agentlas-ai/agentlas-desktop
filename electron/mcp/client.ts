@@ -377,8 +377,6 @@ import {
   routeReadStepRuntime,
   runtimeFailureBlocksReplay,
   runtimeDisplayName,
-  roleFallbackBlocked,
-  runtimeForOwnerSelection,
   runtimeMatchesSelection,
   selectInvocationRuntime,
 } from "../runtime/selection";
@@ -3366,14 +3364,12 @@ async function runMcpInvocationInContext(
   });
   /*
    * The light front's own lane (shared/one-front.ts). A personal-agent turn that carries the front selection and cannot
-   * start, or cannot finish before anything was sent, continues on the runtime the owner chose for this conversation
-   * (its chip pin) before the role pool's order: "my CLI" is what the owner picked, not whatever the pool lists first.
-   * Never the serving runtime itself, and never past the replay guards below (they still decide whether a retry may run).
+   * start, or cannot finish before anything was sent, continues in the configured orchestrator order.
+   * Never another serving runtime, and never past the replay guards below.
    */
-  const frontOwnLaneCandidate: RuntimeStatus | null = req.oneMode === true && runtimeResolution.pinHonored && isOneFrontSelection(req.runtimeSelection)
-    ? runtimeForOwnerSelection(runtimes, chat?.runtimeSelection) : null;
-  const frontOwnLane = frontOwnLaneCandidate && frontOwnLaneCandidate.kind !== "agentlas" && pickRunner(frontOwnLaneCandidate) ? frontOwnLaneCandidate : null;
-  const firstOwnLaneRuntime = (): RuntimeStatus | undefined => frontOwnLane ?? rolePriorityRuntimes(runtimes, "orchestrator")[0];
+  const frontRecovery = req.oneMode === true && runtimeResolution.pinHonored && isOneFrontSelection(req.runtimeSelection);
+  const firstOwnLaneRuntime = (): RuntimeStatus | undefined => rolePriorityRuntimes(runtimes, "orchestrator", { allowLegacyActive: !frontRecovery })
+    .find((candidate) => !frontRecovery || candidate.kind !== "agentlas");
   // Workforce leader turns run under this run's configured permission on the selected runtime, pinned or not
   // (workforceLeaderRunnerBoundary); whether the pin was honored no longer decides their authority.
   let runtimeChoice = runtimeResolution.choice;
@@ -7874,13 +7870,13 @@ async function runMcpInvocationInContext(
           failedRuntime: active,
           failure: failed,
           allowCreditFallback,
+          allowLegacyActive: !frontRecovery,
         });
-        // The replay guards stand (roleFallbackBlocked); behind them the owner's own pick for this conversation goes first,
-        // even when the pool has nobody else left.
-        const fallback = (frontOwnLane && active.kind === "agentlas" && !roleFallbackBlocked({ failedRuntime: active, failure: failed })
-          ? [frontOwnLane, ...poolFallbacks] : poolFallbacks).find((candidate) => {
+        // The pool has already applied the replay guards. The front recovers
+        // in configured orchestrator order and never into another serving lane.
+        const fallback = poolFallbacks.find((candidate) => {
           const candidateKey = runtimeAttemptKey(candidate);
-          return candidateKey !== selectedRuntimeKey && !attemptedRuntimeKeys.has(candidateKey);
+          return (!frontRecovery || candidate.kind !== "agentlas") && candidateKey !== selectedRuntimeKey && !attemptedRuntimeKeys.has(candidateKey);
         });
         const fallbackPicked = fallback ? pickRunner(fallback) : null;
         if (!fallback || !fallbackPicked) {

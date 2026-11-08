@@ -21,8 +21,8 @@ import { getOneProfile, oneScopedMetaKey } from "../store/one-profile";
  * Where Hope's conversation turns run (shared/one-front.ts). One row per account, beside the One profile, so an account
  * that opted in never carries that choice to another account on the same machine (oneScopedMetaKey).
  *
- * Fail closed: a missing, damaged or unreadable row is the default (own lane, notice unseen). A reply turn never throws
- * because of it, and a damaged row is not overwritten by a read.
+ * A missing row offers the default front with its notice. A damaged or unreadable row fails closed
+ * to the own lane; a damaged row is never overwritten by a read.
  */
 export const ONE_FRONT_META_KEY = "agentlas.one.front.v1";
 
@@ -35,7 +35,7 @@ function read(): { raw: string | null; state: OneFrontState; damaged: boolean } 
     const parsed = JSON.parse(row.value) as unknown;
     if (isOneFrontState(parsed)) return { raw: row.value, state: parsed, damaged: false };
   } catch { /* falls through to the default; the stored row is left as it is */ }
-  return { raw: row.value, state: defaultOneFrontState(), damaged: true };
+  return { raw: row.value, state: { ...defaultOneFrontState(), front: "own-lane" }, damaged: true };
 }
 
 /** A stored row that does not parse is never replaced by a guess. */
@@ -71,8 +71,8 @@ function assertInput(value: unknown, keys: readonly string[], label: string): Re
 }
 
 /**
- * Another runtime for the owner to continue on: a member of the orchestrator pool that is not the serving endpoint, or the
- * runtime the owner pinned on the personal conversation's chip (the own lane a front turn falls back to first).
+ * Whether the owner can decline the front and continue on their configured or conversation-pinned runtime.
+ * Front failure recovery separately follows the configured orchestrator pool order.
  */
 function ownLaneAvailable(): boolean {
   try {

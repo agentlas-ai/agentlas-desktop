@@ -31,6 +31,7 @@ import {
   setupHintFor,
   usePluginCatalog,
   type KeyStepState,
+  type KeySavePhase,
   type LoginStepState,
   type PluginPickerResult,
 } from "./PluginPickerCore";
@@ -57,6 +58,9 @@ export function PluginPickerDialog({
   onCompleted,
   onCustomSetup,
   contextNote,
+  onKeySavePhase,
+  onKeySaveInterrupted,
+  isKeySaveOwnerCurrent,
 }: {
   ko: boolean;
   embedded?: boolean;
@@ -70,6 +74,9 @@ export function PluginPickerDialog({
   onCustomSetup?: () => void;
   /** Value-free explanation of the pending original request; never a grant. */
   contextNote?: string;
+  onKeySavePhase?: (phase: KeySavePhase | null) => void;
+  onKeySaveInterrupted?: (phase: KeySavePhase) => void;
+  isKeySaveOwnerCurrent?: () => boolean;
 }) {
   const brandMap = usePluginBrandMap();
   const catalog = usePluginCatalog();
@@ -219,6 +226,9 @@ export function PluginPickerDialog({
         state={keyStep}
         brandMap={brandMap}
         chrome={embedded ? "inline" : "modal"}
+        onSavePhase={onKeySavePhase}
+        onSaveInterrupted={onKeySaveInterrupted}
+        isSaveOwnerCurrent={isKeySaveOwnerCurrent}
         onDone={(finalResult) => {
           setKeyStep(null);
           onCompleted?.(finalResult);

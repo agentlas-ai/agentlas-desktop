@@ -24,6 +24,7 @@ import {
   type BrowserFindResult,
   type BrowserHistoryEntry,
   type BrowserNativeSessionReadiness,
+  type BrowserActionResult,
   type BrowserUiResult,
   type BrowserUiTarget,
   type BrowserZoomResult,
@@ -247,21 +248,21 @@ export function setBrowserDevTools(ownerId: number, input: BrowserUiTarget & { o
   } catch { return { ok: false, reason: "operation-failed" }; }
 }
 
-export function printBrowserPage(ownerId: number, input: BrowserUiTarget): Promise<BrowserUiResult> {
+export function printBrowserPage(ownerId: number, input: BrowserUiTarget): Promise<BrowserActionResult> {
   if (invalidTarget(input)) return Promise.resolve({ ok: false, reason: "invalid-request" });
   const contents = guest(ownerId, input);
   if (!contents) return Promise.resolve({ ok: false, reason: "guest-unavailable" });
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (result: BrowserUiResult) => {
+    const finish = (result: BrowserActionResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       resolve(result);
     };
-    const timer = setTimeout(() => finish({ ok: false, reason: "operation-failed" }), PRINT_TIMEOUT_MS);
+    const timer = setTimeout(() => finish({ ok: false, reason: "outcome-unconfirmed" }), PRINT_TIMEOUT_MS);
     try { contents.print({ silent: false, printBackground: true }, (success) => finish(success ? { ok: true } : { ok: false, reason: "operation-failed" })); }
-    catch { finish({ ok: false, reason: "operation-failed" }); }
+    catch { finish({ ok: false, reason: "outcome-unconfirmed" }); }
   });
 }
 

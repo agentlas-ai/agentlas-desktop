@@ -693,6 +693,8 @@ export function rolePriorityRuntimes(
     exclude?: RuntimeStatus[];
     /** Post-dispatch paid fallback requires explicit evidence that replay is safe. */
     allowCreditFallback?: boolean;
+    /** Use legacy active runtime when no role rows exist (default true). */
+    allowLegacyActive?: boolean;
     /** See roleFallbackBlocked: the unsettled turn is proven to have acted on nothing. */
     unsettledNoEffectProven?: boolean;
   } = {},
@@ -765,6 +767,7 @@ export function rolePriorityRuntimes(
   // Legacy/unconfigured stores have no ordered pool yet. Keep the old active
   // role behavior only in that case; once a pool exists, no detection-order
   // runtime may be smuggled in ahead of its DB rows.
+  if (options.allowLegacyActive === false) return out;
   const legacyActive = pickActive(runtimes, role);
   pushCandidate(legacyActive);
   appendQuotaCreditFallback();

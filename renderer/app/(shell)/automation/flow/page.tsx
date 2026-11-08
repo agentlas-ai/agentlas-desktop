@@ -174,6 +174,17 @@ function AutomationFlowPage() {
   const [inputPrompt, setInputPrompt] = useState<{ label: string; value: string; fresh: boolean } | null>(null);
   /** 이 그래프가 쓰는 것들을 한 창에서 정리한다(공급자 묶음별). */
   const [connectionsOpen, setConnectionsOpen] = useState(false);
+  const [connectionsNotice, setConnectionsNotice] = useState(false);
+  const connectionsOpener = useRef<HTMLElement | null>(null);
+  const openConnections = (opener?: HTMLElement | null) => {
+    connectionsOpener.current = opener === undefined ? (document.activeElement instanceof HTMLElement ? document.activeElement : null) : opener;
+    setConnectionsOpen(true);
+  };
+  const closeConnections = (keySaveUnconfirmed = false) => {
+    if (keySaveUnconfirmed) setConnectionsNotice(true);
+    setConnectionsOpen(false);
+    requestAnimationFrame(() => { if (connectionsOpener.current?.isConnected) connectionsOpener.current.focus(); });
+  };
   /* ★이전 판 — 저장이 덮어쓰기뿐이라, 말로 고치다 한 번 잘못 저장하면 잘 돌던 그래프가
      되돌아갈 자리 없이 사라졌다. 목록은 열 때 한 번만 읽는다. */
   /* Hub에 올리기 — 메인 프로세스엔 처음부터 있었는데 누를 자리가 없었다. */
@@ -1249,6 +1260,7 @@ function AutomationFlowPage() {
   async function toggleEnabled() {
     const api = ipc();
     if (!api || !automation || togglingRef.current) return;
+    const toggleOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previous = automation;
     const requestedEnabled = !previous.enabled;
     // ★누르면 **먼저** 반응한다. 예전에는 켜기 게이트(연결 검사)가 도는 몇 초 동안
@@ -1287,7 +1299,7 @@ function AutomationFlowPage() {
           setAutomation(current);
           if (notConnected) {
             setMessage(raw.replace(/^Error:\s*/, "").replace(/^.*AUTOMATION_NOT_CONNECTED[^:]*:\s*/, ""));
-            setConnectionsOpen(true);
+            openConnections(toggleOpener);
           } else {
             // The refusal's own sentence when the app wrote one for the owner (for example a past one-time automation); never a code.
             const sentence = raw.replace(/^Error invoking remote method '[^']+':\s*/, "").replace(/^Error:\s*/, "").trim();
@@ -2034,6 +2046,7 @@ function AutomationFlowPage() {
 
 return (
     <div className={`automation-flow-screen ${compactStyles.screen}`} style={{ flex: 1, display: "flex", flexDirection: "column", background: "var(--paper-2)", minHeight: 0, position: "relative" }}>
+      <div hidden={connectionsOpen} style={{display:connectionsOpen?"none":"flex", flex:1, minHeight:0, flexDirection:"column"}}>
       <header
         className="automation-flow-header titlebar-drag"
         style={{
@@ -2071,7 +2084,7 @@ return (
             <GraphControl label={t("common.cancel")} icon={<IconClose size={17}/>} onClick={()=>{setEditing(false);setPaletteOpen(false);void load();}}/>
           </> : <>
             <GraphControl label={t("auto.flow.edit")} icon={<IconEdit size={17}/>} onClick={()=>setEditing(true)}/>
-            <GraphControl data-testid="open-connections" label={locale === "en" ? "Connections" : "연결"} icon={<IconKey size={17}/>} onClick={()=>setConnectionsOpen(true)}/>
+            <GraphControl data-testid="open-connections" label={locale === "en" ? "Connections" : "연결"} icon={<IconKey size={17}/>} onClick={()=>openConnections()}/>
             <GraphControl data-testid="refresh-automation-run" label={locale === "en" ? "Refresh" : "새로고침"} icon={<IconRefresh size={17}/>} onClick={()=>void refreshRunView()} disabled={refreshing}/>
             <GraphControl data-testid="inspector-toggle" label={locale === "en" ? "Details" : "상세"} icon={<IconPanelRight size={17}/>} aria-expanded={rightOpen} onClick={()=>setRightOpen(v=>!v)}/>
             <details className={compactStyles.menu}><summary aria-label={locale === "en" ? "More actions" : "더 보기"} title={locale === "en" ? "More actions" : "더 보기"}><IconMoreHorizontal size={18}/></summary><div className={compactStyles.menuContent}>
@@ -2178,13 +2191,7 @@ return (
       {/* 알림·제안·결정 카드는 캔버스 **위에 뜬다**. 예전에는 캔버스 위쪽에 차곡차곡 쌓여서,
           카드가 하나 늘 때마다 그래프가 아래로 밀리고 좁아졌다 — 화면의 주인공이
           부수 메시지에 밀려 가장 작은 영역을 갖는 상태였다. */}
-      {connectionsOpen ? (
-        <ConnectionsDialog
-          automationId={automation.id}
-          locale={locale}
-          onClose={() => setConnectionsOpen(false)}
-        />
-      ) : null}
+      {connectionsNotice && <div role="status">{locale === "en" ? "The key save was interrupted. A started save may have completed; check the connection before trying again." : "키 저장이 중단되었습니다. 이미 시작된 저장은 완료됐을 수 있으니 다시 시도하기 전에 연결을 확인해 주세요."} <button type="button" onClick={() => setConnectionsNotice(false)}>{locale === "en" ? "Dismiss" : "닫기"}</button></div>}
 
       {/* ★이전 판 목록. 되돌리기도 저장이므로 지금 판이 먼저 이력에 남는다 —
           되돌린 게 잘못이었을 때 다시 앞으로 올 수 있어야 한다. */}
@@ -2696,6 +2703,8 @@ return (
 
 
       </div>
+      </div>
+      {connectionsOpen && <ConnectionsDialog automationId={automation.id} locale={locale} onClose={closeConnections} />}
     </div>
   );
 }

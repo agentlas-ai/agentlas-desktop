@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ipc } from "@/lib/ipc";
 import { Markdown } from "@/components/Markdown";
@@ -31,12 +31,12 @@ export function CapabilitySwitch({ checked, disabled, label, tip, onChange }: { 
   );
 }
 
-export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, initial }: {
-  open: boolean; locale: CapabilityLocale; onClose(): void; api?: OneCapabilitiesAPI | null; initial?: OneCapabilitiesInitial;
+export function OneCapabilitiesModal({ open, embedded = false, active = true, locale, onClose, api: apiProp, initial }: {
+  open: boolean; embedded?: boolean; active?: boolean; locale: CapabilityLocale; onClose(): void; api?: OneCapabilitiesAPI | null; initial?: OneCapabilitiesInitial;
 }) {
   const ko = locale === "ko";
   const copy = (a: string, b: string) => (ko ? a : b);
-  const [items, setItems] = useState<OneCapabilityItem[]>(initial?.items ?? []);
+  const [items, setItemsState] = useState<OneCapabilityItem[]>(initial?.items ?? []);
   const [loaded, setLoaded] = useState(Boolean(initial?.items));
   const [failed, setFailed] = useState(false);
   const [kind, setKind] = useState<OneCapabilityKind>(initial?.kind ?? "skill");
@@ -51,40 +51,54 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
   const itemsRef = useRef(items);
   itemsRef.current = items;
   const dialogRef = useRef<HTMLDivElement>(null);
+  const epoch = useRef(0); const [ownerRevision,setOwnerRevision] = useState(0);
+  const shown = open && active;
+  useLayoutEffect(() => { ++epoch.current; return () => { ++epoch.current; }; }, [shown]);
+  useEffect(() => {
+    let owner:string|null|undefined; let events=0; let disposed=false;
+    const identify=(session:{signedIn:boolean;accountFingerprint?:string;workspaceId?:string})=>session.signedIn?(session.accountFingerprint&&session.workspaceId?JSON.stringify([session.accountFingerprint,session.workspaceId]):null):"signed-out";
+    const auth=ipc()?.auth; void auth?.getSession?.().then(session=>{if(!disposed&&events===0)owner=identify(session);}).catch(()=>undefined);
+    const off=auth?.onSessionChanged?.(session=>{events++;const next=identify(session);const changed=owner===undefined||next===null||next!==owner;owner=next;if(!changed)return;
+      ++epoch.current;setItemsState([]);setLoaded(false);setFailed(false);setDetailId(null);setDetail(null);setDetailState("idle");setRowError(null);setOwnerRevision(value=>value+1);
+    });
+    return()=>{disposed=true;++epoch.current;off?.();};
+  },[]);
   const api = (): OneCapabilitiesAPI | null => apiProp ?? (ipc() as { oneCapabilities?: OneCapabilitiesAPI } | null)?.oneCapabilities ?? null;
 
   const load = useCallback(async () => {
-    const bridge = api();
-    if (!bridge) { setFailed(true); setLoaded(true); return; }
-    try { const result = await bridge.list(); setItems(result.items); setFailed(false); } catch { setFailed(true); }
-    setLoaded(true);
+    const current = epoch.current; const bridge = api();
+    if (!bridge) { if(current===epoch.current){setFailed(true);setLoaded(true);} return; }
+    try { const result = await bridge.list(); if(current===epoch.current){setItemsState(result.items);setFailed(false);} } catch { if(current===epoch.current)setFailed(true); }
+    if(current===epoch.current)setLoaded(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiProp]);
 
-  useEffect(() => { if (open && !initial?.items) void load(); }, [open, load, initial?.items]);
+  useEffect(() => { if (shown && (!initial?.items || ownerRevision>0)) void load(); }, [shown, load, initial?.items, ownerRevision]);
   useEffect(() => {
-    if (!open) return;
+    if (!shown || embedded) return;
     const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") { event.stopPropagation(); onClose(); } };
     window.addEventListener("keydown", onKey, true);
     dialogRef.current?.focus();
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [open, onClose]);
+  }, [shown, embedded, onClose]);
   useEffect(() => {
-    if (!open || !detailId || detail?.id === detailId) return;
-    let live = true;
+    if (!shown || !detailId || detail?.id === detailId) return;
+    let live = true; const current=epoch.current;
     setDetailState("loading");
     const bridge = api();
     (bridge ? bridge.detail({ id: detailId }) : Promise.resolve(null))
-      .then((value) => { if (!live) return; if (value) { setDetail(value); setDetailState("idle"); } else setDetailState("missing"); })
-      .catch(() => { if (live) setDetailState("missing"); });
+      .then((value) => { if (!live || current!==epoch.current) return; if (value) { setDetail(value); setDetailState("idle"); } else setDetailState("missing"); })
+      .catch(() => { if (live && current===epoch.current) setDetailState("missing"); });
     return () => { live = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, detailId]);
+  }, [shown, detailId, ownerRevision]);
 
   const toggle = useCallback(async (id: string, enabled: boolean) => {
     setRowError(null);
+    const current=epoch.current;
+    const setItems = (value:OneCapabilityItem[]) => { if(current===epoch.current)setItemsState(value); };
     const result = await toggleCapability(api(), itemsRef.current, id, enabled, setItems);
-    if (!result.ok && itemsRef.current.find((item) => item.id === id)?.applies) setRowError(id);
+    if (current===epoch.current && !result.ok && itemsRef.current.find((item) => item.id === id)?.applies) setRowError(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiProp]);
 
@@ -105,11 +119,13 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
   const setRole = async (id: string, role: OneCapabilityRole) => {
     const bridge = api();
     if (!bridge?.setRole) return;
+    const currentEpoch=epoch.current;
     try {
       const next = await bridge.setRole({ id, role });
-      if (next) setItems((current) => current.map((item) => (item.id === id ? { ...item, role: next.role ?? role } : item)));
+      if(currentEpoch!==epoch.current)return;
+      if (next) setItemsState((current) => current.map((item) => (item.id === id ? { ...item, role: next.role ?? role } : item)));
       setRowError(null);
-    } catch { setRowError(id); }
+    } catch { if(currentEpoch===epoch.current)setRowError(id); }
   };
   const roleFor = (item: OneCapabilityItem) => item.applies && item.enabled ? (
     <select className={styles.role} value={item.role ?? "both"} aria-label={copy("쓰는 곳", "Used by")}
@@ -133,8 +149,8 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
   );
 
   const node = (
-    <div className={styles.scrim} data-one-capabilities-layer="true" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div ref={dialogRef} className={styles.dialog} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} data-one-capabilities="true">
+    <div className={embedded ? styles.embedded : styles.scrim} hidden={!shown} data-one-capabilities-layer="true" onMouseDown={(event) => { if (!embedded && event.target === event.currentTarget) onClose(); }}>
+      <div ref={dialogRef} className={`${styles.dialog} ${embedded ? styles.embeddedDialog : ""}`} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-label={title} tabIndex={-1} data-one-capabilities="true">
         <nav className={styles.nav} aria-label={title}>
           <h2>{title}</h2>
           {navKinds.map((entry) => (
@@ -226,5 +242,5 @@ export function OneCapabilitiesModal({ open, locale, onClose, api: apiProp, init
       </div>
     </div>
   );
-  return typeof document === "undefined" ? node : createPortal(node, document.body);
+  return embedded || typeof document === "undefined" ? node : createPortal(node, document.body);
 }

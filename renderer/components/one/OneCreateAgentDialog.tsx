@@ -265,9 +265,17 @@ export function OneCreateAgentDialog({
   onOpenMailbox,
   onSavedOne,
   identityOnly = false,
+  embedded = false,
+  active = true,
+  isOwnerCurrent,
 }: {
   open: boolean;
   identityOnly?: boolean;
+  /** Inline settings can stay mounted while another section is visible. */
+  embedded?: boolean;
+  active?: boolean;
+  /** The parent fences subsequent writes after an observed owner change. */
+  isOwnerCurrent?: () => boolean;
   locale: "ko" | "en";
   seed?: OneCreateAgentSeed | null;
   edit?: OneEditMemberTarget | null;
@@ -434,7 +442,7 @@ export function OneCreateAgentDialog({
   }, [open, edit, editOne]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || (embedded && !active)) return;
     const api = ipc();
     if (!api?.runtime) return;
     let cancelled = false;
@@ -479,7 +487,7 @@ export function OneCreateAgentDialog({
       if (!cancelled) setModelsLoading(false);
     });
     return () => { cancelled = true; };
-  }, [ko, open]);
+  }, [ko, open, embedded, active]);
 
   useEffect(() => {
     if (!open || !seed || !draftHydratedRef.current || appliedSeedRef.current === seed.token) return;
@@ -669,7 +677,7 @@ export function OneCreateAgentDialog({
   }, [open, editOne]);
 
   const updateOne = async () => {
-    if (!editOne) return;
+    if (!editOne || (isOwnerCurrent && !isOwnerCurrent())) return;
     const cleanName = name.replace(/\s+/g, " ").trim();
     if (!cleanName || !avatarReady || creating) return;
     const api = ipc();
@@ -698,6 +706,7 @@ export function OneCreateAgentDialog({
         savedSelfVersionRef.current=version;
         savedSelfImageRef.current=previewSrc;
       }
+      if (isOwnerCurrent && !isOwnerCurrent()) return;
       await api.oneProfile.update({
         ...(editOne.oneId ? {oneId:editOne.oneId} : {}),
         expectedVersion: version,
@@ -708,7 +717,9 @@ export function OneCreateAgentDialog({
         },
       });
       profileSaved=true;
+      if (isOwnerCurrent && !isOwnerCurrent()) return;
       await onSavedOne?.();
+      if (isOwnerCurrent && !isOwnerCurrent()) return;
       onClose();
     } catch (cause) {
       const detail=cause instanceof Error ? cause.message : String(cause);
@@ -816,8 +827,9 @@ export function OneCreateAgentDialog({
     });
   };
 
-  return <OneBottomSheet
+  const sheet = <OneBottomSheet
     open={open}
+    embedded={embedded}
     onClose={requestDismiss}
     closeLabel={editOne
       ? (ko ? "One 편집 닫기" : "Close edit One")
@@ -971,4 +983,5 @@ export function OneCreateAgentDialog({
     </div>
     )}
   </OneBottomSheet>;
+  return embedded ? <div className={identityOnly ? styles.identityOnly : undefined} hidden={!active}>{sheet}</div> : sheet;
 }

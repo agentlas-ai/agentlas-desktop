@@ -29,6 +29,7 @@ const EMPTY: TelegramOneDialogState = { open: false, busy: null, logs: [], recei
 
 let state: TelegramOneDialogState = EMPTY;
 let snapshot: TelegramOneDialogState = state;
+let restoreFocusOnClose = true;
 const listeners = new Set<() => void>();
 
 function emit(next: TelegramOneDialogState): void {
@@ -55,14 +56,18 @@ export function getTelegramOneDialogServerSnapshot(): TelegramOneDialogState {
 
 export function openTelegramOneDialog(): void {
   if (state.open) return;
+  restoreFocusOnClose = true;
   emit({ ...state, open: true });
 }
 
-export function closeTelegramOneDialog(): void {
+export function closeTelegramOneDialog(options?: {restoreFocus?: boolean}): void {
   if (!state.open) return;
+  restoreFocusOnClose = options?.restoreFocus !== false;
   // busy/로그는 일부러 남긴다 — 다시 열면 진행 중인 연결이 그대로 보여야 한다.
   emit({ ...state, open: false });
 }
+
+export function shouldRestoreTelegramFocus(): boolean { return restoreFocusOnClose; }
 
 export function setTelegramOneBusy(busy: string | null): void {
   emit({ ...state, busy });
@@ -74,6 +79,11 @@ export function pushTelegramOneLog(row: TelegramOneLogRow): void {
 
 export function setTelegramOneReceipt(receipt: string | null): void {
   emit({ ...state, receipt });
+}
+
+/** Drop another account's presentation data without cancelling an active operation. */
+export function clearTelegramOneObservation(): void {
+  emit({ ...state, logs: [], receipt: null });
 }
 
 export function telegramOneLogId(): string {

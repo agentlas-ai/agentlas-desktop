@@ -9,7 +9,8 @@ import { createAutomation, getAutomation, markToolchainImplementationAutomation 
 import { prepareAssetFreshSession, type AssetFreshSession, type NativeAssetPublicationAuthority } from "./asset-cold-start";
 import { emitDesktopStoreChange } from "../store/change-bus";
 
-const PREFIX = "toolchain.asset.v1:";
+export const TOOLCHAIN_ASSET_META_PREFIX = "toolchain.asset.v1:";
+const PREFIX = TOOLCHAIN_ASSET_META_PREFIX;
 const KEY_PREFIX = "toolchain.capability-key.v1:";
 const DEFINITION_PREFIX = "toolchain.definition.v1:";
 const IMPLEMENTATION_PREFIX = "toolchain.implementation-fingerprint.v1:";

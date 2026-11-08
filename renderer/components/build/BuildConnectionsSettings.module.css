@@ -1,0 +1,9 @@
+.screen { min-height: 0; flex: 1; overflow: auto; color: var(--ink); background: var(--paper); }
+.screen[hidden] { display: none; }
+.header { padding: 48px 32px 12px; }
+.header button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 8px 0; }
+.header h1 { font-size: 24px; margin: 12px 0; }
+.layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 32px; padding: 0 32px 32px; }
+.layout nav { padding: 12px; font-weight: 600; }
+.content { min-width: 0; }
+@media (max-width: 700px) { .header { padding: 48px 16px 8px; } .layout { grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 0 16px 24px; } .layout nav { padding: 8px 0; } }

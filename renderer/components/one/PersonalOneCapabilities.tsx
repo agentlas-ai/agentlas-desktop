@@ -14,8 +14,9 @@ import { IconRefresh, IconRoute } from "@/components/Icon";
 import styles from "./PersonalOneCapabilities.module.css";
 
 export type PersonalOneCapabilityTab = "connections" | "repeat";
-export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, onPrompt }: {
+export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, onPrompt, embedded = false, active = true }: {
   open: PersonalOneCapabilityTab | null; locale: "ko" | "en"; chatId?: string; oneId?: string;
+  embedded?: boolean; active?: boolean;
   onClose(): void; onPrompt(prompt: string): void;
 }) {
   const ko = locale === "ko";
@@ -34,6 +35,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
   const [oauthMessage, setOauthMessage] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
   const revision = useRef(0);
+  const lifetime = useRef(0);
   const load = useCallback(async () => {
     const current = ++revision.current;
     const api = ipc();
@@ -51,34 +53,47 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
   // Locale changes only presentation; each reload reads Main-owned state.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, locale, oneId]);
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const visibleRef = useRef(true);
+  visibleRef.current = !!open && (!embedded || active);
   useEffect(() => {
-    if (!open) return;
+    if (!open || (embedded && !active)) return;
     const reads = createCoalescedRefresh<void>(load, () => undefined);
     const refresh = () => { if (document.visibilityState !== "hidden") void reads.request(undefined); };
     const changes = createStoreChangeThrottle({ immediate: () => false, throttleMs: 1_000, run: refresh });
     refresh();
     const off = ipcEvents()?.onStoreChanged?.((change) => changes.notify(change));
     document.addEventListener("visibilitychange", refresh);
-    return () => { ++revision.current; changes.dispose(); reads.dispose(); off?.(); abort.current?.abort(); document.removeEventListener("visibilitychange", refresh); };
-  }, [open, load]);
-  useEffect(() => { setConfigure(null); setInstall(null); setError(null); setOauthMessage(null);setManualUrl(null); }, [open]);
-  const perform = async (id: string, action: () => Promise<unknown>) => {
+    return () => { ++revision.current; changes.dispose(); reads.dispose(); off?.(); document.removeEventListener("visibilitychange", refresh); };
+  }, [open, load, embedded, active]);
+  // Visibility and tab changes do not end an embedded operation. Closing,
+  // unmounting, or changing One does; the parent owns the auth-session key.
+  useEffect(() => () => { ++lifetime.current; abort.current?.abort(); }, [oneId, embedded ? !!open : open]);
+  useEffect(() => { setInstalled([]); setCatalog([]); setReadiness([]); setAutomations([]); setBusy(null); setOauthMessage(null); setManualUrl(null); }, [oneId]);
+  useEffect(() => { if (!embedded || !open) { setConfigure(null); setInstall(null); setError(null); setOauthMessage(null);setManualUrl(null); } if (!open) setBusy(null); }, [open, embedded]);
+  const perform = async (id: string, action: (current: () => boolean) => Promise<unknown>) => {
     if (busy) return;
+    const generation = lifetime.current;
+    const current = () => generation === lifetime.current;
     setBusy(id); setError(null);
-    try { await action(); await load(); }
-    catch { setError(copy("실행 결과를 확인하지 못했습니다. 현재 상태를 새로 확인해 주세요.", "The outcome was not confirmed. Refresh the current state before retrying.")); }
-    finally { setBusy(null); }
+    try { await action(current); if (current() && visibleRef.current) await loadRef.current(); }
+    catch { if (current()) setError(copy("실행 결과를 확인하지 못했습니다. 현재 상태를 새로 확인해 주세요.", "The outcome was not confirmed. Refresh the current state before retrying.")); }
+    finally { if (current()) setBusy(null); }
   };
-  const connect = (server: InstalledMcpServer) => perform(server.id, async () => {
+  const connect = (server: InstalledMcpServer) => perform(server.id, async (current) => {
     const api = ipc();
     if (!api) throw new Error("desktop_unavailable");
     const auth = await api.mcpTools.oauthStatus(server.id);
+    if (!current()) return;
     if (auth.supported && !auth.connected) {
       abort.current?.abort(); const controller = new AbortController(); abort.current = controller;
       await runMcpOAuthAttempt({ api: mcpOAuthAPI(api.mcpTools), serverId: server.id, signal: controller.signal,
-        update: progress => {setOauthMessage(copy("로그인을 기다리고 있습니다. 취소하거나 창을 닫을 수 있습니다.", "Waiting for sign-in. You can cancel or close this sheet."));try{setManualUrl(progress.manualUrl&&new URL(progress.manualUrl).protocol==="https:"?progress.manualUrl:null);}catch{setManualUrl(null);}} });
+        update: progress => {if (!current()) return; setOauthMessage(copy("로그인을 기다리고 있습니다. 취소하거나 창을 닫을 수 있습니다.", "Waiting for sign-in. You can cancel or close this sheet."));try{setManualUrl(progress.manualUrl&&new URL(progress.manualUrl).protocol==="https:"?progress.manualUrl:null);}catch{setManualUrl(null);}} });
     }
+    if (!current()) return;
     const status = await api.mcpTools.test(server.id);
+    if (!current()) return;
     setOauthMessage(null);setManualUrl(null);
 
     if (!status.connected) throw new Error("capability_not_ready");
@@ -90,7 +105,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
   const repeatItems = automations.filter(item => !!chatId && (item.monitor?.originChatId === chatId));
   const visibleCatalog = catalog.filter(item => !installed.some(server => server.catalogId === item.id)
     && `${item.name} ${item.nameEn} ${item.description}`.toLowerCase().includes(query.toLowerCase())).slice(0, 30);
-  return <OneBottomSheet open={!!open} onClose={onClose} closeLabel={copy("닫기", "Close")}
+  return <div hidden={embedded && !active}><OneBottomSheet open={!!open} embedded={embedded} onClose={onClose} closeLabel={copy("닫기", "Close")}
     ariaLabel={open === "repeat" ? copy("반복 업무", "Recurring work") : copy("연결 도구", "Connected tools")}
     title={open === "repeat" ? copy("반복 업무", "Recurring work") : copy("연결 도구", "Connected tools")}
     icon={<IconRoute size={20}/>} size="compact">
@@ -98,7 +113,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
       <div className={styles.top}><p>{open === "repeat" ? copy("이 대화에 연결된 업무의 조건과 다음 실행을 확인합니다.", "Review conditions and the next run for work bound to this conversation.") : copy("현재 계정과 실제 준비 상태를 확인하고 필요한 도구만 연결합니다.", "Check connected accounts and live readiness, then connect only what you need.")}</p>
         <button type="button" onClick={() => void load()} aria-label={copy("상태 새로고침", "Refresh status")}><IconRefresh size={16}/></button></div>
       {error && <p role="status" className={styles.notice}>{error}</p>}
-      {open === "connections" && <>
+      {(embedded || open === "connections") && <div hidden={open !== "connections"}>
         {installed.length === 0 && <p>{copy("연결한 도구가 없습니다. 아래에서 필요한 도구를 찾아보세요.", "No tools are connected. Find a tool below.")}</p>}
         {installed.map(server => {
           const status = readiness.find(item => item.installedServerId === server.id);
@@ -127,13 +142,13 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
               <p>{item.transport === "stdio" ? copy("이 컴퓨터에서 아래 프로그램을 실행하는 도구입니다.", "This tool runs the following program on this computer.") : copy("아래 외부 서비스에 연결합니다.", "This tool connects to the following external service.")}</p>
               <code>{item.transport === "stdio" ? [item.command, ...(item.args ?? [])].join(" ") : item.url}</code>
               {item.envRequirements.length > 0 && <p>{copy("필요한 키", "Required keys")}: {item.envRequirements.map(key => key.key).join(", ")}</p>}
-              <div className={styles.actions}><button type="button" disabled={!!busy} onClick={() => void perform(item.id, async () => {await ipc()!.mcpTools.install(item.id); setInstall(null);})}>{copy("이 도구 연결", "Connect this tool")}</button><button type="button" onClick={() => setInstall(null)}>{copy("취소", "Cancel")}</button></div>
+              <div className={styles.actions}><button type="button" disabled={!!busy} onClick={() => void perform(item.id, async (current) => {await ipc()!.mcpTools.install(item.id); if (current()) setInstall(null);})}>{copy("이 도구 연결", "Connect this tool")}</button><button type="button" onClick={() => setInstall(null)}>{copy("취소", "Cancel")}</button></div>
             </div>}
         </article>)}
-      </>}
-      {open === "repeat" && <>
+      </div>}
+      {(embedded || open === "repeat") && <div hidden={open !== "repeat"}>
         <button type="button" onClick={() => setCreateRepeat(value => !value)}>{copy("새 반복 업무 준비", "Prepare recurring work")}</button>
-        {createRepeat && <DescribeAutomation locale={locale} openAfterCreate={false} presentation="chat" persistenceKey={chatId ? `agentlas.one.companion.graph.${chatId}` : undefined} onCreated={() => void load()}/>}
+        {createRepeat && <DescribeAutomation locale={locale} openAfterCreate={false} presentation="chat" persistenceKey={chatId ? `agentlas.one.companion.graph.${chatId}` : undefined} onCreated={() => { if (visibleRef.current) void loadRef.current(); }}/>}
         {repeatItems.length === 0 && <p>{copy("이 대화에 연결된 반복 업무가 없습니다.", "No recurring work is bound to this conversation.")}</p>}
         {repeatItems.map(item => <article className={styles.card} key={item.id} data-one-repeat={item.id}>
           <header><strong>{item.name}</strong><span>{item.enabled ? copy("예약 켜짐", "Scheduled") : copy("일시 중지", "Paused")}</span></header>
@@ -144,7 +159,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
             <button type="button" onClick={() => {onPrompt(copy(`반복 업무 '${item.name}' (ID: ${item.id})의 조건을 수정해줘. 현재 등록 범위와 권한을 먼저 확인하고 변경할 조건을 물어봐.`, `Update the conditions for recurring work '${item.name}' (ID: ${item.id}). Check its current scope and grants, then ask which conditions to change.`)); onClose();}}>{copy("조건 수정", "Change conditions")}</button>
           </div>
         </article>)}
-      </>}
+      </div>}
     </div>
-  </OneBottomSheet>;
+  </OneBottomSheet></div>;
 }

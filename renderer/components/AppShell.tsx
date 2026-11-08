@@ -3,7 +3,7 @@
 // + Electron 메뉴 → 라우터 브릿지.
 // + 자동 업데이트 배너 (downloading/downloaded 상태에서만 노출).
 "use client";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { ProjectSidebar } from "./ProjectSidebar";
@@ -14,6 +14,7 @@ import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
+import { PROJECT_SETTINGS_EVENT, type ProjectSettingsRequest } from "@/lib/project-settings";
 import { startInputLatencyRecorder } from "@/lib/input-latency";
 import { usePendingConfirmationCount } from "@/lib/attention";
 import { AttentionCoveredSwitcherDot } from "./AttentionDot";
@@ -38,6 +39,7 @@ import {
 } from "@/lib/multimodal/jobs";
 
 import {
+  closeTelegramOneDialog,
   getTelegramOneDialogSnapshot,
   getTelegramOneDialogServerSnapshot,
   subscribeTelegramOneDialog,
@@ -90,6 +92,7 @@ function sameJobList(prev: MultimodalJob[], next: MultimodalJob[]): boolean {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
   const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
+  const telegramOpen = useSyncExternalStore(subscribeTelegramOneDialog, () => getTelegramOneDialogSnapshot().open, () => getTelegramOneDialogServerSnapshot().open);
   const importRequested = useHasOpened(importOpen);
   const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
@@ -98,10 +101,27 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [sciencePromoVisible, setSciencePromoVisible] = useState(false);
   const router = useRouter();
   const pathname = usePathname() ?? "/";
+  const previousPathname = useRef(pathname);
   const { locale } = useT();
   // 승인 대기 수는 전역 주의 저장소가 센다(폴링·독 배지 포함 — 라우트 트리와 무관하게 돈다).
   // 대시보드 항목의 알림 수는 예전 그대로 "대화 질문(승인 인박스)"만 센다.
   const pendingConfirmations = usePendingConfirmationCount();
+
+  useLayoutEffect(() => {
+    if (previousPathname.current !== pathname) {
+      previousPathname.current = pathname;
+      closeTelegramOneDialog({restoreFocus:false});
+    }
+  }, [pathname]);
+
+  useEffect(() => {
+    const openProject = (event: Event) => {
+      const request = (event as CustomEvent<ProjectSettingsRequest>).detail;
+      if (request?.mode === "create" || (request?.mode === "edit" && request.projectId)) closeTelegramOneDialog({restoreFocus:false});
+    };
+    window.addEventListener(PROJECT_SETTINGS_EVENT, openProject);
+    return () => window.removeEventListener(PROJECT_SETTINGS_EVENT, openProject);
+  }, []);
 
   // navigate() 헬퍼가 hard navigation(window.location) 대신 soft navigation을
   // 쓰도록 App Router 인스턴스를 등록한다. static export 셸에서 hard navigation은
@@ -258,6 +278,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div
+      onClickCapture={(event) => {
+        if (!telegramOpen || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const target = event.target instanceof Element ? event.target : null;
+        const link = target?.closest<HTMLAnchorElement>(".sidenav a[href]");
+        const productChoice = target?.closest('[data-product-mode-menu] [role="menuitem"]');
+        if (productChoice || (link && link.target !== "_blank" && new URL(link.href, window.location.href).origin === window.location.origin)) closeTelegramOneDialog({restoreFocus:false});
+      }}
+      onKeyDownCapture={(event) => {
+        if (!telegramOpen || (event.key !== "Enter" && event.key !== " ")) return;
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest('[data-product-mode-menu] [role="menuitem"]')) closeTelegramOneDialog({restoreFocus:false});
+      }}
       style={{
         display: "flex",
         flexDirection: "row",
@@ -280,10 +312,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           background: "transparent",
         }}
       >
-        <div hidden={projectSettingsOpen} style={{ display: projectSettingsOpen ? "none" : "contents" }}>
+        <div hidden={projectSettingsOpen || telegramOpen} style={{ display: projectSettingsOpen || telegramOpen ? "none" : "contents" }}>
           <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
         </div>
-        <ProjectSettingsHost onVisibilityChange={setProjectSettingsOpen} />
+        <div hidden={telegramOpen} style={{display:telegramOpen ? "none" : "contents"}}><ProjectSettingsHost onVisibilityChange={setProjectSettingsOpen} /></div>
+        <TelegramDialogHost />
       </main>
       <PageTour pathname={pathname} autoOpenSuspended={pageTourAutoOpenSuspended} />
       {pathname.startsWith("/dashboard") && (
@@ -320,9 +353,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           }
         }}
       />}
-      {/* 커넥트 ▸ 텔레그램은 페이지가 아니라 팝업이다. 사이드바에서만 열리므로
-          셸 안에 한 번만 마운트한다. */}
-      <TelegramDialogHost />
       <GuideFab
         avoidComposer={pathname.startsWith("/workspace/task")}
         onReplayTour={replayCurrentPageTour}

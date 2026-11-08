@@ -7,13 +7,12 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type KeyboardEvent,
 } from "react";
 import { confirmPopup } from "@/lib/popup";
 import { ipc } from "../../lib/ipc";
 import { useT } from "../../lib/i18n";
-import { useDismissibleLayer } from "../../lib/use-dismissible-layer";
 import {
+  clearTelegramOneObservation,
   closeTelegramOneDialog,
   friendlyTelegramError,
   getTelegramOneDialogServerSnapshot,
@@ -21,6 +20,7 @@ import {
   pushTelegramOneLog,
   setTelegramOneBusy,
   setTelegramOneReceipt,
+  shouldRestoreTelegramFocus,
   subscribeTelegramOneDialog,
   telegramOneLogId,
   telegramOneNowLabel,
@@ -45,7 +45,7 @@ const STATUS_KEY: Record<TelegramConnectStatus, string> = {
 };
 
 /**
- * 텔레그램 ↔ One 연결 팝업.
+ * 텔레그램 ↔ One 연결 화면.
  *
  * 예전 /connect 페이지가 하던 "에이전트를 골라 연결"은 사라졌다. 제품이 프로젝트 기반
  * 채팅으로 옮겨가면서 텔레그램의 상대는 One 하나이기 때문이다. 남은 레거시 연결은
@@ -70,6 +70,9 @@ export default function TelegramOneDialog() {
   const [deleteBots, setDeleteBots] = useState(false);
   const [error, setError] = useState("");
   const [addingAnother, setAddingAnother] = useState(false);
+  const [unconfirmed, setUnconfirmed] = useState(false);
+  const ownerEpoch = useRef(0);
+  const readGeneration = useRef(0);
 
   const busy = dialog.busy;
   const open = dialog.open;
@@ -84,6 +87,8 @@ export default function TelegramOneDialog() {
   const refresh = useCallback(async () => {
     const api = ipc();
     if (!api) return;
+    const epoch = ownerEpoch.current;
+    const generation = ++readGeneration.current;
     try {
       const [rows, profile] = await Promise.all([
         api.telegram.listBindings(),
@@ -91,12 +96,38 @@ export default function TelegramOneDialog() {
       ]);
       // 구 preload·목 브리지는 모르는 메서드에 null 을 돌려준다. 그대로 담으면
       // 다음 렌더의 .find 에서 팝업 전체가 죽는다(실측: 화면이 아예 안 뜸).
+      if (epoch !== ownerEpoch.current || generation !== readGeneration.current) return;
       setBindings(Array.isArray(rows) ? rows : []);
       if (profile?.displayName) setOneName(profile.displayName);
     } catch (err) {
-      setError(friendlyTelegramError(err));
+      if (epoch === ownerEpoch.current && generation === readGeneration.current) setError(friendlyTelegramError(err));
     }
   }, []);
+
+  useEffect(() => {
+    const auth = ipc()?.auth;
+    if (!auth) return;
+    let owner: string | null | undefined;
+    let events = 0;
+    let disposed = false;
+    const identify = (session: {signedIn:boolean;accountFingerprint?:string;workspaceId?:string}) => session.signedIn
+      ? session.accountFingerprint && session.workspaceId ? JSON.stringify([session.accountFingerprint,session.workspaceId]) : null
+      : "signed-out";
+    void auth.getSession?.().then(session => { if (!disposed && events === 0) owner = identify(session); }).catch(() => undefined);
+    const unsubscribe = auth.onSessionChanged?.(session => {
+      events += 1;
+      const next = identify(session);
+      const changed = owner === undefined || next === null || next !== owner;
+      owner = next;
+      if (!changed) return;
+      ownerEpoch.current += 1; readGeneration.current += 1;
+      setBindings([]); setOneName("One"); setError(""); setBotToken(""); setBotName(""); setMode("auto"); setAddingAnother(false);
+      clearTelegramOneObservation();
+      if (getTelegramOneDialogSnapshot().busy) setUnconfirmed(true);
+      if (getTelegramOneDialogSnapshot().open) void refresh();
+    });
+    return () => { disposed = true; ownerEpoch.current += 1; readGeneration.current += 1; unsubscribe?.(); };
+  }, [refresh]);
 
   useEffect(() => {
     if (!open) return;
@@ -107,26 +138,16 @@ export default function TelegramOneDialog() {
     void refresh();
   }, [open, refresh]);
 
-  // 바깥 클릭 · Escape · 포커스 복원은 공용 레이어 계약이 담당한다.
-  // 진행 중에도 닫힌다 — 진행 상태가 모듈 스토어에 살아 있어서 다시 열면 그대로
-  // 이어 보인다. 안내문이 "닫아도 계속됩니다"라고 말하는데 닫히지 않으면 거짓말이다.
-  useDismissibleLayer({ open, roots: [cardRef], onDismiss: closeTelegramOneDialog });
-
   useEffect(() => {
     if (!open) return;
-    // 팝업을 연 사이드바 항목. 닫을 때 여기로 포커스를 돌려주지 않으면 키보드
-    // 사용자는 문서 맨 위부터 다시 Tab 해야 한다(실측: 닫은 뒤 activeElement가 body).
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    // 실수로 Enter를 눌러도 파괴적인 "정리"가 아니라 주 CTA가 눌리게 한다.
-    // preventScroll 필수 — CTA는 카드 맨 아래라, 그냥 focus() 하면 브라우저가 카드를
-    // 스크롤해 제목·닫기 버튼이 잘린 채 열린다(실측 scrollTop 92px).
-    const focusTimer = window.setTimeout(() => primaryRef.current?.focus({ preventScroll: true }), 0);
+    const focusTimer = window.setTimeout(() => cardRef.current?.focus({ preventScroll: true }), 0);
     return () => {
       window.clearTimeout(focusTimer);
-      document.body.style.overflow = previousOverflow;
-      previouslyFocused?.focus({ preventScroll: true });
+      if (shouldRestoreTelegramFocus() && !getTelegramOneDialogSnapshot().open) {
+        if (previouslyFocused && previouslyFocused !== document.body && previouslyFocused.isConnected) previouslyFocused.focus({ preventScroll: true });
+        else document.querySelector<HTMLElement>(".sidenav-collapse")?.focus({ preventScroll: true });
+      }
       // 붙여넣은 BotFather 토큰은 비밀값이다. 이 컴포넌트는 닫혀도 언마운트되지
       // 않으므로(셸이 항상 마운트) 여기서 지우지 않으면 다시 열 때 그대로 보인다.
       setBotToken("");
@@ -151,6 +172,7 @@ export default function TelegramOneDialog() {
   const runConnect = useCallback(async () => {
     const api = ipc();
     if (!api || busy) return;
+    const epoch = ownerEpoch.current;
     setError("");
     setTelegramOneBusy("connect");
     appendLog(t("tgone.connecting.title"));
@@ -165,15 +187,18 @@ export default function TelegramOneDialog() {
             ...(botName.trim() ? { botName: botName.trim() } : {}),
             ...(addingAnother ? { newConnection: true } : {}),
           });
+      if (epoch !== ownerEpoch.current) return;
       setBotToken("");
       setAddingAnother(false);
       appendLog(result.message, "success");
       await refresh();
     } catch (err) {
+      if (epoch !== ownerEpoch.current) return;
       const message = friendlyTelegramError(err);
       setError(message);
       appendLog(message, "error");
     } finally {
+      if (epoch !== ownerEpoch.current) setUnconfirmed(true);
       setTelegramOneBusy(null);
     }
   }, [addingAnother, appendLog, botName, botToken, busy, mode, refresh, t]);
@@ -181,11 +206,14 @@ export default function TelegramOneDialog() {
   const runCleanup = useCallback(async () => {
     const api = ipc();
     if (!api || busy || !legacyBindings.length) return;
+    const epoch = ownerEpoch.current;
     if (!(await confirmPopup(t("tgone.legacy.confirm", { count: String(legacyBindings.length) }), { locale: locale === "ko" ? "ko" : "en", tone: "danger" }))) return;
+    if (epoch !== ownerEpoch.current) return;
     setError("");
     setTelegramOneBusy("legacy");
     try {
       const result = await api.telegram.removeLegacy({ deleteBots });
+      if (epoch !== ownerEpoch.current) return;
       const lines = [
         deleteBots && result.botsDeleted > 0
           ? t("tgone.legacy.done_with_bots", {
@@ -203,10 +231,12 @@ export default function TelegramOneDialog() {
       appendLog(receipt, result.botDeleteFailures.length ? "error" : "success");
       await refresh();
     } catch (err) {
+      if (epoch !== ownerEpoch.current) return;
       const message = friendlyTelegramError(err);
       setError(message);
       appendLog(message, "error");
     } finally {
+      if (epoch !== ownerEpoch.current) setUnconfirmed(true);
       setTelegramOneBusy(null);
     }
   }, [appendLog, busy, deleteBots, legacyBindings.length, refresh, t]);
@@ -215,33 +245,42 @@ export default function TelegramOneDialog() {
     async (action: "open" | "test" | "settings" | "import_terminal" | "remove", oneBinding: TelegramConnectBinding) => {
       const api = ipc();
       if (!api || !oneBinding || busy) return;
+      const epoch = ownerEpoch.current;
       if (action === "remove" && !(await confirmPopup(t("tgone.disconnect.confirm"), { locale: locale === "ko" ? "ko" : "en", tone: "danger" }))) return;
       if (action === "import_terminal" && !(await confirmPopup(t("tgone.terminal_import.confirm"), { locale: locale === "ko" ? "ko" : "en" }))) return;
+      if (epoch !== ownerEpoch.current) return;
       setError("");
       setTelegramOneBusy(action);
       try {
         if (action === "open") {
           const result = await api.telegram.openBot(oneBinding.id);
+          if (epoch !== ownerEpoch.current) return;
           appendLog(result.message, result.ok ? "success" : "error");
         } else if (action === "test") {
           const result = await api.telegram.sendTest(oneBinding.id);
+          if (epoch !== ownerEpoch.current) return;
           appendLog(result.message, "success");
         } else if (action === "settings") {
           const result = await api.telegram.configureBotSettings(oneBinding.id);
+          if (epoch !== ownerEpoch.current) return;
           appendLog(result.message, result.ok ? "success" : "error");
         } else if (action === "import_terminal") {
           const result = await api.telegram.importTerminal(oneBinding.id);
+          if (epoch !== ownerEpoch.current) return;
           appendLog(result.message, "success");
         } else {
           // 봇은 남긴다 — 다시 연결할 때 재사용할 수 있고, 봇 삭제는 되돌릴 수 없다.
           await api.telegram.remove(oneBinding.id, false);
         }
+        if (epoch !== ownerEpoch.current) return;
         await refresh();
       } catch (err) {
+        if (epoch !== ownerEpoch.current) return;
         const message = friendlyTelegramError(err);
         setError(message);
         appendLog(message, "error");
       } finally {
+        if (epoch !== ownerEpoch.current) setUnconfirmed(true);
         setTelegramOneBusy(null);
       }
     },
@@ -251,11 +290,12 @@ export default function TelegramOneDialog() {
   // 수동 토큰 연결의 짝짓기(OD-3): t.me 링크의 시작 버튼이 정확한 "/start <연결 id>" 를 보낸다.
   // 링크를 못 여는 환경을 위해 같은 문장을 복사할 수 있게 둔다.
   const copyPairingCommand = async (command: string) => {
+    const epoch = ownerEpoch.current;
     try {
       await navigator.clipboard.writeText(command);
-      appendLog(t("tgone.pair.copied"), "success");
+      if (epoch === ownerEpoch.current) appendLog(t("tgone.pair.copied"), "success");
     } catch (err) {
-      appendLog(friendlyTelegramError(err), "error");
+      if (epoch === ownerEpoch.current) appendLog(friendlyTelegramError(err), "error");
     }
   };
 
@@ -264,45 +304,26 @@ export default function TelegramOneDialog() {
   const connected = oneBindings.length > 0;
   // 연결이 하나도 없으면 곧바로 연결 폼, 있으면 "하나 더" 를 눌렀을 때만 폼을 편다.
   const showConnectForm = !connected || addingAnother;
-  const latestLog = dialog.logs[0]?.text ?? "";
+  const latestLog = dialog.logs[0];
   const canConnect = mode === "auto" || botToken.trim().length > 0;
 
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "Tab" || !cardRef.current) return;
-    const focusable = cardRef.current.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    );
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-
   return (
-    <div className={`${styles.layer} titlebar-nodrag`}>
-      <div className={styles.scrim} aria-hidden="true" />
+    <div className={`${styles.inlineLayer} titlebar-nodrag`}>
       <div
         ref={cardRef}
-        className={styles.card}
-        role="dialog"
-        aria-modal="true"
+        className={styles.inlineCard}
+        role="region"
+        tabIndex={-1}
         aria-labelledby="tgone-title"
         aria-describedby="tgone-subtitle"
         aria-busy={busy ? "true" : "false"}
-        onKeyDown={onKeyDown}
       >
         <div className={styles.head}>
           <div className={styles.mark} aria-hidden="true">✈</div>
           <button
             type="button"
             className={styles.close}
-            onClick={closeTelegramOneDialog}
+            onClick={() => closeTelegramOneDialog()}
             aria-label={t("tgone.action.close")}
           >
             ✕
@@ -314,13 +335,15 @@ export default function TelegramOneDialog() {
         <div className={styles.scroll}>
         <h2 id="tgone-title" className={styles.title}>{t("tgone.title", { name: oneName })}</h2>
         <p id="tgone-subtitle" className={styles.subtitle}>{t("tgone.subtitle", { name: oneName })}</p>
+        <p className={styles.notice}>{locale === "ko" ? "이 목록은 이 컴퓨터의 텔레그램 연결입니다. 계정별 소유 여부는 확인되지 않았습니다." : "These are Telegram connections on this computer. Their account ownership is not confirmed."}</p>
+        {unconfirmed && <p className={styles.notice} role="status">{locale === "ko" ? "계정이 바뀌는 동안 진행된 연결 작업의 결과는 확인되지 않았습니다. 다시 시도하기 전에 이 컴퓨터의 연결을 확인하세요." : "The outcome of a connection operation during an account change is unconfirmed. Review this computer's connections before trying again."} <button type="button" onClick={() => void refresh()}>{locale === "ko" ? "이 컴퓨터의 연결 다시 확인" : "Review this computer's connections"}</button></p>}
 
         <details className={styles.details}><summary>{locale === "ko" ? "기존 연결 안내" : "Existing connection details"}</summary><p className={styles.notice}>{t("tgone.migration.notice", { name: oneName })}</p></details>
 
         {busy === "connect" ? (
           <div className={styles.progress}>
-            <strong>{t("tgone.connecting.title")}</strong>
-            {latestLog ? <span className={styles.progressLine}>{latestLog}</span> : null}
+            <strong>{unconfirmed ? (locale === "ko" ? "이전 계정에서 시작한 작업이 아직 진행 중일 수 있습니다." : "An operation started in the previous account may still be running.") : t("tgone.connecting.title")}</strong>
+            {latestLog ? <span className={styles.progressLine}>{latestLog.text}</span> : null}
             <span className={styles.progressHint}>{t("tgone.connecting.keep_open")}</span>
           </div>
         ) : null}
@@ -510,6 +533,7 @@ export default function TelegramOneDialog() {
 
         {dialog.receipt ? <p className={styles.receipt}>{dialog.receipt}</p> : null}
         {error ? <p className={styles.error}>{error}</p> : null}
+        {!busy && !dialog.receipt && !error && latestLog ? <p className={latestLog.tone === "error" ? styles.error : styles.receipt} role={latestLog.tone === "error" ? "alert" : "status"}>{latestLog.text}</p> : null}
         </div>
 
         <button

@@ -317,6 +317,7 @@ import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
 import { loadSkillPluginMentions, appendSkillPluginMention, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
 import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
+import { keySaveInterruptionText, keySaveSessionIdentity, type KeySavePhase } from "@/components/plugins/PluginPickerCore";
 import {
   beginOneActivityState,
   initialOneActivityState,
@@ -1597,6 +1598,8 @@ function OneSessionsShell() {
   const orgSheetSerial = useRef(0);
   /** One 자신을 고치는 창. 팀원 편집과 같은 창을 쓴다(오너 지시 2026-08-23). */
   const [editOneTarget, setEditOneTarget] = useState<OneEditSelfTarget | null>(null);
+  const [oneEditorOpen, setOneEditorOpen] = useState(false);
+  const oneEditorNavigating = useRef(false);
   const createAgentSeedTokenRef = useRef(0);
   const [agentPickerRequest, setAgentPickerRequest] = useState<{
     token: number;
@@ -2288,6 +2291,9 @@ function OneSessionsShell() {
       setAccountSignedIn(session?.signedIn === true);
       if (!changed) return;
       identityGeneration.current += 1;
+      setEditOneTarget(null);
+      setOneEditorOpen(false);
+      oneEditorNavigating.current = false;
       invalidateIpcCache("oneMemory");
       setOneProfile(null);
       setOneMemory(null);
@@ -2405,6 +2411,8 @@ function OneSessionsShell() {
     setRailModeState(mode);
   }, []);
   const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | "profile" | "memory" | "language">("mcp");
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
+  const [capabilitiesVisited, setCapabilitiesVisited] = useState(false);
   const lastSettingsSection = useRef<OneSettingsKey>("mcp");
   if (settingsSheet !== "profile" && settingsSheet !== "memory" && settingsSheet !== "language") lastSettingsSection.current = settingsSheet;
   const [settingsProfileVisited, setSettingsProfileVisited] = useState(false);
@@ -2417,19 +2425,26 @@ function OneSessionsShell() {
     return () => { if (previous?.isConnected) previous.focus(); };
   }, [railMode]);
   const [pluginPickerOpen, setPluginPickerOpen] = useState(false);
+  const capabilityPickerReturn = useRef<{open:boolean;generation:number}|null>(null);
+  const openCapabilities = () => { if (!capabilitiesOpen) capabilityPickerReturn.current = {open:pluginPickerOpen,generation:settingsPickerGeneration.current}; setOneEditorOpen(false); setPluginPickerOpen(false); setCapabilitiesVisited(true); setCapabilitiesOpen(true); setRailMode("settings"); };
+  const closeCapabilities = () => { setCapabilitiesOpen(false); const previous=capabilityPickerReturn.current; capabilityPickerReturn.current=null; if(previous?.open && previous.generation===settingsPickerGeneration.current)setPluginPickerOpen(true); };
   const openOneSettings = useCallback((setting: OneSettingsKey | "profile" | "memory") => {
+    setOneEditorOpen(false);
     setComposerMenu(null);
     setPluginPickerOpen(false);
+    setCapabilitiesOpen(false);
     if (setting === "profile") setSettingsProfileVisited(true);
     if (setting === "memory") setSettingsMemoryVisited(true);
     setSettingsSheet(setting);
     setRailMode("settings");
   }, [setRailMode]);
-  const closeOneSettings = () => { setPluginPickerOpen(false); setRailMode(settingsReturnMode.current); };
+  const closeOneSettings = () => { setPluginPickerOpen(false); setCapabilitiesOpen(false); setRailMode(settingsReturnMode.current); };
   const [settingsPickerVisited, setSettingsPickerVisited] = useState(false);
   const [settingsPickerTarget, setSettingsPickerTarget] = useState<string | null>(null);
   const openOnePluginPicker = useCallback((targetName?: string) => {
+    setOneEditorOpen(false);
     setComposerMenu(null);
+    setCapabilitiesOpen(false);
     setSettingsSheet("plugins");
     setSettingsPickerTarget(targetName || null);
     setSettingsPickerVisited(true);
@@ -2438,14 +2453,30 @@ function OneSessionsShell() {
   }, [setRailMode]);
   const settingsPickerGeneration = useRef(0);
   const settingsPickerOwner = settingsPickerGeneration.current;
+  const settingsPickerSavePhase = useRef<KeySavePhase | null>(null);
+  const [settingsPickerInterruption, setSettingsPickerInterruption] = useState<KeySavePhase | null>(null);
+  const rememberSettingsPickerInterruption = (phase: KeySavePhase) =>
+    setSettingsPickerInterruption(current => current === "write-started" ? current : phase);
   useEffect(() => {
-    const unsubscribe = ipc()?.auth?.onSessionChanged?.(() => {
+    let alive = true;
+    let identity: string | null | undefined;
+    let events = 0;
+    void window.agentlas?.auth?.getSession?.().then(session => { if (alive && events === 0) identity = keySaveSessionIdentity(session); }).catch(() => undefined);
+    const unsubscribe = ipc()?.auth?.onSessionChanged?.((session) => {
+      if (!alive) return;
+      events += 1;
+      const next = keySaveSessionIdentity(session);
+      const changed = identity === undefined || next === null || identity !== next;
+      identity = next;
+      if (!changed) return;
+      if (settingsPickerSavePhase.current) rememberSettingsPickerInterruption(settingsPickerSavePhase.current);
+      settingsPickerSavePhase.current = null;
       settingsPickerGeneration.current += 1;
       setPluginPickerOpen(false);
       setSettingsPickerVisited(false);
       setSettingsPickerTarget(null);
     });
-    return () => { settingsPickerGeneration.current += 1; unsubscribe?.(); };
+    return () => { alive = false; settingsPickerGeneration.current += 1; unsubscribe?.(); };
   }, []);
   const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, false));
   /*
@@ -2596,7 +2627,7 @@ function OneSessionsShell() {
   const [dismissedBriefing, setDismissedBriefing] = useState<{ signature: string; expiresAt: number } | null>(null);
   const [introReplayToken, setIntroReplayToken] = useState(0);
   const [whatsNewReplayToken, setWhatsNewReplayToken] = useState(0);
-  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
+
   // The visible app language is the one language control a person can see and
   // change in this surface. A stale profile preference must not make an
   // English One screen submit Korean runtime/surface copy (or the reverse).
@@ -10231,8 +10262,8 @@ function OneSessionsShell() {
               onOpenOne={openLatestOneSession}
               onNewSession={startFreshSession}
               onEditOne={() => {
-                // One 도 팀원과 같은 창에서 고친다. "지킬 것" 목록만 기존 프로필 창에 남는다.
-                setEditOneTarget({
+                // Retain an unfinished edit when returning from another settings section.
+                if (!editOneTarget) setEditOneTarget({
                   oneId: oneProfile?.oneId,
                   displayName: oneProfile?.displayName ?? "One",
                   role: oneProfile?.role ?? "Agentlas One",
@@ -10240,7 +10271,10 @@ function OneSessionsShell() {
                   avatarIcon: oneProfile?.avatarIcon ?? "",
                   expectedVersion: oneProfile?.version ?? 0,
                 });
-                setCreateAgentOpen(true);
+                setCapabilitiesOpen(false);
+                setPluginPickerOpen(false);
+                setOneEditorOpen(true);
+                setRailMode("settings");
               }}
               onEditIdentity={(member) => {
                 // 이름·캐릭터는 '에이전트 만들기'와 같은 창에서 고친다(오너 지적 2026-08-23).
@@ -10335,7 +10369,7 @@ function OneSessionsShell() {
             </nav>}
             <div className={styles.railBottomMenu}>
               <UpdateBanner />
-              <button type="button" data-one-capabilities-entry="true" onClick={() => setCapabilitiesOpen(true)}><span><IconPuzzle size={15} />{appLocale === "ko" ? "능력" : "Capabilities"}</span></button>
+              <button type="button" data-one-capabilities-entry="true" onClick={openCapabilities}><span><IconPuzzle size={15} />{appLocale === "ko" ? "능력" : "Capabilities"}</span></button>
               <button type="button" onClick={() => router.push("/local-models")}><span><IconCpu size={15} />{appLocale === "ko" ? "로컬 모델" : "Local Models"}</span></button>
               <button type="button" onClick={() => setRailMode("settings")}><span><IconSettings size={15} />{appLocale === "ko" ? "설정" : "Settings"}</span><IconChevronDown size={12} /></button>
               <button type="button" onClick={() => openOneSettings("profile")}><span className={styles.railAccountMark}>{oneDisplayName.slice(0, 1).toLocaleUpperCase()}</span><span>{oneDisplayName}</span></button>
@@ -12105,25 +12139,41 @@ function OneSessionsShell() {
         />
       </div>
 
+      {settingsPickerInterruption && <div role="status" style={{ position: "absolute", top: 12, right: 16, zIndex: 80, maxWidth: 440, padding: 12, background: "var(--paper)", color: "var(--ink)", border: "1px solid var(--paper-edge)", borderRadius: 8 }}>
+        {keySaveInterruptionText(settingsPickerInterruption, appLocale === "ko")}{" "}<button type="button" onClick={() => setSettingsPickerInterruption(null)}>{appLocale === "ko" ? "닫기" : "Dismiss"}</button>
+      </div>}
       <div ref={settingsScreenRef} tabIndex={-1} hidden={railMode !== "settings"} className={styles.settingsScreen} data-one-settings-screen="true">
-        <aside className={styles.settingsNavigation}>
-          <OneSettingsRail locale={appLocale} profileName={oneDisplayName} pendingMemoryCount={0} selected={settingsSheet}
-            onBack={closeOneSettings} onOpen={setting => { setPluginPickerOpen(false); setSettingsSheet(setting); }}
-            onOpenProfile={() => { setPluginPickerOpen(false); setSettingsProfileVisited(true); setSettingsSheet("profile"); }} onOpenMemory={() => { setPluginPickerOpen(false); setSettingsMemoryVisited(true); setSettingsSheet("memory"); }}
-            onToggleLocale={() => { setPluginPickerOpen(false); setSettingsSheet("language"); }} />
+        <aside className={styles.settingsNavigation} style={{flexDirection:"column"}}>
+          <OneSettingsRail locale={appLocale} profileName={oneDisplayName} pendingMemoryCount={0} selected={capabilitiesOpen || oneEditorOpen ? undefined : settingsSheet}
+            onBack={closeOneSettings} onOpen={setting => { setOneEditorOpen(false); setCapabilitiesOpen(false); setPluginPickerOpen(false); setSettingsSheet(setting); }}
+            onOpenProfile={() => { setOneEditorOpen(false); setCapabilitiesOpen(false); setPluginPickerOpen(false); setSettingsProfileVisited(true); setSettingsSheet("profile"); }} onOpenMemory={() => { setOneEditorOpen(false); setCapabilitiesOpen(false); setPluginPickerOpen(false); setSettingsMemoryVisited(true); setSettingsSheet("memory"); }}
+            onToggleLocale={() => { setOneEditorOpen(false); setCapabilitiesOpen(false); setPluginPickerOpen(false); setSettingsSheet("language"); }} />
+          {editOneTarget && <button type="button" aria-current={oneEditorOpen ? "page" : undefined} onClick={() => { setCapabilitiesOpen(false); setPluginPickerOpen(false); setOneEditorOpen(true); }} style={{width:"100%",textAlign:"left",padding:"10px 14px",border:0,borderRadius:8,background:oneEditorOpen?"var(--paper-2)":"transparent",color:"var(--ink)",cursor:"pointer"}}>{appLocale === "ko" ? "One 편집" : "Edit One"}</button>}
+          <button type="button" aria-current={capabilitiesOpen ? "page" : undefined} onClick={openCapabilities} style={{width:"100%",textAlign:"left",padding:"10px 14px",border:0,borderRadius:8,background:capabilitiesOpen?"var(--paper-2)":"transparent",color:"var(--ink)",cursor:"pointer"}}>{appLocale === "ko" ? "능력" : "Capabilities"}</button>
         </aside>
         <main className={styles.settingsContent} aria-label={appLocale === "ko" ? "설정 내용" : "Settings content"}>
-          <div hidden={settingsSheet !== "profile" || pluginPickerOpen}>{settingsProfileVisited && <OneProfileSheet key={identityDisplayGeneration} embedded open profile={oneProfile} locale={appLocale}
+          {editOneTarget && <OneCreateAgentDialog key={identityDisplayGeneration} embedded open active={railMode === "settings" && oneEditorOpen} locale={appLocale} editOne={editOneTarget}
+            isOwnerCurrent={() => identityGeneration.current === settingsOwnerGeneration}
+            onClose={() => { if (identityGeneration.current !== settingsOwnerGeneration) return; if (oneEditorNavigating.current) { oneEditorNavigating.current = false; return; } setEditOneTarget(null); setOneEditorOpen(false); }}
+            onCreated={() => {}} onAddExisting={() => {}}
+            onOpenPrinciples={() => { if (identityGeneration.current === settingsOwnerGeneration) { oneEditorNavigating.current = true; setOneEditorOpen(false); openOneSettings("profile"); } }}
+            onOpenMailbox={mail.available ? () => { if (identityGeneration.current === settingsOwnerGeneration) { oneEditorNavigating.current = true; setOneEditorOpen(false); setRailMode("mail"); } } : undefined}
+            onSavedOne={async () => { if (identityGeneration.current === settingsOwnerGeneration) await refreshAll(); }} />}
+          <div hidden={!capabilitiesOpen || oneEditorOpen}>{capabilitiesVisited && <OneCapabilitiesModal key={identityDisplayGeneration} embedded open active={railMode === "settings" && capabilitiesOpen && !pluginPickerOpen && !oneEditorOpen} locale={appLocale === "ko" ? "ko" : "en"} onClose={closeCapabilities} />}</div>
+          <div hidden={oneEditorOpen || settingsSheet !== "profile" || pluginPickerOpen || capabilitiesOpen}>{settingsProfileVisited && <OneProfileSheet key={identityDisplayGeneration} embedded open profile={oneProfile} locale={appLocale}
             onClose={() => setSettingsSheet("mcp")} onProfileChange={handleProfileChange}
             onOpenMailbox={mail.available ? () => setRailMode("mail") : undefined} />}</div>
-          <div hidden={settingsSheet !== "memory" || pluginPickerOpen}>{settingsMemoryVisited && <OneMemorySheet key={identityDisplayGeneration} embedded open active={railMode === "settings" && settingsSheet === "memory" && !pluginPickerOpen} state={oneMemory} locale={appLocale}
+          <div hidden={oneEditorOpen || settingsSheet !== "memory" || pluginPickerOpen || capabilitiesOpen}>{settingsMemoryVisited && <OneMemorySheet key={identityDisplayGeneration} embedded open active={railMode === "settings" && !oneEditorOpen && settingsSheet === "memory" && !pluginPickerOpen && !capabilitiesOpen} state={oneMemory} locale={appLocale}
             useOnceTarget={oneMemoryUseOnceTarget} onClose={() => setSettingsSheet("mcp")}
             onStateChange={handleMemoryChange} onUseOnceReady={handleMemoryUseOnceReady}
             valueClosure={selectedValueClosure} experienceReuse={selectedExperienceReuse} improvementProof={selectedImprovementProof}
             valueClosureState={oneValueClosures} onValueClosureStateChange={state => { if (identityGeneration.current === settingsOwnerGeneration) handleValueClosuresChange(state); }} onManageImprovementAsset={manageImprovementAsset} />}</div>
-          <div hidden={!pluginPickerOpen}>{settingsPickerTarget && <p role="status" style={{ padding: "12px 24px 0", margin: 0 }}>
+          <div hidden={oneEditorOpen || !pluginPickerOpen || capabilitiesOpen}>{settingsPickerTarget && <p role="status" style={{ padding: "12px 24px 0", margin: 0 }}>
             {appLocale === "ko" ? `${settingsPickerTarget}: 저장된 연결 설정이 올바르지 않아 켤 수 없습니다. 이 화면에서 기존 설정을 복구할 수는 없으며, 아래 목록은 새 도구 추가용입니다. 이전 연결 단계가 보이면 완료하거나 '나중에'를 선택한 뒤 도구 추가를 다시 열어 주세요.` : `${settingsPickerTarget}: the saved connection configuration is invalid and cannot be enabled. This screen cannot repair it; the list below adds new tools. If an earlier connection step is open, complete it or choose to do it later, then open Add plugins again.`}
           </p>}{settingsPickerVisited && <PluginPickerDialog embedded active={railMode === "settings" && pluginPickerOpen} ko={appLocale === "ko"}
+            onKeySavePhase={phase => { if (settingsPickerGeneration.current === settingsPickerOwner) settingsPickerSavePhase.current = phase; }}
+            onKeySaveInterrupted={phase => { if (settingsPickerGeneration.current === settingsPickerOwner) rememberSettingsPickerInterruption(phase); }}
+            isKeySaveOwnerCurrent={() => settingsPickerGeneration.current === settingsPickerOwner}
             onClose={() => { if (settingsPickerGeneration.current === settingsPickerOwner) setPluginPickerOpen(false); }} onCompleted={() => {
               if (settingsPickerGeneration.current !== settingsPickerOwner) return;
               const api = ipc();
@@ -12131,15 +12181,15 @@ function OneSessionsShell() {
               void Promise.all([api.mcpTools.listInstalled(), api.mcpTools.listCatalog(), api.mcpTools.status().catch(() => [])])
                 .then(([plugins, catalog, statuses]) => { if (settingsPickerGeneration.current !== settingsPickerOwner) return; setInstalledPlugins(plugins); setPluginCatalog(catalog); setPluginStatuses(statuses); });
             }} />}</div>
-          {settingsSheet === "language" && !pluginPickerOpen && <section className={styles.settingsLanguage} aria-labelledby="one-settings-language-title">
+          {settingsSheet === "language" && !oneEditorOpen && !pluginPickerOpen && !capabilitiesOpen && <section className={styles.settingsLanguage} aria-labelledby="one-settings-language-title">
             <h1 id="one-settings-language-title">{appLocale === "ko" ? "언어" : "Language"}</h1>
             <p>{appLocale === "ko" ? "현재 언어: 한국어" : "Current language: English"}</p>
             <button type="button" onClick={() => setPref(appLocale === "ko" ? "en" : "ko")}>
               {appLocale === "ko" ? "Switch to English" : "한국어로 변경"}
             </button>
           </section>}
-          <div hidden={pluginPickerOpen || settingsSheet === "profile" || settingsSheet === "memory" || settingsSheet === "language"}>
-            <OneSettingsSheet embedded open={lastSettingsSection.current} active={railMode === "settings" && !pluginPickerOpen && settingsSheet !== "profile" && settingsSheet !== "memory" && settingsSheet !== "language"} locale={appLocale}
+          <div hidden={oneEditorOpen || pluginPickerOpen || capabilitiesOpen || settingsSheet === "profile" || settingsSheet === "memory" || settingsSheet === "language"}>
+            <OneSettingsSheet embedded open={lastSettingsSection.current} active={railMode === "settings" && !oneEditorOpen && !pluginPickerOpen && !capabilitiesOpen && settingsSheet !== "profile" && settingsSheet !== "memory" && settingsSheet !== "language"} locale={appLocale}
               installedPlugins={installedPlugins} pluginCatalog={pluginCatalog} pluginStatuses={pluginStatuses}
               permission={onePermission} runtime={oneRuntime} models={oneModelOptions} history={computerHistory}
               onClose={closeOneSettings} onTogglePlugin={toggleOnePlugin}
@@ -12190,7 +12240,6 @@ function OneSessionsShell() {
         />
       )}
 
-      <OneCapabilitiesModal open={capabilitiesOpen} locale={appLocale === "ko" ? "ko" : "en"} onClose={() => setCapabilitiesOpen(false)} />
       <OneTaskforceDialog
         oneAvatarIcon={oneAvatarTone}
         open={taskforceDialogOpen}
@@ -12208,20 +12257,18 @@ function OneSessionsShell() {
       />
       <OneCreateAgentDialog
         open={createAgentOpen}
+        isOwnerCurrent={() => identityGeneration.current === settingsOwnerGeneration}
         locale={appLocale}
         seed={createAgentSeed}
         edit={editMemberTarget}
-        editOne={editOneTarget}
         onClose={() => {
           setCreateAgentOpen(false);
           setCreateAgentSeed(null);
           setEditMemberTarget(null);
-          setEditOneTarget(null);
         }}
-        onOpenPrinciples={() => { setEditOneTarget(null); openOneSettings("profile"); }}
+        onOpenPrinciples={() => openOneSettings("profile")}
         onOpenMailbox={mail.available ? () => setRailMode("mail") : undefined}
         onSavedOne={async () => {
-          setEditOneTarget(null);
           await refreshAll();
         }}
         onUpdated={async () => {

@@ -159,7 +159,11 @@ const PREPARATION_BASE_MS = 500;
 export const EMPTY_REPLY_MAX_RETRIES = 1;
 const EMPTY_REPLY_RETRY_MS = 400;
 /** Codes whose turn must never be replayed by anyone (the host already knows it may have acted or is looping). */
-const REPLAY_BLOCKING_CODES: ReadonlySet<string> = new Set(["runtime_turn_unsettled", "serving_reconciliation_required", "automation_no_progress_loop"]);
+const REPLAY_BLOCKING_CODES: ReadonlySet<string> = new Set([
+  "runtime_turn_unsettled", "serving_reconciliation_required", "automation_no_progress_loop",
+  // A typed authorization refusal is an owner or policy boundary, not a provider outage.
+  "permission_denied", "policy_denied", "approval_required", "approval_declined", "user_denied", "user_rejected",
+]);
 
 /**
  * The single retry / continue / fresh-session / recover / surface decision for a turn that did not complete, from typed

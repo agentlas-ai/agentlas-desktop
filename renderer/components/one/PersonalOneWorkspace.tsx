@@ -108,12 +108,27 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [identityLoading,setIdentityLoading]=useState(false);
   const [identityError,setIdentityError]=useState(false);
   const identityTrigger=useRef<HTMLButtonElement>(null);
-  const [checkinsOpen,setCheckinsOpen]=useState(false);
-  const [budgetsOpen,setBudgetsOpen]=useState(false);const [budgetId,setBudgetId]=useState("");
+  const [budgetId,setBudgetId]=useState("");
   const [capabilitiesModal,setCapabilitiesModal]=useState(false);
   const [capabilities,setCapabilities]=useState<PersonalOneCapabilityTab|null>(null);
   const [menuOpen,setMenuOpen]=useState(false);
-  const [securityOpen,setSecurityOpen]=useState(false);
+  const [settingsSection,setSettingsSection]=useState<"appearance"|"memory"|"security"|"identity"|"capabilities"|"connections"|"repeat"|"budgets"|"monitoring"|null>(null);
+  const settingsSectionRef=useRef(settingsSection);settingsSectionRef.current=settingsSection;
+  const [securityVisited,setSecurityVisited]=useState(false); const [budgetsVisited,setBudgetsVisited]=useState(false); const [checkinsVisited,setCheckinsVisited]=useState(false); const [settingsIdentity,setSettingsIdentity]=useState(0);
+  const [budgetOwnerScope,setBudgetOwnerScope]=useState<string|null>(null);
+  const budgetOwnerScopeRef=useRef<string|null>(null);
+  const settingsEpoch=useRef(0); const settingsRef=useRef<HTMLElement>(null); const settingsOpener=useRef<HTMLElement|null>(null);
+  const openSettings=(section:NonNullable<typeof settingsSection>)=>{if(!settingsSection)settingsOpener.current=document.activeElement instanceof HTMLElement?document.activeElement:null;if(section==="security")setSecurityVisited(true);if(section==="budgets")setBudgetsVisited(true);if(section==="monitoring")setCheckinsVisited(true);setSettingsSection(section);};
+  const openCapabilities=(section:PersonalOneCapabilityTab)=>{setCapabilities(section);openSettings(section);};
+  const openCapabilityCatalog=()=>{setCapabilitiesModal(true);openSettings("capabilities");};
+  const closeSettings=()=>{setSettingsSection(null);requestAnimationFrame(()=>{const opener=settingsOpener.current;if(opener?.isConnected)opener.focus();else composerInput.current?.focus();});};
+  useEffect(()=>{if(settingsSection)settingsRef.current?.focus();},[settingsSection]);
+  useEffect(()=>{let owner:string|null|undefined;let events=0;let disposed=false;
+    const identify=(session:{signedIn:boolean;accountFingerprint?:string;workspaceId?:string})=>session.signedIn?(session.accountFingerprint&&session.workspaceId?JSON.stringify([session.accountFingerprint,session.workspaceId]):null):"signed-out";
+    const invalidate=()=>{settingsEpoch.current++;setSettingsIdentity(value=>value+1);setProfile(null);setProfileName("");setMemory(null);setProfileError(false);setSavingProfile(false);setIdentityProfile(null);};
+    const auth=ipc()?.auth;void auth?.getSession?.().then(session=>{if(!disposed&&events===0){owner=identify(session);budgetOwnerScopeRef.current=owner;setBudgetOwnerScope(owner);}}).catch(()=>undefined);
+    const off=auth?.onSessionChanged?.(session=>{events++;const next=identify(session);const changed=owner===undefined||next===null||owner!==next;owner=next;budgetOwnerScopeRef.current=next;setBudgetOwnerScope(next);if(changed)invalidate();});
+    return()=>{disposed=true;budgetOwnerScopeRef.current=null;settingsEpoch.current++;off?.();};},[]);
   // Sidebar: owner choice persists; below 860px it is collapsed unless the owner opens it for this session.
   const [navPref,setNavPref]=useState<"open"|"closed"|null>(()=>{try{const v=window.localStorage.getItem("agentlas.one.personal.nav");return v==="open"||v==="closed"?v:null;}catch{return null;}});
   const headerMenuRef=useRef<HTMLElement>(null);const headerMenuTrigger=useRef<HTMLButtonElement>(null);
@@ -145,7 +160,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [ownVisibleCommands,setOwnVisibleCommands]=useState<{scope:string|null;ids:string[]}>({scope:null,ids:[]});
   const historyAnchor=useRef<{scope:string|null;id:string;top:number}|null>(null);
   const historyButtonStyle:CSSProperties={padding:"7px 12px",border:"1px solid var(--paper-edge)",borderRadius:10,background:"var(--paper-2)",color:"var(--ink)",font:"inherit",fontSize:12,cursor:"pointer"};
-  const budgets=usePersonalOneBudgets(snapshot?.oneId);
+  const budgets=usePersonalOneBudgets(snapshot?.oneId,budgetOwnerScope,budgetOwnerScopeRef,settingsEpoch);
   const workBudget=budgets.items.find(item=>item.budgetId===budgetId);
   const budgetSelectionUnconfirmed=!!budgetId&&(budgets.unconfirmed||!workBudget||workBudget.limitUsd===null);
   const [attachments,setAttachments]=useState<Array<{draft:ChatFileDraft;preview?:string}>>([]);
@@ -249,10 +264,12 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   };
   const togglePinned=async()=>{try{const value=await windowAction(()=>ipc()?.oneWindow?.setAlwaysOnTop({value:!pinned}));if(!value)throw new Error("window_controller_unavailable");setPinned(value.alwaysOnTop);setWindowError(false);}catch{setWindowError(true);}};
   const openMain=async(route:string)=>{if(!detached){router.push(route);return;}try{const value=await windowAction(()=>ipc()?.oneWindow?.showMain({route}));if(!value)throw new Error("window_controller_unavailable");setMenuOpen(false);}catch{setWindowError(true);}};
-  const [appearanceOpen,setAppearanceOpen]=useState(false); const [profile,setProfile]=useState<OneProfile|null>(null); const [profileName,setProfileName]=useState("");
+  const [profile,setProfile]=useState<OneProfile|null>(null); const [profileName,setProfileName]=useState("");
   const [bubbleColor,setBubbleColor]=useState<OneBubbleColor>("blue"); const [savingProfile,setSavingProfile]=useState(false);
   const [profileError,setProfileError]=useState(false);
-  const [memoryOpen,setMemoryOpen]=useState(false); const [memory,setMemory]=useState<OneMemoryState|null>(null);
+  const [memory,setMemory]=useState<OneMemoryState|null>(null);
+  const observedSettingsOne=useRef<string|null>(null);
+  useLayoutEffect(()=>{const next=snapshot?.oneId ?? null;const prior=observedSettingsOne.current;observedSettingsOne.current=next;if(prior&&next!==prior){settingsEpoch.current++;setSettingsIdentity(value=>value+1);setProfile(null);setProfileName("");setMemory(null);setIdentityProfile(null);setSavingProfile(false);setProfileError(false);}},[snapshot?.oneId]);
   const [historyOpen,setHistoryOpen]=useState(false);
   const [plusOpen,setPlusOpen]=useState(false); const plusMenu=useRef<HTMLDivElement>(null);
   useEffect(()=>{
@@ -263,7 +280,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     return()=>{document.removeEventListener("pointerdown",outside);document.removeEventListener("keydown",escape);};
   },[plusOpen]);
   const [dismissedKeyRun,setDismissedKeyRun]=useState<string|null>(null);
-  const closeMemory=useCallback(()=>setMemoryOpen(false),[]);
+
   const [savedRequests,setSavedRequests]=useState<PendingSupervisorWrite[]>([]);
   const [optimistic,setOptimistic]=useState<Array<{commandId:string;text:string;acknowledged:boolean}>>([]);
   const outbox=useRef<SupervisorOutbox|null>(null); const outboxOneId=useRef<string|null>(null); const inFlight=useRef(new Set<string>());
@@ -569,24 +586,22 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     catch{setError(true);void sync();}finally{setStopPending(null);}
   };
   const openIdentity=async()=>{
-    if(identityLoading)return;
+    openSettings("identity");if(identityProfile)return;
+    if(identityLoading)return;const epoch=settingsEpoch.current;
     setIdentityLoading(true);setIdentityError(false);
-    try{setIdentityProfile(await ipc()!.oneProfile.get());}catch{setIdentityError(true);}finally{setIdentityLoading(false);}
+    try{const value=await ipc()!.oneProfile.get();if(epoch===settingsEpoch.current)setIdentityProfile(value);}catch{if(epoch===settingsEpoch.current)setIdentityError(true);}finally{setIdentityLoading(false);}
   };
-  const closeIdentity=()=>{setIdentityProfile(null);requestAnimationFrame(()=>identityTrigger.current?.focus());};
-  const appearance=async()=>{setProfileError(false);setAppearanceOpen(true);try{const value=await ipc()!.oneProfile.get();setProfile(value);setProfileName(value.displayName);setBubbleColor(value.bubbleColor ?? "blue");}catch{setProfileError(true);}};
+  const closeIdentity=()=>{setIdentityProfile(null);if(settingsSectionRef.current==="identity")void appearance();};
+  const appearance=async()=>{openSettings("appearance");if(profile)return;const epoch=settingsEpoch.current;setProfileError(false);try{const value=await ipc()!.oneProfile.get();if(epoch!==settingsEpoch.current)return;setProfile(value);setProfileName(value.displayName);setBubbleColor(value.bubbleColor ?? "blue");}catch{if(epoch===settingsEpoch.current)setProfileError(true);}};
   const saveAppearance=async()=>{
-    if(!profile||savingProfile)return;setSavingProfile(true);
-    try{let value=await write('appearance',{oneId:profile.oneId,expectedVersion:profile.version,displayName:profileName,bubbleColor});
-      // The profile moved on another window or the phone while this sheet was open: the owner's name and colour are what they asked
-      // for, so they are saved once more on the profile as it is now instead of asking them to save again.
-      if(value.state!=='completed'&&value.reason==='supervisor_profile_version_conflict'){const fresh=await ipc()!.oneProfile.get();setProfile(fresh);
-        value=await write('appearance',{oneId:fresh.oneId,expectedVersion:fresh.version,displayName:profileName,bubbleColor});}
-      showReceipt(value);
-      if(value.state==='completed')setAppearanceOpen(false);else {setProfileError(true);setProfile(await ipc()!.oneProfile.get());}void sync();}
-    catch{setProfileError(true);}finally{setSavingProfile(false);}
+    if(!profile||savingProfile)return;const epoch=settingsEpoch.current;setSavingProfile(true);
+    try{const value=await write('appearance',{oneId:profile.oneId,expectedVersion:profile.version,displayName:profileName,bubbleColor});
+      if(epoch!==settingsEpoch.current)return;showReceipt(value);
+      if(value.state!=='completed')setProfileError(true);else {setProfile(null);try{const fresh=await ipc()!.oneProfile.get();if(epoch===settingsEpoch.current&&fresh.oneId===profile.oneId)setProfile(fresh);else if(epoch===settingsEpoch.current)setProfileError(true);}catch{if(epoch===settingsEpoch.current)setProfileError(true);}void sync();}}
+    catch{if(epoch===settingsEpoch.current)setProfileError(true);}finally{if(epoch===settingsEpoch.current)setSavingProfile(false);}
   };
-  const openMemory=async()=>{setMemoryOpen(true);try{setMemory(await ipc()!.oneMemory.getState());}catch{setError(true);}};
+  const refreshAppearance=async()=>{const epoch=settingsEpoch.current;try{const fresh=await ipc()!.oneProfile.get();if(epoch!==settingsEpoch.current)return;if(profile&&fresh.oneId!==profile.oneId){setProfile(null);setProfileError(true);return;}setProfile(fresh);setProfileError(false);}catch{if(epoch===settingsEpoch.current)setProfileError(true);}};
+  const openMemory=async()=>{openSettings("memory");const epoch=settingsEpoch.current;try{const value=await ipc()!.oneMemory.getState();if(epoch===settingsEpoch.current)setMemory(value);}catch{if(epoch===settingsEpoch.current)setError(true);}};
   const openFile=useCallback((reference:LinkedFileArtifact,chatId:string)=>{
     if (/^https?:\/\//iu.test(reference.href)) {
       // The panel may currently belong to a task or a local file. Switch its
@@ -652,18 +667,19 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       <span className={styles.delegationMeta} aria-hidden="true">{state==="completed"&&<IconCheck size={14}/>}<IconChevronRight size={14}/></span>
     </button>;
   };
+  const settingsOwnerEpoch=settingsEpoch.current;
   return <div ref={workspaceRoot} className={styles.root} data-personal-one-workspace="true" data-detached={detached} data-layout={viewportWidth>=860?"workbench":"companion"} onDragOver={event=>{if(event.dataTransfer.types.includes("Files")){event.preventDefault();event.dataTransfer.dropEffect="copy";}}} onDrop={event=>{if(event.dataTransfer.files.length){event.preventDefault();void pickAttachments(Array.from(event.dataTransfer.files));}}} style={{"--personal-bubble":bubbleHex(snapshot?.bubbleColor)} as CSSProperties}>
-    {!detached&&<aside id="personal-one-navigation" className={styles.navigation} data-collapsed={navCollapsed} hidden={navCollapsed} aria-label={copy("One 탐색","One navigation")}>
+    {!detached&&<aside id="personal-one-navigation" className={styles.navigation} data-collapsed={navCollapsed} hidden={navCollapsed||settingsSection!==null} aria-label={copy("One 탐색","One navigation")}>
       <div className="titlebar-drag" style={{height:28}}/><ProductModeMenu current="one" locale={ko?"ko":"en"}/>
       <button className={styles.personalEntry} data-personal-one-entry="true" aria-current="page"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/><span className={styles.personalIdentity}><strong>{name}</strong><small>{copy("개인 에이전트","Personal agent")}</small></span></button>
       <nav className={styles.tabs}><button onClick={()=>navigateRail("organisation")}>{copy("에이전트","Agents")}</button><button onClick={()=>navigateRail("sessions")}>{copy("세션","Session")}</button><button onClick={()=>navigateRail("mail")}>{copy("메일","Mail")}</button></nav>
-      <div className={styles.navigationLinks}><button onClick={()=>navigateRail("sessions")}>{copy("One으로 돌아가기","Back to One")}</button><button onClick={()=>void appearance()}><IconSettings size={16}/>{copy("이름과 말풍선","Name and bubbles")}</button><button onClick={()=>void openMemory()}><IconBrain size={16}/>{copy("메모리","Memory")}</button><button type="button" data-one-capabilities-entry="true" onClick={()=>setCapabilitiesModal(true)}><IconPuzzle size={16}/>{copy("능력","Capabilities")}</button><button onClick={()=>setHistoryOpen(true)}>{copy("지난 One 대화","Previous One conversations")}</button></div>
+      <div className={styles.navigationLinks}><button onClick={()=>navigateRail("sessions")}>{copy("One으로 돌아가기","Back to One")}</button><button onClick={()=>void appearance()}><IconSettings size={16}/>{copy("이름과 말풍선","Name and bubbles")}</button><button onClick={()=>void openMemory()}><IconBrain size={16}/>{copy("메모리","Memory")}</button><button type="button" data-one-capabilities-entry="true" onClick={openCapabilityCatalog}><IconPuzzle size={16}/>{copy("능력","Capabilities")}</button><button onClick={()=>setHistoryOpen(true)}>{copy("지난 One 대화","Previous One conversations")}</button></div>
       <p className={styles.localLabel}>{copy("이 컴퓨터에서 실행","Runs on this computer")}</p>
     </aside>}
-    <main className={styles.conversation}>
+    <main className={styles.conversation} hidden={settingsSection!==null}>
       <header ref={contextBar} className={`${styles.header} ${detached?"titlebar-drag":""}`} data-personal-one-header="true">
         <div className={`${styles.headerSide} titlebar-nodrag`}>{!detached&&<button type="button" className={styles.iconButton} data-personal-one-nav-toggle="true" aria-label={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} title={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} aria-expanded={!navCollapsed} aria-controls="personal-one-navigation" onClick={toggleNav}><IconSidebar size={18}/></button>}</div>
-        <div className={styles.headerIdentity}><button ref={identityTrigger} type="button" className={`${styles.headerIdentityButton} titlebar-nodrag`} onClick={()=>void openIdentity()} disabled={identityLoading} aria-label={copy("이름과 사진 편집","Edit name and photo")} aria-haspopup="dialog" aria-busy={identityLoading}><span className={styles.headerAvatar} aria-hidden="true"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/></span><span className={styles.headerIdentityName}>{name}</span></button><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
+        <div className={styles.headerIdentity}><button ref={identityTrigger} type="button" className={`${styles.headerIdentityButton} titlebar-nodrag`} onClick={()=>void openIdentity()} disabled={identityLoading} aria-label={copy("이름과 사진 편집","Edit name and photo")} aria-busy={identityLoading}><span className={styles.headerAvatar} aria-hidden="true"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/></span><span className={styles.headerIdentityName}>{name}</span></button><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
         <div className={`${styles.headerSide} titlebar-nodrag`} data-side="end">
           {detached&&<button className={styles.iconButton} type="button" aria-label={copy("항상 위에 두기","Always on top")} aria-pressed={pinned} title={copy("항상 위에 두기","Always on top")} onClick={()=>void togglePinned()}><span aria-hidden="true">⌖</span></button>}
           <button type="button" className={styles.iconButton} aria-label={copy("결과·작업 보기","Show results and work")} aria-expanded={taskDrawerVisible} title={copy("결과·작업 보기","Show results and work")} onClick={()=>{if(taskDrawerVisible)setTasksOpen(false);else showTaskDrawer();setTaskPreviewOnly(Boolean(selected));}}><IconPanelRight size={17}/></button>
@@ -671,13 +687,13 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         </div>
       </header>
       {menuOpen&&<nav ref={headerMenuRef} id="personal-one-menu" className={styles.headerMenu} aria-label={copy("One 메뉴","One menu")} onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();setMenuOpen(false);headerMenuTrigger.current?.focus();}}}>
-        <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("connections");}}>{copy("연결 도구","Connected tools")}</button>
-        <button type="button" data-personal-one-security-entry="true" onClick={()=>{setMenuOpen(false);setSecurityOpen(true);}}>{copy("보안과 연결 관리","Security and connections")}</button>
-        <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("repeat");}}>{copy("반복 업무","Recurring work")}</button>
-        <button type="button" onClick={()=>{setMenuOpen(false);setBudgetsOpen(true);}}>{copy("실행 예산","Execution budgets")}</button>
-        <button type="button" onClick={()=>{setMenuOpen(false);setCheckinsOpen(true);}}>{copy("감시 조건","Monitoring")}</button>
+        <button type="button" onClick={()=>{setMenuOpen(false);openCapabilities("connections");}}>{copy("연결 도구","Connected tools")}</button>
+        <button type="button" data-personal-one-security-entry="true" onClick={()=>{setMenuOpen(false);openSettings("security");}}>{copy("보안과 연결 관리","Security and connections")}</button>
+        <button type="button" onClick={()=>{setMenuOpen(false);openCapabilities("repeat");}}>{copy("반복 업무","Recurring work")}</button>
+        <button type="button" onClick={()=>{setMenuOpen(false);openSettings("budgets");}}>{copy("실행 예산","Execution budgets")}</button>
+        <button type="button" onClick={()=>{setMenuOpen(false);openSettings("monitoring");}}>{copy("감시 조건","Monitoring")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);void openMemory();}}>{copy("메모리","Memory")}</button>
-        <button type="button" onClick={()=>{setMenuOpen(false);setCapabilitiesModal(true);}}>{copy("능력","Capabilities")}</button>
+        <button type="button" onClick={()=>{setMenuOpen(false);openCapabilityCatalog();}}>{copy("능력","Capabilities")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);void appearance();}}>{copy("이름과 말풍선","Name and bubbles")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setHistoryOpen(true);}}>{copy("지난 대화","Previous conversations")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);void sync();}}>{copy("연결 상태 다시 확인","Refresh connection")}</button>
@@ -787,9 +803,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);showTaskDrawer();setTaskPreviewOnly(false);setSelected(null);}}><span className={styles.plusIcon}><IconLayers size={15}/></span><strong>{copy("Work에 맡기기","Hand to Work")}</strong></button>
               {!!snapshot?.scienceProjects?.length&&<button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);showTaskDrawer();setTaskPreviewOnly(false);setSelected(null);}}><span className={styles.plusIcon}><IconSparkles size={15}/></span><strong>{copy("Science에 맡기기","Hand to Science")}</strong></button>}
               <div className={styles.plusDivider}/>
-              <button type="button" role="menuitem" onClick={()=>{setPlusOpen(false);setCapabilities("connections");}}>{copy("연결 도구","Connected tools")}</button>
-              <button type="button" role="menuitem" onClick={()=>{setPlusOpen(false);setCapabilities("repeat");}}>{copy("반복 업무","Recurring work")}</button>
-              <button type="button" role="menuitem" onClick={()=>{setPlusOpen(false);setCheckinsOpen(true);}}>{copy("감시 조건","Monitoring")}</button>
+              <button type="button" role="menuitem" onClick={()=>{setPlusOpen(false);openCapabilities("connections");}}>{copy("연결 도구","Connected tools")}</button>
+              <button type="button" role="menuitem" onClick={()=>{setPlusOpen(false);openCapabilities("repeat");}}>{copy("반복 업무","Recurring work")}</button>
+              <button type="button" role="menuitem" onClick={()=>{setPlusOpen(false);openSettings("monitoring");}}>{copy("감시 조건","Monitoring")}</button>
               <div className={styles.plusSection}>{name}</div>
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void openMemory();}}><span className={styles.plusIcon}><IconBrain size={15}/></span><strong>{copy("메모리","Memory")}</strong></button>
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void appearance();}}><span className={styles.plusIcon}><IconSettings size={15}/></span><strong>{copy("이름과 말풍선","Name and bubbles")}</strong></button>
@@ -817,7 +833,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     <BrowserActionApprovalSheet chatId={snapshot?.conversationChatId ?? null} />
     {live?.keyRequest && live.keyRequest.runId!==dismissedKeyRun && <McpKeyRequestSheet key={live.keyRequest.runId}
       request={live.keyRequest} presentation="one" localeOverride={ko?"ko":"en"} onResolved={()=>setDismissedKeyRun(live.keyRequest!.runId)} />}
-    <div className={styles.outputPanel} data-personal-one-output-panel="true" data-visible={outputPanelVisible} style={{'--personal-panel-width':shownPanelWidth+'px','--personal-composer-height':composerHeight+'px','--personal-context-bottom':contextBottom+'px'} as CSSProperties}>
+    <div className={styles.outputPanel} hidden={settingsSection!==null} data-personal-one-output-panel="true" data-visible={outputPanelVisible} style={{'--personal-panel-width':shownPanelWidth+'px','--personal-composer-height':composerHeight+'px','--personal-context-bottom':contextBottom+'px'} as CSSProperties}>
       <aside className={styles.taskDrawer} hidden={!taskDrawerVisible} aria-labelledby="one-task-heading" data-one-task-drawer="true" onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();setTasksOpen(false);composerInput.current?.focus();}}}>
         <div className={styles.panelResize} role="separator" tabIndex={0} aria-label={copy("결과 영역 너비","Result panel width")} aria-orientation="vertical" aria-valuemin={280} aria-valuemax={Math.round(panelMaxWidth)} aria-valuenow={Math.round(shownPanelWidth)}
           onKeyDown={event=>{if(event.key==="ArrowLeft"||event.key==="ArrowRight"){event.preventDefault();resizePanel(shownPanelWidth+(event.key==="ArrowLeft"?24:-24));}}}
@@ -831,7 +847,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       </div>
       <label>{copy("이 Work 업무에 사용할 실행 예산","Execution budget for this Work task")}<Select aria-label={copy("이 Work 업무에 사용할 실행 예산","Execution budget for this Work task")} value={budgetId} onChange={event=>setBudgetId(event.target.value)}><option value="">{copy("제한 없이 관측만 (기본)","Unrestricted observation (default)")}</option>{budgets.items.filter(item=>item.limitUsd!==null).map(item=><option key={item.budgetId} value={item.budgetId}>{personalOneBudgetName(item,ko?"ko":"en")}</option>)}{budgetSelectionUnconfirmed&&<option value={budgetId}>{copy("선택 예산 확인 필요","Selected budget needs review")}</option>}</Select></label>
       <p className={styles.feedback}>{budgetSelectionUnconfirmed?copy("선택한 예산의 최신 정책을 확인하지 못했습니다. 예산 관측을 확인하거나 기본 관측으로 직접 변경해 주세요.","The selected budget policy is unconfirmed. Review budget observations or explicitly choose the default observation mode."):budgetId?copy("이 업무의 후속 실행도 같은 예산에서 예약합니다. 공급자의 실제 청구 상한을 보장하지 않습니다.","Follow-up runs reserve from the same task budget. Actual provider charges are not capped."):copy("예산을 선택하지 않으면 제한 없이 관측합니다. 실제 청구가 미확정일 수 있습니다.","Without a selected budget, execution is unrestricted observation. Actual billing may remain unconfirmed.")}</p>
-      <button type="button" onClick={()=>setBudgetsOpen(true)}>{copy("예산 설정과 비용 관측","Budget settings and billing observations")}</button>
+      <button type="button" onClick={()=>openSettings("budgets")}>{copy("예산 설정과 비용 관측","Budget settings and billing observations")}</button>
       <button disabled={workPending||!snapshot||!work.trim()||budgetSelectionUnconfirmed} onClick={()=>void startWork()}>{copy("Work 시작","Start Work")}</button><button onClick={()=>void openMain("/science")}>{copy("Science 열기","Open Science")}</button>
       {!!snapshot?.scienceProjects?.length&&<><label>{copy("Science 프로젝트","Science project")}<Select value={scienceProject} onChange={event=>setScienceProject(event.target.value)}><option value="">{copy("프로젝트 선택","Choose a project")}</option>{snapshot.scienceProjects.map(project=><option key={project.projectId} value={project.projectId}>{project.title}</option>)}</Select></label><button disabled={workPending||!scienceProject||!work.trim()} onClick={()=>void startWork(true)}>{copy("Science에 맡기기","Hand off to Science")}</button></>}
       {snapshot?.scienceError&&<p className={styles.feedback}>{copy("Science 관측 연결을 확인할 수 없습니다.","Science observation is unavailable.")}</p>}
@@ -852,20 +868,36 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       <TaskSidePanel key={panelChatId ?? "one-files"} items={[]} locale={ko?'ko':'en'} visible={!!file||artifactOpen} onEmptyChange={setOutputPanelEmpty} screenChatId={panelChatId} browserScopeKey={panelChatId ?? 'personal-one-unbound'} width={shownPanelWidth} minWidth={280} maxWidth={panelMaxWidth} onResize={resizePanel} onRequestReadableWidth={resizePanel} onRequestOpen={()=>setArtifactOpen(true)} onClose={()=>{setFile(null);setArtifactOpen(false);setBrowserChatId(null);setPendingWebLink(null);}}/>
     </div>
     {identityError&&<p role="alert" className={styles.feedback}>{copy("프로필을 열지 못했습니다. 다시 눌러 주세요.","Could not open the profile. Please try again.")}</p>}
-    {identityProfile&&<OneIdentityEditor open identityOnly locale={ko?"ko":"en"} editOne={{oneId:identityProfile.oneId,displayName:identityProfile.displayName,role:identityProfile.role,profileContext:identityProfile.profileContext,avatarIcon:identityProfile.avatarIcon ?? "character:orange-dino",expectedVersion:identityProfile.version}} onClose={closeIdentity} onCreated={()=>{}} onAddExisting={()=>{}} onSavedOne={async()=>{await sync();}}/>}
-    <OneBottomSheet open={appearanceOpen} onClose={()=>setAppearanceOpen(false)} closeLabel={copy("설정 닫기","Close appearance")} ariaLabel={copy("나의 One","Your One")} title={copy("나의 One","Your One")} icon={<IconSettings size={20} />} size="compact" footer={<button className={styles.saveAppearance} disabled={!profile||savingProfile||!profileName.trim()} onClick={()=>void saveAppearance()}>{copy("저장","Save")}</button>}>
-      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")}</p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:bubbleHex(color as OneBubbleColor)}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:bubbleHex(bubbleColor)}}>{profileName||name}</p>
+    <section ref={settingsRef} tabIndex={-1} className={styles.settingsScreen} hidden={settingsSection===null} aria-label={copy("설정","Settings")}>
+      <aside className={styles.settingsNav}><button type="button" onClick={closeSettings}>{copy("← 대화로 돌아가기","← Back to conversation")}</button><h1>{copy("설정","Settings")}</h1>
+        <button type="button" aria-current={settingsSection==="identity"?"page":undefined} onClick={()=>void openIdentity()}>{copy("프로필","Profile")}</button>
+        <button type="button" aria-current={settingsSection==="capabilities"?"page":undefined} onClick={openCapabilityCatalog}>{copy("능력","Capabilities")}</button>
+        <button type="button" aria-current={settingsSection==="connections"?"page":undefined} onClick={()=>openCapabilities("connections")}>{copy("연결 도구","Connected tools")}</button>
+        <button type="button" aria-current={settingsSection==="repeat"?"page":undefined} onClick={()=>openCapabilities("repeat")}>{copy("반복 업무","Recurring work")}</button>
+        <button type="button" aria-current={settingsSection==="budgets"?"page":undefined} onClick={()=>openSettings("budgets")}>{copy("실행 예산","Execution budgets")}</button>
+        <button type="button" aria-current={settingsSection==="monitoring"?"page":undefined} onClick={()=>openSettings("monitoring")}>{copy("감시 조건","Monitoring")}</button>
+        <button type="button" aria-current={settingsSection==="appearance"?"page":undefined} onClick={()=>void appearance()}>{copy("이름과 말풍선","Name and bubbles")}</button>
+        <button type="button" aria-current={settingsSection==="memory"?"page":undefined} onClick={()=>void openMemory()}>{copy("메모리","Memory")}</button>
+        <button type="button" aria-current={settingsSection==="security"?"page":undefined} onClick={()=>openSettings("security")}>{copy("보안과 연결 관리","Security and connections")}</button>
+      </aside><div className={styles.settingsContent}>
+        <div hidden={settingsSection!=="appearance"}>    <OneBottomSheet embedded open={true} onClose={closeSettings} closeLabel={copy("설정 닫기","Close appearance")} ariaLabel={copy("나의 One","Your One")} title={copy("나의 One","Your One")} icon={<IconSettings size={20} />} size="compact" footer={<button className={styles.saveAppearance} disabled={!profile||savingProfile||!profileName.trim()} onClick={()=>void saveAppearance()}>{copy("저장","Save")}</button>}>
+      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")} <button type="button" onClick={()=>void refreshAppearance()}>{copy("최신 설정 불러오기","Load latest settings")}</button></p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:bubbleHex(color as OneBubbleColor)}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:bubbleHex(bubbleColor)}}>{profileName||name}</p>
         <CadenceSwitchRow id="one-cadence-enabled" testId="enabled" title={copy("답을 말풍선으로 나눠 보기","Show replies as separate bubbles")} hint={copy("끄면 답을 말풍선으로 나누지 않고, 예전처럼 한 덩어리로 보여 줍니다.","When off, a reply is shown as one block instead of being split into bubbles.")} on={cadence.enabled} onToggle={()=>cadence.setEnabled(!cadence.enabled)}/>
         {cadence.enabled&&<CadenceSwitchRow id="one-cadence-instant" testId="instant" title={copy("답을 바로 보기","Show replies instantly")} hint={copy("켜면 말풍선 사이에 쉬는 시간 없이, 문단이 끝나는 대로 보여 줍니다.","When on, each bubble appears as soon as its paragraph is written, with no pause between them.")} on={cadence.instant} onToggle={()=>cadence.setInstant(!cadence.instant)}/>}
         <OneFrontSetting controller={front} locale={ko?"ko":"en"}/></div>
     </OneBottomSheet>
+</div>
+        <div hidden={settingsSection!=="memory"}>    <OneMemorySheet key={settingsIdentity} embedded open active={settingsSection==="memory"} state={memory} locale={ko?"ko":"en"} useOnceTarget={null} onClose={closeSettings} onStateChange={value=>{if(settingsOwnerEpoch===settingsEpoch.current)setMemory(value);}} onUseOnceReady={()=>{}}/></div>
+        <div hidden={settingsSection!=="budgets"}>{budgetsVisited&&<PersonalOneBudget key={`budget-${settingsIdentity}`} embedded open active={settingsSection==="budgets"} isOwnerCurrent={()=>settingsOwnerEpoch===settingsEpoch.current} ownerScope={budgetOwnerScope} oneId={snapshot?.oneId} locale={ko?"ko":"en"} items={budgets.items} unconfirmed={budgets.unconfirmed} onRefresh={budgets.refresh} onClose={closeSettings}/>}</div>
+        <div hidden={settingsSection!=="monitoring"}>{checkinsVisited&&<PersonalOneCheckins key={`checkins-${settingsIdentity}`} embedded open active={settingsSection==="monitoring"} isOwnerCurrent={()=>settingsOwnerEpoch===settingsEpoch.current} ownerScope={budgetOwnerScope} oneId={snapshot?.oneId} locale={ko?"ko":"en"} onClose={closeSettings} onRefresh={()=>void sync()}/>}</div>
+        <div hidden={settingsSection!=="security"}>{securityVisited&&<OneBottomSheet embedded open onClose={closeSettings} closeLabel={copy("닫기","Close")} ariaLabel={copy("보안과 연결 관리","Security and connections")} title={copy("보안과 연결 관리","Security and connections")} size="compact"><OneSecurityFeatures/></OneBottomSheet>}
+</div>
+        <div hidden={settingsSection!=="identity"}>{identityLoading&&<p role="status">{copy("프로필을 불러오는 중입니다.","Loading profile.")}</p>}{identityError&&<p role="alert">{copy("프로필을 열지 못했습니다. 다시 눌러 주세요.","Could not open the profile. Please try again.")}</p>}{identityProfile&&<OneIdentityEditor key={settingsIdentity} open embedded active={settingsSection==="identity"} identityOnly isOwnerCurrent={()=>settingsOwnerEpoch===settingsEpoch.current} locale={ko?"ko":"en"} editOne={{oneId:identityProfile.oneId,displayName:identityProfile.displayName,role:identityProfile.role,profileContext:identityProfile.profileContext,avatarIcon:identityProfile.avatarIcon ?? "character:orange-dino",expectedVersion:identityProfile.version}} onClose={()=>{if(settingsOwnerEpoch===settingsEpoch.current)closeIdentity();}} onCreated={()=>{}} onAddExisting={()=>{}} onSavedOne={async()=>{if(settingsOwnerEpoch===settingsEpoch.current)await sync();}}/>}</div>
+        {capabilitiesModal&&<OneCapabilitiesModal key={`catalog-${settingsIdentity}`} embedded open active={settingsSection==="capabilities"} locale={ko?"ko":"en"} onClose={closeSettings}/>}
+        <PersonalOneCapabilities key={`connections-${settingsIdentity}`} embedded active={settingsSection==="connections"||settingsSection==="repeat"} oneId={snapshot?.oneId} open={settingsSection===null?null:capabilities} locale={ko?"ko":"en"} chatId={snapshot?.conversationChatId} onClose={closeSettings} onPrompt={prompt=>{setText(current=>current.trim()?`${current}\n\n${prompt}`:prompt);closeSettings();}}/>
+      </div>
+    </section>
     <OneFrontNotice controller={front} locale={ko?"ko":"en"}/>
-    <PersonalOneBudget open={budgetsOpen} oneId={snapshot?.oneId} locale={ko?"ko":"en"} items={budgets.items} unconfirmed={budgets.unconfirmed} onRefresh={budgets.refresh} onClose={()=>setBudgetsOpen(false)}/>
-    <PersonalOneCheckins open={checkinsOpen} oneId={snapshot?.oneId} locale={ko?"ko":"en"} onClose={()=>setCheckinsOpen(false)} onRefresh={()=>void sync()}/>
-    <OneCapabilitiesModal open={capabilitiesModal} locale={ko?"ko":"en"} onClose={()=>setCapabilitiesModal(false)}/>
-    <PersonalOneCapabilities oneId={snapshot?.oneId} open={capabilities} locale={ko?"ko":"en"} chatId={snapshot?.conversationChatId} onClose={()=>setCapabilities(null)} onPrompt={prompt=>{setText(prompt);composerInput.current?.focus();}}/>
-    <OneMemorySheet open={memoryOpen} state={memory} locale={ko?"ko":"en"} useOnceTarget={null} onClose={closeMemory} onStateChange={setMemory} onUseOnceReady={()=>{}}/>
-    <OneBottomSheet open={securityOpen} onClose={()=>setSecurityOpen(false)} closeLabel={copy("닫기","Close")} ariaLabel={copy("보안과 연결 관리","Security and connections")} title={copy("보안과 연결 관리","Security and connections")} size="compact"><OneSecurityFeatures/></OneBottomSheet>
     <OneBottomSheet open={historyOpen} onClose={()=>setHistoryOpen(false)} closeLabel={copy('이전 대화 닫기','Close previous conversations')} ariaLabel={copy('지난 One 대화','Previous One conversations')} title={copy('지난 One 대화','Previous One conversations')} icon={<IconLayers size={20} />} size="compact">
       <div className={styles.appearance}>
         {snapshot?.legacyHistory?.linked.map(source=><button className={styles.historyItem} key={source.chatId} onClick={()=>void openMain('/one?chat='+encodeURIComponent(source.chatId))}><IconLayers size={18}/><span>{source.title}<small>{source.messageCount} {copy('메시지','messages')}</small></span><IconChevronRight size={16}/></button>)}

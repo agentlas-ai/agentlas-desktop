@@ -3,7 +3,7 @@ import { readOrdinaryOneTurn, type OrdinaryOneTurnSource } from "../invocation/o
 import { oneGoalRoomTurnOnDesktop } from "../invocation/goal-owner-route";
 import { supervisorError } from "../../shared/one-supervisor";
 import { createHash } from 'node:crypto';
-import { chatFilePrompt, chatFileDisplayImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
+import { chatFilePrompt, chatFileDisplayImageCopies, validateChatAttachmentSelection } from "../store/chat-message-attachments";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { readRunTurnPlacement } from "../invocation/turn-placement";
 import { latestInvocationBrowserLoginWait } from "../invocation/browser-login-wait";
@@ -298,8 +298,9 @@ export function oneSupervisor():OneSupervisorService {
       // Legacy rows may still display their images, but only the typed selection creates new file authority.
       const groupId=selectedGroupId ?? /<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
       validateChatAttachmentSelection(chatId,groupId,images);
-      const allImages=[...(images ?? []),...chatFileDisplayImages(chatId,groupId,images)]; // legacy display copy only within the old bounds
-      return appendChatMessage(chatId,"user",text,{...(allImages.length ? {images:allImages} : {}),...(selectedGroupId ? {fileGroupId:selectedGroupId} : {})}).id;
+      const copies=chatFileDisplayImageCopies(chatId,groupId,images);
+      const allImages=[...(images ?? []),...copies.map(copy=>copy.image)]; // legacy display copies, with host-owned source IDs
+      return appendChatMessage(chatId,"user",text,{...(allImages.length ? {images:allImages} : {}),...(selectedGroupId ? {fileGroupId:selectedGroupId,legacyFileCopyIds:copies.map(copy=>copy.fileId)} : {})}).id;
     },attachmentPrompt:chatFilePrompt,
     createWork:input=>{
       // A project id that names no project starts the brief without one: Hope passed its own conversation id and the owner's

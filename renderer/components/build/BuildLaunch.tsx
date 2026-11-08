@@ -241,9 +241,10 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
 
 
 /** Catalog browsing never installs a tool, injects a prompt or edits an agent. */
-export function BuildResources({ ko, canAttach, canConfigure = canAttach, onAttachFolder, onStop, registered }: {
+export function BuildResources({ ko, canAttach, canConfigure = canAttach, onAttachFolder, onStop, registered, connectionsTarget, onConnectionsOpenChange, connectionsCloseRequest, connectionsActive }: {
   ko: boolean; canAttach: boolean; canConfigure?: boolean; onAttachFolder: () => void; onStop?: () => void;
   registered: { id: string; kind: "agent" | "team"; name: string } | null;
+  connectionsTarget: HTMLElement | null; onConnectionsOpenChange: (open: boolean) => void; connectionsCloseRequest: number; connectionsActive: boolean;
 }) {
   const [catalog, setCatalog] = useState<"apps" | "skills" | null>(null);
   const [apps, setApps] = useState<McpToolCatalogEntry[]>([]);
@@ -314,7 +315,7 @@ export function BuildResources({ ko, canAttach, canConfigure = canAttach, onAtta
 
   return <section className={styles.resources} aria-label={ko ? "연결과 추가 설정" : "Connections and additional settings"}>
     <div className={styles.resourceActions}>
-      <ServiceConnectionsButton locale={ko ? "ko" : "en"} disabled={!canConfigure || Boolean(onStop)} />
+      <ServiceConnectionsButton locale={ko ? "ko" : "en"} disabled={!canConfigure || Boolean(onStop)} embedded active={connectionsActive} portalTarget={connectionsTarget} onOpenChange={onConnectionsOpenChange} closeRequest={connectionsCloseRequest} />
       <button type="button" onClick={event => { trigger.current = event.currentTarget; setCatalog("apps"); }}>{ko ? "앱 찾아보기" : "Browse apps"}</button>
       <button type="button" onClick={event => { trigger.current = event.currentTarget; setCatalog("skills"); }}>{ko ? "스킬 찾아보기" : "Browse skills"}</button>
       {library && <Link href={`${library}&tab=memory`}>{ko ? "메모리" : "Memory"}</Link>}

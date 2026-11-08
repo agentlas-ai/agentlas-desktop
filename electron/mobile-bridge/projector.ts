@@ -29,7 +29,7 @@ import {
   isPersonalSupervisorConversation,
   listRecentChats,
 } from "../store/chats";
-import { listChatFileSnapshot } from "../store/chat-message-attachments";
+import { chatMessageFileCopyIds, listChatFileSnapshot } from "../store/chat-message-attachments";
 import {
   ensureCanonicalTaskForChat,
   findCanonicalTaskForChat,
@@ -1004,6 +1004,15 @@ export function projectMobileBridgeHistory(
       continue;
     }
     const files = mobileBridgeChatFiles(chatId, message.role, message.text);
+    // Preserve the old exact-key image DTO while giving both representations of
+    // a host-recorded compatibility copy the same usable attachment ID.
+    const fileIds = new Set(files.map(file => file.attachmentId));
+    const copies = chatId && message.role === "user" && files.length && images.length
+      ? chatMessageFileCopyIds(chatId, message.id) : new Map<string,string>();
+    const projectedImages = images.map(image => {
+      const fileId = copies.get(image.attachmentId);
+      return fileId && fileIds.has(fileId) ? { attachmentId: fileId } : image;
+    });
     const hostNotice = notice?.purpose === "one-dispatch-link" || notice?.purpose === "one-dispatch-result"
       ? { ...notice, memberName: sanitizeMobileBridgeText(notice.memberName, 256),
           ...(notice.dispatch ? { dispatch: { ...notice.dispatch,
@@ -1052,7 +1061,7 @@ export function projectMobileBridgeHistory(
       ...(message.role === "user" && promptRunIds.has(message.id)
         ? { runId: promptRunIds.get(message.id)! }
         : {}),
-      ...(images.length ? { images } : {}),
+      ...(projectedImages.length ? { images: projectedImages } : {}),
       ...(files.length ? { files } : {}),
     };
     const remaining = budget - outBytes - mobileBridgeJsonBytes(shell) - 16;
