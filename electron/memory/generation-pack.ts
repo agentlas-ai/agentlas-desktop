@@ -74,14 +74,18 @@ function changes() {
   if (maximum > 2048 && maximum !== readiness.lastPruned) {
     db.prepare("DELETE FROM memory_recall_changes WHERE seq<?").run(maximum - 2048); readiness.lastPruned = maximum;
   }
-  return { db, complete: readiness.complete, watch: sha([readiness.signature, clock.nonce]), max: maximum };
+  return { db, complete: readiness.complete, watch: sha([readiness.signature, clock.nonce]), max: maximum, nonce: clock.nonce };
 }
 export interface GenerationPackResult { text: string; eligibleIds: string[]; selectedIds: string[]; prefix: string; }
-export function readGenerationMemoryPack(token: MemoryContextGeneration, input: {
+type GenerationPackInput = {
   query: string; maxApproxTokens: number;
   select(entries: MemoryEntry[], query: string, tokenBudget: number): MemoryEntry[];
   render(entries: MemoryEntry[]): string;
-}): GenerationPackResult | null {
+};
+export function readGenerationMemoryPack(token: MemoryContextGeneration, input: GenerationPackInput): GenerationPackResult | null {
+  return readGenerationMemoryPackAttempt(token, input, 1);
+}
+function readGenerationMemoryPackAttempt(token: MemoryContextGeneration, input: GenerationPackInput, retries: number): GenerationPackResult | null {
   try {
     const identity = memoryGenerationState(token), journal = changes();
     const custody = JSON.stringify([identity.ownerNamespace, identity.revocationEpoch]);
@@ -133,7 +137,12 @@ export function readGenerationMemoryPack(token: MemoryContextGeneration, input: 
       for (const row of changed) eligible.add(row.id);
       pack.eligibleIds = [...eligible];
       const base = new Set(pack.baseIds);
-      pack.deltaIds = [...new Set([...changed.map(entry => entry.id).filter(id => !base.has(id)), ...pack.deltaIds.filter(id => !updateIds.includes(id))])].slice(0, DELTA_SOURCE_LIMIT);
+      const deltaIds = [...new Set([...changed.map(entry => entry.id).filter(id => !base.has(id)), ...pack.deltaIds.filter(id => !updateIds.includes(id))])];
+      if (deltaIds.length > DELTA_SOURCE_LIMIT) {
+        cache.delete(identity.key);
+        return readGenerationMemoryPackAttempt(token, input, retries);
+      }
+      pack.deltaIds = deltaIds;
     }
     const queryTerms = [...new Set(localEmbeddingTokens(input.query))].sort();
     if (sha(queryTerms) !== sha(pack.probeTerms)) {
@@ -144,7 +153,12 @@ export function readGenerationMemoryPack(token: MemoryContextGeneration, input: 
       const candidates = listMemoryForContext(scope, -1);
       const probe = input.select(candidates, input.query, 200);
       const base = new Set(pack.baseIds);
-      pack.deltaIds = [...new Set([...probe.map(entry => entry.id).filter(id => !base.has(id)), ...pack.deltaIds])].slice(0, DELTA_SOURCE_LIMIT);
+      const deltaIds = [...new Set([...probe.map(entry => entry.id).filter(id => !base.has(id)), ...pack.deltaIds])];
+      if (deltaIds.length > DELTA_SOURCE_LIMIT) {
+        cache.delete(identity.key);
+        return readGenerationMemoryPackAttempt(token, input, retries);
+      }
+      pack.deltaIds = deltaIds;
       pack.probeTerms = queryTerms;
     }
     const deltaSources = listMemoryForContext(scope, -1, pack.deltaIds);
@@ -166,13 +180,24 @@ export function readGenerationMemoryPack(token: MemoryContextGeneration, input: 
     pack.seenSeq = journal.max;
     pack.byteSize = Buffer.byteLength(JSON.stringify(pack));
     memoryGenerationState(token);
-    cache.set(identity.key, pack);
     const sourceScope = currentMemorySourceCustody();
-    if (sourceScope && pack.text) {
-      const baseDigest = dependencies(pack.baseIds).digest;
+    const channel = sha([identity.actorId, identity.visibilityDomain, identity.projectId, identity.projectPath]);
+    const baseDigest = sourceScope && pack.text ? dependencies(pack.baseIds).digest : null;
+    let currentClock: { seq: number; nonce: string } | undefined;
+    try { currentClock = journal.db.prepare("SELECT seq,nonce FROM memory_recall_clock WHERE id=1").get() as typeof currentClock; }
+    catch { /* Do not publish a pack whose source clock could not be verified. */ }
+    if (!currentClock || currentClock.seq !== journal.max || currentClock.nonce !== journal.nonce) {
+      cache.delete(identity.key);
+      if (sourceScope) sourcePacks.get(sourceScope)?.delete(channel);
+      if (currentClock && retries > 0) return readGenerationMemoryPackAttempt(token, input, retries - 1);
+      counts.fallbacks++;
+      recordMemoryGenerationFallback("generation-pack-source-changed");
+      return { text: "", prefix: "", eligibleIds: [], selectedIds: [] };
+    }
+    cache.set(identity.key, pack);
+    if (sourceScope && pack.text && baseDigest) {
       const capturedIdentity = { ...identity };
       const grants = sourcePacks.get(sourceScope) ?? new Map<string, PackGrant>();
-      const channel = sha([identity.actorId, identity.visibilityDomain, identity.projectId, identity.projectPath]);
       grants.set(channel, { prefix: pack.text, generation: token, identity: capturedIdentity, baseDigest,
         credentialRevision: getCredentialStateRevision(), envRevision: getEnvConfigurationRevision(),
         assertCurrent() { memoryGenerationState(token); if (dependencies(pack!.baseIds).digest !== baseDigest)

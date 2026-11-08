@@ -1,3 +1,7 @@
+.profileSheet.profileSheet {
+  width: min(760px, calc(100vw - 32px));
+}
+
 .content {
   min-width: 0;
 }

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.136 — 2026-11-08
+
+- Settings: navigate Desktop, project, Finance, and One settings in a menu and content workspace while keeping conversations and drafts available. Mobile pairing can be opened inside settings.
+- Service setup: open an unconfigured tool directly in One settings; closing the credential step prevents writes that have not yet been sent.
+- Science: load further pages of execution history from the research workspace.
+- One memory: refresh selection when a large set of changes cannot fit in the incremental candidate window, and check for concurrent changes while assembling memory context.
+- Tools and Goals: send tool cancellation before waiting for the cancellation record; report an unapplied mobile Goal resume accurately and avoid attributing another turn’s reply to a Goal rest notice.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.135 — 2026-11-08
 
 - One: a sign-in wait that a process left behind when it died ends at the next start, and the Work on it is continued by One. A reply the app refused for its own state waits one, five and ten minutes like a hand-off, and wakes when a sign-in or a runtime signal arrives. A reply, follow-up or room message whose turn stopped at a sign-in follows the run that continued it, and a wait an app restart cut ends as stopped instead of hanging. A reply start that never answered is released by the 30-second check, so the next message and One's report are never held behind it.

@@ -2,6 +2,7 @@
 
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
@@ -35,6 +36,7 @@ function profileSubtitle(locale: Locale): string {
 
 interface OneProfileSheetProps {
   open: boolean;
+  embedded?: boolean;
   profile: OneProfile | null;
   locale: "ko" | "en";
   onClose: () => void;
@@ -64,13 +66,14 @@ function formatDate(value: string, locale: "ko" | "en"): string {
 
 export function OneProfileSheet({
   open,
+  embedded = false,
   profile,
   locale,
   onClose,
   onProfileChange,
   onOpenMailbox,
 }: OneProfileSheetProps) {
-  const hydratedVersionRef = useRef<number | null>(null);
+  const hydratedVersionRef = useRef<{ oneId: string; version: number } | null>(null);
   const [displayName, setDisplayName] = useState(profile?.displayName ?? "One");
   const [role, setRole] = useState(profile?.role ?? "Agentlas One");
   const [bubbleColor,setBubbleColor]=useState<OneBubbleColor>(profile?.bubbleColor ?? 'blue');
@@ -81,10 +84,38 @@ export function OneProfileSheet({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
+  const profileIdentity = useRef({ oneId: profile?.oneId ?? null, version: profile?.version ?? null });
+  profileIdentity.current = { oneId: profile?.oneId ?? null, version: profile?.version ?? null };
+  const sessionGeneration = useRef(0);
   useEffect(() => {
-    if (!profile || hydratedVersionRef.current === profile.version) return;
-    hydratedVersionRef.current = profile.version;
+    let identity: string | null | undefined;
+    let eventCount = 0;
+    let disposed = false;
+    const identify = (session: { signedIn: boolean; accountFingerprint?: string; workspaceId?: string }) =>
+      session.signedIn ? session.accountFingerprint && session.workspaceId ? JSON.stringify([session.accountFingerprint, session.workspaceId]) : null : "signed-out";
+    void window.agentlas?.auth?.getSession?.().then(session => {
+      if (!disposed && eventCount === 0) identity = identify(session);
+    }).catch(() => undefined);
+    const unsubscribe = ipc()?.auth?.onSessionChanged?.((session) => {
+      eventCount += 1;
+      const next = identify(session);
+      const changed = identity === undefined || next === null || identity !== next;
+      identity = next;
+      if (!changed) return;
+      sessionGeneration.current += 1;
+      setBusy(false);
+      setMessage(null);
+      setError(null);
+    });
+    return () => { disposed = true; sessionGeneration.current += 1; unsubscribe?.(); };
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!profile || (hydratedVersionRef.current?.oneId === profile.oneId && hydratedVersionRef.current.version === profile.version)) return;
+    const changedOwner = hydratedVersionRef.current !== null && hydratedVersionRef.current.oneId !== profile.oneId;
+    hydratedVersionRef.current = { oneId: profile.oneId, version: profile.version };
+    setBusy(false);
+    if (changedOwner) { setEditingId(null); setEditContent(""); setNewContent(""); setBusy(false); setMessage(null); setError(null); }
     setDisplayName(profile.displayName);
     setRole(profile.role);
     setBubbleColor(profile.bubbleColor ?? 'blue');
@@ -109,22 +140,30 @@ export function OneProfileSheet({
       setError(null);
       return null;
     }
+    const identity = profile?.oneId ?? null;
+    const version = profile?.version ?? null;
+    const generation = sessionGeneration.current;
+    const isCurrent = () => identity !== null && profileIdentity.current.oneId === identity && profileIdentity.current.version === version && sessionGeneration.current === generation;
+    if (!isCurrent()) return null;
     setBusy(true);
     setError(null);
     setMessage(null);
     try {
       const next = await operation();
+      if (!isCurrent() || next.oneId !== identity) return null;
       onProfileChange(next);
       setMessage(success);
       return next;
     } catch (cause) {
+      if (!isCurrent()) return null;
       const latest = await api.oneProfile.get().catch(() => null);
-      if (latest) onProfileChange(latest);
+      if (!isCurrent()) return null;
+      if (latest?.oneId === identity) onProfileChange(latest);
       requestOneOperationalRecovery("one-profile", cause);
       setError(null);
       return null;
     } finally {
-      setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   };
 
@@ -237,16 +276,18 @@ export function OneProfileSheet({
   return (
     <OneBottomSheet
       open={open}
+      embedded={embedded}
       onClose={onClose}
       closeLabel={tFor(locale, "one.prof.close_aria")}
-      ariaLabelledBy="one-profile-title"
-      size="compact"
+      ariaLabelledBy={embedded ? "one-profile-settings-title" : "one-profile-title"}
+      size="wide"
+      panelClassName={styles.profileSheet}
       closeOnBackdrop={!busy}
       closeOnEscape={!busy}
       closeDisabled={busy}
       eyebrow={tFor(locale, "one.prof.eyebrow")}
       title={tFor(locale, "one.prof.title")}
-      titleId="one-profile-title"
+      titleId={embedded ? "one-profile-settings-title" : "one-profile-title"}
       icon={<IconUser size={20} />}
     >
         {!profile ? (

@@ -89,6 +89,7 @@ function sameJobList(prev: MultimodalJob[], next: MultimodalJob[]): boolean {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
+  const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
   const importRequested = useHasOpened(importOpen);
   const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
@@ -279,9 +280,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           background: "transparent",
         }}
       >
-        <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
+        <div hidden={projectSettingsOpen} style={{ display: projectSettingsOpen ? "none" : "contents" }}>
+          <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
+        </div>
+        <ProjectSettingsHost onVisibilityChange={setProjectSettingsOpen} />
       </main>
-      <ProjectSettingsHost />
       <PageTour pathname={pathname} autoOpenSuspended={pageTourAutoOpenSuspended} />
       {pathname.startsWith("/dashboard") && (
         <WorkFirstRunOnboarding onVisibilityChange={setWorkFirstRunVisible} />

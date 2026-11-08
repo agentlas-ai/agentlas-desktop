@@ -68,6 +68,7 @@ export function createMemoryGenerationCache<T extends { byteSize: number }>(maxE
   registerMemoryRecallCacheInvalidator(clear);
   return {
     get(key: string): T | null { const row = rows.get(key); if (!row) return null; rows.delete(key); rows.set(key, row); return row.value; },
+    delete(key: string) { const row = rows.get(key); if (row) bytes -= row.bytes; rows.delete(key); },
     set(key: string, value: T) { const old = rows.get(key); if (old) bytes -= old.bytes; rows.delete(key);
       if (value.byteSize > maxBytes) return; rows.set(key, { value, bytes: value.byteSize }); bytes += value.byteSize;
       while (rows.size > maxEntries || bytes > maxBytes) { const id = rows.keys().next().value!; bytes -= rows.get(id)!.bytes; rows.delete(id); } },

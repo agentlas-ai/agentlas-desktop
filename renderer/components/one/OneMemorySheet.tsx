@@ -4,6 +4,7 @@ import { keptEditAfterRefresh, memorySheetFailureText, memorySheetKeptEditText, 
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -42,6 +43,8 @@ import styles from "./OneMemorySheet.module.css";
 
 interface OneMemorySheetProps {
   open: boolean;
+  embedded?: boolean;
+  active?: boolean;
   state: OneMemoryState | null;
   locale: "ko" | "en";
   useOnceTarget: OneMemoryUseOnceTarget | null;
@@ -119,7 +122,7 @@ function KindIcon({ kind, size = 14 }: { kind: string; size?: number }) {
 
 /** Older preload compatibility: exactly one historical One reader is mounted
  * only when the optional Desktop Inspector is absent. No new intake or approval. */
-function LegacyOneMemoryView({open,locale}:{open:boolean;locale:"ko"|"en"}) {
+function LegacyOneMemoryView({open,active,locale}:{open:boolean;active:boolean;locale:"ko"|"en"}) {
   const [busyId,setBusyId]=useState<string|null>(null),[message,setMessage]=useState<string|null>(null),[error,setError]=useState<string|null>(null);
   const [durable, setDurable] = useState<OneDurableMemoryEntryUi[] | null>(null);
   const [durableError, setDurableError] = useState(false);
@@ -130,12 +133,15 @@ function LegacyOneMemoryView({open,locale}:{open:boolean;locale:"ko"|"en"}) {
   const [kindFilter, setKindFilter] = useState<string | null>(null);
   const [selectedMemory, setSelectedMemory] = useState<string | null>(null);
   const durableRequest = useRef(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const request = ++durableRequest.current;
     // A closed sheet forgets its last read, so reopening shows "loading" instead of the old count for a frame.
     if (!open) { setDurable(null); setMemoryMap(null); setSelectedMemory(null); return; }
+    if (!active) return;
     setBusyId(null);
     setDurable(null);
+    setMemoryMap(null);
+    setSelectedMemory(null);
     setDurableError(false);
     const api = ipc();
     if (!api?.oneMemory?.listEntries) {
@@ -152,7 +158,7 @@ function LegacyOneMemoryView({open,locale}:{open:boolean;locale:"ko"|"en"}) {
     // The map is a picture of the same entries; without it the list still works.
     void api.oneMemory.getMap?.().then((map) => { if (request === durableRequest.current) setMemoryMap(map); }).catch(() => undefined);
     return () => { ++durableRequest.current; };
-  }, [open, durableRetry]);
+  }, [open, active, durableRetry]);
   const forgetDurable = async (entry: OneDurableMemoryEntryUi) => {
     const api = ipc();
     if (!api?.oneMemory?.forgetEntry) return;
@@ -201,10 +207,10 @@ function LegacyOneMemoryView({open,locale}:{open:boolean;locale:"ko"|"en"}) {
     const row = durable?.find((entry) => entry.id === id);
     return row ? { label: kindLabel(row.kind, locale), text: row.content } : null;
   }, [durable, locale]);
-  useEffect(()=>{if(!open)return;return window.agentlasEvents?.onStoreChanged?.(change=>{
+  useEffect(()=>{if(!open||!active)return;return window.agentlasEvents?.onStoreChanged?.(change=>{
     if(!["agent","project","one-profile","runtime"].includes(change.entity))return;
     ++durableRequest.current;setDurable(null);setMemoryMap(null);setSelectedMemory(null);setDurableRetry(value=>value+1);
-  });},[open]);
+  });},[open,active]);
   return <><section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
               <h3 id="durable-memory-title" className={styles.memoryCount}>
                 {locale === "ko" ? "기억" : "Memories"} <span>{durable ? durable.length : durableError ? "!" : "…"}</span>
@@ -276,7 +282,7 @@ function LegacyOneMemoryView({open,locale}:{open:boolean;locale:"ko"|"en"}) {
             </section>{message&&<p className={styles.message} role="status">{message}</p>}{error&&<p className={styles.error} role="alert">{error}</p>}</>;
 }
 
-function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:"ko"|"en";revisionHint:OneMemoryState|null}) {
+function DesktopMemoryInspector({open,active,locale,revisionHint}:{open:boolean;active:boolean;locale:"ko"|"en";revisionHint:OneMemoryState|null}) {
   const [result,setResult]=useState<DesktopMemoryQueryResult|null>(null),[detail,setDetail]=useState<DesktopMemoryDetail|null>(null);
   const [actor,setActor]=useState(BUILTIN_ONE_AGENT_ID),[project,setProject]=useState(""),[scope,setScope]=useState("");
   const [status,setStatus]=useState<DesktopMemoryStatus|"all">("active"),[selected,setSelected]=useState<string|null>(null);
@@ -288,23 +294,31 @@ function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:
   // action the owner just took does this (never the effects that read the list, which would loop on a memory that keeps changing).
   // The words the owner typed into the editor survive that reload: they come back in the editor of the same memory once it is read again.
   const keptEdit=useRef<KeptEdit|null>(null);
+  const suspendedEdit=useRef<(KeptEdit & { ownerRef: string })|null>(null);
+  const activeResult=useRef(false);
   const settleFailure=(cause:unknown,kept:KeptEdit|null=null)=>{const outcome=memorySheetOutcome(cause,locale);if(outcome.refresh){keptEdit.current=kept;setError(null);setNotice(kept?memorySheetKeptEditText(locale):outcome.text);setRetry(value=>value+1);}else setError(outcome.text);};
-  useEffect(()=>{
-    const current=++generation.current;++detailGeneration.current;setResult(null);setDetail(null);setSelected(null);setEditing(false);setError(null);
-    if(!open){keptEdit.current=null;return;}
+  useLayoutEffect(()=>{
+    const current=++generation.current;++detailGeneration.current;activeResult.current=false;
+    if (!open) { keptEdit.current=null; suspendedEdit.current=null; setResult(null);setDetail(null);setSelected(null);setEditing(false);setError(null);return; }
+    if (!active) { if (editing && selected && result) suspendedEdit.current={memoryId:selected,text,ownerRef:result.ownerRef}; return; }
+    setResult(null);setDetail(null);setSelected(null);setEditing(false);setError(null);
     const api=ipc()?.oneMemory.inspector;
     if(!api){setError(locale==="ko"?"기억 정보를 불러올 수 없습니다.":"Memory information is unavailable.");return;}
     void api.query({actorId:actor==="*"?null:actor,projectId:project||null,scope:(scope||null) as OneMemoryMapSnapshot["nodes"][number]["scope"]|null,status})
-      .then(value=>{if(current===generation.current){if(value.schemaVersion!=="agentlas.desktop-memory-inspector.v1")throw Error("Memory information is unavailable");setResult(value);
+      .then(value=>{if(current===generation.current){if(value.schemaVersion!=="agentlas.desktop-memory-inspector.v1")throw Error("Memory information is unavailable");
+        const suspended=suspendedEdit.current;suspendedEdit.current=null;
+        if(suspended) keptEdit.current=suspended.ownerRef===value.ownerRef?{memoryId:suspended.memoryId,text:suspended.text}:null;
+        activeResult.current=true;setResult(value);
         // The memory the owner was editing is still listed: open it again so its detail (and the typed words) come back; otherwise nothing to keep.
         const kept=keptEdit.current;if(kept){if(value.entries.some(row=>row.memoryId===kept.memoryId))setSelected(kept.memoryId);else keptEdit.current=null;}}})
       .catch(cause=>{if(current===generation.current)setError(errorText(cause));});
     return ()=>{++generation.current;++detailGeneration.current;};
-  },[open,actor,project,scope,status,retry,locale,revisionHint]);
-  useEffect(()=>{if(!open)return;const events=window.agentlasEvents;
+  },[open,active,actor,project,scope,status,retry,locale,revisionHint]);
+  useEffect(()=>{if(!open||!active)return;const events=window.agentlasEvents;
     return events?.onStoreChanged?.((change)=>{if(!["agent","project","one-profile","runtime"].includes(change.entity))return;++generation.current;++detailGeneration.current;setResult(null);setDetail(null);setSelected(null);setEditing(false);setRetry(value=>value+1);});
-  },[open]);
+  },[open,active]);
   useEffect(()=>{
+    if(!active || !activeResult.current)return;
     const current=++detailGeneration.current;setDetail(null);setEditing(false);
     if(!open||!selected||!result)return;
     const api=ipc()?.oneMemory.inspector;if(!api)return;
@@ -312,7 +326,7 @@ function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:
       const kept=keptEdit.current;if(kept){keptEdit.current=null;if(kept.memoryId===value.memoryId&&value.editable&&value.status==="active"){setText(kept.text);setEditing(true);}}}})
       .catch(cause=>{if(current===detailGeneration.current)setError(errorText(cause));});
     return ()=>{++detailGeneration.current;};
-  },[open,selected,result]);
+  },[open,active,selected,result]);
   useEffect(()=>{
     const current=detailGeneration.current;setAppSharing(null);setAppChoice("");
     const api=ipc()?.oneMemory.inspector;
@@ -385,12 +399,12 @@ function DesktopMemoryInspector({open,locale,revisionHint}:{open:boolean;locale:
   </section>;
 }
 
-export function OneMemorySheet({ open, state, locale, onClose, valueClosure, experienceReuse,
+export function OneMemorySheet({ open, embedded = false, active = true, state, locale, onClose, valueClosure, experienceReuse,
   improvementProof, valueClosureState, onValueClosureStateChange, onManageImprovementAsset }: OneMemorySheetProps) {
-  return <OneBottomSheet open={open} onClose={onClose} closeLabel={tFor(locale, "one.mem.aria.close_memory")} ariaLabelledBy="one-memory-title" size="wide" title={tFor(locale, "one.mem.header.title")}
-    icon={<IconBrain size={20} />} titleId="one-memory-title">
-    {ipc()?.oneMemory.inspector ? <DesktopMemoryInspector open={open} locale={locale} revisionHint={state} />
-      : <LegacyOneMemoryView open={open} locale={locale} />}
+  return <OneBottomSheet open={open} embedded={embedded} onClose={onClose} closeLabel={tFor(locale, "one.mem.aria.close_memory")} ariaLabelledBy={embedded ? "one-memory-settings-title" : "one-memory-title"} size="wide" title={tFor(locale, "one.mem.header.title")}
+    icon={<IconBrain size={20} />} titleId={embedded ? "one-memory-settings-title" : "one-memory-title"}>
+    {ipc()?.oneMemory.inspector ? <DesktopMemoryInspector open={open} active={active} locale={locale} revisionHint={state} />
+      : <LegacyOneMemoryView open={open} active={active} locale={locale} />}
     {valueClosure && <section className={styles.section}>
       {valueClosureState && onValueClosureStateChange && <OneValueClosureCard record={valueClosure} state={valueClosureState}
         locale={locale} onStateChange={onValueClosureStateChange} />}

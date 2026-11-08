@@ -7,6 +7,7 @@ export type OneBottomSheetSize = "compact" | "wide" | "full";
 
 type OneBottomSheetProps = {
   open: boolean;
+  embedded?: boolean;
   onClose: () => void;
   closeLabel: string;
   ariaLabel?: string;
@@ -129,6 +130,7 @@ function getFocusableElements(root: HTMLElement): HTMLElement[] {
  */
 export function OneBottomSheet({
   open,
+  embedded = false,
   onClose,
   closeLabel,
   ariaLabel,
@@ -157,7 +159,7 @@ export function OneBottomSheet({
   onCloseRef.current = onClose;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || embedded) return;
 
     const dialog = dialogRef.current;
     if (!dialog) return;
@@ -234,7 +236,12 @@ export function OneBottomSheet({
 
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
+      // The panel itself receives initial focus. Starting from it (or from a
+      // focus that escaped) must enter the dialog in the requested direction.
+      if (document.activeElement === dialog || !dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -253,9 +260,15 @@ export function OneBottomSheet({
       if (layer && layerZIndex !== null) layer.style.zIndex = "";
       if (priorFocus && document.contains(priorFocus)) priorFocus.focus();
     };
-  }, [closeOnEscape, open]);
+  }, [closeOnEscape, open, embedded]);
 
   if (!open) return null;
+  if (embedded) return <section className={styles.embedded} aria-labelledby={ariaLabelledBy ?? titleId} aria-label={ariaLabel}>
+    {title !== undefined && <header className={styles.embeddedHeader}><h1 id={titleId}>{title}</h1>{description !== undefined && <p>{description}</p>}</header>}
+    {toolbar}
+    <div className={bodyClassName}>{children}</div>
+    {footer}
+  </section>;
 
   return createPortal(
     <div className={styles.layer} data-one-modal-layer="true" role="presentation">

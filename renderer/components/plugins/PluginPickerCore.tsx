@@ -527,11 +527,41 @@ export function KeyStep({
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<"before-write" | "write-started" | null>(null);
+  const mounted = useRef(false);
+  const activeSave = useRef<{ issued: boolean } | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    let identity: string | null | undefined;
+    let events = 0;
+    let disposed = false;
+    const identify = (session: { signedIn: boolean; accountFingerprint?: string; workspaceId?: string }) =>
+      session.signedIn ? session.accountFingerprint && session.workspaceId ? JSON.stringify([session.accountFingerprint, session.workspaceId]) : null : "signed-out";
+    void window.agentlas?.auth?.getSession?.().then(session => {
+      if (!disposed && events === 0) identity = identify(session);
+    }).catch(() => undefined);
+    const unsubscribe = ipc()?.auth?.onSessionChanged?.(session => {
+      events += 1;
+      const next = identify(session);
+      const changed = identity === undefined || next === null || identity !== next;
+      identity = next;
+      if (!changed) return;
+      const interrupted = activeSave.current;
+      activeSave.current = null;
+      setBusy(false);
+      setValues({});
+      setError(null);
+      if (interrupted) setNotice(interrupted.issued ? "write-started" : "before-write");
+    });
+    return () => { disposed = true; mounted.current = false; activeSave.current = null; unsubscribe?.(); };
+  }, []);
 
   // 다음 플러그인으로 넘어갈 때 앞 항목의 입력값이 남아 있으면 안 된다.
   useEffect(() => {
     setValues({});
     setError(null);
+    setNotice(null);
   }, [state.index]);
 
   if (!current) {
@@ -549,26 +579,35 @@ export function KeyStep({
   };
 
   const save = async () => {
-    if (!api || busy) return;
+    if (!api || !mounted.current || activeSave.current) return;
+    const saveToken = { issued: false };
+    activeSave.current = saveToken;
+    const isCurrent = () => mounted.current && activeSave.current === saveToken;
     setBusy(true);
     setError(null);
+    setNotice(null);
     const deferred: string[] = [];
     try {
       // Where each key lives is the connection's own slot (shared/mcp-credential-slot.ts). Read the rows once; a
       // failed read stops the save instead of guessing the global name for a row that owns its key.
       const servers = current.serverIds?.length ? await api.mcpTools.listInstalled() : [];
       for (const key of current.envKeys) {
+        if (!isCurrent()) return;
         const value = (values[key] ?? "").trim();
         // 값은 여기서 곧장 vault로 간다. 빈 칸은 저장하지 않고 "나중에"로 남긴다 —
         // 빈 문자열을 저장하면 "키가 있다"고 잘못 보고된다.
         if (!value) { deferred.push(key); continue; }
-        for (const target of connectionKeySaveTargets(servers, current.serverIds, key)) await api.env.set(target, value);
+        for (const target of connectionKeySaveTargets(servers, current.serverIds, key)) {
+          if (!isCurrent()) return;
+          saveToken.issued = true;
+          await api.env.set(target, value);
+        }
       }
-      advance(deferred);
+      if (isCurrent()) advance(deferred);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "save failed");
+      if (isCurrent()) setError(saveError instanceof Error ? saveError.message : "save failed");
     } finally {
-      setBusy(false);
+      if (isCurrent()) { activeSave.current = null; setBusy(false); }
     }
   };
 
@@ -606,6 +645,10 @@ export function KeyStep({
       </div>
 
       {error && <p className={styles.error}>{error}</p>}
+
+      {notice && <p className={styles.keyNote} role="status">{notice === "before-write"
+        ? ko ? "인증 상태가 바뀌어 저장이 중단됐습니다. 이번 저장에서는 아직 요청을 보내지 않았습니다." : "The authentication state changed, so saving stopped. No save request was sent in this attempt."
+        : ko ? "인증 상태가 바뀌어 남은 저장이 중단됐습니다. 이미 시작한 저장의 결과를 확인해 주세요." : "The authentication state changed, so remaining saves stopped. Check the result of any save that already started."}</p>}
 
       <p className={styles.keyNote}>
         {ko

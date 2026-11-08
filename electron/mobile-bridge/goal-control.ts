@@ -157,8 +157,12 @@ export class MobileGoalControl {
           return reply({ ok: true, outcome: "applied", view: this.services.readGoalPanel(chatId!) });
         }
         case "chats.resumeGoal": {
-          await this.services.resumeGoal(chatId!, input.expectedGoalId as string);
-          return reply({ ok: true, outcome: "applied", view: this.services.readGoalPanel(chatId!) });
+          const outcome = await this.services.resumeGoal(chatId!, input.expectedGoalId as string);
+          const view = this.services.readGoalPanel(chatId!);
+          if (outcome === "no_run" || outcome === "not_stopped") {
+            return reply({ ok: false, code: outcome === "no_run" ? "goal_resume_no_run" : "goal_resume_not_stopped", view });
+          }
+          return reply({ ok: true, outcome: "applied", view });
         }
         case "goalPanel.view": return reply({ ok: true, view: this.services.readGoalPanel(chatId!) });
         case "goalPanel.edit": return reply(this.services.editGoalPanel(input));

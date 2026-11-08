@@ -8,3 +8,14 @@
 .connections{margin-top:8px;padding-top:0}.connections h3{margin:0 0 8px;font-size:13px;font-weight:600}.connectionLabel{min-width:0;display:grid;gap:5px}.connectionLabel strong{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.connectionLabel small{font-size:12px;color:var(--ink-soft)}
 
 .sourceHeading{margin:18px 0 0;font-size:13px;font-weight:600}
+
+/* Settings are a full workspace view, not a modal. */
+.dialog{width:100%;height:auto;min-height:calc(100vh - 32px);border:0;border-radius:0;box-shadow:none;overflow:visible;background:var(--paper-2)}
+.sidebar{position:sticky;top:0;align-self:start;height:100vh;max-height:100vh;padding:24px 12px;overflow:auto}
+.sidebar .back{display:flex;align-items:center;gap:8px;margin-bottom:24px;color:var(--ink-soft)}
+.content{padding:32px clamp(20px,4vw,64px);min-height:0}
+.content header{border:0;margin-bottom:12px}
+.body{overflow:visible;max-width:780px}
+@media(max-width:650px){.dialog{grid-template-columns:125px minmax(0,1fr);height:auto}.sidebar{padding:18px 6px}.content{padding:20px 12px}}
+
+.dialog[hidden]{display:none}

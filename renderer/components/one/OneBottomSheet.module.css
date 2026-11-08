@@ -1,5 +1,5 @@
 /* One floating-dialog token. Feature dialogs inherit this contract and own only their content styles. */
-.layer {
+.layer, .embedded {
   /* One's sheets follow the app's neutral surface language (the composer
      popovers, settings): white paper, hairline var(--paper-3), quiet gray labels.
      Owner decision 2026-08-16 — the warm-paper/oversized-title look was
@@ -48,6 +48,9 @@
   --one-motion-exit: 150ms;
   --one-ease-panel: cubic-bezier(0.32, 0.72, 0, 1);
   --one-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+}
+
+.layer {
   position: fixed;
   inset: 0;
   z-index: 120;
@@ -270,3 +273,9 @@
   padding: 14px 0 20px;
   border-top: 1px solid var(--one-sheet-line);
 }
+
+.embedded { box-sizing: border-box; width: min(100%, 760px); margin: 0 auto; padding: 38px 28px 72px; color: var(--ink); }
+.embeddedHeader { margin-bottom: 28px; }
+.embeddedHeader h1 { margin: 0; font-size: 26px; line-height: 1.25; letter-spacing: -.03em; }
+.embeddedHeader p { margin: 8px 0 0; color: var(--muted-deep); font-size: 13px; line-height: 1.5; }
+@media (max-width: 620px) { .embedded { padding: 24px 18px 56px; } }

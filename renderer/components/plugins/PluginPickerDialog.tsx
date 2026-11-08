@@ -49,6 +49,8 @@ type OwnershipFilter = "all" | "installed" | "not-installed";
 
 export function PluginPickerDialog({
   ko,
+  embedded = false,
+  active = true,
   variant = "browse",
   initialSlugs = [],
   onClose,
@@ -57,6 +59,8 @@ export function PluginPickerDialog({
   contextNote,
 }: {
   ko: boolean;
+  embedded?: boolean;
+  active?: boolean;
   /** onboarding이면 대표 항목만 먼저 보이고 "더 찾아보기"로 전체를 편다. */
   variant?: "browse" | "onboarding";
   /** The MCP catalog can open a reviewed install with a specific choice. */
@@ -89,6 +93,7 @@ export function PluginPickerDialog({
   // Esc로 닫기 — 팝업은 되돌아 나가는 길이 늘 보여야 한다.
   // 필터 메뉴가 열려 있으면 Esc는 그 메뉴부터 닫는다(안쪽부터 벗겨진다).
   useEffect(() => {
+    if (!active) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       if (filterOpen) { setFilterOpen(false); return; }
@@ -96,7 +101,7 @@ export function PluginPickerDialog({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [filterOpen, installing, keyStep, onClose]);
+  }, [active, filterOpen, installing, keyStep, onClose]);
 
   /*
    * 필터 메뉴는 바깥을 누르면 닫혀야 한다.
@@ -107,7 +112,7 @@ export function PluginPickerDialog({
    * 메뉴 자체를 누른 경우만 살려 두고 나머지는 닫는다.
    */
   useEffect(() => {
-    if (!filterOpen) return;
+    if (!active || !filterOpen) return;
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as Node | null;
       if (target && filterRef.current?.contains(target)) return;
@@ -115,7 +120,7 @@ export function PluginPickerDialog({
     };
     window.addEventListener("mousedown", onPointerDown);
     return () => window.removeEventListener("mousedown", onPointerDown);
-  }, [filterOpen]);
+  }, [active, filterOpen]);
 
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -192,6 +197,7 @@ export function PluginPickerDialog({
         ko={ko}
         state={loginStep}
         brandMap={brandMap}
+        chrome={embedded ? "inline" : "modal"}
         onDone={(finalResult, keyQueue) => {
           setLoginStep(null);
           if (keyQueue.length > 0) {
@@ -212,6 +218,7 @@ export function PluginPickerDialog({
         ko={ko}
         state={keyStep}
         brandMap={brandMap}
+        chrome={embedded ? "inline" : "modal"}
         onDone={(finalResult) => {
           setKeyStep(null);
           onCompleted?.(finalResult);
@@ -228,7 +235,7 @@ export function PluginPickerDialog({
   const showTypeFilter = typeCounts.mcp > 0 && typeCounts.skill > 0;
 
   return (
-    <div className={styles.overlay} role="dialog" aria-modal="true" aria-labelledby="plugin-picker-title">
+    <div className={embedded ? styles.embedded : styles.overlay} role={embedded ? undefined : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="plugin-picker-title">
       <div className={styles.panel} ref={dialogRef}>
         <header className={styles.header}>
           <h2 id="plugin-picker-title" className={styles.title}>

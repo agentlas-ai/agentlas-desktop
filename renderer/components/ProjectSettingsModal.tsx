@@ -1,14 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { invalidateViewData } from "@/lib/view-data-cache";
 import { projectAgentLimitMessage } from "@/lib/project-agent-roster";
 import type { NewProjectSource, ProjectSettingsRequest, ProjectSettingsSection } from "@/lib/project-settings";
 import type { FsPathGrant, Project, ProjectAgentPoolMember } from "@/lib/types";
-import { IconArrowLeft, IconCheck, IconChevronRight, IconClose, IconFolder, IconGithub, IconPlus, IconUsers } from "./Icon";
+import { IconArrowLeft, IconCheck, IconChevronRight, IconFolder, IconGithub, IconPlus, IconUsers } from "./Icon";
 import { ProjectAgentPicker } from "./ProjectAgentPicker";
 import { projectSettingsPatch } from "@/lib/edit-patch";
 import styles from "./ProjectSettingsModal.module.css";
@@ -22,7 +21,7 @@ export function ProjectSourceChoices({ onSelect }: { onSelect: (source: NewProje
     { id: "empty" as const, icon: <IconPlus size={23} />, title: ko ? "빈 프로젝트" : "Empty project", detail: ko ? "새 폴더에서 자유롭게 시작" : "Start fresh in a new folder" },
   ];
   return <div className={styles.choices}>
-    {choices.map((choice) => <button key={choice.id} type="button" className={styles.choice} onClick={() => onSelect(choice.id)} aria-haspopup="dialog" data-project-source={choice.id}>
+    {choices.map((choice) => <button key={choice.id} type="button" className={styles.choice} onClick={() => onSelect(choice.id)} data-project-source={choice.id}>
       <span className={styles.choiceIcon}>{choice.icon}</span>
       <strong>{choice.title}</strong><span>{choice.detail}</span><IconChevronRight size={16} />
     </button>)}
@@ -53,7 +52,7 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
   const [connectedGithub, setConnectedGithub] = useState("");
   const [pending, setPending] = useState<"folder" | "github" | "save" | null>(null);
   const [error, setError] = useState("");
-  const dialogRef = useRef<HTMLDialogElement>(null);
+  const pageRef = useRef<HTMLElement>(null);
   const mounted = useRef(false);
   const operation = useRef(false);
   const nameEdited = useRef(false);
@@ -73,14 +72,8 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
 
   useEffect(() => {
     mounted.current = true;
-    const element = dialogRef.current;
-    const previous = document.activeElement as HTMLElement | null;
-    element?.showModal();
-    return () => {
-      mounted.current = false;
-      element?.close();
-      if (previous?.isConnected) previous.focus();
-    };
+    pageRef.current?.focus();
+    return () => { mounted.current = false; };
   }, []);
 
   useEffect(() => {
@@ -227,11 +220,11 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
     </label>
   </details>;
 
-  return typeof document === "undefined" ? null : createPortal(
-    <dialog ref={dialogRef} className={styles.dialog} aria-labelledby="project-settings-title" aria-busy={Boolean(pending)} data-project-settings
-      onCancel={(event) => { event.preventDefault(); event.stopPropagation(); requestClose(); }}>
+  return (
+    <section ref={pageRef} tabIndex={-1} className={styles.dialog} aria-labelledby="project-settings-title" aria-busy={Boolean(pending)} data-project-settings>
       <div className={styles.layout}>
         <aside className={styles.nav}>
+          <button className={styles.back} type="button" onClick={requestClose}><IconArrowLeft size={16} />{ko ? "뒤로" : "Back"}</button>
           <div className={styles.projectMark}><IconFolder size={20} /></div>
           <strong className={styles.projectName}>{project?.name || (ko ? "새 프로젝트" : "New project")}</strong>
           <span className={styles.navCaption}>{editing ? (ko ? "프로젝트 설정" : "Project settings") : source === "github" ? "GitHub" : source === "local" ? (ko ? "로컬 폴더 연결" : "Local folder") : source ? (ko ? "빈 프로젝트" : "Empty project") : "Agentlas Work"}</span>
@@ -251,7 +244,6 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
             <div><h2 id="project-settings-title">{!source ? (ko ? "어디서 시작할까요?" : "Where would you like to start?") : section === "agents" ? (ko ? "에이전트 연결" : "Connect agents") : source === "github" ? (ko ? "GitHub 저장소 연결" : "Connect a GitHub repository") : (ko ? "로컬 폴더 연결" : "Connect a local folder")}</h2>
               <p>{!source ? (ko ? "프로젝트에 필요한 파일과 에이전트를 한곳에 모으세요." : "Bring your project's files and agents together.") : section === "agents" ? (ko ? "함께할 팀과 에이전트를 골라 주세요. 나중에 바꿀 수 있어요." : "Choose your teams and agents. You can change them later.") : source === "github" ? (ko ? "저장소를 내 컴퓨터에 복제해 작업합니다." : "Work with a local clone of your repository.") : (ko ? "작업할 폴더를 연결하세요. 원래 위치에서 이어서 작업합니다." : "Connect a folder to work with its files in place.")}</p>
             </div>
-            <button className={styles.close} type="button" onClick={requestClose} aria-label={pending ? (ko ? "설정을 닫고 작업은 백그라운드에서 계속" : "Close settings; operation continues in background") : (ko ? "프로젝트 설정 닫기" : "Close project settings")}><IconClose size={19} /></button>
           </header>
           <div className={styles.content}>
             {loading ? <p role="status">{ko ? "프로젝트를 불러오는 중…" : "Loading project…"}</p> : editing && !project ? <div role="alert"><p>{error}</p><button className={styles.secondary} onClick={() => setLoadAttempt((value) => value + 1)}>{ko ? "다시 시도" : "Retry"}</button></div> : !source ? <ProjectSourceChoices onSelect={selectSource} /> : <>
@@ -285,6 +277,6 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
           </footer>}
         </div>
       </div>
-    </dialog>, document.body,
+    </section>
   );
 }

@@ -87,3 +87,17 @@
 
 /* Paper popup elevation shares the desktop popup palette. */
 .dialog { border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }
+
+/* Project settings occupies the workspace while the underlying page stays mounted. */
+.dialog { flex:1; width:100%; height:100%; min-width:0; min-height:0; margin:0; border:0; border-radius:0; box-shadow:none; }
+.back { display:flex; align-items:center; gap:8px; padding:8px 10px; margin:0 0 18px; border:0; border-radius:8px; background:transparent; color:var(--ink-soft); font:inherit; cursor:pointer; }
+.back:hover { background:color-mix(in srgb,var(--accent) 8%,transparent); }
+@media(max-width:520px) {
+  .layout { grid-template-columns:120px minmax(0,1fr); grid-template-rows:minmax(0,1fr); }
+  .nav { border-right:1px solid var(--paper-edge); border-bottom:0; padding:12px 8px; }
+  .nav nav { flex-direction:column; }
+}
+
+.switchNotice { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:12px 20px; border-bottom:1px solid var(--paper-edge); background:var(--paper-2); color:var(--ink); font:12px/1.5 var(--font-body); }
+.switchNotice span { flex:1; min-width:160px; }
+.switchNotice button { border:1px solid var(--paper-edge); border-radius:7px; background:var(--paper); color:var(--ink); padding:7px 10px; font:inherit; cursor:pointer; }

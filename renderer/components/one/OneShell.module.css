@@ -4688,3 +4688,16 @@
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* A dedicated settings workspace keeps the conversation mounted underneath. */
+.shell { position: relative; }
+.settingsScreen { position: absolute; inset: 0; z-index: 65; outline: none; display: grid; grid-template-columns: 252px minmax(0, 1fr); background: var(--paper); }
+.settingsScreen[hidden] { display: none; }
+.settingsNavigation { display: flex; min-height: 0; padding: 48px 12px 12px; overflow: hidden; border-right: 1px solid var(--paper-edge); background: var(--paper-2); }
+.settingsContent { min-width: 0; min-height: 0; overflow: auto; background: var(--paper); }
+.settingsLanguage { box-sizing: border-box; width: min(100%, 760px); margin: 0 auto; padding: 38px 28px; color: var(--ink); }
+.settingsLanguage h1 { margin: 0; font-size: 26px; letter-spacing: -.03em; }
+.settingsLanguage p { color: var(--muted-deep); font-size: 13px; margin: 8px 0 28px; }
+.settingsLanguage label { display: block; margin-bottom: 8px; font-weight: 650; }
+.settingsLanguage select { min-width: 180px; padding: 10px; color: var(--ink); background: var(--paper-2); border: 1px solid var(--paper-edge); border-radius: 8px; }
+@media (max-width: 620px) { .settingsScreen { grid-template-columns: minmax(140px, 38%) minmax(0, 1fr); } .settingsNavigation { padding: 40px 6px 8px; } .settingsLanguage { padding: 24px 18px; } }

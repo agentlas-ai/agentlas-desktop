@@ -1,7 +1,7 @@
 // 설정 — BYOC 연결 관리. PRD 3.1 FRE 6단계 + 10번 리스크 "키 저장 위치 명시".
 "use client";
 
-import { PopupFrame, PopupSteps } from "@/components/Popup";
+import { PopupSteps } from "@/components/Popup";
 
 import { confirmPopup } from "@/lib/popup";
 import { FIRST_RUN_OPEN_EVENT } from "@/lib/first-run-state";
@@ -148,6 +148,21 @@ function backendKeyHint(b: ByokBackend, locale: string): string {
 
 export default function SettingsPage() {
   const { t, pref, setPref, locale } = useT();
+  const [settingsSection, setSettingsSection] = useState("general");
+  const settingsContentRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const applyHash = () => {
+      const hash = window.location.hash.slice(1);
+      const targets: Record<string, string> = { multimodal: "models", "run-alerts": "notifications", "service-connections": "connections" };
+      const section = targets[hash] ?? (hash.startsWith("settings-") ? hash.slice(9) : "");
+      if (!["general", "mobile", "connections", "models", "notifications", "privacy", "billing"].includes(section)) return;
+      setSettingsSection(section);
+      if (targets[hash]) requestAnimationFrame(() => document.getElementById(hash)?.scrollIntoView({ block: "start" }));
+    };
+    applyHash();
+    window.addEventListener("hashchange", applyHash);
+    return () => window.removeEventListener("hashchange", applyHash);
+  }, []);
   const { pref: themePref, setPref: setThemePref } = useTheme();
   const [statuses, setStatuses] = useState<RuntimeStatus[]>([]);
   const [draftKey, setDraftKey] = useState<Record<ByokBackend, string>>({
@@ -510,7 +525,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <div style={{ flex: 1, background: "var(--paper-2)", overflowY: "auto" }}>
+    <div style={{ flex: 1, minWidth: 0, background: "var(--paper-2)", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <header
         className="titlebar-drag"
         style={{
@@ -528,17 +543,41 @@ export default function SettingsPage() {
         </h1>
       </header>
 
-      <section
-        className="titlebar-nodrag"
-        style={{ maxWidth: 760, margin: "0 auto", padding: 32 }}
-      >
+      <style>{`.desktop-settings-layout { display: flex; flex: 1; min-height: 0; min-width: 0; }
+        .desktop-settings-nav { width: 220px; flex: 0 0 220px; overflow-y: auto; padding: 16px 12px; border-right: var(--hairline); background: var(--paper); }
+        .desktop-settings-nav button { display: block; width: 100%; text-align: left; border: 0; border-radius: 8px; background: transparent; color: var(--ink-soft); padding: 10px 12px; cursor: pointer; font: inherit; }
+        .desktop-settings-nav button[aria-current="page"] { color: var(--ink); background: var(--paper-2); font-weight: 700; }
+        .desktop-settings-content { flex: 1; min-width: 0; overflow: auto; }
+        .desktop-settings-inner { max-width: 760px; margin: 0 auto; padding: 24px 32px 48px; }
+        @media (max-width: 620px) { .desktop-settings-layout { flex-direction: column; } .desktop-settings-nav { width: auto; flex: 0 0 auto; display: flex; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: var(--hairline); padding: 8px; } .desktop-settings-nav button { width: auto; flex: 0 0 auto; white-space: nowrap; } .desktop-settings-inner { padding: 16px; } }
+      `}</style>
+      <div className="desktop-settings-layout titlebar-nodrag">
+      <nav className="desktop-settings-nav" aria-label={locale === "ko" ? "설정 항목" : "Settings sections"}>
+        {([
+          ["general", "일반", "General"], ["mobile", "모바일 연결", "Mobile connection"],
+          ["connections", "서비스 연결", "Connections"], ["models", "모델과 엔진", "Models and engines"],
+          ["notifications", "알림", "Notifications"], ["privacy", "개인정보와 데이터", "Privacy and data"],
+          ["billing", "요금제", "Plan"],
+        ] as const).map(([id, ko, en]) => <button key={id} type="button" aria-current={settingsSection === id ? "page" : undefined}
+          onClick={() => { setSettingsSection(id); window.location.hash = `settings-${id}`; settingsContentRef.current?.scrollTo({ top: 0 }); }}>
+          {locale === "ko" ? ko : en}
+        </button>)}
+      </nav>
+      <section className="desktop-settings-content" ref={settingsContentRef} aria-label={locale === "ko" ? "설정 내용" : "Settings content"}>
+      <div className="desktop-settings-inner">
+        <div hidden={settingsSection !== "general"}>
         <Banner />
         <UpdatePanel />
         <ScienceExtensionPanel />
-        <MobileBridgePanel />
-        <AgentMailPanel locale={locale} />
-        <ArchivePanel locale={locale} />
-        <ReachPanel locale={locale} />
+        </div>
+        <div hidden={settingsSection !== "mobile"}><MobileBridgePanel active={settingsSection === "mobile"} /></div>
+        <div hidden={settingsSection !== "connections"}><AgentMailPanel locale={locale} /></div>
+        <div hidden={settingsSection !== "privacy"}>
+          <ArchivePanel locale={locale} />
+          <ReachPanel locale={locale} />
+        </div>
+        <div hidden={settingsSection !== "billing"}><SettingsPlanRow /></div>
+        <div hidden={settingsSection !== "general"}>
 
         {/* 언어 선택 */}
         <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15, margin: "24px 0 12px" }}>
@@ -582,8 +621,6 @@ export default function SettingsPage() {
             );
           })}
         </div>
-
-        <SettingsPlanRow />
 
         {/* 첫 설정 다시 열기 — 새 설치에서만 스스로 뜨는 첫 설정(이름·Chrome·AI·말투·메일)을
             기존 사용자와 건너뛴 사람이 여기서 연다(Raycast "Show Onboarding" 과 같은 자리). */}
@@ -722,6 +759,9 @@ export default function SettingsPage() {
         </div>}
 
         <MediaDisplaySettings locale={locale} />
+
+        </div>
+        <div hidden={settingsSection !== "models"}>
 
         {/* 에이전트 동시성(스웜 크기) — 게임 그래픽 세팅처럼 내 컴 사양 기반 추천 + 슬라이더 */}
         {concurrency && (
@@ -988,7 +1028,9 @@ export default function SettingsPage() {
           onRetry={() => void retryMultimodal()}
         />
 
-        <RunAlertsPanel locale={locale} />
+        </div>
+        <div hidden={settingsSection !== "notifications"}><RunAlertsPanel locale={locale} /></div>
+        <div hidden={settingsSection !== "models"}>
 
         <TerminalProfilesPanel />
 
@@ -998,12 +1040,14 @@ export default function SettingsPage() {
         </a>
         <OllamaMigrationPanel locale={locale} />
 
+        </div>
+        <div hidden={settingsSection !== "connections"}>
         <section id="service-connections" style={{ marginTop: 32 }}>
           <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15 }}>{locale === "ko" ? "서비스 API·도구 연결" : "Service API and tool connections"}</h2>
             <p style={{ fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.6 }}>{locale === "ko"
               ? "서비스 검색·로고·연결 상태·사용자 지정 MCP API를 한곳에서 관리하세요. 저장된 키의 이름과 서비스·계정 연결은 별개입니다. 작업 중 키 요청에도 같은 연결 화면을 사용합니다."
               : "Search services, review logos and connection status, and add custom MCP APIs here. A stored key's name is separate from its service and account binding. In-task key requests use this same connection screen."}</p>
-          <ServiceConnectionsButton locale={locale} />
+          <ServiceConnectionsButton locale={locale} embedded active={settingsSection === "connections"} />
         </section>
 
         <ConnectSection
@@ -1133,20 +1177,25 @@ export default function SettingsPage() {
           </div>
         ))}
         </ConnectSection>
-
+        </div>
+        <div hidden={settingsSection !== "billing"}>
         <PricingPanel locale={locale} />
-
+        </div>
+        <div hidden={settingsSection !== "privacy"}>
         <PersonalAgentFrontPanel />
 
         <MemoryDiagnosticsPanel />
 
         <MigrationPanel />
+        </div>
+      </div>
       </section>
+      </div>
     </div>
   );
 }
 
-function MobileBridgePanel() {
+function MobileBridgePanel({ active }: { active: boolean }) {
   const { locale } = useT();
   const [status, setStatus] = useState<MobileBridgeRuntimeStatus | null>(null);
   const [devices, setDevices] = useState<MobileBridgeDeviceSummary[]>([]);
@@ -1160,6 +1209,21 @@ function MobileBridgePanel() {
   const [installGate, setInstallGate] = useState<"closed" | "ask" | "stores">("closed");
   const [storeChoice, setStoreChoice] = useState<"android" | "ios" | null>(null);
   const [storeQrDataUrl, setStoreQrDataUrl] = useState("");
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const pairButtonRef = useRef<HTMLButtonElement>(null);
+  const installHeadingRef = useRef<HTMLHeadingElement>(null);
+  const pairingNeedsRenewal = useRef(false);
+  function closeInstallGate() {
+    setInstallGate("closed");
+    window.requestAnimationFrame(() => { if (activeRef.current) pairButtonRef.current?.focus(); });
+  }
+  useEffect(() => { if (activeRef.current && installGate !== "closed") installHeadingRef.current?.focus(); }, [installGate]);
+  useEffect(() => {
+    if (!active || !pairingNeedsRenewal.current) return;
+    pairingNeedsRenewal.current = false;
+    renewPairingQr();
+  }, [active]);
 
   /*
    * ★이 대화상자는 **나가는 길이 바깥 클릭 하나뿐**이었다 (대화상자 실측 2026-09-08).
@@ -1167,15 +1231,15 @@ function MobileBridgePanel() {
    *   갇힌다. 모달은 어디서나 같은 방법으로 닫혀야 한다.
    */
   useEffect(() => {
-    if (installGate === "closed") return;
+    if (!active || installGate === "closed") return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
       event.stopPropagation();
-      setInstallGate("closed");
+      closeInstallGate();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [installGate]);
+  }, [active, installGate]);
 
   const refresh = useCallback(async () => {
     const api = ipc();
@@ -1211,16 +1275,20 @@ function MobileBridgePanel() {
   useEffect(() => {
     const off = ipcEvents()?.onMobileBridgeChanged?.(({ reason }) => {
       if (reason === "device-paired") {
+        pairingNeedsRenewal.current = false;
         setPairing(null);
         setQrDataUrl("");
         setMessage(locale === "ko" ? "새 모바일 기기가 연결됐습니다." : "A new mobile device is paired.");
       } else if (reason === "challenge-expired" || reason === "challenge-invalidated") {
+        if (reason === "challenge-invalidated") pairingNeedsRenewal.current = false;
         setPairing(null);
         setQrDataUrl("");
         // The card is still on screen: make the next QR instead of leaving a blank card (R10, shared/pairing-qr-renewal.ts).
+        if (reason === "challenge-expired" && !activeRef.current) pairingNeedsRenewal.current = true;
         if (reason === "challenge-expired" && renewPairingQr()) return;
         setMessage(locale === "ko" ? "연결 QR이 만료됐습니다. 새 QR을 만들어 주세요." : "The pairing QR expired. Create a new one.");
       } else if (reason === "runtime-rebinding" || reason === "runtime-stopped") {
+        pairingNeedsRenewal.current = false;
         setPairing(null);
         setQrDataUrl("");
         setMessage(locale === "ko" ? "Desktop 연결 주소를 다시 확인하고 있습니다." : "Refreshing the Desktop connection address.");
@@ -1237,6 +1305,7 @@ function MobileBridgePanel() {
     const timer = window.setTimeout(() => {
       setPairing(null);
       setQrDataUrl("");
+      if (!activeRef.current) pairingNeedsRenewal.current = true;
       if (renewPairingQr()) return;
       setMessage(locale === "ko" ? "연결 QR이 만료됐습니다. 새 QR을 만들어 주세요." : "The pairing QR expired. Create a new one.");
       void refresh();
@@ -1276,6 +1345,7 @@ function MobileBridgePanel() {
   const pairingRenewals = useRef(0);
   const pairingRenewing = useRef(false);
   function renewPairingQr(): boolean {
+    if (!activeRef.current) return false;
     if (pairingRenewing.current) return true;
     if (!pairingQrShouldRenew({ visible: document.visibilityState === "visible", renewals: pairingRenewals.current })) return false;
     pairingRenewals.current += 1;
@@ -1287,6 +1357,7 @@ function MobileBridgePanel() {
   async function issuePairing(options: { automatic?: boolean } = {}) {
     const api = ipc();
     if (!api || (busy && !options.automatic)) return;
+    if (!options.automatic) pairingNeedsRenewal.current = false;
     if (!options.automatic) pairingRenewals.current = 0;
     setBusy(true);
     setMessage("");
@@ -1459,6 +1530,7 @@ function MobileBridgePanel() {
           <button
             type="button"
             disabled={!status?.running || busy}
+            ref={pairButtonRef}
             onClick={() => setInstallGate("ask")}
             style={{
               border: 0,
@@ -1484,7 +1556,11 @@ function MobileBridgePanel() {
             This gate also answers the prerequisite question — is the app even
             installed — instead of leaving a person with an unusable QR. */}
         {installGate !== "closed" && (
-          <PopupFrame title={locale === "ko" ? "모바일 연결" : "Connect Mobile"} icon={<IconCheck size={20} />} closeLabel={locale === "ko" ? "닫기" : "Close"} onClose={() => setInstallGate("closed")}>
+          <section aria-labelledby="mobile-install-title" style={{ marginTop: 18, padding: 20, border: "1px solid var(--paper-edge)", borderRadius: 14, background: "var(--paper)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+              <h3 ref={installHeadingRef} tabIndex={-1} id="mobile-install-title" style={{ margin: 0, flex: 1, fontSize: 16 }}>{locale === "ko" ? "모바일 연결" : "Connect Mobile"}</h3>
+              <button type="button" onClick={closeInstallGate} style={{ border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "7px 11px", background: "var(--paper)", color: "var(--ink)", cursor: "pointer" }}>{locale === "ko" ? "닫기" : "Close"}</button>
+            </div>
             <div data-testid="mobile-bridge-install-gate">
               {installGate === "ask" ? (
                 <>
@@ -1626,7 +1702,7 @@ function MobileBridgePanel() {
                 </>
               )}
             </div>
-          </PopupFrame>
+          </section>
         )}
 
         {pairing && qrDataUrl && (

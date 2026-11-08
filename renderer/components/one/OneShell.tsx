@@ -109,6 +109,7 @@ import {
 } from "@/components/Icon";
 import { confirmPopup, alertPopup } from "@/lib/popup";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
+import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { tFor, useT } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -2263,15 +2264,40 @@ function OneSessionsShell() {
     return () => window.clearInterval(timer);
   }, [selected?.chatId, conversation?.id, localFollowupIntents, reconcileUncertainPreflightSteer]);
 
+  const identityGeneration = useRef(0);
+  const settingsOwnerGeneration = identityGeneration.current;
+  const identityRefresh = useRef<(() => void) | null>(null);
+  const [identityDisplayGeneration, setIdentityDisplayGeneration] = useState(0);
   useEffect(() => {
     const api = ipc();
     if (!api?.auth) return;
     let cancelled = false;
-    void api.auth.getSession()
-      .then((session) => { if (!cancelled) setAccountSignedIn(session?.signedIn === true); })
+    let eventCount = 0;
+    let identity: string | null | undefined;
+    const sessionIdentity = (session: { signedIn: boolean; accountFingerprint?: string; workspaceId?: string }) =>
+      session.signedIn ? session.accountFingerprint && session.workspaceId ? JSON.stringify([session.accountFingerprint, session.workspaceId]) : null : "signed-out";
+    void window.agentlas.auth.getSession()
+      .then((session) => { if (!cancelled && eventCount === 0) { identity = sessionIdentity(session); setAccountSignedIn(session?.signedIn === true); } })
       .catch(() => undefined);
     const unsubscribe = api.auth.onSessionChanged?.((session) => {
-      if (!cancelled) setAccountSignedIn(session?.signedIn === true);
+      if (cancelled) return;
+      eventCount += 1;
+      const next = sessionIdentity(session);
+      const changed = identity === undefined || next === null || identity !== next;
+      identity = next;
+      setAccountSignedIn(session?.signedIn === true);
+      if (!changed) return;
+      identityGeneration.current += 1;
+      invalidateIpcCache("oneMemory");
+      setOneProfile(null);
+      setOneMemory(null);
+      setOneMemoryMap(null);
+      setOneValueClosures(null);
+      setOneWeeklyReflection(null);
+      setOneExperienceReuse(null);
+      setOneImprovementProofs(null);
+      setIdentityDisplayGeneration(value => value + 1);
+      identityRefresh.current?.();
     });
     return () => { cancelled = true; unsubscribe?.(); };
   }, []);
@@ -2370,12 +2396,57 @@ function OneSessionsShell() {
   const [railOpen, setRailOpen] = useState(false);
   const [railCollapsed, setRailCollapsedState] = useState(() => readStoredBoolean(ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY, false));
   const [railMode, setRailModeState] = useState<OneRailMode>(() => readLastRailMode());
+  const activeRailMode = useRef<OneRailMode>(railMode);
+  const settingsReturnMode = useRef<Exclude<OneRailMode, "settings">>(railMode === "settings" ? "organisation" : railMode);
   const setRailMode = useCallback((mode: OneRailMode) => {
+    if (mode === "settings" && activeRailMode.current !== "settings") settingsReturnMode.current = activeRailMode.current;
+    activeRailMode.current = mode;
     rememberRailMode(mode);
     setRailModeState(mode);
   }, []);
-  const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | null>(null);
+  const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | "profile" | "memory" | "language">("mcp");
+  const lastSettingsSection = useRef<OneSettingsKey>("mcp");
+  if (settingsSheet !== "profile" && settingsSheet !== "memory" && settingsSheet !== "language") lastSettingsSection.current = settingsSheet;
+  const [settingsProfileVisited, setSettingsProfileVisited] = useState(false);
+  const [settingsMemoryVisited, setSettingsMemoryVisited] = useState(false);
+  const settingsScreenRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (railMode !== "settings") return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    settingsScreenRef.current?.focus();
+    return () => { if (previous?.isConnected) previous.focus(); };
+  }, [railMode]);
   const [pluginPickerOpen, setPluginPickerOpen] = useState(false);
+  const openOneSettings = useCallback((setting: OneSettingsKey | "profile" | "memory") => {
+    setComposerMenu(null);
+    setPluginPickerOpen(false);
+    if (setting === "profile") setSettingsProfileVisited(true);
+    if (setting === "memory") setSettingsMemoryVisited(true);
+    setSettingsSheet(setting);
+    setRailMode("settings");
+  }, [setRailMode]);
+  const closeOneSettings = () => { setPluginPickerOpen(false); setRailMode(settingsReturnMode.current); };
+  const [settingsPickerVisited, setSettingsPickerVisited] = useState(false);
+  const [settingsPickerTarget, setSettingsPickerTarget] = useState<string | null>(null);
+  const openOnePluginPicker = useCallback((targetName?: string) => {
+    setComposerMenu(null);
+    setSettingsSheet("plugins");
+    setSettingsPickerTarget(targetName || null);
+    setSettingsPickerVisited(true);
+    setPluginPickerOpen(true);
+    setRailMode("settings");
+  }, [setRailMode]);
+  const settingsPickerGeneration = useRef(0);
+  const settingsPickerOwner = settingsPickerGeneration.current;
+  useEffect(() => {
+    const unsubscribe = ipc()?.auth?.onSessionChanged?.(() => {
+      settingsPickerGeneration.current += 1;
+      setPluginPickerOpen(false);
+      setSettingsPickerVisited(false);
+      setSettingsPickerTarget(null);
+    });
+    return () => { settingsPickerGeneration.current += 1; unsubscribe?.(); };
+  }, []);
   const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, false));
   /*
    * 홈 화면 기록 열도 접힌 채로 시작한다 (오너 결정 2026-08-25: "다 접힌 상태").
@@ -2525,8 +2596,6 @@ function OneSessionsShell() {
   const [dismissedBriefing, setDismissedBriefing] = useState<{ signature: string; expiresAt: number } | null>(null);
   const [introReplayToken, setIntroReplayToken] = useState(0);
   const [whatsNewReplayToken, setWhatsNewReplayToken] = useState(0);
-  const [profileOpen, setProfileOpen] = useState(false);
-  const [memoryOpen, setMemoryOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   // The visible app language is the one language control a person can see and
   // change in this surface. A stale profile preference must not make an
@@ -2893,7 +2962,7 @@ function OneSessionsShell() {
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const railRevealButtonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    if (!railOpen) return;
+    if (!railOpen || railMode === "settings") return;
     const closeDrawer = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       if (event.target instanceof Element && event.target.closest('[role="dialog"],[role="alertdialog"],[role="menu"]')) return;
@@ -2903,7 +2972,7 @@ function OneSessionsShell() {
     };
     document.addEventListener("keydown", closeDrawer);
     return () => document.removeEventListener("keydown", closeDrawer);
-  }, [railOpen]);
+  }, [railOpen, railMode]);
   const scrollRef = useRef<HTMLDivElement>(null);
   // State, not a ref: the dock mounts after the first render, and an effect keyed
   // on a ref never re-ran, so the dock height was never observed.
@@ -3371,6 +3440,7 @@ function OneSessionsShell() {
   const projectionReadRef = useRef<{ dirty: boolean; at: number | null; items: OneTaskProjection[]; active: string; pending: string; context: string }>(
     { dirty: true, at: null, items: [], active: "", pending: "", context: "" });
   const refreshAllRead = useCallback(async (options: { includeOrg?: boolean; poll?: boolean } = {}) => {
+    const readIdentityGeneration = identityGeneration.current;
     const includeOrg = options.includeOrg !== false;
     const api = ipc();
     if (!api) {
@@ -3475,19 +3545,19 @@ function OneSessionsShell() {
       setConfirmations(keepPrevIfDeepEqual(pending));
       setUpdaterState(keepPrevIfDeepEqual(update));
       setMobileStatus(keepPrevIfDeepEqual(mobile));
-      if (profile) setOneProfile(keepPrevIfDeepEqual(profile));
+      if (readIdentityGeneration === identityGeneration.current && profile) setOneProfile(keepPrevIfDeepEqual(profile));
       if (org) setOneOrgState(keepPrevIfDeepEqual(org));
       setTaskforces(keepPrevIfDeepEqual(taskforceRows));
       setComputerHistory(keepPrevIfDeepEqual(history));
-      setOneMemory(keepPrevIfDeepEqual(memory));
-      if (memoryMap) {
+      if (readIdentityGeneration === identityGeneration.current) setOneMemory(keepPrevIfDeepEqual(memory));
+      if (readIdentityGeneration === identityGeneration.current && memoryMap) {
         setOneMemoryMap((current) => current?.sourceRevision === memoryMap.sourceRevision ? current : memoryMap);
       }
       setOneSuggestions(keepPrevIfDeepEqual(suggestions));
-      setOneValueClosures(keepPrevIfDeepEqual(valueClosures));
-      setOneWeeklyReflection(keepPrevIfDeepEqual(weeklyReflection));
-      setOneExperienceReuse(keepPrevIfDeepEqual(experienceReuse));
-      setOneImprovementProofs(keepPrevIfDeepEqual(improvementProofs));
+      if (readIdentityGeneration === identityGeneration.current) setOneValueClosures(keepPrevIfDeepEqual(valueClosures));
+      if (readIdentityGeneration === identityGeneration.current) setOneWeeklyReflection(keepPrevIfDeepEqual(weeklyReflection));
+      if (readIdentityGeneration === identityGeneration.current) setOneExperienceReuse(keepPrevIfDeepEqual(experienceReuse));
+      if (readIdentityGeneration === identityGeneration.current) setOneImprovementProofs(keepPrevIfDeepEqual(improvementProofs));
       setOneIntroState(keepPrevIfDeepEqual(resolvedIntro));
       setOneActivationState(keepPrevIfDeepEqual(activation));
       setBriefingSnapshot(keepPrevIfDeepEqual(safeBriefingSnapshot(proactiveBriefing)));
@@ -3624,6 +3694,7 @@ function OneSessionsShell() {
   const refreshAll = useCallback((options: { includeOrg?: boolean; poll?: boolean } = {}) => (
     refreshAllCoordinatorRef.current!.request(options)
   ), [appLocale]);
+  identityRefresh.current = () => { void refreshAll({ includeOrg: false }); };
 
   const mutateOneOrg = useCallback(async (operation: () => Promise<OneOrgState>, propagateFailure = false) => {
     try {
@@ -3710,8 +3781,7 @@ function OneSessionsShell() {
     const target = installedPlugins.find((plugin) => plugin.id === pluginId);
     if (!target) return;
     if (target.configurationValid === false && nextEnabled) {
-      setSettingsSheet(null);
-      setPluginPickerOpen(true);
+      openOnePluginPicker(appLocale === "ko" ? target.name || target.nameEn : target.nameEn || target.name);
       return;
     }
     setInstalledPlugins((current) => current.map((plugin) => plugin.id === pluginId ? { ...plugin, enabled: nextEnabled } : plugin));
@@ -3724,7 +3794,7 @@ function OneSessionsShell() {
     } catch {
       setInstalledPlugins((current) => current.map((plugin) => plugin.id === pluginId ? { ...plugin, enabled: target.enabled } : plugin));
     }
-  }, [installedPlugins, pluginStatuses]);
+  }, [appLocale, installedPlugins, openOnePluginPicker, pluginStatuses]);
   const clearComputerHistoryView = useCallback(async () => {
     const api = ipc();
     if (!api) return;
@@ -9804,8 +9874,6 @@ function OneSessionsShell() {
     if (attachmentThreadRef.current && attachmentThreadRef.current !== nextThread) clearAttachmentDrafts();
     attachmentThreadRef.current = nextThread;
   }, [activeThreadChatId, clearAttachmentDrafts]);
-  const closeProfile = useCallback(() => setProfileOpen(false), []);
-  const closeMemory = useCallback(() => setMemoryOpen(false), []);
   const handleProfileChange = useCallback((profile: OneProfile) => setOneProfile(profile), []);
   const handleMemoryChange = useCallback((memory: OneMemoryState) => setOneMemory(memory), []);
   const handleMemoryUseOnceReady = useCallback((
@@ -9816,8 +9884,11 @@ function OneSessionsShell() {
   }, []);
   const handleSuggestionsChange = useCallback((suggestions: OneSuggestionState) => setOneSuggestions(suggestions), []);
   const handleValueClosuresChange = useCallback((valueClosures: OneValueClosureState) => {
+    const generation = identityGeneration.current;
     setOneValueClosures(valueClosures);
-    void ipc()?.oneWeeklyReflection.get().then(setOneWeeklyReflection).catch(() => undefined);
+    void ipc()?.oneWeeklyReflection.get().then(value => {
+      if (identityGeneration.current === generation) setOneWeeklyReflection(value);
+    }).catch(() => undefined);
   }, []);
   const acknowledgeOneIntro = useCallback(async (resolution: OneFeatureIntroResolution) => {
     const api = ipc();
@@ -9854,8 +9925,7 @@ function OneSessionsShell() {
   }, [oneIntroState]);
   const manageImprovementAsset = useCallback((asset: OneImprovementReusedAssetV1) => {
     if (asset.assetType === "memory") {
-      setProfileOpen(false);
-      setMemoryOpen(true);
+      openOneSettings("memory");
       return;
     }
     if (asset.assetType === "automation") {
@@ -9872,7 +9942,7 @@ function OneSessionsShell() {
       return;
     }
     focusOneOutput();
-  }, [appLocale, focusOneOutput, router]);
+  }, [appLocale, focusOneOutput, openOneSettings, router]);
   /*
    * 브리핑이 찾아낸 것을 One 이 **실제로 살펴보게** 한다.
    *
@@ -10059,6 +10129,8 @@ function OneSessionsShell() {
     <div className={styles.shell}>
       <div
         className={styles.body}
+        inert={railMode === "settings" ? true : undefined}
+        aria-hidden={railMode === "settings" ? true : undefined}
         data-rail-collapsed={railCollapsed ? "true" : "false"}
         data-rail-open={railOpen ? "true" : "false"}
         data-context-rail={outputRailTakesSpace ? "true" : "false"}
@@ -10160,7 +10232,6 @@ function OneSessionsShell() {
               onNewSession={startFreshSession}
               onEditOne={() => {
                 // One 도 팀원과 같은 창에서 고친다. "지킬 것" 목록만 기존 프로필 창에 남는다.
-                setMemoryOpen(false);
                 setEditOneTarget({
                   oneId: oneProfile?.oneId,
                   displayName: oneProfile?.displayName ?? "One",
@@ -10195,8 +10266,8 @@ function OneSessionsShell() {
               pluginCatalog={pluginCatalog}
               pluginStatuses={pluginStatuses}
               onSetAutoSelect={setOneOrgAutoSelect}
-              onConnectTool={() => { setSettingsSheet("mcp"); }}
-              onBrowseTools={() => { setSettingsSheet("plugins"); }}
+              onConnectTool={() => openOneSettings("mcp")}
+              onBrowseTools={() => openOneSettings("plugins")}
               onBrowseMoreAgents={() => router.push("/marketplace")}
               conversationResults={oneOrgConversationResults}
               historyResults={oneOrgHistoryResults}
@@ -10267,28 +10338,10 @@ function OneSessionsShell() {
               <button type="button" data-one-capabilities-entry="true" onClick={() => setCapabilitiesOpen(true)}><span><IconPuzzle size={15} />{appLocale === "ko" ? "능력" : "Capabilities"}</span></button>
               <button type="button" onClick={() => router.push("/local-models")}><span><IconCpu size={15} />{appLocale === "ko" ? "로컬 모델" : "Local Models"}</span></button>
               <button type="button" onClick={() => setRailMode("settings")}><span><IconSettings size={15} />{appLocale === "ko" ? "설정" : "Settings"}</span><IconChevronDown size={12} /></button>
-              <button type="button" onClick={() => { setMemoryOpen(false); setProfileOpen(true); }}><span className={styles.railAccountMark}>{oneDisplayName.slice(0, 1).toLocaleUpperCase()}</span><span>{oneDisplayName}</span></button>
+              <button type="button" onClick={() => openOneSettings("profile")}><span className={styles.railAccountMark}>{oneDisplayName.slice(0, 1).toLocaleUpperCase()}</span><span>{oneDisplayName}</span></button>
               <span className={styles.connection} data-offline={!executionAvailable ? "true" : "false"} role="status"><span className={styles.connectionDot} aria-hidden="true" /><span>{connectionLabel}</span></span>
             </div>
-          </> : <OneSettingsRail
-            locale={appLocale}
-            profileName={oneDisplayName}
-            pendingMemoryCount={0}
-            onBack={() => setRailMode("organisation")}
-            onOpen={(setting) => {
-              // Permission is a composer decision. Keep it anchored to the
-              // input so the control stays beside the action it governs.
-              if (setting === "permission") {
-                setSettingsSheet(null);
-                setComposerMenu("permission");
-                return;
-              }
-              setSettingsSheet(setting);
-            }}
-            onOpenProfile={() => { setMemoryOpen(false); setProfileOpen(true); }}
-            onOpenMemory={() => { setProfileOpen(false); setMemoryOpen(true); }}
-            onToggleLocale={() => setPref(appLocale === "ko" ? "en" : "ko")}
-          />}
+          </> : null}
         </aside>
 
         <main
@@ -11052,7 +11105,7 @@ function OneSessionsShell() {
                       autoRecovery={autoRecovery}
                       valueClosure={selectedValueClosure}
                       experienceReuse={selectedExperienceReuse}
-                      onManageExperience={() => { setProfileOpen(false); setMemoryOpen(true); }}
+                      onManageExperience={() => openOneSettings("memory")}
                       valueClosureState={oneValueClosures}
                       onValueClosureStateChange={handleValueClosuresChange}
                       improvementProof={selectedImprovementProof}
@@ -11066,7 +11119,7 @@ function OneSessionsShell() {
                     state={oneMemory}
                     locale={appLocale}
                     onStateChange={handleMemoryChange}
-                    onReview={() => { setProfileOpen(false); setMemoryOpen(true); }}
+                    onReview={() => openOneSettings("memory")}
                   />
                 )}
                 {!selectedMemoryCandidate && selectedSuggestion && oneSuggestions && (
@@ -11372,8 +11425,7 @@ function OneSessionsShell() {
                   })();
                 }}
                 onOpenPlugins={() => {
-                  setComposerMenu(null);
-                  setSettingsSheet("plugins");
+                  openOneSettings("plugins");
                 }}
                 onTogglePlugin={(pluginId) => {
                   const skill=skillPluginMentions.find(plugin=>`skill:${plugin.slug}`===pluginId);
@@ -11383,8 +11435,7 @@ function OneSessionsShell() {
                   // 설정이 덜 끝난 플러그인은 여기서 켜 봐야 동작하지 않는다 —
                   // 스위치를 흉내 내는 대신 키를 넣을 수 있는 화면으로 보낸다.
                   if (target.configurationValid === false) {
-                    setComposerMenu(null);
-                    setPluginPickerOpen(true);
+                    openOnePluginPicker(appLocale === "ko" ? target.name || target.nameEn : target.nameEn || target.name);
                     return;
                   }
                   const api = ipc();
@@ -12000,7 +12051,7 @@ function OneSessionsShell() {
               autoRecovery={autoRecovery}
               valueClosure={selectedValueClosure}
               experienceReuse={selectedExperienceReuse}
-              onManageExperience={() => { setProfileOpen(false); setMemoryOpen(true); }}
+              onManageExperience={() => openOneSettings("memory")}
               valueClosureState={oneValueClosures}
               onValueClosureStateChange={handleValueClosuresChange}
               improvementProof={selectedImprovementProof}
@@ -12054,6 +12105,50 @@ function OneSessionsShell() {
         />
       </div>
 
+      <div ref={settingsScreenRef} tabIndex={-1} hidden={railMode !== "settings"} className={styles.settingsScreen} data-one-settings-screen="true">
+        <aside className={styles.settingsNavigation}>
+          <OneSettingsRail locale={appLocale} profileName={oneDisplayName} pendingMemoryCount={0} selected={settingsSheet}
+            onBack={closeOneSettings} onOpen={setting => { setPluginPickerOpen(false); setSettingsSheet(setting); }}
+            onOpenProfile={() => { setPluginPickerOpen(false); setSettingsProfileVisited(true); setSettingsSheet("profile"); }} onOpenMemory={() => { setPluginPickerOpen(false); setSettingsMemoryVisited(true); setSettingsSheet("memory"); }}
+            onToggleLocale={() => { setPluginPickerOpen(false); setSettingsSheet("language"); }} />
+        </aside>
+        <main className={styles.settingsContent} aria-label={appLocale === "ko" ? "설정 내용" : "Settings content"}>
+          <div hidden={settingsSheet !== "profile" || pluginPickerOpen}>{settingsProfileVisited && <OneProfileSheet key={identityDisplayGeneration} embedded open profile={oneProfile} locale={appLocale}
+            onClose={() => setSettingsSheet("mcp")} onProfileChange={handleProfileChange}
+            onOpenMailbox={mail.available ? () => setRailMode("mail") : undefined} />}</div>
+          <div hidden={settingsSheet !== "memory" || pluginPickerOpen}>{settingsMemoryVisited && <OneMemorySheet key={identityDisplayGeneration} embedded open active={railMode === "settings" && settingsSheet === "memory" && !pluginPickerOpen} state={oneMemory} locale={appLocale}
+            useOnceTarget={oneMemoryUseOnceTarget} onClose={() => setSettingsSheet("mcp")}
+            onStateChange={handleMemoryChange} onUseOnceReady={handleMemoryUseOnceReady}
+            valueClosure={selectedValueClosure} experienceReuse={selectedExperienceReuse} improvementProof={selectedImprovementProof}
+            valueClosureState={oneValueClosures} onValueClosureStateChange={state => { if (identityGeneration.current === settingsOwnerGeneration) handleValueClosuresChange(state); }} onManageImprovementAsset={manageImprovementAsset} />}</div>
+          <div hidden={!pluginPickerOpen}>{settingsPickerTarget && <p role="status" style={{ padding: "12px 24px 0", margin: 0 }}>
+            {appLocale === "ko" ? `${settingsPickerTarget}: 저장된 연결 설정이 올바르지 않아 켤 수 없습니다. 이 화면에서 기존 설정을 복구할 수는 없으며, 아래 목록은 새 도구 추가용입니다. 이전 연결 단계가 보이면 완료하거나 '나중에'를 선택한 뒤 도구 추가를 다시 열어 주세요.` : `${settingsPickerTarget}: the saved connection configuration is invalid and cannot be enabled. This screen cannot repair it; the list below adds new tools. If an earlier connection step is open, complete it or choose to do it later, then open Add plugins again.`}
+          </p>}{settingsPickerVisited && <PluginPickerDialog embedded active={railMode === "settings" && pluginPickerOpen} ko={appLocale === "ko"}
+            onClose={() => { if (settingsPickerGeneration.current === settingsPickerOwner) setPluginPickerOpen(false); }} onCompleted={() => {
+              if (settingsPickerGeneration.current !== settingsPickerOwner) return;
+              const api = ipc();
+              if (!api) return;
+              void Promise.all([api.mcpTools.listInstalled(), api.mcpTools.listCatalog(), api.mcpTools.status().catch(() => [])])
+                .then(([plugins, catalog, statuses]) => { if (settingsPickerGeneration.current !== settingsPickerOwner) return; setInstalledPlugins(plugins); setPluginCatalog(catalog); setPluginStatuses(statuses); });
+            }} />}</div>
+          {settingsSheet === "language" && !pluginPickerOpen && <section className={styles.settingsLanguage} aria-labelledby="one-settings-language-title">
+            <h1 id="one-settings-language-title">{appLocale === "ko" ? "언어" : "Language"}</h1>
+            <p>{appLocale === "ko" ? "현재 언어: 한국어" : "Current language: English"}</p>
+            <button type="button" onClick={() => setPref(appLocale === "ko" ? "en" : "ko")}>
+              {appLocale === "ko" ? "Switch to English" : "한국어로 변경"}
+            </button>
+          </section>}
+          <div hidden={pluginPickerOpen || settingsSheet === "profile" || settingsSheet === "memory" || settingsSheet === "language"}>
+            <OneSettingsSheet embedded open={lastSettingsSection.current} active={railMode === "settings" && !pluginPickerOpen && settingsSheet !== "profile" && settingsSheet !== "memory" && settingsSheet !== "language"} locale={appLocale}
+              installedPlugins={installedPlugins} pluginCatalog={pluginCatalog} pluginStatuses={pluginStatuses}
+              permission={onePermission} runtime={oneRuntime} models={oneModelOptions} history={computerHistory}
+              onClose={closeOneSettings} onTogglePlugin={toggleOnePlugin}
+              onSelectPermission={setOnePermission} onSelectModel={(runtime, model) => applyOneRuntimeSelection({ model }, runtime)}
+              onHistoryConsent={enableComputerHistory} onOpenMcpLibrary={() => openOnePluginPicker()} onToolTabChange={setSettingsSheet} />
+          </div>
+        </main>
+      </div>
+
       {/* /one lives in the no-shell route group, so AppShell's global browser
           approval listener is not mounted here. Keep the native approval
           checkpoint in this route explicitly; otherwise browser actions can
@@ -12061,42 +12156,6 @@ function OneSessionsShell() {
       <BrowserActionApprovalSheet permission={onePermission} chatId={activeThreadChatId} />
       <AutomationStrategyApprovalSheet chatId={activeThreadChatId} />
 
-      <OneSettingsSheet
-        open={settingsSheet}
-        locale={appLocale}
-        installedPlugins={installedPlugins}
-        pluginCatalog={pluginCatalog}
-        pluginStatuses={pluginStatuses}
-        permission={onePermission}
-        runtime={oneRuntime}
-        models={oneModelOptions}
-        history={computerHistory}
-        onClose={() => setSettingsSheet(null)}
-        onTogglePlugin={toggleOnePlugin}
-        onSelectPermission={setOnePermission}
-        onSelectModel={(runtime, model) => applyOneRuntimeSelection({ model }, runtime)}
-        onHistoryConsent={enableComputerHistory}
-        onOpenMcpLibrary={() => { setSettingsSheet(null); setPluginPickerOpen(true); }}
-        onToolTabChange={setSettingsSheet}
-      />
-
-      {pluginPickerOpen && <PluginPickerDialog
-        ko={appLocale === "ko"}
-        onClose={() => setPluginPickerOpen(false)}
-        onCompleted={() => {
-          const api = ipc();
-          if (!api) return;
-          void Promise.all([
-            api.mcpTools.listInstalled(),
-            api.mcpTools.listCatalog(),
-            api.mcpTools.status().catch(() => []),
-          ]).then(([plugins, catalog, statuses]) => {
-            setInstalledPlugins(plugins);
-            setPluginCatalog(catalog);
-            setPluginStatuses(statuses);
-          });
-        }}
-      />}
 
       <OneBottomSheet
         open={historyClearConfirmOpen}
@@ -12131,30 +12190,7 @@ function OneSessionsShell() {
         />
       )}
 
-      <OneProfileSheet
-        open={profileOpen}
-        profile={oneProfile}
-        locale={appLocale}
-        onClose={closeProfile}
-        onProfileChange={handleProfileChange}
-        onOpenMailbox={mail.available ? () => setRailMode("mail") : undefined}
-      />
       <OneCapabilitiesModal open={capabilitiesOpen} locale={appLocale === "ko" ? "ko" : "en"} onClose={() => setCapabilitiesOpen(false)} />
-      <OneMemorySheet
-        open={memoryOpen}
-        state={oneMemory}
-        locale={appLocale}
-        useOnceTarget={oneMemoryUseOnceTarget}
-        onClose={closeMemory}
-        onStateChange={handleMemoryChange}
-        onUseOnceReady={handleMemoryUseOnceReady}
-        valueClosure={selectedValueClosure}
-        experienceReuse={selectedExperienceReuse}
-        improvementProof={selectedImprovementProof}
-        valueClosureState={oneValueClosures}
-        onValueClosureStateChange={handleValueClosuresChange}
-        onManageImprovementAsset={manageImprovementAsset}
-      />
       <OneTaskforceDialog
         oneAvatarIcon={oneAvatarTone}
         open={taskforceDialogOpen}
@@ -12182,7 +12218,7 @@ function OneSessionsShell() {
           setEditMemberTarget(null);
           setEditOneTarget(null);
         }}
-        onOpenPrinciples={() => { setEditOneTarget(null); setProfileOpen(true); }}
+        onOpenPrinciples={() => { setEditOneTarget(null); openOneSettings("profile"); }}
         onOpenMailbox={mail.available ? () => setRailMode("mail") : undefined}
         onSavedOne={async () => {
           setEditOneTarget(null);

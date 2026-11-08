@@ -51,7 +51,7 @@ export function WorkHome() {
         {loading && projects.length === 0 ? <p className={styles.empty} role="status">{ko ? "프로젝트를 불러오는 중…" : "Loading projects…"}</p> : !failed && projects.length === 0 ? <p className={styles.empty}>{ko ? "아직 프로젝트가 없어요. 위에서 시작 방법을 골라 주세요." : "No projects yet. Choose a starting point above."}</p> : null}
         <div className={styles.list}>{projects.map((project) => <div className={styles.row} key={project.id}>
           <button type="button" className={styles.projectLink} onClick={() => navigate(`/project/detail?id=${encodeURIComponent(project.id)}`)}><span className={styles.folder}><IconFolder size={20} /></span><span><strong>{project.name}</strong><small>{project.sourceType === "github" ? "GitHub" : project.sourceType === "local" ? (ko ? "로컬 폴더" : "Local folder") : (ko ? "Agentlas 폴더" : "Agentlas folder")}</small></span><IconChevronRight size={16} /></button>
-          <button type="button" className={styles.settings} onClick={() => openProjectSettings({ mode: "edit", projectId: project.id })} aria-label={ko ? `${project.name} 설정 열기` : `Open settings for ${project.name}`} aria-haspopup="dialog"><IconSettings size={16} /></button>
+          <button type="button" className={styles.settings} onClick={() => openProjectSettings({ mode: "edit", projectId: project.id })} aria-label={ko ? `${project.name} 설정 열기` : `Open settings for ${project.name}`}><IconSettings size={16} /></button>
         </div>)}</div>
       </section>
     </main>

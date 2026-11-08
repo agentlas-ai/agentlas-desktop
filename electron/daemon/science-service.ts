@@ -21,7 +21,7 @@ type Questions = ReturnType<Store["researcherQuestions"]>;
 type Scope = { projectId: string; conversationId: string };
 type TurnScope = Scope & { turnId: string };
 type ComputeReadInput = Scope & { executionId: string; afterCursor?: number; maxEvents?: number; waitMs?: number };
-type ComputeListInput = Scope & { limit?: number };
+type ComputeListInput = Scope & { limit?: number; cursor?: string };
 export type NativeHumanComputeRequester = { kind: "signed-science-main-frame"; viewInstanceId: string; releaseId: string; ownerServiceIdentity: string; ownerBootId: string };
 type HumanComputeInput = Scope & { turnId:string|null; originMessageId: string; invocationRunId: string|null; executionId: string; kernelId: string;
   kernelGeneration: number; codeSha256: string; environmentSha256: string; requestId: string };
@@ -66,7 +66,7 @@ type ComputeUiApi = {
     list(input: ComputeListInput): unknown; read(input: Required<ComputeReadInput>): Promise<unknown>;
   } }) => { list(input: ComputeListInput): Promise<unknown>; read(input: ComputeReadInput): Promise<unknown> };
   scienceScientificExecutionService?: () => {
-    list(projectId: string, conversationId: string, limit?: number): unknown;
+    list(projectId: string, conversationId: string, limit?: number, cursor?: string): unknown;
     wait(projectId: string, conversationId: string, executionId: string, afterCursor?: number, maxEvents?: number, waitMs?: number): Promise<unknown>;
   } & Partial<HumanComputeService>;
 };
@@ -604,7 +604,7 @@ export function createDaemonScienceService(options: {
         // service access. The execution service stays lazy in the owning daemon.
         const execution = () => { assertExecution(); return compute.scienceScientificExecutionService!(); };
         const reader = compute.createScientificComputeUiReader({ authorize: assertExecution, store, service: {
-          list: i => execution().list(i.projectId, i.conversationId, i.limit),
+          list: i => execution().list(i.projectId, i.conversationId, i.limit, i.cursor),
           read: i => execution().wait(i.projectId, i.conversationId, i.executionId, i.afterCursor, i.maxEvents, i.waitMs),
         } });
         return command.op === "compute.list" ? reader.list(command.input) : reader.read(command.input);

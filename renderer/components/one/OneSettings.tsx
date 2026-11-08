@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   IconApps,
   IconArrowLeft,
@@ -79,10 +79,13 @@ type RailProps = {
   onOpenProfile: () => void;
   onOpenMemory: () => void;
   onToggleLocale: () => void;
+  selected?: OneSettingsKey | "profile" | "memory" | "language";
 };
 
 type SheetProps = {
   open: OneSettingsKey | null;
+  embedded?: boolean;
+  active?: boolean;
   locale: string;
   installedPlugins: InstalledMcpServer[];
   pluginCatalog: McpToolCatalogEntry[];
@@ -121,8 +124,8 @@ const PERMISSIONS: Array<{ id: OnePermissionMode; ko: string; en: string; detail
   { id: "full", ko: "전체 액세스", en: "Full access", detailKo: "파일 · 명령 · 네트워크 · 도구", detailEn: "Files · Commands · Network · Tools" },
 ];
 
-function RailRow({ icon, title, detail, badge, onClick }: { icon: ReactNode; title: string; detail?: string; badge?: string; onClick: () => void }) {
-  return <button type="button" className={styles.railRow} onClick={onClick}>
+function RailRow({ icon, title, detail, badge, active, onClick }: { icon: ReactNode; title: string; detail?: string; badge?: string; active?: boolean; onClick: () => void }) {
+  return <button type="button" className={styles.railRow} aria-current={active ? "page" : undefined} data-active={active ? "true" : undefined} onClick={onClick}>
     <span className={styles.railIcon}>{icon}</span>
     <span className={styles.railCopy}><strong>{title}</strong>{detail && <small>{detail}</small>}</span>
     {badge && <span className={styles.railBadge}>{badge}</span>}
@@ -130,37 +133,37 @@ function RailRow({ icon, title, detail, badge, onClick }: { icon: ReactNode; tit
   </button>;
 }
 
-export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBack, onOpen, onOpenProfile, onOpenMemory, onToggleLocale }: RailProps) {
+export function OneSettingsRail({ locale, profileName, pendingMemoryCount, onBack, onOpen, onOpenProfile, onOpenMemory, onToggleLocale, selected }: RailProps) {
   const ko = locale === "ko";
-  return <section className={styles.railRoot} aria-label={ko ? "One 설정" : "One settings"}>
+  return <section className={styles.railRoot} data-selected-setting={selected} aria-label={ko ? "One 설정" : "One settings"}>
     <header className={styles.railHeader}>
       <button type="button" onClick={onBack} aria-label={ko ? "조직도로 돌아가기" : "Back to organisation"}><IconArrowLeft size={16} /></button>
       <div><strong>{ko ? "설정" : "Settings"}</strong><small>{ko ? "One과 조직의 실행 환경" : "One and organisation runtime"}</small></div>
     </header>
     <div className={styles.railScroll}>
       <div className={styles.railGroup}><span>{ko ? "One" : "One"}</span>
-        <RailRow icon={<IconUsers size={15} />} title={ko ? `프로필 · ${profileName}` : `Profile · ${profileName}`} onClick={onOpenProfile} />
-        <RailRow icon={<IconBrain size={15} />} title={ko ? "메모리" : "Memory"} badge={pendingMemoryCount > 0 ? String(pendingMemoryCount) : undefined} onClick={onOpenMemory} />
+        <RailRow icon={<IconUsers size={15} />} title={ko ? `프로필 · ${profileName}` : `Profile · ${profileName}`} active={selected === "profile"} onClick={onOpenProfile} />
+        <RailRow icon={<IconBrain size={15} />} title={ko ? "메모리" : "Memory"} badge={pendingMemoryCount > 0 ? String(pendingMemoryCount) : undefined} active={selected === "memory"} onClick={onOpenMemory} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "도구" : "Tools"}</span>
-        <RailRow icon={<IconRoute size={15} />} title="MCP" detail={ko ? "직접 등록한 서버" : "Custom servers"} onClick={() => onOpen("mcp")} />
-        <RailRow icon={<IconLayers size={15} />} title={ko ? "플러그인" : "Plugins"} detail={ko ? "설치한 연결 도구" : "Installed tools"} onClick={() => onOpen("plugins")} />
+        <RailRow icon={<IconRoute size={15} />} title="MCP" detail={ko ? "직접 등록한 서버" : "Custom servers"} active={selected === "mcp"} onClick={() => onOpen("mcp")} />
+        <RailRow icon={<IconLayers size={15} />} title={ko ? "플러그인" : "Plugins"} detail={ko ? "설치한 연결 도구" : "Installed tools"} active={selected === "plugins"} onClick={() => onOpen("plugins")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "실행" : "Execution"}</span>
-        <RailRow icon={<IconShield size={15} />} title={ko ? "권한" : "Permission"} onClick={() => onOpen("permission")} />
-        <RailRow icon={<IconSparkles size={15} />} title={ko ? "모델" : "Models"} detail={ko ? "One CEO 기본 모델" : "One CEO default"} onClick={() => onOpen("models")} />
-        <RailRow icon={<IconImage size={15} />} title={ko ? "멀티모달" : "Multimodal"} onClick={() => onOpen("multimodal")} />
-        <RailRow icon={<IconImage size={15} />} title={ko ? "결과 미디어" : "Result media"} detail={ko ? "사이드바에 표시" : "Show in sidebars"} onClick={() => onOpen("media")} />
-        <RailRow icon={<IconApps size={15} />} title={ko ? "동시 실행" : "Concurrency"} onClick={() => onOpen("concurrency")} />
+        <RailRow icon={<IconShield size={15} />} title={ko ? "권한" : "Permission"} active={selected === "permission"} onClick={() => onOpen("permission")} />
+        <RailRow icon={<IconSparkles size={15} />} title={ko ? "모델" : "Models"} detail={ko ? "One CEO 기본 모델" : "One CEO default"} active={selected === "models"} onClick={() => onOpen("models")} />
+        <RailRow icon={<IconImage size={15} />} title={ko ? "멀티모달" : "Multimodal"} active={selected === "multimodal"} onClick={() => onOpen("multimodal")} />
+        <RailRow icon={<IconImage size={15} />} title={ko ? "결과 미디어" : "Result media"} detail={ko ? "사이드바에 표시" : "Show in sidebars"} active={selected === "media"} onClick={() => onOpen("media")} />
+        <RailRow icon={<IconApps size={15} />} title={ko ? "동시 실행" : "Concurrency"} active={selected === "concurrency"} onClick={() => onOpen("concurrency")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "알림" : "Notifications"}</span>
-        <RailRow icon={<IconSparkles size={15} />} title={ko ? "브리핑" : "Briefing"} detail={ko ? "주기·데스크탑 알림·방해 금지" : "Cadence, desktop alerts, quiet hours"} onClick={() => onOpen("briefing")} />
+        <RailRow icon={<IconSparkles size={15} />} title={ko ? "브리핑" : "Briefing"} detail={ko ? "주기·데스크탑 알림·방해 금지" : "Cadence, desktop alerts, quiet hours"} active={selected === "briefing"} onClick={() => onOpen("briefing")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "개인정보" : "Privacy"}</span>
-        <RailRow icon={<IconLock size={15} />} title={ko ? "컴퓨터 사용 기록" : "Computer History"} onClick={() => onOpen("history")} />
+        <RailRow icon={<IconLock size={15} />} title={ko ? "컴퓨터 사용 기록" : "Computer History"} active={selected === "history"} onClick={() => onOpen("history")} />
       </div>
       <div className={styles.railGroup}><span>{ko ? "앱" : "App"}</span>
-        <RailRow icon={<IconSettings size={15} />} title={ko ? "언어" : "Language"} detail={ko ? "English로 전환" : "한국어로 전환"} onClick={onToggleLocale} />
+        <RailRow icon={<IconSettings size={15} />} title={ko ? "언어" : "Language"} detail={ko ? "English로 전환" : "한국어로 전환"} active={selected === "language"} onClick={onToggleLocale} />
       </div>
     </div>
   </section>;
@@ -343,13 +346,15 @@ function MultimodalSettingsPanel({ locale, active }: { locale: string; active: b
 function ConcurrencySettings({ locale, active }: { locale: string; active: boolean }) {
   const [info, setInfo] = useState<AgentConcurrencyInfo | null>(null);
   const [draft, setDraft] = useState(1);
+  const draftEdited = useRef(false);
+  const editDraft = (value: number | ((previous: number) => number)) => { draftEdited.current = true; setDraft(value); };
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
     if (!active) return;
     const api = ipc();
-    if (!api) { const preview = { cores: 10, totalMemGB: 32, recommended: 4, current: 4, hardMax: 8, userSet: false }; setInfo(preview); setDraft(preview.current); return; }
-    void api.system.concurrencyInfo().then((next) => { setInfo(next); setDraft(next.current); setNotice(null); }).catch(() => {
+    if (!api) { const preview = { cores: 10, totalMemGB: 32, recommended: 4, current: 4, hardMax: 8, userSet: false }; setInfo(preview); if (!draftEdited.current) setDraft(preview.current); return; }
+    void api.system.concurrencyInfo().then((next) => { setInfo(next); if (!draftEdited.current) setDraft(next.current); setNotice(null); }).catch(() => {
       setNotice(locale === "ko" ? "저장된 동시 실행 수를 불러오지 못했습니다." : "The saved concurrency could not be loaded.");
     });
   }, [active, locale]);
@@ -366,9 +371,11 @@ function ConcurrencySettings({ locale, active }: { locale: string; active: boole
       const next = await api.system.setConcurrency(draft);
       if (!next || next.current !== draft) throw new Error("concurrency_receipt_mismatch");
       setInfo(next);
+      draftEdited.current = false;
       setDraft(next.current);
       setNotice(locale === "ko" ? `동시 실행 ${next.current}개를 저장했습니다.` : `Saved ${next.current} concurrent runs.`);
     } catch {
+      draftEdited.current = false;
       setDraft(info.current);
       try {
         const readback = await api.system.concurrencyInfo();
@@ -391,16 +398,16 @@ function ConcurrencySettings({ locale, active }: { locale: string; active: boole
   };
   return <div className={styles.concurrency}>
     <div className={styles.slotAdjust}>
-      <button type="button" aria-label={locale === "ko" ? "동시 실행 1개 줄이기" : "Decrease concurrent runs"} disabled={draft <= 1} onClick={() => setDraft((value) => Math.max(1, value - 1))}><IconChevronDown size={15} /></button>
+      <button type="button" aria-label={locale === "ko" ? "동시 실행 1개 줄이기" : "Decrease concurrent runs"} disabled={draft <= 1} onClick={() => editDraft((value) => Math.max(1, value - 1))}><IconChevronDown size={15} /></button>
       <div className={styles.slotNumber}><strong>{draft}</strong><span>{locale === "ko" ? "동시 실행" : "concurrent runs"}</span></div>
-      <button type="button" aria-label={locale === "ko" ? "동시 실행 1개 늘리기" : "Increase concurrent runs"} disabled={draft >= info.hardMax} onClick={() => setDraft((value) => Math.min(info.hardMax, value + 1))}><IconChevronDown size={15} style={{ transform: "rotate(180deg)" }} /></button>
+      <button type="button" aria-label={locale === "ko" ? "동시 실행 1개 늘리기" : "Increase concurrent runs"} disabled={draft >= info.hardMax} onClick={() => editDraft((value) => Math.min(info.hardMax, value + 1))}><IconChevronDown size={15} style={{ transform: "rotate(180deg)" }} /></button>
     </div>
-    <input type="range" min={1} max={info.hardMax} value={draft} onChange={(event) => setDraft(Number(event.target.value))} aria-label={locale === "ko" ? "동시 실행 수" : "Concurrent runs"} />
+    <input type="range" min={1} max={info.hardMax} value={draft} onChange={(event) => editDraft(Number(event.target.value))} aria-label={locale === "ko" ? "동시 실행 수" : "Concurrent runs"} />
     <div className={styles.slotScale}><span>1</span><span>{locale === "ko" ? `권장 ${info.recommended}` : `Recommended ${info.recommended}`}</span><span>{info.hardMax}</span></div>
     <div className={styles.slotVisual} aria-hidden="true">{Array.from({ length: info.hardMax }, (_, index) => <span key={index} data-active={index < draft ? "true" : "false"}><IconUsers size={16} /></span>)}</div>
     <p>{locale === "ko" ? `${info.cores}코어 · ${info.totalMemGB}GB RAM` : `${info.cores} cores · ${info.totalMemGB}GB RAM`}</p>
     {notice && <p className={styles.notice} role="status">{notice}</p>}
-    <div className={styles.actionRow}><button type="button" disabled={busy} onClick={() => setDraft(info.recommended)}>{locale === "ko" ? "권장값" : "Recommended"}</button><button type="button" className={styles.primary} disabled={busy || draft === info.current} onClick={() => void save()}>{locale === "ko" ? "적용" : "Apply"}</button></div>
+    <div className={styles.actionRow}><button type="button" disabled={busy} onClick={() => editDraft(info.recommended)}>{locale === "ko" ? "권장값" : "Recommended"}</button><button type="button" className={styles.primary} disabled={busy || draft === info.current} onClick={() => void save()}>{locale === "ko" ? "적용" : "Apply"}</button></div>
   </div>;
 }
 
@@ -514,15 +521,17 @@ function BriefingSettings({ locale }: { locale: string }) {
   </div>;
 }
 
-export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog, pluginStatuses, permission, runtime, models, history, onClose, onTogglePlugin, onSelectPermission, onSelectModel, onHistoryConsent, onOpenMcpLibrary, onToolTabChange }: SheetProps) {
+export function OneSettingsSheet({ open, embedded = false, active = true, locale, installedPlugins, pluginCatalog, pluginStatuses, permission, runtime, models, history, onClose, onTogglePlugin, onSelectPermission, onSelectModel, onHistoryConsent, onOpenMcpLibrary, onToolTabChange }: SheetProps) {
+  const visited = useRef(new Set<OneSettingsKey>());
+  if (open) visited.current.add(open);
   const ko = locale === "ko";
   const meta = open ? SETTINGS_META[open] : SETTINGS_META.mcp;
   const customServers = installedPlugins.filter((item) => !item.catalogId);
   const catalogPlugins = installedPlugins.filter((item) => Boolean(item.catalogId));
   const toolsOpen = open === "plugins" || open === "mcp";
-  const title = toolsOpen ? (ko ? "도구" : "Tools") : (ko ? meta.titleKo : meta.titleEn);
+  const title = toolsOpen && !embedded ? (ko ? "도구" : "Tools") : (ko ? meta.titleKo : meta.titleEn);
   const icon = toolsOpen ? <IconLayers size={20} /> : open === "permission" ? <IconShield size={20} /> : open === "models" ? <IconSparkles size={20} /> : open === "history" ? <IconLock size={20} /> : open === "concurrency" ? <IconUsers size={20} /> : open === "multimodal" || open === "media" ? <IconImage size={20} /> : <IconSettings size={20} />;
-  return <OneBottomSheet open={open !== null} onClose={onClose} closeLabel={ko ? "설정 닫기" : "Close settings"} size={SHEET_WIDTH[open ?? "permission"]} eyebrow={ko ? "One 설정" : "One settings"} title={title} icon={icon} titleId="one-settings-sheet-title" ariaLabelledBy="one-settings-sheet-title">
+  return <OneBottomSheet open={open !== null} embedded={embedded} onClose={onClose} closeLabel={ko ? "설정 닫기" : "Close settings"} size={SHEET_WIDTH[open ?? "permission"]} eyebrow={ko ? "One 설정" : "One settings"} title={title} description={embedded ? (ko ? meta.descriptionKo : meta.descriptionEn) : undefined} icon={icon} titleId="one-settings-sheet-title" ariaLabelledBy="one-settings-sheet-title">
     <div className={styles.sheetBody} data-setting={open || undefined}>
       {toolsOpen && <div className={styles.toolTabs} role="tablist" aria-label={ko ? "도구 종류" : "Tool type"}>
         <button type="button" role="tab" aria-selected={open === "plugins"} data-active={open === "plugins" ? "true" : "false"} onClick={() => onToolTabChange("plugins")}><IconLayers size={16} /><span>{ko ? "플러그인" : "Plugins"}</span><small>{catalogPlugins.length}</small></button>
@@ -532,9 +541,9 @@ export function OneSettingsSheet({ open, locale, installedPlugins, pluginCatalog
       {open === "plugins" && <><ToolRows items={catalogPlugins} catalog={pluginCatalog} statuses={pluginStatuses} locale={locale} onToggle={onTogglePlugin} empty={ko ? "설치한 플러그인이 없습니다." : "No plugins are installed."} /><div className={styles.actionRow}><span /><button type="button" className={styles.primary} onClick={onOpenMcpLibrary}><IconPlus size={15} />{ko ? "플러그인 추가" : "Add plugins"}</button></div></>}
       {open === "permission" && <PermissionSettings locale={locale} value={permission} onChange={onSelectPermission} />}
       {open === "models" && <ModelSettings locale={locale} runtime={runtime} models={models} onSelect={onSelectModel} />}
-      {open === "multimodal" && <MultimodalSettingsPanel locale={locale} active={open === "multimodal"} />}
+      {visited.current.has("multimodal") && <div hidden={open !== "multimodal"}><MultimodalSettingsPanel locale={locale} active={active && open === "multimodal"} /></div>}
       {open === "media" && <MediaDisplaySettings locale={locale} compact />}
-      {open === "concurrency" && <ConcurrencySettings locale={locale} active={open === "concurrency"} />}
+      {visited.current.has("concurrency") && <div hidden={open !== "concurrency"}><ConcurrencySettings locale={locale} active={active && open === "concurrency"} /></div>}
       {open === "history" && <HistorySettings locale={locale} state={history} onConsent={onHistoryConsent} />}
       {open === "briefing" && <BriefingSettings locale={locale} />}
     </div>

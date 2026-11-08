@@ -509,9 +509,10 @@ export async function toolCancel(args: Args, ctx: HarnessCallContext): Promise<P
   }
   if (active.record.chatId !== owner.chatId) return refused("not-found", "no such call on this machine");
   active.record.cancelRequested = true;
-  await pushEvent(active.record, "cancel_requested");
-  await appendReceipt({ operationId: "tool.cancel", callId, resultRef: active.record.resultRef, chatId: ctx.chatId, runId: ctx.runId });
+  const cancelEvent = pushEvent(active.record, "cancel_requested");
   active.controller.abort();
+  await cancelEvent;
+  await appendReceipt({ operationId: "tool.cancel", callId, resultRef: active.record.resultRef, chatId: ctx.chatId, runId: ctx.runId });
   // Settlement is whatever the transport boundary proves; wait briefly for it, then report what is known.
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([active.done, new Promise<void>((resolve) => { timer = setTimeout(resolve, 5_000); timer.unref?.(); })]);

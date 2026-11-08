@@ -954,7 +954,7 @@ function ProjectPage() {
           <IconPlus size={14} />
           {locale === "ko" ? "새 작업" : "New task"}
         </button>
-        <button type="button" className="titlebar-nodrag" style={raisedButton} onClick={() => openProjectSettings({ mode: "edit", projectId: project.id })} aria-label={locale === "ko" ? "프로젝트 설정" : "Project settings"} aria-haspopup="dialog"><IconSettings size={16} /></button>
+        <button type="button" className="titlebar-nodrag" style={raisedButton} onClick={() => openProjectSettings({ mode: "edit", projectId: project.id })} aria-label={locale === "ko" ? "프로젝트 설정" : "Project settings"}><IconSettings size={16} /></button>
         <button
           onClick={() => void removeProject()}
           className="titlebar-nodrag"

@@ -546,3 +546,10 @@
 /* A long catalog description must not enlarge a narrow choice column. */
 .card { min-width:0; }
 @media(max-width:640px) { .grid { grid-template-columns:minmax(0,1fr); } }
+
+/* Inside One settings, browsing tools is part of the page, not a second dialog. */
+.embedded { width: min(100%, 820px); box-sizing: border-box; margin: 0 auto; padding: 32px 20px 48px; }
+.embedded .panel { width: 100%; max-height: none; min-height: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; overflow: visible; }
+.embedded .header { padding: 0 0 12px; }
+.embedded .close { font-size: 0; }
+.embedded .close::before { content: "←"; font-size: 20px; }

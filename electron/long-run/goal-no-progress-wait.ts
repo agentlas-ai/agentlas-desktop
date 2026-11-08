@@ -1,8 +1,11 @@
 import { getDb } from "../store/db";
 import { appendLongRunEvent, goalOwnerAnswerHold, getLongRun, longRunOwnerHold, nextBlockedGoalRetrySlot, noProgressRetryDelayMs, releaseGoalOwnerAnswerHold,
-  RUNTIME_RETRY_CLEANUP_WINDOW_MS, scheduleBlockedGoalRetry, type BlockedGoalRetry, type LongRunRecord } from "../store/long-runs";
+  RUNTIME_RETRY_CLEANUP_WINDOW_MS, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, liveLongRunAttemptCount, type BlockedGoalRetry, type LongRunRecord } from "../store/long-runs";
 import { NO_PROGRESS_RETRY_LIMIT, VERIFICATION_NO_PROGRESS_REASON } from "../../shared/long-run-checkpoint";
-import { appendChatMessage } from "../store/chats";
+import { appendChatMessage, getChat } from "../store/chats";
+import { invocationRunOwners } from "../store/invocation-run-owners";
+import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
+import { hasQueuedOwnerSteer } from "../store/invocation-steers";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { currentUiLocale } from "../ui-locale";
@@ -108,20 +111,6 @@ export function noProgressRestSettled(runId: string, retry: BlockedGoalRetry | n
   } catch { return false; }
 }
 
-/** Did a real answer reach the owner from the producing turn? An assistant message of the chat bound to that run (or, with no run id, written after the checkpoint's start). */
-function answerReachedOwner(chatId: string, invocationRunId: string | null, checkpointAt: string): boolean {
-  const db = getDb();
-  const started = invocationRunId
-    ? (db.prepare("SELECT ts FROM run_events WHERE run_id = ? AND kind = 'invoke_started' ORDER BY seq LIMIT 1").get(invocationRunId) as { ts?: string } | undefined)?.ts
-    : undefined;
-  const since = started ?? new Date(Date.parse(checkpointAt) - 10 * 60_000).toISOString();
-  // A real deliverable only: a row that carries any host notice is the app's own line, never the turn's answer. The typed purpose is
-  // named too, so the room's "not finished / what remains" notice (purpose goal-incomplete) can never count as a delivered result.
-  return Boolean(db.prepare(`SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND text <> '' AND host_notice_json IS NULL
-    AND COALESCE(json_extract(host_notice_json, '$.purpose'), '') <> 'goal-incomplete'
-    AND row_scope IS NOT 'view' AND created_at >= ? LIMIT 1`).get(chatId, since));
-}
-
 /** The longest part of the producing turn's own report the rest message carries; the rest stays in the run record. */
 const REST_REPORT_BODY_CHARS = 3500;
 
@@ -163,8 +152,8 @@ function restReportText(locale: "ko" | "en", checkpoint: NonNullable<ReturnType<
 /**
  * The rest's time has come. True: the Goal keeps resting and no model is started (the caller defers). False: a signal brought this
  * retry (a pulled-forward or otherwise scheduled one), or nothing proves the outcome is the unchanged one: the caller runs it as before.
- * Delivery is once per outcome digest and atomic across processes: the owner either already has an answer from the producing turn
- * (recorded, nothing posted), or the host posts what stands and what remains.
+ * Delivery is once per outcome digest and atomic across processes. The host posts what stands and what remains
+ * because older chat rows do not prove which turn produced them.
  */
 export function settleNoProgressRest(run: LongRunRecord, retry: BlockedGoalRetry): boolean {
   if (retry.fromReason !== VERIFICATION_NO_PROGRESS_REASON || !run.rootChatId) return false;
@@ -179,13 +168,27 @@ export function settleNoProgressRest(run: LongRunRecord, retry: BlockedGoalRetry
     const chatId = run.rootChatId;
     // Delivered already (every sweep after a restart asks): read without the write lock and stop here.
     if (restDelivered(run.id, digest)) { noteRestSettled(run.id, retry.seq); return true; }
-    getDb().transaction(() => {
-      if (restDelivered(run.id, digest)) return;
-      const reached = answerReachedOwner(chatId, checkpoint.invocationRunId, checkpoint.createdAt);
-      if (!reached) appendChatMessage(chatId, "assistant", restReportText(currentUiLocale() === "ko" ? "ko" : "en", checkpoint, latestInvocationReport(checkpoint.invocationRunId)), { noGoalResult: true });
+    const settled = getDb().transaction(() => {
+      const current = getLongRun(run.id);
+      const currentRetry = pendingBlockedGoalRetry(run.id);
+      const currentCheckpoint = latestTaskCheckpoint(run.goalId);
+      const admission = getPendingInvocationAdmissionForChat(chatId);
+      if (!current || current.version !== run.version || current.status !== run.status
+        || current.goalId !== run.goalId || current.rootChatId !== chatId
+        || longRunOwnerHold(run.id) || goalOwnerAnswerHold(run.id)
+        || getChat(chatId)?.goalId !== run.goalId || currentRetry?.seq !== retry.seq
+        || currentCheckpoint?.checkpointId !== checkpoint.checkpointId || currentCheckpoint.outcomeDigest !== digest
+        || liveLongRunAttemptCount(run.id) > 0 || invocationRunOwners.getActiveOwner(chatId)
+        || (admission && Date.now() - Date.parse(admission.pendingAt) < 120_000)
+        || hasQueuedOwnerSteer(chatId)) return false;
+      if (restDelivered(run.id, digest)) return true;
+      appendChatMessage(chatId, "assistant", restReportText(currentUiLocale() === "ko" ? "ko" : "en", checkpoint, latestInvocationReport(checkpoint.invocationRunId)), { noGoalResult: true });
       appendLongRunEvent({ runId: run.id, kind: NO_PROGRESS_REST_DELIVERED_KIND, actorKind: "host",
-        payload: { digest, checkpointId: checkpoint.checkpointId, posted: !reached } });
+        payload: { digest, checkpointId: checkpoint.checkpointId, posted: true } });
+      return true;
     }).immediate();
+    // The caller must defer a stale snapshot, not reopen its old retry.
+    if (!settled) return true;
     emitDesktopStoreChange({ entity: "chat", id: chatId });
     noteRestSettled(run.id, retry.seq);
     return true;

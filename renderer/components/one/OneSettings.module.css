@@ -135,3 +135,14 @@
 .cadenceChoices button[aria-checked="true"] { border-color: var(--one-sheet-primary); background: var(--paper-3); font-weight: 650; }
 .cadenceChoices button:focus-visible { outline: 2px solid var(--one-sheet-accent); outline-offset: 2px; }
 .cadenceChoices button:disabled { opacity: .5; cursor: wait; }
+
+.railRow[data-active="true"] { background: var(--paper-3); color: var(--ink); }
+
+/* Settings navigation stays compact so more sections remain visible at once. */
+.railGroup { gap: 1px; padding-bottom: 12px; }
+.railGroup > span { padding: 8px 10px 5px; font-size: 10px; letter-spacing: 0; text-transform: none; }
+.railRow { min-height: 32px; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px; padding: 5px 10px; border-radius: 8px; }
+.railRow > svg:last-child { display: none; }
+.railIcon { width: 18px; height: 18px; background: transparent; border-radius: 0; color: var(--ink-soft); }
+.railCopy strong { font-size: 12px; font-weight: 500; }
+.railCopy small { display: none; }
