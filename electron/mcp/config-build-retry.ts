@@ -4,7 +4,7 @@ import { isStoreBusyError } from "../../shared/transient-send-refusal";
  * The run's tool table is built by one call (mcp-tools/mcp-config.ts buildMcpConfigFile). A throw there means the table is not
  * ready; nothing has reached the model. Most throws are the app's own host not being ready yet: the tool gate that is bound on
  * demand, the OS host a Hope turn needs, a store lock, a Goal usage ledger caught between two writes. Those clear in seconds, so
- * the build is tried again inside the run (about a minute at most) instead of ending the run with "send it again" (observed in use: 8 runs, 3
+ * the build is tried again inside the run (about a minute at most) instead of ending the run with "send it again" (production 8 runs, 3
  * reasons, each fixed one by one, the catch-all stayed).
  *
  * Only codes named here are tried again. A credential the owner has to give, a server definition that is wrong, the Goal changing

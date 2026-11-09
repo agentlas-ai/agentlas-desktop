@@ -1354,7 +1354,7 @@ export function bindGoalResultMessage(p: { chatId: string; goalId: string; runId
   // IMMEDIATE: this transaction reads (the answer's row, the stored presentation of a Goal chat that has thousands of them:
   // tens of milliseconds) and only then writes. Deferred, the daemon's commit in that window made the upgrade to a write fail
   // at once with SQLITE_BUSY_SNAPSHOT ("database is locked", which busy_timeout never waits out) and a finished Goal turn
-  // ended as a failed run (observed in use 11:05 and 2026-10-27 00:29, both an answered Goal turn). Same cure as
+  // ended as a failed run (production and both an answered Goal turn). Same cure as
   // recordRunEvent and saveGoalPlan: take the write lock first and let the other writer wait its turn.
   const id = db.transaction(() => {
     const rows = db.prepare(`SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND text = ? AND created_at >= ? ORDER BY rowid DESC`).all(p.chatId, p.text, p.notBefore) as {id: string}[];

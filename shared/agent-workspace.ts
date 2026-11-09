@@ -51,7 +51,7 @@ export interface AgentWorkspaceRevision {
   outcome?: AgentWorkspaceRevisionOutcome;
   /** Runs on the revision it replaced next to runs on this one, per kind of work; absent when neither side has runs. */
   comparison?: AgentWorkspaceRevisionComparison;
-  /** What an applied learning was, kept only when it names the runs it came from. Absent on older revisions. */
+  /** What an applied learning was, kept only when it names the runs it came from. Absent on revisions before. */
   experience?: AgentWorkspaceExperience;
 }
 /** The kind of work a run was, from its start record: an automation run, a task, a conversation turn, or unrecorded. */

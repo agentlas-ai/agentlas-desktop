@@ -1,3 +1,4 @@
+import { SCIENCE_START_INVALID_ID_BEFORE_ADMISSION } from "../../shared/science-composer-admission";
 import { supervisorError } from "../../shared/one-supervisor";
 import { performance } from "node:perf_hooks";
 import { createHash } from "node:crypto";
@@ -34,8 +35,10 @@ export function scienceRequestId(commandId:string):string {
  * rejection that may carry receipts) is unknown and stays held, where a turn that did start is still paired by its request id.
  */
 export function scienceStartNotSent(error:unknown):boolean {
-  const failure=(error as {failure?:{outcome?:unknown}}|null)?.failure;
+  const failure=(error as {failure?:{outcome?:unknown;phase?:unknown;remoteSourceCode?:unknown}}|null)?.failure;
   if (failure?.outcome==="not-dispatched") return true;
+  if (failure?.outcome==="rejected" && failure.phase==="remote"
+      && failure.remoteSourceCode===SCIENCE_START_INVALID_ID_BEFORE_ADMISSION) return true;
   const code=(error as {code?:unknown}|null)?.code;
   return code==="supervisor_science_project_missing" || code==="supervisor_science_conversation_missing" || code==="supervisor_open_science_conversation_first";
 }

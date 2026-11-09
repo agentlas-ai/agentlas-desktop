@@ -58,7 +58,7 @@ const EXTERNALLY_OPENABLE_CHAT_FILE_EXTENSIONS = new Set([
   ".zip", ".gz", ".tgz", ".tar", ".bz2", ".7z", ".rar",
   ".mp3", ".mpeg", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".oga", ".opus", ".weba", ".mid", ".midi",
   ".mp4", ".mov", ".webm", ".m4v", ".ogv",
-  // media-carousel: phone photo and camera formats open in the system viewer like the rest.
+  // media-carousel phone photo and camera formats open in the system viewer like the rest.
   ".heic", ".heif", ".bmp", ".tif", ".tiff", ".3gp", ".3g2", ".mkv", ".avi",
 ]);
 const MAX_DIRECTORY_ENTRIES = 512;
@@ -83,7 +83,7 @@ export const CHAT_FILE_MEDIA_BY_EXTENSION: Readonly<Record<string, string>> = Ob
   ".zip": "application/zip", ".gz": "application/gzip", ".tgz": "application/gzip", ".tar": "application/x-tar", ".bz2": "application/x-bzip2", ".7z": "application/x-7z-compressed", ".rar": "application/vnd.rar",
   ".mp3": "audio/mpeg", ".mpeg": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/opus", ".weba": "audio/webm", ".mid": "audio/midi", ".midi": "audio/midi",
   ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".m4v": "video/x-m4v", ".ogv": "video/ogg",
-  // media-carousel: what a phone camera or gallery hands over (iPhone HEIC, Android 3GP, screen recorders' MKV/AVI).
+  // media-carousel what a phone camera or gallery hands over (iPhone HEIC, Android 3GP, screen recorders' MKV/AVI).
   ".heic": "image/heic", ".heif": "image/heif", ".bmp": "image/bmp", ".tif": "image/tiff", ".tiff": "image/tiff",
   ".3gp": "video/3gpp", ".3g2": "video/3gpp2", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
   ".js": "text/javascript", ".jsx": "text/jsx", ".ts": "text/typescript", ".tsx": "text/tsx", ".css": "text/css", ".py": "text/x-python", ".rb": "text/x-ruby", ".go": "text/x-go", ".rs": "text/x-rust", ".java": "text/x-java-source", ".c": "text/x-c", ".h": "text/x-c", ".cpp": "text/x-c++", ".hpp": "text/x-c++", ".sql": "application/sql",

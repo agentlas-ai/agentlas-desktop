@@ -54,7 +54,7 @@ import { tStatus } from "./status-i18n";
 import { createToolLoopProgress, createToolLoopUsage, prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { fetchWithReconnect } from "./reconnecting-fetch";
-import { serverFailureResendDelayMs, SERVER_FAILURE_CONSECUTIVE_RESENDS, waitForServerResend } from "./provider-overload";
+import { serverFailure, serverFailureCodeForStatus, serverFailureResendDelayMs, SERVER_FAILURE_CONSECUTIVE_RESENDS, waitForServerResend } from "./provider-overload";
 
 const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
 
@@ -304,14 +304,42 @@ function servingStreamErrorBeforeDispatch(data: unknown, firstRequest: boolean):
 }
 
 function streamFailure(data: unknown, locale: RunnerRequest["locale"]): RunnerFailure {
-  const record = data && typeof data === "object" ? data as { code?: unknown; message?: unknown } : {};
+  const record = data && typeof data === "object" ? data as { code?: unknown; message?: unknown; retryable?: unknown; providerStatus?: unknown } : {};
+  // The model provider refused at its header and the server settled the attempt at zero (nothing was generated), so it says the request
+  // may be sent again and gives the provider's status: the same typed class as that status from a provider the desktop calls itself
+  // (provider-overload.ts), so the shared continuation and its wait apply as on every other lane. Before, every such refusal came as
+  // "reconciliation required" and the turn ended.
+  // A provider status that is no server failure is the provider's settled answer: a 429 is its rate limit and any other 4xx a
+  // refusal that sending again would repeat (a server that marks every non-2xx retryable must not turn those into a week of
+  // host recovery as an outage). The server's message stays out: it is written in the server's language, not the owner's.
+  const providerStatus = typeof record.providerStatus === "number" && Number.isInteger(record.providerStatus) ? record.providerStatus : null;
+  if (record.retryable === true && providerStatus !== null) {
+    const providerFailure = serverFailureCodeForStatus(providerStatus);
+    if (providerFailure) {
+      return serverFailure({ code: providerFailure, status: providerStatus, runtime: "agentlas", providerLabel: "Agentlas", locale: locale ?? undefined });
+    }
+    const ko = locale === "ko";
+    if (providerStatus === 429) {
+      return { kind: "rate_limit", runtime: "agentlas", source: "marker", providerCode: "serving_rate_limited",
+        message: ko ? "Agentlas 모델이 요청 한도에 걸렸습니다(HTTP 429). 한도가 풀리면 이어 갑니다." : "The Agentlas model hit its rate limit (HTTP 429). Work continues once the limit clears." };
+    }
+    return servingProviderRefused(providerStatus, locale);
+  }
   const code = typeof record.code === "string" && /^[a-z0-9_]{1,64}$/.test(record.code) ? record.code : "serving_failed";
   if (code === "serving_reconciliation_required") return servingReconciliationFailure(locale);
   if (code === "serving_input_too_large") return servingInputTooLargeFailure(locale);
+  if (code === "serving_provider_refused") return servingProviderRefused(providerStatus, locale);
   const message = typeof record.message === "string" && record.message ? record.message
     : locale === "ko" ? "답을 만들지 못했습니다. 잠시 뒤 다시 시도해 주세요." : "The Agentlas model could not answer. Try again shortly.";
   return { kind: code === "insufficient_credits" ? "quota" : "exit", runtime: "agentlas", source: "marker",
     providerCode: code, message: message.slice(0, 400) };
+}
+
+/** The model provider refused this request as such (a 4xx other than 429): sending it again repeats the answer. */
+function servingProviderRefused(status: number | null, locale: RunnerRequest["locale"]): RunnerFailure {
+  const http = status === null ? "" : `(HTTP ${status})`;
+  return { kind: "refused", runtime: "agentlas", source: "marker", providerCode: "serving_provider_refused",
+    message: locale === "ko" ? `Agentlas 모델이 이 요청을 받지 않았습니다${http}.` : `The Agentlas model refused this request${http ? ` ${http}` : ""}.` };
 }
 
 /** The server's own typed 413 (nothing dispatched to a provider): the same capacity refusal as the local pre-send check. */

@@ -48,7 +48,7 @@ export function agentRevisionOutcomes(agentId: string): Map<string, AgentWorkspa
   }
   if (!revisionOf.size) return outcomes;
   const counts = db.prepare(`SELECT kind, COUNT(*) AS n FROM run_events WHERE run_id = ? AND kind IN (${COUNTED.map(() => "?").join(",")}) GROUP BY kind`);
-  // invoke_started is one of a run's first events (seq 13 at most on a real ledger), so the lookup stops early; without a
+  // invoke_started is one of a run's first events (seq 13 at most on the owner's ledger), so the lookup stops early; without a
   // bound a run that has none would be read to its end.
   const start = db.prepare(`SELECT automation_id AS automationId, json_extract(payload_json, '$.taskIntent') AS intent FROM run_events
     WHERE run_id = ? AND seq <= ${START_WINDOW} AND kind = 'invoke_started' ORDER BY seq LIMIT 1`);

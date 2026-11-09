@@ -1,4 +1,4 @@
-import { isRuntimeCredentialUnavailable, RUNTIME_CREDENTIAL_UNAVAILABLE_CODE } from "./credential-access";
+import { isRuntimeCredentialUnavailable, RUNTIME_CREDENTIAL_UNAVAILABLE_CODE, runtimeModelUnavailableByInventory } from "./credential-access";
 import { invocationBreaker, invocationBreakerKey } from "./invocation-breaker";
 import { runtimeCooldown } from "./runtime-cooldown";
 import { runtimeReadsWithTools } from "../../shared/runtime-capabilities";
@@ -533,23 +533,10 @@ function runtimeMatchesOverride(runtime: RuntimeStatus, override: AgentRuntimeOv
   return true;
 }
 
-const LOCAL_AUTHORITATIVE_MODEL_KINDS = new Set<RuntimeStatus["kind"]>(["ollama", "lmstudio", "mlx", "agentlas-local"]);
-
-/** True only when the runtime's own authoritative inventory proves the model absent. The Goal model handoff admits an
- * owner's choice by this same test, so a choice it accepts is never one the episode then refuses. */
+/** Keep credential refusals ahead of inventory conclusions. */
 export function runtimeModelUnavailable(runtime: RuntimeStatus, selectedModel: string | null | undefined): boolean {
-  const model = selectedModel?.trim();
-  if (!model || isRuntimeCredentialUnavailable(runtime)) return false;
-  const discovery = runtime.modelDiscovery;
-  // Failed/empty/stale discovery cannot prove that an explicit model was removed.
-  if (discovery && (discovery.status !== "ok" || discovery.stale)) return false;
-  // CLI picker catalogs may omit accepted aliases/hidden models even when the
-  // read succeeds. Preserve the explicit request and let the runtime answer it.
-  const authoritative = LOCAL_AUTHORITATIVE_MODEL_KINDS.has(runtime.kind);
-  return authoritative && (runtime.availableModels?.length ?? 0) > 0
-    && !(runtime.kind === "ollama"
-      ? ollamaModelListIncludes(runtime.availableModels!, model)
-      : runtime.availableModels!.includes(model));
+  if (!selectedModel?.trim() || isRuntimeCredentialUnavailable(runtime)) return false;
+  return runtimeModelUnavailableByInventory(runtime, selectedModel, ollamaModelListIncludes);
 }
 
 /** Keep exact pins on their selected provider unless its own authoritative

@@ -2807,7 +2807,7 @@ async function runCodexResidentTurn(input: {
         sandbox: policy.sandbox,
         ...(Object.keys(threadConfig).length > 0 ? { config: threadConfig } : {}),
         // Image generation is a tool the model picks when the task needs it (the dynamic tool below carries its own
-        // description); no image line rides the thread .
+        // description); no image line rides the thread.
         developerInstructions: buildDeveloperInstructions(req),
         ...(imageToolSlot ? { dynamicTools: [CODEX_IMAGE_DYNAMIC_TOOL] } : {}),
       };
@@ -2883,7 +2883,7 @@ async function runCodexResidentTurn(input: {
           ...commonThreadParams,
           ...(req.model ? { model: req.model } : {}),
         }, { timeoutMs: 120_000, signal: req.signal });
-        //: turn/start has not been sent (turnDispatchAttempted is set below it), so a model-selection refusal here sent
+        // turn/start has not been sent (turnDispatchAttempted is set below it), so a model-selection refusal here sent
         // nothing: typed "not-dispatched" like the resume path above, its own code kept.
         const modelAcknowledgement = await acknowledgeCodexThreadModel({
           request: session.conn.request.bind(session.conn), response: started,
@@ -3062,10 +3062,13 @@ async function runCodexResidentTurn(input: {
     /** The host's silence window ran out: an open turn that holds more than its baseline keeps running (bounded); anything else ends as before. */
     const armSilence = (guardedChild: typeof session.child): void => {
       silence?.stop();
-      silence = startCliSilenceGuard(guardedChild, {
+      const guard = startCliSilenceGuard(guardedChild, {
         label: "codex", onStatus: events.onStatus, windowMs: silenceWindowMs, toolWindowMs: cliToolSilenceWindowMs(env),
         kill: () => { void onSilenceTrip(guardedChild); },
       });
+      // "In a row": a notification between two silent windows starts the count again. Before, the count lived for the whole turn,
+      // so a long healthy turn with four separate quiet stretches was ended at the fourth.
+      silence = Object.assign(Object.create(guard) as CliSilenceGuard, { touch: () => { proofWaits = 0; guard.touch(); } });
     };
     const onSilenceTrip = async (guardedChild: typeof session.child): Promise<void> => {
       let verdict: "completed" | "waiting" | "none" = "none";

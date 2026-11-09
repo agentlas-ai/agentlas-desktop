@@ -357,7 +357,7 @@ async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Rec
         checkReports();
         return native.withPreparedCommit(proposal, () => { checkReports(); return commit(); });
       }};
-    // Generalizing can outlast the 200 s request the One-team tool server gives a call (observed in use twice: the AI read
+    // Generalizing can outlast the 200 s request the One-team tool server gives a call (production and 10-26: the AI read
     // "One team request timed out" for a creation that kept running in Main, and could start it a second time). Same answer as
     // toolchain_publish: wait a bounded time, then say it is still generating and keep the work going. The registration of what it
     // produced belongs to the work, so it runs when the generation settles, whoever is still waiting. A repeat of this call with

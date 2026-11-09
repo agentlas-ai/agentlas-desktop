@@ -70,7 +70,7 @@ function readTeamGoalContext(rootChatId: string, projectId: string | null, withC
  * A turn the background service hosts hands its Goal intake to Main (goal-intake-forward.ts) and finishes as an ordinary turn;
  * Main admits the automatic Goal of THIS turn's own message while the planner or a worker is still running, and that Goal
  * follows the turn (daemon-turn-goal.ts). The room gaining it is the turn's own Goal arriving, not a replacement, so the plan
- * (which saw no live Goal) keeps running. Observed in use: intake admitted
+ * (which saw no live Goal) keeps running. Production Z, room 8f3e09ee, run a6376693: intake admitted
  * goal:auto-message:22e9c67e 16 s into the turn, the planner call returned 49 s later and the fence failed the whole turn
  * team_goal_context_changed ("The run failed before it could finish a reply"). Only the exact transition no live Goal ->
  * the Goal derived from the run's own prompt message is adopted; any other change still fails the comparison.
@@ -86,7 +86,7 @@ function adoptsOwnAutomaticGoal(context: TeamGoalContext, current: TeamGoalConte
  * How the room's Goal differs now from the one a team run captured at admission:
  *  - "none": the same Goal, the same revision;
  *  - "revised": the same Goal and run, amended by the owner mid-run (its revision, objective or criteria moved). A revision bump is never by itself
- * a reason to stop (decided): the step goes on, and the new revision governs the Goal's next turn and its verification;
+ * a reason to stop: the step goes on, and the new revision governs the Goal's next turn and its verification;
  *  - "replaced": another Goal or run, or the room's project/binding moved: the plan must not adopt it.
  */
 export function teamGoalContextChange(context: TeamGoalContext, current: TeamGoalContext): "none" | "revised" | "replaced" {

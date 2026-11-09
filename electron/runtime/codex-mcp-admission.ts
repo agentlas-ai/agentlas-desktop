@@ -3,7 +3,7 @@
  * judge read-only (its judgment is the tool's readOnlyHint), and our `agentlas-turn` tools carry none: harness_call is one gateway
  * for reads and effects alike. The arbiter (host-tool-permission-policy.ts) refuses or asks for a call it is told is mutating, so
  * in a read-permission turn (a woken One reviewing finished work) every internal read waited five minutes for a card nobody could
- * see and then came back "user rejected MCP tool call" (app.operations x3, one 300 s hang).
+ * see and then came back "user rejected MCP tool call" (Hope, -23:44: app.operations x3, one 300 s hang).
  *
  * This decides only the `mutating` flag, from the call's own arguments, and only for the server the run's own config names
  * `agentlas-turn`. It never allows anything by itself: a read still passes the arbiter's stored deny rules and plan mode. A call it

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.139 — 2026-11-10
+
+- Models and runtimes: an explicit "no tools" or "no images" flag on a model is honored when a model is chosen, and an explicit "yes" satisfies a required capability; the phone and the desktop apply the same availability rule to local models; an Ollama alias matches its single tagged model; concurrent Anthropic capability lookups no longer cancel each other.
+- Failures: a provider outage (5xx) is told the same way on every runtime that can tell it, and an error frame inside an opened stream is the same typed failure as a header error; a Codex connection failure or a Kimi step failure continues once instead of ending the turn; a Codex turn that keeps making progress is not cut short; a cancelled legacy CLI turn no longer starts a process; Agentlas serving separates a rate limit from a provider refusal.
+- Automations: a held run on a graph that did not change starts again at the next slot instead of staying parked; the strategy review after a run asks no model when nothing changed; an incomplete webhook body is rejected; a learning change built from retired lessons no longer blocks an agent's learning.
+- Build: a build that an app restart cut goes on by itself when its model turn is proven unfinished.
+- Finance: exact `yahoo:` listings resolve before price queries; invalid arguments show their bounds; the first card outside the guide is drawn with a warning; the phone retries a Finance search while the desktop is not ready; chart assets ship with the card code; invalid, duplicate and capped observations are told apart.
+- Tools and setup: the service key step can be left; partial and pending installs show their result; unapproved local connections are registered disabled; an empty plugin installation is not recorded; the first-run setup check shows a retry instead of a blank screen; the Finance conversation picker has search; "Explore agents" opens the marketplace.
+- Phone and Work: a Work start keeps its completion criteria across the bridge; paired phones can read the exact supervisor receipt; a concurrent hand-off reuses its receipt; an unreadable live document is never overwritten; mobile push recovery signals are kept during delivery; model role pools and their mirrors commit together; a Science start is not delegated twice.
+- Science: bounded provider waits for astronomy, physics, genomics and materials; review state is re-read after races and a stop is still attempted when the state write fails; previous manuscript draft requests are summarized.
+
+This release binds Agentlas OS v1.2.78 at e13ae0df5ca866888bfff69ae7b69cfdb330e267; public runtime asset `agentlas-os-runtime-v1.2.78.tar.gz` is pinned at SHA-256 `8f7bf3cc0f5c686887e5b207d5f191645aab0eddd992ff1d2783611a9f79fbb1`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.138 — 2026-11-09
 
 - One: manage profile, capabilities, execution budgets and monitoring from settings while preserving drafts. Agentlas is offered for the front agent with an explicit choice before activation.

@@ -10804,7 +10804,7 @@ function OneSessionsShell() {
                               />
                             )}
                             {message.role === "user" ? (
-                              // media-carousel: the owner's pictures and videos as one swipeable strip (components/media).
+                              // media-carousel the owner's pictures and videos as one swipeable strip (components/media).
                               <div data-one-message-media={message.images?.length || message.chatFiles?.length ? "true" : undefined}>
                                 <MessageAttachments files={message.chatFiles} imageUrls={message.images} locale={appLocale === "ko" ? "ko" : "en"} onOpenFile={openOneChatFile} />
                               </div>

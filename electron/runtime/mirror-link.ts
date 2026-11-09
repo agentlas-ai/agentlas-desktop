@@ -318,7 +318,7 @@ const reportedIsolation = new Set<string>();
 /**
  * A product home that could not be built for a reason other than the person's own setup (no folder, keyring sign-in):
  * typed, once per runtime and cause, never silent. The run continues with the person's folder (owner principle: a
- * runtime is not refused for this; the policy question stays open).
+ * runtime is not refused for this; see output/windows-fix-20261024/batch2.md for the open policy question).
  */
 export function reportIsolationUnavailable(runtime: string, cause: unknown): void {
   const reason = typeof cause === "string" ? cause : errorCode(cause);

@@ -37,6 +37,7 @@ export interface PluginPickerResult {
   installed: string[];
   /** 고르긴 했지만 붙일 서버가 없거나 실패한 항목 — 조용히 성공으로 위장하지 않는다. */
   skipped: Array<{ slug: string; reason: string }>;
+  pending?: Array<{ slug: string; serverName: string }>;
   /** 사용자가 "나중에 입력"을 고른 환경변수 이름들. 값은 담지 않는다. */
   deferredKeys: string[];
 }
@@ -51,7 +52,7 @@ export interface PluginCatalog {
   loaded: boolean;
   loadError: string | null;
   installedKnown: boolean;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<{ catalog: boolean; installed: boolean; sites: boolean }>;
   isInstalled: (listing: MarketplaceListing) => boolean;
   hasBrowserLogin: (listing: MarketplaceListing) => boolean;
 }
@@ -74,8 +75,8 @@ export function usePluginCatalog(options?: { enabled?: boolean }): PluginCatalog
   const [installedKnown, setInstalledKnown] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!enabled) return;
-    if (!api) { setLoaded(true); setLoadError("bridge_unavailable"); return; }
+    if (!enabled) return { catalog: false, installed: false, sites: false };
+    if (!api) { setLoaded(true); setLoadError("bridge_unavailable"); return { catalog: false, installed: false, sites: false }; }
     const [catalogResult, installedResult, sitesResult] = await Promise.allSettled([
       api.marketplace.search(""), api.mcpTools.listInstalled(), api.browser.listSites(),
     ]);
@@ -100,6 +101,7 @@ export function usePluginCatalog(options?: { enabled?: boolean }): PluginCatalog
     }
     if (sitesResult.status === "fulfilled") setLinkedSites(sitesResult.value ?? []);
     setLoaded(true);
+    return { catalog: catalogResult.status === "fulfilled", installed: installedResult.status === "fulfilled", sites: sitesResult.status === "fulfilled" };
   }, [api, enabled]);
 
   useEffect(() => {
@@ -243,7 +245,7 @@ export async function installPlugins(input: {
 }): Promise<PluginInstallOutcome> {
   const { chosen, ko, onProgress } = input;
   const api = ipc();
-  const result: PluginPickerResult = { installed: [], skipped: [], deferredKeys: [] };
+  const result: PluginPickerResult = { installed: [], skipped: [], pending: [], deferredKeys: [] };
   const needKeys: PluginInstallOutcome["needKeys"] = [];
   const needLogin: PluginInstallOutcome["needLogin"] = [];
   if (!api || chosen.length === 0) return { result, needKeys, needLogin };
@@ -280,13 +282,24 @@ export async function installPlugins(input: {
           approveLocalExecution: false,
         });
         const connected = receipt.receipts.filter(
-          (row) => row.action === "connected" || row.action === "already-installed",
+          (row) => row.transport !== "skills" && (row.action === "connected" || row.action === "already-installed"),
         );
         const pending = receipt.receipts.filter((row) => row.action === "needs-approval");
         const failed = receipt.receipts.filter((row) => row.action === "skipped");
+        const skillsInstalled = receipt.receipts.some((row) => row.transport === "skills" && row.action === "connected");
+
+        for (const row of failed) result.skipped.push({
+          slug: listing.slug,
+          reason: `${row.serverName}: ${row.transport === "skills" ? (ko ? "스킬 설치 결과를 확인하지 못했습니다." : "Skill installation could not be confirmed.") : ["stdio", "http", "sse"].includes(row.transport) ? (ko ? "MCP 연결 결과를 확인하지 못했습니다." : "MCP connection could not be confirmed.") : (ko ? "도구 추가 결과를 확인하지 못했습니다." : "Tool setup could not be confirmed.")}`,
+        });
+        for (const row of pending) result.pending!.push({ slug: listing.slug, serverName: row.serverName });
+        if (skillsInstalled) result.installed.push(listing.slug);
+        if (!skillsInstalled && connected.length === 0 && pending.length === 0 && failed.length === 0) {
+          result.skipped.push({ slug: listing.slug, reason: ko ? "설치 결과를 확인하지 못했습니다." : "The installation result could not be confirmed." });
+        }
 
         if (connected.length > 0 || pending.length > 0) {
-          result.installed.push(listing.slug);
+          if (!skillsInstalled && connected.length > 0) result.installed.push(listing.slug);
           /*
            * 다음에 무엇을 물을지는 **실제로 깔린 것**이 정한다 — 허브가 선언한 auth 가
            * 아니다. 그 둘은 갈린다(2026-08-20 실측):
@@ -313,16 +326,11 @@ export async function installPlugins(input: {
           const envKeys = missingEnv;
           const serverIds = [...new Set([...connected, ...pending].map((row) => row.serverId).filter((id): id is string => !!id))];
           needKeys.push({ slug: listing.slug, name: listing.name, envKeys, serverIds });
-        } else if (failed.length > 0) {
-          result.skipped.push({
-            slug: listing.slug,
-            reason: failed[0]?.reason ?? (ko ? "설치하지 못했습니다." : "Install failed."),
-          });
         }
-      } catch (error) {
+      } catch {
         result.skipped.push({
           slug: listing.slug,
-          reason: error instanceof Error ? error.message.slice(0, 200) : "install failed",
+          reason: ko ? "도구 추가 결과를 확인하지 못했습니다. 설치된 연결을 확인해 주세요." : "The tool setup result could not be confirmed. Check installed connections.",
         });
       }
     }
@@ -527,6 +535,7 @@ export function KeyStep({
   onSavePhase,
   onSaveInterrupted,
   isSaveOwnerCurrent,
+  onDismiss,
 }: {
   ko: boolean;
   state: KeyStepState;
@@ -537,6 +546,7 @@ export function KeyStep({
   onSavePhase?: (phase: KeySavePhase | null) => void;
   onSaveInterrupted?: (phase: KeySavePhase) => void;
   isSaveOwnerCurrent?: () => boolean;
+  onDismiss?: () => void;
 }) {
   const api = ipc();
   const current = state.queue[state.index];
@@ -645,6 +655,7 @@ export function KeyStep({
               : "This connection could not find the settings named below. If a key is already saved, check its connection first. You can skip entering a value."}
           </p>
         </div>
+        {onDismiss && <button type="button" className={styles.close} style={{ marginLeft: "auto" }} onClick={onDismiss} aria-label={ko ? "연결 화면 닫기" : "Close connection setup"}>×</button>}
       </header>
 
       <div className={styles.keyFields}>

@@ -619,10 +619,9 @@ export async function installHubPlugin(input: {
         args: row.args ?? [],
         envKeys: row.envKeys ?? [],
         credentialRefs: hubConnectionCredentialRefs(row.envKeys ?? []),
-      });
+      }, { initialEnabled: row.transport !== "stdio" || input.approveLocalExecution });
       installed.push(server);
       if (row.transport === "stdio" && !input.approveLocalExecution) {
-        setServerEnabled(server.id, false);
         receipts.push({
           slug: input.slug,
           serverName: server.name,
@@ -746,9 +745,8 @@ export async function bridgeHubPluginCandidates(
             args: row.args ?? [],
             envKeys: row.envKeys ?? [],
             credentialRefs: hubConnectionCredentialRefs(row.envKeys ?? []),
-          });
-          setServerEnabled(server.id, false);
-          installedServers.push({ ...server, enabled: false });
+          }, { initialEnabled: false });
+          installedServers.push(server);
           receipts.push({
             slug: candidate.slug,
             serverName: server.name,

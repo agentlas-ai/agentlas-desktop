@@ -6,7 +6,7 @@ import { MediaViewer } from "./MediaViewer";
 import styles from "./MediaStrip.module.css";
 
 /**
- * One message's (or one composer's) pictures, videos and files as a horizontal strip of real thumbnails (owner:
+ * One message's (or one composer's) pictures, videos and files as a horizontal strip of real thumbnails (
  * "좌우 스와이프 되면서 사진 보여지게"). The strip scrolls sideways with a trackpad swipe or ←/→ when it has focus; a picture or
  * video opens the full-screen viewer (←/→, swipe, Esc). Shared by One/Hope, Work and the Build composer.
  */

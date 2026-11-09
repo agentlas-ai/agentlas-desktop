@@ -6,7 +6,7 @@ import { appControlOmittedFromModelCatalog, appControlPolicy } from "./policy";
  * Reading a model's app.call the way the model meant it, before the dispatcher judges it.
  *
  * The dispatcher (service.ts appControlCallLocal) refuses an argument it does not know, an `args` that is not an object,
- * a required `chatId` that is absent and an operation it has never heard of. Observed in use (failure_events,
+ * a required `chatId` that is absent and an operation it has never heard of. Production (failure_events,
  * harness_call app.call): 30 of those refusals were a model that had the right operation and the right value under a
  * neighbouring name -- chats.getGoalContext {chatId} (it takes `id`), automations.latestRun {id} (it takes `automationId`),
  * `args: []` for an operation with no arguments, invoke.latestReceipt {} (the conversation it is asked from), the harness
@@ -59,7 +59,7 @@ function neighbouringOperation(path: string): AppControlCatalogEntry | null {
 /**
  * The browser / live-view operations name the conversation they act in `taskScopeId`, and that is the chat's id. A run reads a task's id
  * in its own evidence (`task_<chatId>`), so workLiveView.listTabs {taskScopeId:"task_39ff5b23-..."} was refused "native-browser-chat-missing"
- * twice (observed in use) while that chat was the one the run was in. The prefix is the only difference, so it is read off; a read
+ * twice while that chat was the one the run was in. The prefix is the only difference, so it is read off; a read
  * that names no scope is asked in the conversation it comes from. Writes keep exactly what they were given (beyond the prefix).
  */
 const VIEW_OPERATION = /^(workLiveView|browserUi|browserAnnotation)\./;
@@ -101,7 +101,7 @@ const ARGUMENT_ENVELOPES: ReadonlySet<string> = new Set(["args", "arguments", "b
 /**
  * The call's fields in the shape the operation declares. 499 operations take an `input` object, and app.call reads a request's `input`
  * as the call's own arguments, so {operation:"agentWorkspace.prepareFileChange", input:{agentId,...}} reached the dispatcher flat and was
- * refused "belong inside input"; {operation, payload:{agentId}} was refused beside the `params` call
+ * refused "belong inside input" (owner's Hope, 1.3.108); {operation, payload:{agentId}} was refused beside the `params` call
  * that passed. Neither changes which operation runs or any value, and the operation's schema still judges the fields, so a write is
  * read this way too.
  */

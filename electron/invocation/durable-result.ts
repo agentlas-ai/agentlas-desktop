@@ -3,7 +3,7 @@
  *
  * The rule this serves (invocation/service.ts, the `final` event): a completion is published only after reopening the chat
  * can read the exact answer back. Treating "the row I looked up byte-for-byte is not there" as "the answer is lost" turned
- * finished answers into `result-not-durable` errors (observed in use, one millisecond after the row was saved) and,
+ * finished answers into `result-not-durable` errors (production one millisecond after the row was saved) and,
  * behind the error, a second "Interrupted answer" copy of the same text. Nothing was wrong with the answer: the saved body and
  * the event's body differ legitimately (the store repairs mistyped ask markers; a firm or swarm producer saves the raw model
  * text where the event carries the cleaned copy; the 10-29/30 marker changes strip [quiet] and NEEDS-INPUT from the saved copy).

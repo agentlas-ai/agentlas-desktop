@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
  * A parked relay (deferred-system-relays.ts) is delivered by "the chat's next turn that runs". Nothing made such a turn happen:
  *
  *  - A Goal that waits on its own host-scheduled retry (waiting_tool + a pending blocked-goal retry, 30 min to 6 h out) refused a
- *    teammate's report and the report waited for that retry. Observed in use: 50 of 66 parked relays waited 5-30 min,
+ * teammate's report and the report waited for that retry. a real installation 50 of 66 parked relays waited 5-30 min,
  *    11 waited 2 h or more (those were Goals held for the owner's answer: an owner hold, left alone).
  *  - A room note whose steer was refused for a reason that clears by itself (a locked store, the other host holding the room,
  *    a settling turn) was parked and no timer or later event started a turn for it; with no Goal and no owner message it sat.

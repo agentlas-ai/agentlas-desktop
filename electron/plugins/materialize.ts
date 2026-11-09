@@ -532,7 +532,7 @@ export function materializePluginRelease(input: {
     // a plugin process started from the old tree may still be reading it, and an old-path writer can still create
     // `.state` there. The next launch's sweep (retirePluginInstallerLeftovers) removes it once it is older than the
     // grace period, unless it holds host state. Before that sweep existed every update left one full copy per changed
-    // plugin on every machine and nothing removed them (one machine,: 1,283 copies, 1.5 GB).
+    // plugin on every machine and nothing removed them (one machine, 1,283 copies, 1.5 GB).
     return {
       slug,
       action: destinationStat ? "updated" : "installed",

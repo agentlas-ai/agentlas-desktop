@@ -746,7 +746,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
                 :<Markdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={message.role==="assistant"?prepareUiFollowup:undefined} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>}
               <InlineUiInstances chatId={snapshot?.conversationChatId} instances={ownedUi} turnIds={turn?[turn.runId]:[]} locale={ko?"ko":"en"}/>
             </article></MessageActions>}
-            {/* media-carousel: pictures and videos as one swipeable strip, other files as cards (components/media). */}
+            {/* media-carousel pictures and videos as one swipeable strip, other files as cards (components/media). */}
             {(imageUrls.length>0||fileGroups.length>0)&&<MessageAttachments files={fileGroups.flatMap(group=>messageFiles[group] ?? [])} imageUrls={imageUrls} locale={ko?"ko":"en"} onOpenFile={requestChatFileOpen} align={message.role==="user"?"end":"start"}/>}
             {delegated.map(delegation)}
             {/* Owner 2026-10-04: while One answers, three dots without an activity log. */}

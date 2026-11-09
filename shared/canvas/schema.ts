@@ -7,7 +7,7 @@ export { CANVAS_TONES, CANVAS_UNITS, CANVAS_WIDTHS };
 /**
  * The result-card canvas (ui.canvas; finance.present is an alias): one card composed from generic blocks. No block belongs to a kind of question
  * or a domain — an earnings summary, an election's market impact, a portfolio review or a dividend plan are all compositions of the same blocks
- * ("no hard-coding by question type";: one tool, domains register only guides and data adapters). The model
+ * ("no hard-coding by question type"; one tool, domains register only guides and data adapters). The model
  * supplies what it read; series a chart draws are read by the host through the adapter a domain registered (electron/canvas/registry.ts).
  * The same view renders as HTML for the desktop transcript and the phone (render.ts), so both show the same card.
  */

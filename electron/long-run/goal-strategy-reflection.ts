@@ -142,7 +142,7 @@ export function evaluateGoalStrategySettlementGate(
   // A strategy reflection is observation-only: it does nothing outside, so, like a wait (wait-subscriptions.ts, owner
   // 2026-10-05) and the continuation reader, it needs the producing turn finished and bound (terminal event, receipt and
   // snapshot below), not every nested adapter scope of a team turn bound to the root chat. Requiring run-level
-  // effects "settled" refused it for every finished team turn (observed in use: 22 of 24 goal_strategy_effect_unsettled refusals came
+  // effects "settled" refused it for every finished team turn (owner DB: 22 of 24 goal_strategy_effect_unsettled refusals came
   // from turns that ended invoke_completed), and three in a row reached the AGI monitor as a repeated host notice.
   if (!checkpointBoundary || !input.boundary
     || input.boundary.invocationRunId !== input.sourceInvocationRunId
@@ -163,7 +163,7 @@ export function evaluateGoalStrategySettlementGate(
   // state "unknown" (evidence not ready, or a team turn whose run-level effects stay "uncertain" because nested teammate
   // scopes do not bind to the root run). There is nothing to reflect on, which is the expected result, not a host refusal.
   // The checkpoint already records why (episodeStrategy.reasonCode), and the next episode with a strategy asks again.
-  // observed in use: all 6 goal_strategy_effect_unsettled refusals that day were this case (5 with run-level effects
+  // a real installation all 6 goal_strategy_effect_unsettled refusals that day were this case (5 with run-level effects
   // "uncertain"), and the AGI monitor filed three in a row as an app defect (repeated_notice).
   if (strategy.state === "unknown") return { eligible: false, reason: "goal_strategy_effect_unsettled", nothingToReflect: true };
   if (strategy.effectBoundaryDigest !== input.boundary.snapshotDigest

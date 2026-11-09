@@ -24,7 +24,7 @@ export function deadHostClosedLine(deliveries: number, locale: "ko" | "en"): str
 
 /**
  * The host died while an event occurrence was running and its sealed checkpoint cannot prove the step in flight only read
- * (store/db.ts stale-run recovery). Before, the event was parked for the owner. Decision: an interrupted
+ * (store/db.ts stale-run recovery). Before the event was parked for the owner. decision an interrupted
  * step of unknown outcome never stops to ask, a duplicate is accepted; the redelivery resumes the same occurrence (finished steps come
  * back from the checkpoint, an AI step is told once that the earlier attempt may have partly happened and checks first).
  *

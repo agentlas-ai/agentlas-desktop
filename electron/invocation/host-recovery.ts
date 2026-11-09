@@ -18,7 +18,7 @@ import { withEarlierAttempt } from "./earlier-attempt";
 import { isOwnerEndedInvocation } from "../../shared/invocation-host-stop";
 
 /**
- * The host-level safety net for an owner turn that fails INSIDE the app (owner rule: no internal harness code reaches
+ * The host-level safety net for an owner turn that fails INSIDE the app (rule no internal harness code reaches
  * the owner; the request is completed instead).
  *
  * One decision at the one place a failed owner turn becomes visible (invocation/service.ts, the three terminal sites):

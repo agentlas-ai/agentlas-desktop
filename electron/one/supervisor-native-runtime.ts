@@ -176,7 +176,7 @@ export function createSupervisorNativeRuntime(options: {
     try {
       const admission=getInvocationAdmission(runId);
       // A start this process saw refused counts the service's typed refusal before the start boundary too (invocationProvenNotStarted):
-      // its pending reservation alone kept One's conversation locked and the domain hand-over waiting for good .
+      // its pending reservation alone kept One's conversation locked and the domain hand-over waiting for good.
       const refusedHere=starts.get(runId)?.refused===true;
       if ((!admission || admission.status === "rejected" || (refusedHere && invocationProvenNotStarted(runId))) && !options.receipt(runId)
         && !getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1").get(runId)) {

@@ -110,6 +110,9 @@ export class MobilePushService {
   private readonly timers = new Map<NodeJS.Timeout, () => void>();
   private stopped = false;
   private flushing = false;
+  private recoverySignal = 0;
+  private catchUpAfterFlush = false;
+  private catchUpScheduled = false;
   private releaseTimer: NodeJS.Timeout | null = null;
   constructor(private readonly options: MobilePushServiceOptions) {
     this.file = path.join(options.userDataPath, "mobile-bridge", "push.json");
@@ -271,7 +274,23 @@ export class MobilePushService {
    * single attempt per signal: a failure keeps it queued with its original age.
    */
   async flushPending(): Promise<void> {
-    if (this.stopped || this.flushing || this.pendingList().length === 0) return;
+    if (this.stopped) return;
+    this.recoverySignal += 1;
+    if (this.flushing) { this.catchUpAfterFlush = true; return; }
+    await this.flushPendingOnce();
+  }
+  private requestCatchUp(): void {
+    if (this.stopped || this.catchUpScheduled) return;
+    if (this.flushing) { this.catchUpAfterFlush = true; return; }
+    this.catchUpScheduled = true;
+    queueMicrotask(() => {
+      this.catchUpScheduled = false;
+      if (!this.stopped) void this.flushPendingOnce().catch(() => console.warn("[mobile-push] queue flush unavailable"));
+    });
+  }
+  private async flushPendingOnce(): Promise<void> {
+    if (this.stopped || this.pendingList().length === 0) return;
+    if (this.flushing) { this.catchUpAfterFlush = true; return; }
     this.flushing = true;
     try {
       const now = this.clock();
@@ -307,9 +326,14 @@ export class MobilePushService {
         await this.deliver(registration, { ...entry.notice, occurredAt: new Date(this.clock()).toISOString(), ...(resolved.body ? { body: resolved.body } : {}) },
           () => this.options.revalidate?.(entry.notice) !== false, true);
       }));
-    } finally { this.flushing = false; this.scheduleRelease(); }
+    } finally {
+      this.flushing = false;
+      this.scheduleRelease();
+      if (this.catchUpAfterFlush) { this.catchUpAfterFlush = false; this.requestCatchUp(); }
+    }
   }
   private async deliver(item: Registration, notice: MobilePushNotice, stillCurrent: () => boolean, fromQueue: boolean): Promise<void> {
+    const signalAtStart = this.recoverySignal;
     const key = `${item.deviceId}:${notice.dedupeKey}`;
     if (this.queued.has(key) || this.registry.delivered.includes(key) || !item.preferences[preference[notice.category]]) return;
     const quiet = notice.quietEligible ? this.options.quietHours?.() ?? null : null;
@@ -375,6 +399,7 @@ export class MobilePushService {
         if (this.enqueue(key, item.deviceId, notice, "transient", this.clock())) {
           console.warn(`[mobile-push] gave up category=${notice.category} reason=unavailable queued=true`);
         }
+        if (this.recoverySignal !== signalAtStart) this.requestCatchUp();
       }
     } finally { this.queued.delete(key); }
   }

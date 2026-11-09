@@ -223,7 +223,7 @@ export async function requestMobileFinance(method:Method,params:Record<string,un
     case 'search':{
       // A source that is busy or down for a moment is not "no match" (source-failure.ts, the one list): the phone's sheet waits and searches again.
       const found=await ports.service.search(scope,args as {query:string});scope.assertCurrent();
-      const busy=!found.assets.length?transientFinanceCode(found.warnings):null;if(busy)throw new Error(busy);
+      const busy=!found.assets.length?transientFinanceCode(found.warnings):null;if(busy)throw new MobileBridgeNotReady(busy,busy);
       return finish(found);
     }
     case 'query':return finish(await ports.service.query(scope,args as z.infer<typeof query>));

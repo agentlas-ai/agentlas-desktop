@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
  * A value-free marker that moves on every successful keychain write or delete, in any host.
  *
  * The background service cannot see the window's vault edits, so it used to trust a cached credential for one second
- * (vault.ts, observed in use). That made every read a fresh helper process plus a durable recovery attempt:
+ * (vault.ts, production). That made every read a fresh helper process plus a durable recovery attempt:
  * measured, 20 helper processes in 40 s and 22% of all file events on the machine. Comparing this marker
  * tells the service a write happened the moment it happened, so a cached value can be trusted for longer.
  *

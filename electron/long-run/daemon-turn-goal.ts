@@ -28,8 +28,8 @@ import { currentGoalExecutionObligations, currentGoalObligationsSatisfied } from
  *    verifier): work is left -> the Goal continues by itself one minute later as an ordinary Desktop Goal turn (waiting_tool + a
  *    host retry, under the Main controller's own retry limits and wake budget), or after the capacity wait the failure names.
  *    Contract and room binding stay, and the owner's next message still resumes THIS Goal at once. Only a turn that ended on the
- *    owner's question card is held for the answer (waiting_tool + goal_owner_answer_required). In a marketing room:
- *    the Goal used to be cancelled 31 s after such a turn; waiting for "continue" is a stop nobody asked for.
+ * owner's question card is held for the answer (waiting_tool + goal_owner_answer_required). Owner X marketing room:
+ * the Goal used to be cancelled 31 s after such a turn; owner waiting for "continue" is a stop nobody asked for.
  *  - invoke_failed / invoke_threw for any other cause (a refusal, a login or quota limit, a provider or app failure) of a Goal that
  *    is not a series -> the Goal continues like the unverified team above: a host resume one minute later as an ordinary Desktop
  *    Goal turn, contract and room binding kept (it used to be cancelled and the room unbound, which made every internal failure of
@@ -418,7 +418,7 @@ function followDaemonTurnGoalInTransaction(goalId: string): DaemonTurnGoalResult
   // from under it. Only a turn that ended on the owner's question card waits for the answer (nothing may act on a request nobody
   // approved). Any other work left resumes by itself as an ordinary Goal turn on Desktop, under that controller's own retry limits
   // and wake budget, exactly as a Main-hosted Goal turn continues: waiting for the owner to type "continue" was a stop the owner
-  // never asked for (a block in some situation is a defect).
+  // never asked for ("a block in some situation is a defect").
   if (taskForceLeftWork(terminal)) {
     if (run.status === "queued") step("running", "daemon-turn-started");
     if (terminal.decisionRequested) {

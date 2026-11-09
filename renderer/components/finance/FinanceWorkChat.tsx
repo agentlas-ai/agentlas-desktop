@@ -8,7 +8,7 @@ import { taskTitleForDisplay } from "@/lib/task-title";
 import { useT } from "@/lib/i18n";
 import { WorkChatSurface } from "@/components/TaskCockpit";
 import { openPricing } from "@/components/UpgradeCta";
-import { IconPlus, IconRefresh, IconSparkles } from "@/components/Icon";
+import { IconClose, IconPlus, IconRefresh, IconSearch, IconSparkles } from "@/components/Icon";
 import { ComposerMenuExtensions, type ComposerMenuExtension } from "@/lib/composer-menu-extensions";
 import type { FinanceAnalystResult } from "@shared/finance-analysts";
 import { financeAnalystDescription, financeAnalystName } from "./FinanceAnalysts";
@@ -88,6 +88,12 @@ export function FinanceWorkChat({ ownerScope, provisionProject, listAnalysts, on
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const [listOpen, setListOpen] = useState(false);
+  const [listQuery, setListQuery] = useState("");
+  const [listLimit, setListLimit] = useState(50);
+  const listDialog = useRef<HTMLDialogElement>(null);
+  const listTrigger = useRef<HTMLButtonElement>(null);
+  const listSearch = useRef<HTMLInputElement>(null);
   const epoch = useRef(0), owner = useRef(ownerScope), creatingRef = useRef(false), refreshSequence = useRef(0);
   const provision = useRef(provisionProject); provision.current = provisionProject;
   owner.current = ownerScope;
@@ -202,6 +208,24 @@ export function FinanceWorkChat({ ownerScope, provisionProject, listAnalysts, on
   }, [project, ownerScope, refresh]);
 
   const validProject = project?.ownerScope === ownerScope;
+  const matchingChats = useMemo(() => {
+    const query = listQuery.trim().toLocaleLowerCase();
+    return query ? chats.filter(chat => taskTitleForDisplay(chat.title, ko).toLocaleLowerCase().includes(query)) : chats;
+  }, [chats, listQuery, ko]);
+  useEffect(() => {
+    const dialog = listDialog.current;
+    if (!dialog) return;
+    if (listOpen && validProject) {
+      if (!dialog.open) dialog.showModal();
+      listSearch.current?.focus();
+    } else if (dialog.open) dialog.close();
+    return () => { if (dialog.open) dialog.close(); };
+  }, [listOpen, validProject]);
+  useEffect(() => { setListOpen(false); setListQuery(""); setListLimit(50); }, [ownerScope]);
+  const closeList = () => {
+    setListOpen(false);
+    requestAnimationFrame(() => listTrigger.current?.focus());
+  };
   // The Work turn that ended on an empty credit balance carries the machine marker data-terminal-error="insufficient_credits". The newest turn's marker puts one plain sentence and its two actions above the conversation (the stylesheet shows the same sentence in place of the Work failure rows).
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [creditsOut, setCreditsOut] = useState(false);
@@ -233,13 +257,20 @@ export function FinanceWorkChat({ ownerScope, provisionProject, listAnalysts, on
   };
   return <section className={styles.root} data-credits-out={creditsOut ? "true" : undefined} aria-label={l("Finance 대화", "Finance conversations")}>
     <header className={styles.toolbar}>
-      <label className={styles.selector}><span className={styles.srOnly}>{l("대화 선택", "Choose conversation")}</span><select value={validProject ? activeChatId : ""} disabled={loading || creating || !validProject || !chats.length} onChange={event => selectConversation(event.target.value)}>
-        {!chats.length && <option value="">{l("대화", "Conversation")}</option>}
-        {validProject && chats.map(chat => <option key={chat.id} value={chat.id}>{taskTitleForDisplay(chat.title, ko)}</option>)}
-      </select></label>
+      <button ref={listTrigger} type="button" className={styles.selector} aria-haspopup="dialog" aria-expanded={listOpen} disabled={loading || creating || !validProject || !chats.length} onClick={() => { setListQuery(""); setListLimit(50); setListOpen(true); }}>
+        <span className={styles.selectorLabel}>{l("대화 목록", "Conversations")}</span><span className={styles.selectorTitle}>{taskTitleForDisplay(chats.find(chat => chat.id === activeChatId)?.title ?? "", ko)}</span>
+      </button>
       <button type="button" className={styles.icon} onClick={() => void refresh()} disabled={loading || creating || !validProject} aria-label={l("대화 목록 새로고침", "Refresh conversations")} title={l("대화 목록 새로고침", "Refresh conversations")}><IconRefresh size={17}/></button>
       <button type="button" className={styles.newChat} onClick={() => void newConversation()} disabled={loading || creating || !validProject}><IconPlus size={17}/><span>{creating ? l("만드는 중…", "Creating…") : l("새 대화", "New conversation")}</span></button>
     </header>
+    <dialog ref={listDialog} className={styles.listDialog} aria-labelledby="finance-conversation-list-title" onCancel={event => { event.preventDefault(); closeList(); }} onClick={event => { if (event.target === event.currentTarget) closeList(); }}>
+      <div className={styles.listHeader}><div><h2 id="finance-conversation-list-title">{l("대화 목록", "Conversations")}</h2><p>{l(`전체 ${chats.length}개`, `${chats.length} conversations`)}</p></div><button type="button" className={styles.listClose} onClick={closeList} aria-label={l("닫기", "Close")}><IconClose size={18}/></button></div>
+      <label className={styles.listSearch}><IconSearch size={17}/><span className={styles.srOnly}>{l("대화 검색", "Search conversations")}</span><input ref={listSearch} type="search" value={listQuery} onChange={event => { setListQuery(event.target.value); setListLimit(50); }} placeholder={l("대화 제목 검색", "Search conversation titles")}/></label>
+      <div className={styles.listBody} aria-label={l("대화 목록", "Conversation list")}>
+        {matchingChats.length ? <ul className={styles.chatList}>{matchingChats.slice(0, listLimit).map(chat => <li key={chat.id}><button type="button" className={styles.chatRow} aria-current={chat.id === activeChatId ? "true" : undefined} onClick={() => { selectConversation(chat.id); closeList(); }}><span>{taskTitleForDisplay(chat.title, ko)}</span>{chat.id === activeChatId && <span className={styles.current}>{l("현재", "Current")}</span>}</button></li>)}</ul> : <p className={styles.listEmpty}>{l("일치하는 대화가 없습니다.", "No matching conversations.")}</p>}
+        {matchingChats.length > listLimit && <button type="button" className={styles.listMore} onClick={() => setListLimit(limit => limit + 50)}>{l(`더 보기 (${matchingChats.length - listLimit}개 남음)`, `Show more (${matchingChats.length - listLimit} remaining)`)}</button>}
+      </div>
+    </dialog>
     {error && <div className={styles.error} role="alert"><span>{error}</span>{!validProject && <button type="button" onClick={() => setAttempt(value => value + 1)}>{l("다시 시도", "Retry")}</button>}</div>}
     {creditsOut && <div className={styles.credits} role="status"><span>{creditsOutSentence(ko)}</span><button type="button" className={styles.creditsPrimary} onClick={() => openPricing("ai-credits")}>{l("크레딧 충전", "Top up credits")}</button><button type="button" onClick={chooseAnotherModel}>{l("다른 모델 선택", "Choose another model")}</button></div>}
     {loading ? <p className={styles.status} role="status">{l("Finance 대화를 여는 중…", "Opening Finance conversations…")}</p> : validProject && activeChatId ? <div ref={surfaceRef} className={styles.surface} style={{ "--finance-empty-title": JSON.stringify(l("시장, 자산, 보유 종목에 대해 물어보세요", "Ask about markets, assets or your holdings")), "--finance-credits-out": JSON.stringify(creditsOutSentence(ko)) } as CSSProperties}><ComposerMenuExtensions.Provider value={menuExtensions}><WorkChatSurface key={`${ownerScope}:${activeChatId}`} chatId={activeChatId} embedded onNewSession={newConversation}/></ComposerMenuExtensions.Provider>{onStarter && <div className={styles.starters} role="group" aria-label={l("시작 질문", "Starter questions")}>{financeStarterPrompts(ko).map(text => <button key={text} type="button" onClick={() => onStarter(text)}>{text}</button>)}</div>}</div> : !error && <p className={styles.status}>{l("새 대화로 시작하세요.", "Start a new conversation.")}</p>}

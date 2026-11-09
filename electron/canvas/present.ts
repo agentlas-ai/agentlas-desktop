@@ -1,4 +1,3 @@
-import { z } from 'zod';
 import { canvasFit, canvasLayout, type CanvasBlock, type CanvasChart, type CanvasInput, type CanvasLine, type CanvasView } from '../../shared/canvas';
 import '../../shared/canvas/blocks/registry'; // the host knows every asset block before it builds a card (the renderer loads them on demand)
 import type { HarnessCallContext } from '../harness/capability-ports';
@@ -28,7 +27,7 @@ export interface CanvasBuildOptions {
 /**
  * The one implementation of "check this card against a guide, read its chart series, build the view". finance.present and ui.canvas both
  * call it. The blocks follow one of the guide's layouts in order (one may be left out, none added) and take its widths; a card that is not
- * the guide's as sent is fitted to it when it can be (what is left out is named in the warnings) refused once otherwise with the layout to send, and a second card in the turn is drawn as sent, the layout in the warnings.
+ * the guide's as sent is fitted to it when it can be (what is left out is named in the warnings); otherwise it is drawn as sent with the guide mismatch in the warnings.
  * A chart's series are never the model's: each one is read through the domain's adapter, or named as unavailable.
  */
 export async function buildCanvasCard(input: Omit<CanvasInput, 'guide'>, o: CanvasBuildOptions): Promise<{ view: CanvasView; warnings: string[] }> {
@@ -42,7 +41,7 @@ export async function buildCanvasCard(input: Omit<CanvasInput, 'guide'>, o: Canv
   if (!guide && o.noGuideMessage) unguided.push(`${o.warningPrefix}_card_without_guide: ${o.noGuideMessage}`);
   let layout = canvasLayout(o.layouts, args.blocks.map(block => block.type));
   // Not the guide's card as sent (extra blocks, another order): the host draws the guide's card from what was sent rather than
-  // refusing it, since a refused card was often not sent again (Codex,: 18 answers ended without a card). What the
+  // refusing it, since a refused card was often not sent again (Codex, 18 answers ended without a card). What the
   // card leaves out is named in the warnings so the answer text can carry it.
   let fitted: string[] = [];
   let chartFromReads = false;
@@ -59,7 +58,6 @@ export async function buildCanvasCard(input: Omit<CanvasInput, 'guide'>, o: Canv
     }
     if (fit) { fitted = fit.dropped.map(i => blocks[i].type); args.blocks = fit.order.map(i => blocks[i]); layout = fit.slots; }
   }
-  if (layout === null && !o.refusedBefore) throw new z.ZodError([{ code: 'custom', path: ['blocks'], message: `${o.first && o.named && o.named !== o.first ? `This answer's guide is ${o.first}, the one this turn read first; a guide read later is a related lookup. ` : ''}The ${guide} card is ${o.layouts!.join(' or ')} (type:width, in this order; one block may be left out when its data could not be read, never the chart). These blocks are ${args.blocks.map(block => block.type).join(' ')}. Call again with the guide's blocks; a second card this turn is drawn as sent.` }]);
   if (layout === null) {
     unguided.push(`${o.warningPrefix}_card_not_guide_layout: ${o.first && o.named && o.named !== o.first ? `this answer's guide is ${o.first}, the one this turn read first. ` : ''}The ${guide} card is ${o.layouts!.join(' or ')} (type:width, in this order); this one was drawn as sent (${args.blocks.map(block => block.type).join(' ')}). Next time send the guide's blocks.`);
     layout = undefined;

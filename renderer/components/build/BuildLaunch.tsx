@@ -18,7 +18,7 @@ interface Props {
   ko: boolean; screen: "home" | "intro"; request: string; hasBuild: boolean;
   onRequest: (text: string) => void; onResume: () => void; onHome: () => void;
   onNew: () => void; onBlank: () => void; onCompose: (text: string) => void;
-  /** media-carousel: pictures, videos and files dropped or pasted on the intro composer join the build's attachments. */
+  /** media-carousel pictures, videos and files dropped or pasted on the intro composer join the build's attachments. */
   onAttachFiles?: (files: File[]) => void; attachmentCount?: number;
 }
 type GallerySource = "local" | "cloud" | "hub";
@@ -197,7 +197,7 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
         </div>
       </header>
       <section className={styles.hero} aria-labelledby="build-hero-title">
-        <div><h2 id="build-hero-title">{ko ? <>내 에이전트와<br />Hub에서 시작하기</> : <>Start with your agents<br />and the Hub</>}</h2><p>{ko ? "내 컴퓨터와 Cloud, Hub에서 실제 에이전트를 살펴보세요." : "Explore real agents on this computer, in your Cloud, and in the Hub."}</p><button className={styles.primary} onClick={() => openGallery()}>{ko ? "에이전트 둘러보기" : "Explore agents"}</button></div>
+        <div><h2 id="build-hero-title">{ko ? <>내 에이전트와<br />Hub에서 시작하기</> : <>Start with your agents<br />and the Hub</>}</h2><p>{ko ? "내 컴퓨터와 Cloud, Hub에서 실제 에이전트를 살펴보세요." : "Explore real agents on this computer, in your Cloud, and in the Hub."}</p><button className={styles.primary} onClick={() => navigate("/marketplace")}>{ko ? "에이전트 둘러보기" : "Explore agents"}</button></div>
         {featured.length ? <div className={styles.heroCards}>{featured.slice(visibleSlide * 4, visibleSlide * 4 + 4).map(item => <button key={item.key} onClick={() => openGallery(item.key)}><AgentAvatar name={displayName(item)} agentId={item.agentId} size={35} /><strong>{displayName(item)}</strong><span>{sourceLabel(item.source)} · {displayDescription(item)}</span></button>)}</div> : <p className={styles.heroEmpty}>{catalogLoading ? (ko ? "에이전트를 불러오는 중…" : "Loading agents…") : (ko ? "에이전트 목록을 확인해 주세요." : "Check your agent catalog.")}</p>}
         {pages > 1 && <div className={styles.heroPages} aria-label={ko ? "추천 에이전트 페이지" : "Featured agent pages"}>{Array.from({ length: pages }, (_, index) => <button key={index} aria-label={ko ? `추천 ${index + 1} 보기` : `Show featured page ${index + 1}`} aria-pressed={visibleSlide === index} onClick={() => setHeroSlide(index)} />)}</div>}
       </section>

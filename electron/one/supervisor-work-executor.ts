@@ -53,6 +53,9 @@ const terminal = (status: string) => ["completed", "failed", "cancelled", "inter
 /** Holds the executor wrote itself when it lost track of a start (a restart, an owner that went away): no refusal of the brief. */
 const LOST_BINDING_CODES: ReadonlySet<string> = new Set(["personal_data_session_changed", "personal_data_follow_up_page_changed", "supervisor_work_native_binding_changed"]);
 const BOOKKEEPING_HOLDS: ReadonlySet<string> = new Set(["work_owner_unconfirmed", "native_dispatch_outcome_unknown"]);
+/** These admission dependencies may return before the first native dispatch.
+ * The typed code and an intact first-attempt history are both required. */
+const TEMPORARY_BINDING_CODES: ReadonlySet<string> = new Set(["personal_data_sign_in_required", "history_native_execution_adapter_required"]);
 /** The typed reason of a job proven never started and given up on (same word as the supervisor's replies and chat sends). */
 
 /** Claims and dispatches real native invocations independently of a renderer.
@@ -269,6 +272,17 @@ export class OneSupervisorWorkExecutor {
    * began (`neverBegan`) crossed no boundary at all; after begin() the admission ledger must show no start for the run. */
   private preStartRefusal(job: SupervisorWorkLease, neverBegan: boolean, error: unknown): string | null {
     if ((error as {runtimeFailure?:unknown} | null)?.runtimeFailure || !neverBegan && this.deps.runtime.receipt(job.run_id)) return null;
+    const typed = (error as {code?:unknown} | null)?.code;
+    if (neverBegan && typeof typed === "string" && TEMPORARY_BINDING_CODES.has(typed)) {
+      try {
+        const row = this.deps.store.get(job.command_id);
+        if (!row || row.run_id !== job.run_id || row.state !== "stored") return null;
+        const retry = supervisorDispatchRetry(row);
+        if (retry?.retryStopped || retry?.priorRunId || retry?.unconfirmedResends ||
+            this.deps.runtime.receipt(job.run_id) || this.deps.runtime.noStartProof?.(job.run_id) !== true) return null;
+        return typed;
+      } catch { return null; }
+    }
     const code = sendRefusalCode(error);
     const proven = neverBegan || (this.deps.runtime.noStartProof?.(job.run_id) ?? isRefusedBeforeDispatch(error));
     const refusal = code && isTransientSendRefusalCode(code) ? code : isStoreBusyError(error) ? "store_busy"

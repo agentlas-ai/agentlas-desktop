@@ -78,10 +78,10 @@ function mergedProfile(
     ...(live?.capabilities ?? defaults.capabilities
       ? { capabilities: live?.capabilities ?? defaults.capabilities }
       : {}),
-    ...(live?.supportsTools ?? defaults.supportsTools !== undefined
+    ...((live?.supportsTools ?? defaults.supportsTools) !== undefined
       ? { supportsTools: live?.supportsTools ?? defaults.supportsTools }
       : {}),
-    ...(live?.supportsMultimodal ?? defaults.supportsMultimodal !== undefined
+    ...((live?.supportsMultimodal ?? defaults.supportsMultimodal) !== undefined
       ? { supportsMultimodal: live?.supportsMultimodal ?? defaults.supportsMultimodal }
       : {}),
     ...(live?.efforts ?? defaults.efforts ? { efforts: live?.efforts ?? defaults.efforts } : {}),

@@ -628,7 +628,7 @@ const publicItem = ({ builtin: _builtin, ...item }: InventoryEntry): CapabilityI
 /**
  * The inventory the person sees and switches, with each item's on/off for One. Value-free: no file content.
  * Agentlas built-ins are not part of it by default (always on, owner), so counts, search and the lookups
- * that read it never see them. The Capabilities screen asks for `bundledPlugins` (owner screenshot: the
+ * that read it never see them. The Capabilities screen asks for `bundledPlugins` (screenshot the
  * Plugins list held one stray plugin and the owner concluded that nothing worked): the plugin packages the app ships
  * are then listed as read-only rows that are on, because they are what Hope's runs actually mount. A plugin a product
  * domain owns (Science's) stays out: Hope's ordinary conversation does not offer it either (domain-tool-menu.ts).

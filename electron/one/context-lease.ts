@@ -158,7 +158,7 @@ export class OneOsResourceLeaseBroker {
   /**
    * Waits briefly for the keyboard and mouse to go quiet before an action asks for the lease. Idle time counts synthesized input too
    * (context-platform.ts), so an agent's second click inside two seconds of its first read as "the owner is active" and came back
-   * refused, as did a click during a pause in the owner's typing. The lease's own check is unchanged.
+   * refused (owner's Hope, 1.3.108), as did a click during a pause in the owner's typing. The lease's own check is unchanged.
    */
   async settleHumanInput(timeoutMs = HUMAN_INPUT_SETTLE_MS, signal?: AbortSignal): Promise<void> {
     assertRequestCurrent(signal);

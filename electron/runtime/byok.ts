@@ -55,7 +55,7 @@ import { detectRuntimeRefusal } from "./runtime-refusal";
 import { EMPTY_NO_TOOL_RAN_CODE, normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import {
   serverFailure, serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, serverFailureResendLimit,
-  waitForServerResend,
+  streamErrorFrameBody, streamErrorFrameCode, waitForServerResend, type ServerFailureCode,
 } from "./provider-overload";
 import { fetchWithReconnect } from "./reconnecting-fetch";
 import {
@@ -148,7 +148,13 @@ function foldByokToolResults(slots: Array<{ get(): string; set(value: string): v
 }
 
 const ANTHROPIC_EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-const anthropicEffortCapabilities = new Map<string, Promise<ReadonlySet<string> | null>>();
+type AnthropicEffortLookup = {
+  promise: Promise<ReadonlySet<string> | null>;
+  controller: AbortController;
+  subscribers: number;
+  settled: boolean;
+};
+const anthropicEffortCapabilities = new Map<string, AnthropicEffortLookup>();
 
 /**
  * The effort levels Anthropic's own Models API says this model accepts (GET /v1/models/{id} -> capabilities.effort, each
@@ -156,23 +162,52 @@ const anthropicEffortCapabilities = new Map<string, Promise<ReadonlySet<string> 
  * null = the capability could not be read (no effort is sent, and the ledger says why).
  */
 function anthropicEffortLevels(baseUrl: string, headers: Record<string, string>, model: string, signal?: AbortSignal): Promise<ReadonlySet<string> | null> {
+  if (signal?.aborted) return Promise.resolve(null);
   const keyDigest = createHash("sha256").update(headers["x-api-key"] ?? headers.authorization ?? "").digest("hex").slice(0, 16);
   const cacheKey = `${baseUrl}\0${keyDigest}\0${model}`;
-  const cached = anthropicEffortCapabilities.get(cacheKey);
-  if (cached) return cached;
-  const lookup = (async () => {
-    try {
-      const response = await fetch(`${baseUrl}/v1/models/${encodeURIComponent(model)}`, { headers, ...(signal ? { signal } : {}) });
-      if (!response.ok) return null;
-      const body = await response.json() as { capabilities?: { effort?: Record<string, unknown> } };
-      const effort = body?.capabilities?.effort;
-      if (!effort || typeof effort !== "object" || (effort as { supported?: unknown }).supported !== true) return new Set<string>();
-      return new Set(ANTHROPIC_EFFORT_ORDER.filter((level) => (effort[level] as { supported?: unknown } | undefined)?.supported === true));
-    } catch { return null; }
-  })();
-  anthropicEffortCapabilities.set(cacheKey, lookup);
-  void lookup.then((levels) => { if (levels === null) anthropicEffortCapabilities.delete(cacheKey); });
-  return lookup;
+  let entry = anthropicEffortCapabilities.get(cacheKey);
+  if (!entry) {
+    const controller = new AbortController();
+    const created: AnthropicEffortLookup = {
+      controller, subscribers: 0, settled: false,
+      promise: (async () => {
+        try {
+          const response = await fetch(`${baseUrl}/v1/models/${encodeURIComponent(model)}`, { headers, signal: controller.signal });
+          if (!response.ok) return null;
+          const body = await response.json() as { capabilities?: { effort?: Record<string, unknown> } };
+          const effort = body?.capabilities?.effort;
+          if (!effort || typeof effort !== "object" || (effort as { supported?: unknown }).supported !== true) return new Set<string>();
+          return new Set(ANTHROPIC_EFFORT_ORDER.filter((level) => (effort[level] as { supported?: unknown } | undefined)?.supported === true));
+        } catch { return null; }
+      })(),
+    };
+    anthropicEffortCapabilities.set(cacheKey, created);
+    void created.promise.then((levels) => {
+      created.settled = true;
+      if (levels === null && anthropicEffortCapabilities.get(cacheKey) === created) anthropicEffortCapabilities.delete(cacheKey);
+    });
+    entry = created;
+  }
+  const subscribed = entry;
+  subscribed.subscribers += 1;
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = (levels: ReadonlySet<string> | null) => {
+      if (finished) return;
+      finished = true;
+      signal?.removeEventListener("abort", onAbort);
+      subscribed.subscribers -= 1;
+      if (!subscribed.settled && subscribed.subscribers === 0) {
+        if (anthropicEffortCapabilities.get(cacheKey) === subscribed) anthropicEffortCapabilities.delete(cacheKey);
+        subscribed.controller.abort();
+      }
+      resolve(levels);
+    };
+    const onAbort = () => finish(null);
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void subscribed.promise.then(finish);
+  });
 }
 
 /** The requested level when the model takes it, else the highest supported level below it, else its lowest level. */
@@ -595,6 +630,8 @@ async function runAnthropicMessagesInner(
   let toolCallsRun = 0;
   /** G24: consecutive resends spent on an endpoint that answered 5xx at the response header (restarts when a response opens; provider-overload.ts). */
   let serverResends = 0;
+  /** In-stream server error frames in a row (a response opening does not restart this count; a response without one does). */
+  let streamResends = 0;
   const ownerControl = createOwnerControlBoundary(req);
   try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
@@ -738,6 +775,7 @@ async function runAnthropicMessagesInner(
     let turnOutputObserved = false;
     let turnOutputTokens = 0;
     let messageStopped = false;
+    let streamFailure: { code: ServerFailureCode; body: string } | null = null;
 
     for await (const line of iterSseLines(resp)) {
       if (!line.startsWith("data:")) continue;
@@ -752,6 +790,8 @@ async function runAnthropicMessagesInner(
           message?: { usage?: Record<string, number | null | undefined> };
           usage?: Record<string, number | null | undefined>;
         };
+        const frameFailure = streamErrorFrameCode(event);
+        if (frameFailure) { streamFailure = { code: frameFailure, body: streamErrorFrameBody(event) }; break; }
         if (event.type === "content_block_start" && event.content_block?.type === "thinking") {
           opaqueThinking.set(event.index ?? 0, { type: "thinking", thinking: event.content_block.thinking ?? "", signature: event.content_block.signature ?? "" });
         } else if (event.type === "content_block_start" && event.content_block?.type === "redacted_thinking") {
@@ -820,6 +860,30 @@ async function runAnthropicMessagesInner(
       ? { inputTokens: turnInput!, outputTokens: turnOutputTokens,
           ...(turnCacheReadObserved ? { cachedInputTokens: turnCacheRead } : {}) }
       : undefined), currentHistoryRuntimeFence()?.assertCurrent());
+    if (streamFailure) {
+      // An outage after the headers (an error frame inside the stream): the class and resends of a 5xx at the header, with its own
+      // count (serverResends restarts when a response opens). No tool of this response ran (tools run only after a complete reply),
+      // so its text is taken back and the same request goes again.
+      const resendDelayMs = serverFailureResendDelayMs(null, streamResends);
+      const resendLimit = serverFailureResendLimit(streamFailure.code);
+      acc = acc.slice(0, responseStart);
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(acc));
+      if (serverFailureResendable(streamFailure.code) && streamResends < resendLimit
+        && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
+        streamResends += 1;
+        events.onStatus(serverResendStatus(req.locale, streamResends, resendLimit));
+        await waitForServerResend(resendDelayMs, req.signal);
+        if (req.signal?.aborted) throw abortReasonError(req);
+        turn -= 1; // the same request again, not a new tool turn
+        continue;
+      }
+      const observedUsage = measuredUsage.total();
+      return assertCurrentHistoryRunnerResult({ text: acc.trim(), ownerControlTerminal: "uncertain",
+        failure: serverFailure({ code: streamFailure.code, status: null, runtime: "byok", providerLabel: "Anthropic", locale: req.locale,
+          body: streamFailure.body }),
+        ...(observedUsage ? { observedUsage } : {}), workforcePermissionEnforcement: broker?.finish(false) });
+    }
+    streamResends = 0;
 
     // Only complete client-tool groups or final answers admit further work.
     // pause_turn and token/context limits are partial responses, not ACKs.
@@ -1348,6 +1412,8 @@ export const runGoogleByok: Runner = async (
   const geminiCacheSetting = await readGeminiCacheSetting().catch(() => ({ ...GEMINI_CACHE_DEFAULT }));
   /** G24: consecutive resends spent on an endpoint that answered 5xx at the response header (restarts when a response opens; provider-overload.ts). */
   let serverResends = 0;
+  /** In-stream server error frames in a row (a response opening does not restart this count; a response without one does). */
+  let streamResends = 0;
   try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
     if (req.signal?.aborted) throw abortReasonError(req);
@@ -1546,6 +1612,7 @@ export const runGoogleByok: Runner = async (
     let terminalUsage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | undefined;
     let finishReason: string | undefined;
     let conflictingFinishReason = false;
+    let streamFailure: { code: ServerFailureCode; body: string } | null = null;
     for await (const line of iterSseLines(resp)) {
       if (!line.startsWith("data:")) continue;
       const payload = line.slice(5).trim();
@@ -1559,6 +1626,8 @@ export const runGoogleByok: Runner = async (
           candidates?: Array<{ content?: { parts?: GooglePart[] }; finishReason?: string }>;
           usageMetadata?: { promptTokenCount?: unknown; totalTokenCount?: unknown; cachedContentTokenCount?: unknown };
         };
+        const frameFailure = streamErrorFrameCode(event);
+        if (frameFailure) { streamFailure = { code: frameFailure, body: streamErrorFrameBody(event) }; break; }
         const candidateFinishReason = event.candidates?.[0]?.finishReason;
         if (typeof candidateFinishReason === "string") {
           if (finishReason !== undefined && finishReason !== candidateFinishReason) conflictingFinishReason = true;
@@ -1617,6 +1686,30 @@ export const runGoogleByok: Runner = async (
     }
     // A MAX_TOKENS reply is billed like any other: its terminal usage is real and counts toward the turn.
     (measuredUsage.complete(usageAttempt, finishReason === "STOP" || finishReason === "MAX_TOKENS" ? terminalUsage : undefined), currentHistoryRuntimeFence()?.assertCurrent());
+    if (streamFailure) {
+      // An outage after the headers (an error frame inside the stream): the class and resends of a 5xx at the header, with its own
+      // count (serverResends restarts when a response opens). No tool of this response ran (tools run only after a complete reply),
+      // so its text is taken back and the same request goes again.
+      const resendDelayMs = serverFailureResendDelayMs(null, streamResends);
+      const resendLimit = serverFailureResendLimit(streamFailure.code);
+      acc = acc.slice(0, responseStart);
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(acc));
+      if (serverFailureResendable(streamFailure.code) && streamResends < resendLimit
+        && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
+        streamResends += 1;
+        events.onStatus(serverResendStatus(req.locale, streamResends, resendLimit));
+        await waitForServerResend(resendDelayMs, req.signal);
+        if (req.signal?.aborted) throw abortReasonError(req);
+        turn -= 1; // the same request again, not a new tool turn
+        continue;
+      }
+      const observedUsage = measuredUsage.total();
+      return assertCurrentHistoryRunnerResult({ text: acc.trim(), ownerControlTerminal: "uncertain",
+        failure: serverFailure({ code: streamFailure.code, status: null, runtime: "byok", providerLabel: "Google", locale: req.locale,
+          body: streamFailure.body }),
+        ...(observedUsage ? { observedUsage } : {}), workforcePermissionEnforcement: broker?.finish(false) });
+    }
+    streamResends = 0;
     if (finishReason === "MAX_TOKENS" && !conflictingFinishReason && !req.signal?.aborted
       && outputCuts < OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS) {
       // Cut by the output cap: keep the text, never run a call from a cut reply, continue on the same conversation.

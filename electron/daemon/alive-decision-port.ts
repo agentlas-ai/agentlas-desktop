@@ -37,7 +37,7 @@ const bindings = new WeakMap<AliveDecisionBinding, { wake: AliveDecisionWake; as
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 /** The owner binding as one comparable value: the two named fields in one fixed order. A comparison that digested the whole
  * object compared its JSON text, so the same two values in the other key order never matched and every wake the background
- * service hosted refused alive_decision_owner_changed before it reached a model (12 of 12 observed). */
+ * service hosted refused alive_decision_owner_changed before it reached a model (12 of 12). */
 const ownerKey = (owner: AliveDecisionOwner): string => digest([owner.ownerScope, owner.serviceIdentity]);
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }

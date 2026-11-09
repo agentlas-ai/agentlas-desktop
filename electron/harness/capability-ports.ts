@@ -421,7 +421,7 @@ const CONNECT_PROBE_MS = 15_000;
  * ({operation:"auth.ensure", args:{domain:"studio.youtube.com"}} was refused connector_not_installed 10 times in 7 days:
  * the value was there, only under another name). The first non-empty of these, in order; an exact `site` always wins.
  * A bare service name comes last: {operation:"auth.ensure", args:{service:"youtube"}} was refused connector_not_installed 3 times
- * (observed in use, one room's team) while the owner's Agentlas browser held a valid youtube.com sign-in, so the Goal kept
+ * (YouTube room team) while the owner's Agentlas browser held a valid youtube.com sign-in, so the Goal kept
  * "restoring" a session it had. A host or URL there is the site; a bare name is the owner's one saved site of that name.
  */
 async function authSite(args: Record<string, unknown>): Promise<string> {
@@ -1455,7 +1455,7 @@ export function harnessCallIsReadPermissionTerminal(harnessArgs: unknown): boole
  * harness_call arguments that only read, so a read-permission turn never needs an approval card for them. The caller is the Codex
  * MCP approval (runtime/codex-mcp-admission.ts), where Codex judges every harness_call "not read-only" because the tool is one gateway
  * for reads and effects alike; a woken One turn (permission read: a review of finished work) then waited five minutes for a card
- * nobody could see and every internal read came back "user rejected MCP tool call".
+ * nobody could see and every internal read came back "user rejected MCP tool call" (Hope, -23:44).
  *
  * Closed on purpose: { operation, args } and nothing else (no operationId/input aliases), and only
  *   - a port that declares effectFreeRead (the closed set main-work recovery already trusts),
@@ -1515,13 +1515,13 @@ async function harnessOwnerTurn(ctx: HarnessCallContext): Promise<boolean> {
 
 /**
  * Neighbouring names for an operation's required argument, per operation: the value is there under another name.
- * Observed in use (failure_events harness_call): thread.read {chatId} and turn.status {} (required threadId), result.read
+ * Production (failure_events harness_call): thread.read {chatId} and turn.status {} (required threadId), result.read
  * {ref} (resultRef), tool.describe {providerRef} (toolId) and app.call {op, input} (operation) were each refused arguments_missing.
  * A chat is a thread, and a read of "the conversation" from inside it means this one. Same rule as withRequiredIdAliases: only
  * when the real name is absent, only a non-empty string, an exact name always wins; nothing here widens what an operation may touch.
  */
 const HARNESS_ARGUMENT_ALIASES: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
-  // The name a model writes for the tool of a tool.call (real-channel A/B, codex: toolName); tool-dispatch.ts also takes
+  // The name a model writes for the tool of a tool.call (real-channel A/B codex: toolName); tool-dispatch.ts also takes
   // the named tool when toolId is only the connector itself.
   "tool.call": { toolId: ["toolName", "name"] },
   "app.call": { operation: ["op", "name", "path", "method"] },
@@ -1736,7 +1736,7 @@ export async function searchHarness(query: string, kind?: HarnessItemKind, ctx?:
   // could see it, so a Korean request never reached an English plugin or skill (THOUGHT-EXPERIMENTS.md F2-1).
   if (want("plugin")) for (const row of await pluginRows(ctx?.chatId)) out.push({ id: row.id, kind: "plugin", name: row.mention, description: row.description });
   if (want("skill")) for (const row of await skillRows(ctx?.chatId)) out.push({ id: row.id, kind: "skill", name: row.name, description: row.description });
-  // An installed connector is a tool to the model: a search narrowed to kind "tool" still finds it (real-channel A/B,
+  // An installed connector is a tool to the model: a search narrowed to kind "tool" still finds it (real-channel A/B
   // codex searched {kind:"tool", query:"Weather Forecast"} first and got nothing for the connector of that exact name).
   if (want("connector") || kind === "tool") for (const row of await connectorRows(ctx?.chatId)) out.push({ id: row.id, kind: "connector", name: row.name, description: `${row.transport}${row.enabled ? "" : ", off"}` });
   // Only tools installed on this machine: a catalog entry that is not installed is offered through

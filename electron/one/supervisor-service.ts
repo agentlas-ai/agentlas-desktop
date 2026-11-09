@@ -855,7 +855,7 @@ export class OneSupervisorService {
    * An ordinary native turn is settled by its in-memory observation (ordinaryNativeTurn onSettled). When the process that held
    * that observation is gone (a restart) or its preparation closed, nobody settles the row: recover() held it
    * (ordinary_native_capture_unavailable) and skips it from then on, so a turn whose run had long ended stayed `held` for good
-   * (observed in use: invoke_started, mcp_error, invoke_interrupted, run owner released, row held 17 s later, still held
+   * (production invoke_started, mcp_error, invoke_interrupted, run owner released, row held 17 s later, still held
    * six days on). Missing capture is not proof of anything, but the run's OWN receipt is: the same exact-run, exact-chat,
    * settled check the observation makes. Only that proof settles it, with the reading settle() gives every ended run; a row
    * whose run left no receipt, or is still running, is untouched, and nothing here ever starts, steers or cancels a run.
@@ -888,7 +888,7 @@ export class OneSupervisorService {
    * A held row whose run left no receipt, and which the admission ledger proves never started (runtime.noStartProof: no row, or a
    * rejected one). However it came to be held (a closed preparation, a capture lost in a restart, an unconfirmed liveness, a refusal
    * an older build parked) nothing reached a model, so there is no effect to be unsure of and no reason to leave it on "Checking
-   * execution" for ever (observed in use: 14 rows, the oldest 26 days, 9 of them owner replies that no model had read).
+   * execution" for ever (production 14 rows, the oldest 26 days, 9 of them owner replies that no model had read).
    *   restart  a reply, a chat send or a follow-up not older than the shared deadline starts again under the SAME run id (the run id
    *            is the admission ledger's key, so it can never run twice); under the shared durable attempt and time bounds, including across host restarts.
    *   expire   an older one is not started now (an old message must not arrive in a conversation hours later) and a host review that
@@ -937,11 +937,17 @@ export class OneSupervisorService {
       ...(value.images===undefined ? {} : {images:value.images as ImageAttachment[]}),
       ...(value.fileGroupId===undefined ? {} : {fileGroupId:supervisorIdentifier(value.fileGroupId)})};
     const {oneId,chatId} = this.binding(value.oneId);
-    // The owner's pick on a check-in card is the decision, applied before the reply is stored (the reply itself still goes on as an ordinary message).
-    const cardLine = this.applyCheckinCardAnswer(oneId, chatId, input.text);
+    // A card decision is an effect: admit the exact command first, and apply
+    // it in the same transaction as the user message and journal receipt.
+    // An identical replay never runs this callback; a conflict changes nothing.
+    const answerText = input.text;
     input.text=this.deps.attachmentPrompt?.(chatId,input.text,input.fileGroupId) ?? input.text;
+    let cardLine: string | null = null;
     const row = this.deps.store.receive({commandId:input.commandId,oneId,kind:"reply",payload:input,originChatId:chatId,runId:randomUUID()},
-      () => this.deps.appendUser(chatId,input.text,input.images,input.fileGroupId));
+      () => {
+        cardLine = this.applyCheckinCardAnswer(oneId, chatId, answerText);
+        return this.deps.appendUser(chatId,input.text,input.images,input.fileGroupId);
+      });
     if (cardLine && row.state === "stored") { try { this.deps.noticeOwner?.(chatId, row.run_id ?? input.commandId, cardLine); } catch { /* the line is best effort */ } }
     this.drain();
     return JSON.parse(this.deps.store.get(row.command_id)!.receipt_json);
@@ -964,7 +970,7 @@ export class OneSupervisorService {
    * A message One sent into another conversation (one_chat_send) whose start was refused before anything reached a model for a reason
    * that clears by itself (the room's turn runs in the other host: invocation_chat_busy_other_host, a settling turn, a locked store) is
    * stored again by requeueRefused and started here under the SAME run id once the shared backoff has passed, until the shared
-   * deadline. It used to be held for good: Hope was told "unknown" and the room never got the message (observed in use: held at +15 ms,
+   * deadline. It used to be held for good: Hope was told "unknown" and the room never got the message (owner DB: held at +15 ms,
    * never changed). A stored chat-send with no backoff on record (this process restarted meanwhile) starts at once. A follow-up to
    * One's own worker waits the same way, unless its task was cancelled or the owner took the room back meanwhile.
    */
@@ -1688,7 +1694,7 @@ export class OneSupervisorService {
   /**
    * A later run of a worker conversation settles the hand-off One is waiting on when that hand-off's own notice was deferred because the
    * worker's turn ended with sessions it delegated still running (settle). This is the run that brought their reports back; once no
-   * delegated session is open, One is woken with it, once per hand-off (observed in use: Sweet Designer's report reached the Work
+   * delegated session is open, One is woken with it, once per hand-off (production Sweet Designer's report reached the Work
    * room at 12:48 UTC and One heard nothing for 50 minutes).
    */
   private noticeDelegatedOutcome(oneId: string, event: SupervisorSettledEvent): void {
@@ -1901,15 +1907,22 @@ export class OneSupervisorService {
     const doneWhen=supervisorDoneWhen(value.doneWhen);
     if (doneWhen) input.doneWhen=doneWhen;
     const {oneId,chatId}=this.binding(value.oneId);
-    const prior=this.deps.store.get(input.commandId);
-    if (prior) {
+    const replay=(prior:SupervisorRequestRow):SupervisorRequestRow=>{
       // A retry is the same hand-off: its checklist is the one first stored, so a reworded list never turns a retry into a conflict.
       const {doneWhen:_retried,...same}=input;
       const firstDoneWhen=supervisorDoneWhen((JSON.parse(prior.payload_json) as {doneWhen?:unknown}).doneWhen);
-      return JSON.parse(this.deps.store.receive({commandId:input.commandId,oneId,kind:"work",payload:firstDoneWhen ? {...same,doneWhen:firstDoneWhen} : same,originChatId:chatId}).receipt_json);
-    }
+      return this.deps.store.receive({commandId:input.commandId,oneId,kind:"work",payload:firstDoneWhen ? {...same,doneWhen:firstDoneWhen} : same,originChatId:chatId});
+    };
+    const prior=this.deps.store.get(input.commandId);
+    if (prior) return JSON.parse(replay(prior).receipt_json);
     let row!: SupervisorRequestRow;
+    let reused=false;
     this.deps.store.db.transaction(() => {
+      // Another process can admit the same command after the fast read above.
+      // The immediate transaction owns the single decision: do not create a
+      // second room, overwrite its payload, or enqueue it before checking again.
+      const existing=this.deps.store.get(input.commandId);
+      if(existing){row=replay(existing);reused=true;return;}
       const work=this.deps.createWork(input);
       if(input.budgetId){
         if(!this.deps.budget)throw supervisorError("supervisor_budget_unavailable");
@@ -1919,7 +1932,7 @@ export class OneSupervisorService {
       row=this.deps.store.receive({commandId:input.commandId,oneId,kind:"work",payload:input,originChatId:chatId,taskId:work.taskId,runId:randomUUID()});
       this.bindHandoffOrigin(row,originReplyRunId);
       // One's brief is in the room from the moment it is handed over: a Work that waits to start (a busy runtime, a refusal, a
-      // sign-in, a restart) left the room empty . The run finds it by its run id and does not write it again.
+      // sign-in, a restart) left the room empty. The run finds it by its run id and does not write it again.
       if (originReplyRunId) this.deps.handoffBrief?.(work.chatId, withDoneWhen(input.text, input.doneWhen), row.run_id!);
       if (!this.deps.workQueue) this.deps.store.update(row,{state:"dispatching"});
       // Target chat stays in the payload's host-sealed receipt, not a renderer-supplied identity.
@@ -1930,6 +1943,7 @@ export class OneSupervisorService {
       catch(error){console.warn("[one-supervisor] personal agent room mark deferred",error instanceof Error?error.message:"unknown");}
       this.deps.workQueue?.enqueue(this.deps.store.get(row.command_id)!, work.chatId);
     }).immediate();
+    if(reused) return JSON.parse(row.receipt_json);
     if (this.deps.workQueue) {
       // The periodic native executor also dispatches when no renderer is open.
       // A wake is an optimization, never the durable source of pending work.
@@ -1957,14 +1971,18 @@ export class OneSupervisorService {
     const {oneId,chatId}=this.binding(value.oneId);
     const ownerToken=this.deps.owner?.current();
     const assertCurrent=()=>{this.currentIdentity(oneId);if(ownerToken)this.deps.owner!.assertToken(ownerToken);};
-    const prior=this.deps.store.get(input.commandId);
-    const row=this.deps.store.db.transaction(()=>{
-      const saved=this.deps.store.receive({commandId:input.commandId,oneId,kind:"science",payload:input,originChatId:chatId});
-      if(!prior)this.bindHandoffOrigin(saved,originReplyRunId);
-      return saved;
+    const admitted=this.deps.store.db.transaction(()=>{
+      // Decide ownership while holding the same write lock as journal insertion.
+      // Another Main or daemon may already have accepted this command.
+      const prior=this.deps.store.get(input.commandId);
+      const row=this.deps.store.receive({commandId:input.commandId,oneId,kind:"science",payload:input,originChatId:chatId});
+      if (prior) return {row, dispatch:false};
+      this.bindHandoffOrigin(row,originReplyRunId);
+      this.deps.store.update(row,{state:"dispatching"});
+      return {row, dispatch:true};
     }).immediate();
-    if (prior) return JSON.parse(row.receipt_json);
-    this.deps.store.update(row,{state:"dispatching"});
+    const {row}=admitted;
+    if (!admitted.dispatch) return JSON.parse(row.receipt_json);
     try {
       const handle=await this.deps.science.start(input);
       assertCurrent();

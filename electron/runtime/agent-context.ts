@@ -1020,7 +1020,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
   return async(req,events)=>{
     const capability=(req as RunnerRequest & {agentContext?:AgentContextCapability}).agentContext;
     if(!capability)return runner(req,events);
-    //: the runner is entered only inside the `try` further down, so a throw before it (a stale capability or
+    // the runner is entered only inside the `try` further down, so a throw before it (a stale capability or
     // binding, a boundary or transport refusal) sent nothing: typed "not-dispatched" at the one outer catch below, never an
     // unsettled turn (client.ts treats an untyped throw after runnerInvoked as a dispatched turn with no receipt).
     let preDispatch=true;

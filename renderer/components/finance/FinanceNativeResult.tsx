@@ -13,7 +13,7 @@ export const financePresentView = (result: NativeResult) => result.view.kind ===
 /** Rows of a view that only records what the model read to answer (ticker candidates, news, filing and price rows, an empty or
  *  failed read, a valuation with no saved report); `null` for a result the owner asked for (a drawn series, a report, a
  *  holdings proposal). Same rule as the phone
- * projection in shared/finance-native-transcript.ts . */
+ * projection in shared/finance-native-transcript.ts. */
 export function financeReadSourceRows(result: NativeResult): number | null {
   const { view } = result;
   if (view.kind === "search") return view.result.assets.length;

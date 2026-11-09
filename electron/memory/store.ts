@@ -404,7 +404,7 @@ export function listMemoryForContext(
   // Project ids may identify a Science study without a Desktop folder. A null
   // path is not global authority. Agent-specific portable learning remains
   // portable, but only for its own actor; unknown actors receive shared memory.
-  const rows = getDb().prepare(`SELECT memory_entries.*, rb.owner_namespace AS binding_owner, rb.actor_id AS binding_actor, rb.applicability_json
+  const query = getDb().prepare(`SELECT memory_entries.*, rb.owner_namespace AS binding_owner, rb.actor_id AS binding_actor, rb.applicability_json
     FROM memory_entries LEFT JOIN memory_identity_bindings rb ON rb.memory_id=memory_entries.id WHERE superseded_at IS NULL
     ${ids ? `AND id IN (${ids.map(() => "?").join(",")})` : ""}
     AND NOT EXISTS(SELECT 1 FROM memory_identity_bindings b WHERE b.memory_id=memory_entries.id
@@ -417,9 +417,13 @@ export function listMemoryForContext(
       AND (project_id IS NULL OR project_id=?)
       AND (project_path IS NULL OR project_path=?))
     OR (scope='session' AND chat_id=? AND (agent_id IS NULL OR agent_id IN (${actorSql})))
-  ) ORDER BY created_at DESC LIMIT ?`).all(...(ids ?? []), getMemoryStoreInfo().ownerNamespace, ...actors, scope.projectPath ?? null,
+  ) ORDER BY created_at DESC LIMIT ?`);
+  // The query and synchronous policy pass must use the same owner; avoid
+  // re-reading store metadata once for every candidate memory.
+  const owner = getMemoryStoreInfo().ownerNamespace;
+  const rows = query.all(...(ids ?? []), owner, ...actors, scope.projectPath ?? null,
     scope.projectId ?? null, scope.projectPath ?? null, scope.chatId ?? null, ...actors, -1) as Array<Row & MemoryRecallPolicyRow>;
-  const allowed = rows.filter(row => allowsOrdinaryMemoryRecall(row, scope, getMemoryStoreInfo().ownerNamespace));
+  const allowed = rows.filter(row => allowsOrdinaryMemoryRecall(row, scope, owner));
   return (limit < 0 ? allowed : allowed.slice(0, limit)).map(toEntry);
 }
 

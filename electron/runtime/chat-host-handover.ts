@@ -25,7 +25,7 @@ export const CHAT_HANDOVER_DEFAULT_DEADLINE_MS = 5000;
 export const CHAT_BUSY_OTHER_HOST_CODE = "invocation_chat_busy_other_host";
 
 export type HandoverHostKind = "desktop" | "daemon" | "terminal";
-export interface ChatReleaseReply { busy: boolean; released: number; pending: number }
+export interface ChatReleaseReply { busy: boolean; released: number; pending: number; failed?: number; kept?: number }
 /** Ask the OTHER process to release its idle resident sessions of a chat. Rejects when it cannot be reached. */
 export type ChatReleasePeer = (chatId: string, deadlineMs: number) => Promise<ChatReleaseReply>;
 
@@ -37,13 +37,13 @@ export async function releaseLocalChatSessions(chatId: string, deadlineMs: numbe
   if (!idLike(chatId)) throw Object.assign(new Error("chat_handover_invalid"), { code: "chat_handover_invalid" });
   const bound = Number.isFinite(deadlineMs) ? Math.max(0, Math.min(deadlineMs, CHAT_HANDOVER_DEFAULT_DEADLINE_MS)) : CHAT_HANDOVER_DEFAULT_DEADLINE_MS;
   const release = releaseIdleAgentResidencyForChat(chatId);
-  if (release.busy) return { busy: true, released: 0, pending: 0 };
+  if (release.busy) return { busy: true, released: 0, pending: 0, failed: 0, kept: 0 };
   let settled = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const exited = Promise.all(release.completions.map(done => done.then(() => { settled += 1; }))).then(() => true);
   const timedOut = new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), bound); timer.unref?.(); });
   try { await Promise.race([exited, timedOut]); } finally { if (timer) clearTimeout(timer); }
-  return { busy: false, released: release.released, pending: Math.max(0, release.completions.length - settled) };
+  return { busy: false, released: release.released, pending: Math.max(0, release.completions.length - settled), failed: release.failed, kept: release.kept };
 }
 
 /** Validate a handover wire request (`{version, op:"release", chatId, deadlineMs}`) and answer it with a value. */
@@ -65,11 +65,14 @@ export async function answerChatHandoverRequest(raw: unknown): Promise<Record<st
 export function chatReleaseReplyFromWire(value: unknown): ChatReleaseReply {
   const v = value as Record<string, unknown> | null;
   if (!v || typeof v !== "object" || v.version !== CHAT_HANDOVER_VERSION || v.ok !== true || typeof v.busy !== "boolean"
-    || !Number.isSafeInteger(v.released) || !Number.isSafeInteger(v.pending)) {
+    || !Number.isSafeInteger(v.released) || (v.released as number) < 0 || !Number.isSafeInteger(v.pending) || (v.pending as number) < 0
+    || (v.failed !== undefined && (!Number.isSafeInteger(v.failed) || (v.failed as number) < 0))
+    || (v.kept !== undefined && (!Number.isSafeInteger(v.kept) || (v.kept as number) < 0))) {
     const code = v && typeof v === "object" && typeof v.error === "string" ? v.error : "chat_handover_reply_invalid";
     throw Object.assign(new Error(code), { code });
   }
-  return { busy: v.busy, released: v.released as number, pending: v.pending as number };
+  return { busy: v.busy, released: v.released as number, pending: v.pending as number,
+    ...(v.failed === undefined ? {} : { failed: v.failed as number }), ...(v.kept === undefined ? {} : { kept: v.kept as number }) };
 }
 
 /* The transport to the other process is registered by whoever holds the authenticated native channel:
@@ -89,7 +92,7 @@ export interface ChatHandoverInput {
   /** The chat's previous run owner row (not this run), or null for a first run. */
   previous: { ownerKind: HandoverHostKind } | null;
   /** Machine-readable measurement line, recorded as a run event by the caller. */
-  record(line: string, fields: { from: HandoverHostKind; released: number; pending: number; outcome: "released" | "unreachable" }): void;
+  record(line: string, fields: { from: HandoverHostKind; released: number; pending: number; failed?: number; kept?: number; outcome: "released" | "incomplete" | "unknown" | "unreachable" }): void;
   deadlineMs?: number;
 }
 
@@ -116,6 +119,8 @@ export async function ensureChatHostHandover(input: ChatHandoverInput): Promise<
     return;
   }
   if (reply.busy) throw Object.assign(new Error(CHAT_BUSY_OTHER_HOST_CODE), { code: CHAT_BUSY_OTHER_HOST_CODE });
-  input.record(`[runtime-session] handover from=${from} released=${reply.released}${reply.pending ? ` pending=${reply.pending}` : ""}`,
-    { from, released: reply.released, pending: reply.pending, outcome: "released" });
+  const outcome = reply.failed === undefined || reply.kept === undefined ? "unknown"
+    : reply.failed || reply.kept || reply.pending ? "incomplete" : "released";
+  input.record(`[runtime-session] handover from=${from} released=${reply.released}${reply.pending ? ` pending=${reply.pending}` : ""} failed=${reply.failed ?? "unknown"} kept=${reply.kept ?? "unknown"}`,
+    { from, released: reply.released, pending: reply.pending, ...(reply.failed === undefined ? {} : { failed: reply.failed }), ...(reply.kept === undefined ? {} : { kept: reply.kept }), outcome });
 }

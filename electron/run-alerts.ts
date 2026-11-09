@@ -102,7 +102,7 @@ export interface RunAlertInput {
   receipt?: Pick<InvocationRunReceipt, "status" | "interruptionCause" | "hostStopCause" | "errorCode" | "runtimeFailure">;
   /**
    * The owner's send queue will start this run's message again by itself (invocation/queue-retry-fact.ts). Not a failure the owner
-   * has to hear: they are told once, if the message finally does not go through (regression review C4).
+   * has to hear: they are told once, if the message finally does not go through.
    */
   retriedBySelf?: boolean;
 }

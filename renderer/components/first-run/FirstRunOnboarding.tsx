@@ -61,15 +61,17 @@ import { FirstRunPaywallLayer } from "./FirstRunPaywall";
 import { Select } from "@/components/Select";
 
 const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
+// Allow the native store's 15-second busy timeout to finish before offering a retry.
+const FIRST_RUN_CHECK_TIMEOUT_MS = 20_000;
 /** Same bounds as shared/one-profile.ts validation (profileContext ≤4000, principle ≤500, ≤128 principles). */
 const PROFILE_CONTEXT_MAX = 4_000;
 const PRINCIPLE_MAX = 500;
 const PRINCIPLES_MAX = 128;
 
 /** Decide whether this account sees the flow, and keep that decision. */
-async function loadOrClassify(accountFingerprint: string | undefined): Promise<FirstRunRecord> {
+async function loadOrClassify(accountFingerprint: string | undefined): Promise<{ record: FirstRunRecord; created: boolean }> {
   const existing = readFirstRunRecord(window.localStorage, accountFingerprint);
-  if (existing) return existing;
+  if (existing) return { record: existing, created: false };
   const api = ipc();
   let legacyWorkTourSeen = false;
   try { legacyWorkTourSeen = window.localStorage.getItem(LEGACY_WORK_TOUR_KEY) === "1"; } catch { /* storage optional */ }
@@ -91,8 +93,7 @@ async function loadOrClassify(accountFingerprint: string | undefined): Promise<F
   // 있어도 첫 설정을 본다(자기 One 을 아직 꾸민 적이 없을 때만).
   const profileCustomized = Boolean(profile && (profile.displayName !== "One" || profile.profileContext || profile.operatingPrinciples.length > 0));
   const record = newFirstRunRecord(origin === "fresh" && !profileCustomized ? "new" : audience);
-  writeFirstRunRecord(window.localStorage, accountFingerprint, record);
-  return record;
+  return { record, created: true };
 }
 
 /**
@@ -104,6 +105,13 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
   const [record, setRecord] = useState<FirstRunRecord | null>(null);
   const [open, setOpen] = useState(false);
   const [checked, setChecked] = useState(false);
+  const [checkedFingerprint, setCheckedFingerprint] = useState<string | undefined>();
+  const [checkTimedOut, setCheckTimedOut] = useState(false);
+  const [checkAttempt, setCheckAttempt] = useState(0);
+  const checkEpoch = useRef(0);
+  const currentFingerprint = useRef(fingerprint);
+  currentFingerprint.current = fingerprint;
+  const { locale } = useT();
   // Finishing navigates to One first and unmounts the flow only once the route is
   // there. Closing first would mount "/" whose redirect sends people to Work
   // (real run 2026-09-25 landed on /dashboard).
@@ -119,16 +127,34 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
 
   useEffect(() => {
     let alive = true;
+    const epoch = ++checkEpoch.current;
+    const ownsCheck = () => alive && checkEpoch.current === epoch && currentFingerprint.current === fingerprint;
     // Account switch: never show the previous account's record/step while the new one loads.
     setChecked(false);
+    setCheckTimedOut(false);
     setRecord(null);
     setOpen(false);
+    const timeout = window.setTimeout(() => {
+      if (ownsCheck()) setCheckTimedOut(true);
+    }, FIRST_RUN_CHECK_TIMEOUT_MS);
     void loadOrClassify(fingerprint)
-      .then((next) => { if (!alive) return; setRecord(next); setOpen(shouldAutoOpen(next)); })
-      .catch(() => undefined)
-      .finally(() => { if (alive) setChecked(true); });
-    return () => { alive = false; };
-  }, [fingerprint]);
+      .then(({ record, created }) => {
+        if (!ownsCheck()) return;
+        // An abandoned attempt must not persist a classification for a prior account.
+        // Another window or an explicit Settings action may have saved progress meanwhile.
+        const next = created ? readFirstRunRecord(window.localStorage, fingerprint) ?? record : record;
+        if (created && next === record) writeFirstRunRecord(window.localStorage, fingerprint, next);
+        setRecord(next);
+        setOpen(shouldAutoOpen(next));
+        setCheckedFingerprint(fingerprint);
+        setChecked(true);
+      })
+      .catch(() => { if (ownsCheck()) setCheckTimedOut(true); })
+      .finally(() => {
+        window.clearTimeout(timeout);
+      });
+    return () => { alive = false; window.clearTimeout(timeout); };
+  }, [fingerprint, checkAttempt]);
 
   // Settings → "Run first-time setup again": open from the first step, keep old receipts.
   useEffect(() => {
@@ -143,7 +169,49 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
     return () => window.removeEventListener(FIRST_RUN_OPEN_EVENT, onOpen);
   }, [fingerprint]);
 
-  if (!checked) return null;
+  if (!checked || checkedFingerprint !== fingerprint) {
+    const ko = locale === "ko";
+    return (
+      <div role="status" aria-live="polite" style={{
+        position: "fixed", inset: 0, background: "var(--black)", color: "var(--white-soft)",
+        display: "grid", placeItems: "center", textAlign: "center", padding: 24,
+      }}>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>
+            {checkTimedOut
+              ? (ko ? "첫 설정을 확인하지 못했어요." : "Your setup could not be checked.")
+              : (ko ? "첫 설정을 준비하고 있어요." : "Preparing your setup.")}
+          </div>
+          <div style={{ fontSize: 13, color: "rgba(238,245,242,0.72)", lineHeight: 1.5 }}>
+            {checkTimedOut
+              ? (ko ? "다시 시도하거나 이번에는 설정을 건너뛰고 앱을 열 수 있어요. 요금제 안내가 표시되지 않을 수 있으며, 첫 설정은 설정 메뉴에서 다시 열 수 있어요." : "Try again or open the app without setup for now. The plan introduction may not appear; you can reopen setup from Settings.")
+              : (ko ? "잠시만 기다려 주세요." : "Please wait a moment.")}
+          </div>
+          {checkTimedOut && <div style={{ display: "flex", justifyContent: "center", flexWrap: "wrap", gap: 8 }}><button type="button" onClick={() => {
+            // Invalidate synchronously so a late response cannot win the next attempt.
+            checkEpoch.current += 1;
+            setCheckTimedOut(false);
+            setCheckAttempt((value) => value + 1);
+          }} style={{
+            minHeight: 44, marginTop: 16, padding: "8px 16px",
+            border: "1px solid currentColor", borderRadius: 8,
+            background: "transparent", color: "inherit", cursor: "pointer",
+          }}>{ko ? "다시 시도" : "Try again"}</button><button type="button" onClick={() => {
+            // This session only: do not store an unverified audience or completion.
+            checkEpoch.current += 1;
+            setRecord(null);
+            setOpen(false);
+            setCheckedFingerprint(fingerprint);
+            setChecked(true);
+          }} style={{
+            minHeight: 44, marginTop: 16, padding: "8px 16px",
+            border: "1px solid currentColor", borderRadius: 8,
+            background: "transparent", color: "inherit", cursor: "pointer",
+          }}>{ko ? "설정 건너뛰고 앱 열기" : "Open app without setup"}</button></div>}
+        </div>
+      </div>
+    );
+  }
   // The paywall sits in front of the flow, once per account; everything else is unchanged.
   return (
     <FirstRunPaywallLayer key={fingerprint ?? "anonymous"} fingerprint={fingerprint} flowOpen={open && Boolean(record)}>

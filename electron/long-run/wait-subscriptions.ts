@@ -127,7 +127,7 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 const STALL_REPLAN_UNREAD_REASONS: ReadonlySet<string> = new Set(["stall_replan_checkpoint_unsettled", "goal_wait_checkpoint_not_settled"]);
 /**
  * True when the previous wait for THIS stall (same progress key) was a replan the host retired because it could not read the
- * checkpoint. Asking for the same replan again would end the same way after another paid episode: observed in use, one run
+ * checkpoint. Asking for the same replan again would end the same way after another paid episode: a real installation run_27349309
  * registered one every ~11 minutes for 12 hours (16 waits, 0 judged), 70 of 77 stall_replan waits were retired unread. The first try
  * still goes out as a replan (the verifier may not have written its checkpoint yet); a second try for the same stall backs off.
  */
@@ -392,7 +392,7 @@ const STALL_REPLAN_VERIFICATION_HOLD_MS = 10 * 60_000;
  * Whether `latest` is the same producing turn's next checkpoint after the wait's own. A wait is registered when its turn ends, before the
  * turn's attempt is settled (service.ts "ongoing-episode-unverified"), so its own checkpoint says effects are still uncertain; the same
  * turn's background verification then appends its own, settled one (verifier.ts). That is one episode moving on, not another context:
- * observed in use 10:21-13:01Z, 15 stall-replan waits retired by their own verifier as goal_wait_context_changed, each with a
+ * a real installation -13:01Z, 15 stall-replan waits retired by their own verifier as goal_wait_context_changed, each with a
  * "Confirmation is needed" notification and the replan never run. Every checkpoint after the wait's own must be that turn's: one from
  * another turn (the owner's message, a resumed episode) in between, another Goal revision or run, or a wait whose own checkpoint the
  * ledger does not hold is a different context and the wait is retired as before.

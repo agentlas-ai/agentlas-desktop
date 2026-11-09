@@ -9,7 +9,7 @@ import { userDataPath } from '../runtime-paths';
 /**
  * A saved Finance report as one self-contained HTML file, written by the Main process so a Work or One conversation can hand it over
  * as an output without the Finance screen: the report's own text, its charts, key figures computed from its saved rows, a notice. The page
- * is static (a CSP of default-src none, no script, images only as inline data) and draws no source or as-of line (decided).
+ * is static (a CSP of default-src none, no script, images only as inline data) and draws no source or as-of line.
  *
  * Charts: a section that holds one clear dated series (price history, Treasury par curve, FRED series, ECB reference rates) is drawn as an
  * inline SVG line from those saved rows (shared/finance-report-svg.ts). Vega is a development-only package and not available to the Main

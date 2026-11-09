@@ -588,7 +588,7 @@ function buildProjection(
   if (!operations) return null;
 
   // A Task whose turn ended (partial: "waiting for review") while sessions it delegated still run is still working: the Work card
-  // said "waiting for review" over a Sweet Designer session that ran for six more minutes (observed in use).
+  // said "waiting for review" over a Sweet Designer session that ran for six more minutes.
   const delegatedOpen = task.status === "partial" && !!receipt && safeRead(() => sources.delegatedWorkOpen?.(chatId!, receipt.runId)) === true;
   const value = delegatedOpen ? "working" : statusValue(task.status);
   const preferredSummary = confirmations[0]?.question

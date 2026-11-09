@@ -52,7 +52,7 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
     if (!identity || actor!==identity.actor || getOneProfile().oneId !== identity.oneId) {
       // A signed-out machine has its own empty One (store/one-profile.ts), so a service that adopted the domain before the person signed
       // in holds that One, not theirs: the owner's Mac showed an empty Hope and refused every send until the process was replaced
-      // This process stays fenced, and a fresh one adopts the signed-in person's One (recover).
+      //. This process stays fenced, and a fresh one adopts the signed-in person's One (recover).
       if (identity && actor !== "null") options.restartForOwner?.();
       fail("supervisor_daemon_identity_authority_changed");
     }

@@ -129,6 +129,9 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   ["goal-runtime-binding-mismatch", "runtime_changed"],
   ["store_busy", "store_busy"],
   ["work_project_residency_busy", "project_busy"], ["codex_http_connection_failed", "provider_connection"],
+  // Kimi's journal: the last step began and never ended (acp.ts, kind exit). Carried as the cause behind the unfinished turn like
+  // the codex connection failure above, so the owner table below reads it instead of a bare runtime_turn_unsettled.
+  ["kimi_turn_failed", "provider_unavailable"],
   // mcp/client.ts: the run is bound to the Agentlas Browser (the owner's toolMode / assignment / mention, or an active Goal
   // that has been working in it) and its signed-in host is not ready: refused before the model (2026-10-28).
   ["agentlas-browser-host-unavailable", "browser_host_unavailable"],
@@ -139,7 +142,7 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   ["resume_failed", "session_reopen"],
   // The chat's working folder is gone, is not a folder, or cannot be opened (runtime/runner.ts spawnStartFailureRefusal, always pre-dispatch).
   // The folder is the owner's (moved, deleted, permissions): nothing the app does by itself changes that, so it is not retried as the app's own
-  // state (shared/run-failure-cause.ts) and the line says what to fix (owner, regression review 3 F4).
+  // state (shared/run-failure-cause.ts) and the line says what to fix (regression review 3 F4).
   ["project_folder_missing", "working_folder"], ["project_folder_not_directory", "working_folder"], ["project_folder_unreadable", "working_folder"],
 ]);
 
@@ -222,7 +225,7 @@ function resolve(facts: Pick<RunFailureNoticeFacts, "errorCode" | "runtimeFailur
       return named ? { cause: named, unfinished: true, failure: failure.cause! } : { cause: "unsettled", unfinished: true, failure };
     }
     // A bare `refused` (the provider gave no code) beside a host-owned terminal code is the host's refusal, not the provider's: the
-    // code names the cause (E22,: the owner read "the provider refused" for a tool or Goal state that never reached it).
+    // code names the cause (E22, the owner read "the provider refused" for a tool or Goal state that never reached it).
     const hostOwned = failure.kind === "refused" && !failure.providerCode ? hostClassOfCode(facts.errorCode) : null;
     if (hostOwned) return { cause: hostOwned, unfinished: false, failure: { source: "marker" } };
     const named = causeClass(failure);

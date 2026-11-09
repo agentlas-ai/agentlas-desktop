@@ -1,7 +1,7 @@
 /**
  * What an independent verification (or integration) stage is given of the work it checks.
  *
- * Measured in use (one Goal's team): every independent verification stage received the
+ * Measured (a real installation + product Codex rollouts, one Goal's team): every independent verification stage received the
  * producer's report cut at 8,242 characters ("…" and nothing else), the report being 9.7k-13.4k. 12 of 12 verifications answered
  * FAIL and 10 of them named the cut itself ("the report is cut off in the middle of the roadmap") as the reason. Each FAIL started
  * a repair pass and a second verification of the same cut, so the Goal paid four worker turns (about 100-180 s and 350-470k input

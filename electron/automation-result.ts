@@ -215,7 +215,7 @@ export interface ObservedRunRecord {
 }
 
 /** What the judge may read of every step together. A step that made a long table (a 20-file comparison) used to be cut to 600 characters, and
- * the judge answered "the record is cut off, a person must check" (observed in use). Short steps stay whole; the rest share the budget. */
+ * the judge answered "the record is cut off, a person must check" (a real installation). Short steps stay whole; the rest share the budget. */
 const RUN_RECORD_BUDGET = 14_000;
 const RUN_RECORD_MAX_STEPS = 24;
 
@@ -340,7 +340,7 @@ const MODEL_ACTOR_NODE_TYPES: ReadonlySet<string> = new Set(["agent", "action", 
  *
  * The host overturns a judged `ok` when it observed zero tool calls (claimed_without_tools) because a model can write "posted and
  * confirmed" without posting (12 accepted runs, 0 posts). That is only a contradiction when a model-run step is
- * allowed to reach outside. It is not when the graph itself says none does: measured on one install, 86 runs over 11 automations
+ * allowed to reach outside. It is not when the graph itself says none does: measured, 86 runs over 11 automations
  * were turned into "result fell short" by it - a daily "ask me my 3 tasks" whose one agent step is declared `read` and whose goal is
  * to ask a question (24 of 24 runs, six days running, never clearing because its model is pinned), and ten code-and-check graphs
  * whose only mutation is a code step the host ran itself.
@@ -377,7 +377,7 @@ function hostComputedBlock(hostComputedGraph: boolean | undefined): string {
  * The last successful run of the same automation, as the host recorded it (store/automations.ts previousSuccessfulRunOutput).
  *
  * A change watch ("tell me when the measurement changes") cannot be judged from one run's output: the judge was asked
- * "did it change?" with no earlier value and answered "a person must compare" on every run (measured on one install:
+ * "did it change?" with no earlier value and answered "a person must compare" on every run (measured:
  * 586 `needs_input` rows on one 10-minute tracker, every one of them unanswerable by the owner). The host owns the
  * comparison; the judge keeps the meaning.
  */

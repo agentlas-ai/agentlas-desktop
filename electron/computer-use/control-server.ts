@@ -71,7 +71,7 @@ const observations = new Map<string, {
 /**
  * What each observed element was (role and captions, never a value), kept after the observation itself is consumed or the screen moved.
  * An element index from an earlier observation is then found again by what it is on the fresh tree, instead of ending the call with
- * "stale-element-reference" / "invalid-observation" (observed in use: two clicks on the owner's own Agentlas window failed this way).
+ * "stale-element-reference" / "invalid-observation" (production two clicks on the owner's own Agentlas window failed this way).
  */
 interface ElementLabel { role: string; subrole?: string; title?: string; description?: string; lineage: string }
 const retiredObservations = new Map<string, { app: string; expiresAt: number; labels: ElementLabel[]; frames: Array<{x:number;y:number;width:number;height:number}|undefined> }>();
@@ -252,7 +252,7 @@ function typedOsRefusal(error: unknown): boolean {
 }
 /**
  * What a typed refusal means and what to do next, in words. The code alone ("one-os-human-active") reached the owner's chat verbatim
- * (observed in use: Hope told the owner to "finish using the computer and ask again"). The code stays last, for diagnostics.
+ * (production Hope told the owner to "finish using the computer and ask again"). The code stays last, for diagnostics.
  */
 const OS_REFUSAL_TEXT: Readonly<Record<string, string>> = {
   "one-os-human-active": "The owner is typing or moving the mouse right now, so this step was held back (nothing was pressed). Wait about ten seconds and repeat the same call; only if it is still refused after a minute, say the owner is using the computer.",

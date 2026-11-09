@@ -63,6 +63,7 @@ import { resolveShortToolName, resolveToolNameAlias, unknownToolMessage } from "
 import {
   LOCAL_MODEL_UNLOADED_CODE, localModelResident, refineServerFailureCode, RUNTIME_SERVER_ERROR_CODE, serverFailure,
   serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, serverFailureResendLimit, waitForServerResend,
+  streamErrorFrameBody, streamErrorFrameCode, type ServerFailureCode,
 } from "./provider-overload";
 import {
   defaultRuntimeToolPermission,
@@ -538,7 +539,7 @@ export async function prepareMainToolLoop(
   if (collection) {
     assertScienceCollectionCapability(collection, req.mcpConfigPath);
     if (!["byok", "ollama", "lmstudio", "mlx", "agentlas-local", "agentlas"].includes(runtimeKind)) {
-      //: host checks before the tool inventory and any request: typed "not-dispatched" (its own code kept).
+      // host checks before the tool inventory and any request: typed "not-dispatched" (its own code kept).
       throw markRefusedBeforeDispatch(new Error("science_collection_transport_unsupported"));
     }
     if (req.history.length || req.planMode || req.workforceRuntimeToolGrant || req.untrustedNoTools) {
@@ -564,7 +565,7 @@ export async function prepareMainToolLoop(
           catalogMcpOnly ? false : await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
         );
       })();
-  //: the inventory is built before the first request, so a throw from it (mcp_tool_inventory_duplicate_name, a
+  // the inventory is built before the first request, so a throw from it (mcp_tool_inventory_duplicate_name, a
   // name collision, a changed collection server) sent nothing: typed "not-dispatched", its message-as-code kept. Untyped,
   // mcp/client.ts read it as a dispatched turn with no receipt. A Stop keeps its own abort.
   const { signal: stopSignal } = req;
@@ -1381,6 +1382,8 @@ interface StreamTurnResult {
   synthesizedCallIds?: ReadonlySet<string>;
   /** Machine codes of the local-server non-conformances normalized on this reply (never shown; diagnostics only). */
   compatNormalized?: readonly string[];
+  /** An error frame inside the stream (provider-overload.ts streamErrorFrameCode): this reply is not used, the caller decides. */
+  serverFailure?: { code: ServerFailureCode; body: string };
 }
 
 /**
@@ -1413,6 +1416,7 @@ async function streamChatTurn(
   let conflictingFinishReason = false;
   const rawFinishReasons = new Set<string>();
   let sawDone = false;
+  let streamServerFailure: StreamTurnResult["serverFailure"];
   let terminalUsage: StreamTurnResult["terminalUsage"];
   let terminalUsageChunks = 0;
   let lastChunkWasUsage = false;
@@ -1446,6 +1450,8 @@ async function streamChatTurn(
           };
         }>;
       };
+      const frameFailure = streamErrorFrameCode(event);
+      if (frameFailure) { streamServerFailure = { code: frameFailure, body: streamErrorFrameBody(event) }; break; }
       if (event.usage && Array.isArray(event.choices) && event.choices.length === 0) {
         terminalUsageChunks += 1;
         const input = event.usage.prompt_tokens;
@@ -1500,6 +1506,10 @@ async function streamChatTurn(
     }
   }
   if (thinkingOpen) (onThinking?.("end", Date.now() - thinkingStartedAt));
+  if (streamServerFailure) {
+    return { text: "", toolCalls: [], terminalObserved: false, missingToolCallIds: false, incompleteToolCalls: false, thinking: thinkingText,
+      serverFailure: streamServerFailure };
+  }
   if (localCompatible) return normalizeLocalCompatibleTurn({ acc, thinkingText, pending: [...pending.values()], rawFinishReasons,
     sawDone, terminalUsage, terminalUsageChunks, lastChunkWasUsage, turn: localCompatible.turn });
   const pendingCalls = [...pending.values()];
@@ -1858,6 +1868,8 @@ async function runLocalOpenAiChatInner(
   let toolParseRetries = 0;
   /** G24: consecutive resends spent on a server that answered 5xx at the response header (restarts when a response opens). */
   let serverResends = 0;
+  /** In-stream server error frames in a row (a response opening does not restart this count; a response without one does). */
+  let streamResends = 0;
   /** Reasoning behind each tool call, replayed to Ollama's native route (gpt-oss loses its plan between calls without it). */
   const thinkingByCallId = new Map<string, string>();
   /** Screenshot messages this loop appended after tool results (structural identity, never their wording). */
@@ -1953,24 +1965,32 @@ async function runLocalOpenAiChatInner(
   const serverFailureOutcome = async (response: Response, body: string, allowResend: boolean): Promise<"resend" | RunnerResult | null> => {
     const plain = serverFailureCodeForStatus(response.status);
     if (!plain) return null;
+    return serverClassOutcome(plain, response.status, response.headers.get("retry-after"), body, allowResend, false);
+  };
+  /**
+   * The same class and resends for an error frame inside a stream that opened (status null), with its own consecutive count:
+   * serverResends restarts when a response opens, which a stream that fails after opening always does.
+   */
+  const serverClassOutcome = async (plain: ServerFailureCode, status: number | null, retryAfter: string | null, body: string,
+    allowResend: boolean, inStream: boolean): Promise<"resend" | RunnerResult> => {
     const resident = plain === RUNTIME_SERVER_ERROR_CODE ? await localModelResident({ runtimeKind, host, model, signal: req.signal }) : null;
     const code = refineServerFailureCode(plain, resident);
-    const retryAfter = response.headers.get("retry-after");
-    const resendDelayMs = serverFailureResendDelayMs(retryAfter, serverResends);
+    const attempts = inStream ? streamResends : serverResends;
+    const resendDelayMs = serverFailureResendDelayMs(retryAfter, attempts);
     const resendLimit = serverFailureResendLimit(code);
-    if (allowResend && serverFailureResendable(code) && serverResends < resendLimit
+    if (allowResend && serverFailureResendable(code) && attempts < resendLimit
       && !ownerControlPending && !req.signal?.aborted && resendDelayMs !== null) {
-      serverResends += 1;
+      const sent = inStream ? (streamResends += 1) : (serverResends += 1);
       events.onStatus(code === LOCAL_MODEL_UNLOADED_CODE
         ? req.locale === "ko" ? "모델 서버가 오류 뒤 모델을 내렸습니다. 잠시 뒤 같은 요청을 다시 보냅니다…" : "The model server dropped the model after an error; sending the same request again shortly…"
-        : req.locale === "ko" ? `모델 서버가 바빠 잠시 뒤 같은 요청을 다시 보냅니다(${serverResends}/${resendLimit})…` : `The model server is busy; sending the same request again shortly (${serverResends}/${resendLimit})…`);
+        : req.locale === "ko" ? `모델 서버가 바빠 잠시 뒤 같은 요청을 다시 보냅니다(${sent}/${resendLimit})…` : `The model server is busy; sending the same request again shortly (${sent}/${resendLimit})…`);
       await waitForServerResend(resendDelayMs, req.signal);
       if (req.signal?.aborted) throw abortReasonError(req);
       return "resend";
     }
     const observedUsage = usage.total();
-    return assertCurrentHistoryRunnerResult({ text: finalText.trim(),
-      failure: serverFailure({ code, status: response.status, runtime: runtimeKind, providerLabel, locale: req.locale, body, retryAfter }),
+    return assertCurrentHistoryRunnerResult({ text: finalText.trim(), ...(inStream ? { ownerControlTerminal: "uncertain" as const } : {}),
+      failure: serverFailure({ code, status, runtime: runtimeKind, providerLabel, locale: req.locale, body, retryAfter }),
       ...(observedUsage ? { observedUsage } : {}), workforcePermissionEnforcement: broker?.finish(false) });
   };
 
@@ -2222,7 +2242,7 @@ async function runLocalOpenAiChatInner(
       }
       return body;
     };
-    //: set at the moment turnFetch is handed the request; a throw before it (the delivery snapshot, the history fence) sent nothing.
+    // set at the moment turnFetch is handed the request; a throw before it (the delivery snapshot, the history fence) sent nothing.
     let requestHandedToFetch = false;
     try {
       if (req.signal?.aborted) throw abortReasonError(req);
@@ -2352,6 +2372,10 @@ async function runLocalOpenAiChatInner(
           }
           const result = await streamChatTurn(fallback, events.onPartial, events.onThinking, localCompatibleTerminal ? { turn } : undefined);
           (usage.complete(usageAttempt, result.terminalUsage), result.terminalUsage && opts.contextInputSink && (opts.contextInputSink.value = result.terminalUsage.inputTokens), currentHistoryRuntimeFence()?.assertCurrent());
+          if (result.serverFailure) {
+            const server = await serverClassOutcome(result.serverFailure.code, null, null, result.serverFailure.body, false, true);
+            if (server !== "resend") return server;
+          }
           const failure = terminalFailure(result);
           if (failure) return failure;
           observeOwnerControlResponse(result);
@@ -2376,6 +2400,18 @@ async function runLocalOpenAiChatInner(
       localCompatibleTerminal ? { turn } : undefined);
     if (result.compatNormalized && process.env.AGENTLAS_LOCAL_TOOL_DEBUG === "1") console.log("[local-tool-loop] compat normalized:", result.compatNormalized.join(","));
     (usage.complete(usageAttempt, result.terminalUsage), result.terminalUsage && opts.contextInputSink && (opts.contextInputSink.value = result.terminalUsage.inputTokens), currentHistoryRuntimeFence()?.assertCurrent());
+    if (result.serverFailure) {
+      // An error frame inside a stream that opened: no tool of this reply ran, so its partial text is taken back and the same
+      // request goes again on a busy server (serverClassOutcome), or the typed failure returns.
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(continuedText));
+      const server = await serverClassOutcome(result.serverFailure.code, null, null, result.serverFailure.body, true, true);
+      if (server === "resend") {
+        turn -= 1;
+        continue;
+      }
+      return server;
+    }
+    streamResends = 0;
     // A server that loads the model on demand (LM Studio JIT) picks the window itself, and its OpenAI route cannot be asked
     // for one: the request above was admitted against a catalog estimate. Read the window it really loaded, once. A request
     // that cannot fit in it was shortened by the server, so this reply is not used (no tool call runs): the same request is

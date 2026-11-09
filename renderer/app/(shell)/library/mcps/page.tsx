@@ -364,7 +364,14 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
 
   /* ── install flows (same steps as the picker) ─────────────────── */
   const finishInstall = async (result: PluginPickerResult, serverIds: string[] = []) => {
-    setAddSkipped(result.skipped);
+    const pending = (result.pending ?? []).map((row) => ({
+      slug: row.serverName,
+      reason: ko ? "로컬 실행 승인이 필요합니다." : "Local execution approval is needed.",
+    }));
+    const issues = [...result.skipped, ...pending];
+    setAddSkipped(issues.length > 0
+      ? [...result.installed.map((slug) => ({ slug, reason: ko ? "추가됨" : "Added" })), ...issues]
+      : []);
     for (const id of serverIds) await probe(id);
     await refreshAll();
   };
@@ -572,7 +579,7 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
   const notices = <>
     {passiveEntry && route.kind === "browse" && <p className={styles.notice} role="status">{ko ? "연결 상태는 새로고침 또는 연결 확인을 누르면 검사합니다." : "Refresh or verify a connection to check its live state."}</p>}
     {actionError && <p className={styles.notice} role="alert">{actionError}<button type="button" onClick={() => setActionError(null)}>{ko ? "닫기" : "Dismiss"}</button></p>}
-    {addSkipped.length > 0 && <div className={styles.notice} role="status"><strong>{ko ? "일부 항목을 추가하지 못했어요" : "Some items could not be added"}</strong>{addSkipped.map((row) => <p key={row.slug}>{row.slug} — {row.reason}</p>)}<button type="button" onClick={() => setAddSkipped([])}>{ko ? "닫기" : "Dismiss"}</button></div>}
+    {addSkipped.length > 0 && <div className={styles.notice} role="status"><strong>{ko ? "도구 추가 결과" : "Tool setup results"}</strong>{addSkipped.map((row) => <p key={row.slug}>{row.slug} — {row.reason}</p>)}<button type="button" onClick={() => setAddSkipped([])}>{ko ? "닫기" : "Dismiss"}</button></div>}
     {route.kind === "browse" && hub.loadError && type !== "connector" && <p className={styles.notice} role="status">{ko ? "실시간 목록을 갱신하지 못했어요. 앱에 포함된 카탈로그를 표시합니다." : "The live catalog could not be refreshed. Showing the bundled catalog."}</p>}
   </>;
 

@@ -1,4 +1,5 @@
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { abortReasonError } from "./abort-reason";
 // Kimi Code CLI runtime — official Moonshot CLI (`@moonshot-ai/kimi-code`).
 // Headless contract: `kimi -p <prompt> --output-format stream-json`.
 import path from "node:path";
@@ -366,10 +367,13 @@ function runKimiProcess(
   args: string[],
   req: RunnerRequest,
   events: RunnerEvents,
+  dispatch?: { started: boolean },
 ): Promise<KimiProcessResult> {
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawnCli>;
     try {
+      if (req.signal?.aborted) throw abortReasonError(req);
+      if (dispatch) dispatch.started = true;
       child = spawnCli(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
         cwd: req.cwd ?? agentRunCwd(),
@@ -597,8 +601,7 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
     ? (runReq.locale === "ko" ? "Kimi Code 대화를 이어가는 중..." : "Resuming the Kimi Code conversation...")
     : tStatus(runReq.locale, "callingBackend", { backend: runReq.backendLabel }));
   if (runReq.outputSchema) events.onStatus(tStatus(runReq.locale, "schemaInPromptOnly"));
-  dispatch.started = true;
-  const result = await runKimiProcess(bin, args, runReq, events);
+  const result = await runKimiProcess(bin, args, runReq, events, dispatch);
   if (runReq.signal?.aborted) throw new Error(tStatus(runReq.locale, "aborted"));
   if (result.silentLimitMs !== undefined) {
     // The host ended a child that stayed silent: a typed timeout, never an exit-code guess.

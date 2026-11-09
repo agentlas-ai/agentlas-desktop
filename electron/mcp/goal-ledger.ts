@@ -129,12 +129,12 @@ export async function getGoalLedgerGoal(
 /**
  * An explicit goal's contract: the requested outcome, nothing else.
  *
- * ★"기준 5개 하드코딩 이런 거 없어야지." What "done" means comes from the AI's own decomposition
+ * ★Owner "기준 5개 하드코딩 이런 거 없어야지." What "done" means comes from the AI's own decomposition
  * (goal-shaping: tactics with done_when, key results) and the verifier rolls the outcome up from those leaves
  * (shared/goal-rollup.ts). The evidence standard is enforced by code (pinned proof contracts and admissible host
  * refs), not by a criterion sentence.
  *
- *the permission/working-folder scope criterion is gone too. It asked a model to check the run receipt,
+ * the permission/working-folder scope criterion is gone too. It asked a model to check the run receipt,
  * which no model receives (48 of 48 verifications inconclusive); the tool and runtime layer enforces permission and
  * folder, and the request's explicit constraints stay in the outcome sentence. `permission` is kept for callers.
  */

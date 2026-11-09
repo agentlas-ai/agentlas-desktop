@@ -45,25 +45,43 @@ export function FinancePresentLead({ view }: { view: AnyView; asked?: string; lo
 
 /** The asset blocks (hundreds of KB of drawing code) are not in the app's main bundle: a card that holds one loads them once, then draws. */
 let assetsLoading: Promise<unknown> | null = null;
-function useAssets(needed: boolean): boolean {
-  const [, ready] = useState(0);
+function useAssets(needed: boolean): { status: "ready" | "loading" | "failed"; retry: () => void } {
+  const [attempt, setAttempt] = useState(0);
+  const [result, setResult] = useState<"loading" | "failed" | "ready">("loading");
   useEffect(() => {
     if (!needed || assetsInstalled()) return;
     let live = true;
-    assetsLoading ??= import("@shared/canvas/blocks/registry").catch(() => { assetsLoading = null; });
-    void assetsLoading.then(() => { if (live) ready(n => n + 1); });
+    setResult("loading");
+    const pending = assetsLoading ??= import("@shared/canvas/blocks/registry");
+    void pending.then(() => {
+      if (live) setResult(assetsInstalled() ? "ready" : "failed");
+    }, () => {
+      if (assetsLoading === pending) assetsLoading = null;
+      if (live) setResult("failed");
+    });
     return () => { live = false; };
-  }, [needed]);
-  return !needed || assetsInstalled();
+  }, [needed, attempt]);
+  return { status: !needed || assetsInstalled() ? "ready" : result, retry: () => setAttempt(value => value + 1) };
 }
 
-export function FinancePresentBody({ view }: { view: AnyView; locale?: "ko" | "en" }) {
+export function FinancePresentBody({ view, locale = "en" }: { view: AnyView; locale?: "ko" | "en" }) {
   const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
   const canvas = financeCanvasFromLegacy(view);
-  const loaded = useAssets(!!canvas && canvas.blocks.some(block => !isBaseCanvasBlock(block)));
+  const assets = useAssets(!!canvas && canvas.blocks.some(block => !isBaseCanvasBlock(block)));
   installCss();
-  // Until the assets are loaded the card is not drawn at all (a figure card, which needs none, draws at once).
-  if (canvas && !loaded) return null;
-  if (canvas) installAssetCss(canvas.blocks);
-  return canvas ? <div className="fpc" data-finance-present={canvas.kind} dangerouslySetInnerHTML={{ __html: financeCanvasBodyHtml(canvas, uid) }}/> : null;
+  if (!canvas) return null;
+  if (assets.status === "loading") return <p role="status">{locale === "ko" ? "결과 화면을 불러오는 중…" : "Loading the result…"}</p>;
+  if (assets.status === "failed") {
+    // Preserve the base figures even when a separately loaded visual cannot be drawn.
+    const blocks = canvas.blocks.filter(isBaseCanvasBlock);
+    return <>
+      {blocks.length > 0 && <div className="fpc" data-finance-present={canvas.kind} dangerouslySetInnerHTML={{ __html: financeCanvasBodyHtml({ ...canvas, blocks }, uid) }}/>}
+      <div role="alert">
+        <p>{locale === "ko" ? "일부 결과 화면을 불러오지 못했습니다. 다시 시도해도 표시되지 않으면 작업을 저장한 뒤 앱을 다시 열어 주세요." : "Some visuals could not be loaded. If retrying does not help, save your work and reopen the app."}</p>
+        <button type="button" onClick={assets.retry}>{locale === "ko" ? "다시 시도" : "Try again"}</button>
+      </div>
+    </>;
+  }
+  installAssetCss(canvas.blocks);
+  return <div className="fpc" data-finance-present={canvas.kind} dangerouslySetInnerHTML={{ __html: financeCanvasBodyHtml(canvas, uid) }}/>;
 }

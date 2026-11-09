@@ -24,6 +24,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { ollamaModelListIncludes } from "../../shared/runtime-connect";
+import { runtimeModelUnavailableByInventory } from "../runtime/credential-access";
 import { isOneArtifactBindingRequestV1 } from "../../shared/one-artifacts";
 import {
   extractBuildInterviewQuestions,
@@ -1530,13 +1531,7 @@ async function resolveMobileRoleSelection(
   if (runtimeCredentialUnavailable(runtime)) {
     throw new MobileBridgeRefusal("runtime_credential_unavailable", "The selected Desktop runtime credential is unavailable");
   }
-  if (
-    selection.model &&
-    (runtime.availableModels?.length ?? 0) > 0 &&
-    !(runtime.kind === "ollama"
-      ? ollamaModelListIncludes(runtime.availableModels!, selection.model)
-      : runtime.availableModels!.includes(selection.model))
-  ) {
+  if (runtimeModelUnavailableByInventory(runtime, selection.model, ollamaModelListIncludes)) {
     throw new MobileBridgeRefusal("runtime_unavailable", "The selected model is unavailable on this Desktop runtime");
   }
   if (
@@ -1956,7 +1951,7 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
     // one turn still rings once.
     const asksOwner = invocationEventRequestsDecision(event);
     if (isPersonalOneConversation(chatId)) {
-      // The lock screen shows only the text, the same redacted preview the phone gets (owner, "본문만"): no
+      // The lock screen shows only the text, the same redacted preview the phone gets ("본문만"): no
       // title is sent. An older relay ignores the body and shows its generic notice.
       listener({ category: "oneMessage", destination: "personalOne", hostId,
         entityId: hostId, messageId: message.messageId, dedupeKey: `one-message:${hostId}:${message.messageId}`,
@@ -3071,7 +3066,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       throw new TypeError("Invalid Mobile Bridge authority request envelope");
     }
 
-    // media-carousel: the optional chat-attachments-v2 / remote-build-* keys come off the request here, so each
+    // media-carousel the optional chat-attachments-v2 / remote-build-* keys come off the request here, so each
     // existing exact-key check below reads the request it always read (shared/mobile-bridge-media.ts).
     const mediaSplit = splitMobileMediaParams(request.method, request.params);
     if (mediaSplit?.error) throw new TypeError(`${request.method} ${mediaSplit.error}`);
@@ -3237,6 +3232,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ...(snapshot.legacyHistory?{legacyHistory:{...snapshot.legacyHistory,linked:snapshot.legacyHistory.linked.map(source=>({...source,title:boundedRedactedText(source.title,1_000)}))}}:{}),
         },request.method);
         });
+      }
+      case "one.supervisor.receipt": {
+        const params = guardedParams(request, ["oneId", "commandId"]);
+        const receipt = await oneSupervisor().receipt({oneId: requiredIdentifier(params, "oneId"), commandId: requiredIdentifier(params, "commandId")});
+        // Absence is not evidence that work never ran: the journal may have
+        // been replaced or restored. The caller must retain an unknown outcome.
+        return receipt ? supervisorReceiptValue(receipt, request.method) : null;
       }
       case "one.supervisor.send": {
         const params=guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.send"]);
@@ -5036,13 +5038,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           throw new MobileBridgeRefusal("runtime_credential_unavailable", "The selected Desktop runtime credential is unavailable");
         }
         const model = optionalIdentifier(params, "model", 200);
-        if (
-          model &&
-          (runtime.availableModels?.length ?? 0) > 0 &&
-          !(runtime.kind === "ollama"
-            ? ollamaModelListIncludes(runtime.availableModels!, model)
-            : runtime.availableModels!.includes(model))
-        ) {
+        if (runtimeModelUnavailableByInventory(runtime, model, ollamaModelListIncludes)) {
           throw new MobileBridgeRefusal("runtime_unavailable", "The selected model is unavailable on this Desktop runtime");
         }
         const effort = optionalIdentifier(params, "effort", 80);

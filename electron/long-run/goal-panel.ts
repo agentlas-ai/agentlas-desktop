@@ -10,7 +10,7 @@
  *
  * Pause is explicit (owner 2026-09-28 "명시적 멈춤이 멈춤"): a branch is paused only by pause_node here, and a paused
  * branch is skipped by selectActiveTactics. The last open branch may be paused or removed here like any other (round 3,
- *refusing the owner's own edit was a dead end); the turn context then tells the Goal that every remaining item is
+ * refusing the owner's own edit was a dead end); the turn context then tells the Goal that every remaining item is
  * owner-paused, or that every tactic is done or retired, and the Goal's own loop (stall window, verification) takes it from there.
  */
 import { getDb } from "../store/db";

@@ -79,7 +79,7 @@ function settleUnconfirmedDelivery(
 }
 
 /**
- * A check that failed and cannot change by running the occurrence again ends it (decided): the app closes the occurrence by
+ * A check that failed and cannot change by running the occurrence again ends it: the app closes the occurrence by
  * itself, a ledger entry on the run and one plain line in the automation's run history, the owner is asked nothing, and the next occurrence
  * is another event that runs normally. No parked state, so there is no Retry that could only judge the same result again.
  */
@@ -189,7 +189,7 @@ async function deliverClaimedEvent(event: TriggerEventRecord, run: TriggerEventR
       return;
     }
     // An unknown outside effect (result.effectsUnconfirmed, a MUTATION_UNVERIFIED step) does not park the occurrence for the
-    // owner (decided: it keeps running and the risk of a duplicate is accepted). The redelivery resumes the same
+    // owner (decision it keeps running and the risk of a duplicate is accepted). The redelivery resumes the same
     // occurrence: finished steps come back from the checkpoint and the uncertain step runs again with the host's note. The budget is
     // not the 48 of an ordinary failure (about 38 hours, up to ~96 runs of one mutating step): 3 deliveries, the cap of a scheduled
     // occurrence, or the first repeat of the same held steps when no model step can read the note (settleUnconfirmedDelivery).

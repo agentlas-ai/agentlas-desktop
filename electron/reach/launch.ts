@@ -1,5 +1,5 @@
 // Opening an app that is not open yet, for the callers whose job is "use this app" (the computer tool focus_app, Reach's invoke / explore / verify).
-// observed in use/04: "open Calculator and enter 7+8" ended in "No running application matched" and "Reach only drives an app that is already
+// Production /04: "open Calculator and enter 7+8" ended in "No running application matched" and "Reach only drives an app that is already
 // running" because nothing in the tool set could open an app. This is that one missing step: argv only (no shell), no electron import (the daemon loads it).
 import type { ExecFn } from "./types";
 

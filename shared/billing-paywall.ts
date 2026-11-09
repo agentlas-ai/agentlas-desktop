@@ -1,8 +1,8 @@
 /*
  * Desktop first-run paywall — the rules that do not need a screen.
  *
- * The Desktop onboarding shows a paywall right after sign-in, the same shape as the
- * phone's: Pro is preselected
+ * Owner the Desktop onboarding shows a paywall right after sign-in, the same shape as the
+ * phone's (docs: output/one-finance-handoff-20261102/DESIGN-REVIEW-20261103.md 2-5): Pro is preselected
  * and marked, "Continue with Free" is always there and the same size, a trial is named only when the
  * server says this account can have it, and nothing looks paid until the server says so.
  *

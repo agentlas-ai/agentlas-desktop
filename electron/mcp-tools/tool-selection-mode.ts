@@ -9,7 +9,7 @@
 export type ToolSelectionMode = "judge" | "model";
 export const DEFAULT_TOOL_SELECTION_MODE: ToolSelectionMode = "judge";
 /**
- * Runtimes whose model runs on this computer and may be small. They keep the judge in "model" mode: measured 
+ * Runtimes whose model runs on this computer and may be small. They keep the judge in "model" mode: measured
  * (scripts/test-model-picks-local-ab.cjs), qwen3:1.7b found the connector with harness_search and stopped there 3/3 (judge 3/3).
  */
 export const LOCAL_MODEL_RUNTIME_KINDS: ReadonlySet<string> = new Set(["ollama", "lmstudio", "mlx", "agentlas-local"]);

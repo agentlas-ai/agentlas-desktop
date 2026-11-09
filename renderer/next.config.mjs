@@ -21,7 +21,16 @@ const nextConfig = {
   // package. Mark it external to the renderer bundle so webpack does not try
   // to resolve Vega's Node-only fallback (and so Desktop does not pull in a
   // native canvas binary just for Flint charts).
-  webpack(config) {
+  webpack(config, { dev, isServer }) {
+    if (!dev && !isServer) {
+      // Include the locally shipped canvas registry in the card's chunk,
+      // avoiding a registry-specific async request. Its bytes are parsed with
+      // that chunk, but its module executes only on import().
+      config.module.rules.push({
+        test: /[\\/]renderer[\\/]components[\\/]finance[\\/]FinancePresentCard\.tsx$/,
+        parser: { dynamicImportMode: "eager" },
+      });
+    }
     config.module.rules.push({
       test: /\.(?:m?js)$/,
       enforce: "pre",

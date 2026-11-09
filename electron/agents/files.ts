@@ -613,7 +613,7 @@ export function listAgentSkillEntries(dir: string): Array<{ root: string; name: 
       const key = name.toLowerCase();
       if (seen.has(key)) continue;
       // A left-out slug stays left out: the same name under a later root is not a way back in for the candidate the owner never reviewed
-      // (regression review C10: `.codex/skills/<slug>` was listed as a reviewed skill once `.claude/skills/<slug>` was dropped).
+      // (regression review C10, `.codex/skills/<slug>` was listed as a reviewed skill once `.claude/skills/<slug>` was dropped).
       seen.add(key);
       if (skillIsLeftOut(leftOut, root, name)) continue;
       entries.push({ root, name });

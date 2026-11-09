@@ -1,7 +1,7 @@
 /*
  * Host-owned chat cards for what One just did (docs/PROMPT-COMPOSITION-POLICY.md: host code decides, no prompt line asks).
  *
- * Observed in use: the harness has a UI-instance bridge (harness/ui-instances.ts) that draws interactive cards inside the
+ * Production the harness has a UI-instance bridge (harness/ui-instances.ts) that draws interactive cards inside the
  * answer bubble, but only a model call to ui.present created one, and in the owner's whole history the model made none (0 of 2091
  * app.call receipts were followed by a ui.* receipt). A teammate list, a steer, an automation run or a settings change therefore
  * reached the owner as prose only. This module reads the finished tool event Main already sees and presents the card itself.
@@ -166,7 +166,7 @@ export function operationCardFor(event: OperationToolEvent, locale: OperationCar
   const operation = clip(tool.args.operation, 80);
 
   // A change the owner asked for shows its outcome. Reads are not changes and never draw a card, failed or not: a lookup the
-  // model made for itself is the model's to retry or route around, not a decision handed to the owner. observed in use:
+  // model made for itself is the model's to retry or route around, not a decision handed to the owner. Production
   // a failed `workLiveView.listTabs` lookup reached the owner's phone as "Could not apply it: operation-failed: …" with a retry
   // button, although the model went on to repeat the lookup itself.
   if (kind === "app.change") {

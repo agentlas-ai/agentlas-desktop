@@ -1,6 +1,6 @@
 /**
  * An empty HTML comment shell (`<!--`, blank lines, `-->`) is not drawn. It is what was left when only a hidden Memory Events
- * block was cut from a reply (fixed at the source ; older answers keep it in storage). Lines inside a code fence and
+ * block was cut from a reply (fixed at the source; older answers keep it in storage). Lines inside a code fence and
  * a comment that holds anything are left as they are.
  */
 export function withoutEmptyCommentShells(text: string): string {

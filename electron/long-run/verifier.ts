@@ -582,7 +582,7 @@ export function buildBoundedObservation(input: {
    */
   // The delivered reply is the result for a reply-type criterion, so it is the last thing to go: it is cut to ANSWER_FLOOR_CHARS
   // before any event is clamped or dropped (66 receipts across 8 runs said "text omitted by budget" while 200 raw events kept
-  // their full previews, observed in use).
+  // their full previews, a real installation).
   const proseBudgets = [8_000, 4_000, ANSWER_FLOOR_CHARS] as const;
   const answerFloor = input.assistant?.text.slice(0, ANSWER_FLOOR_CHARS) ?? null;
   for (const budget of proseBudgets) {
@@ -945,7 +945,7 @@ export function longRunVerifiersSettled(): boolean {
   return controllers.size === 0;
 }
 
-/** No retry COUNT limits evidence gathering or typed repair . Only idle spin does: NO_PROGRESS_RETRY_LIMIT
+/** No retry COUNT limits evidence gathering or typed repair. Only idle spin does: NO_PROGRESS_RETRY_LIMIT
  * consecutive verifications whose outcome digest equals the previous checkpoint's (shared/long-run-checkpoint.ts). At the limit the
  * Goal is not parked: it rests on a host retry schedule (see the verification transaction below). Unknown or prerequisite failures
  * still wait as blocked. */

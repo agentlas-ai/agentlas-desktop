@@ -1,7 +1,7 @@
 // Windows shell integration: the app's identity in the taskbar/notification system, sign-out and
 // shutdown, and the executable the shell should start again (installed vs portable).
 //
-// Windows audit 2026-10-24 (UI findings #2, #3, #7; file-system finding #12):
+// Windows audit (output/windows-audit-20261024/ui.md #2, #3, #7; fs.md #12):
 //   #2 No app.setAppUserModelId: the NSIS shortcuts carry AUMID = appId (com.agentlas.desktop) and the
 //      process had Electron's default, so toasts could not show and taskbar pins did not merge.
 //   #3 powerMonitor "shutdown" does not exist on Windows and nothing listened to the window

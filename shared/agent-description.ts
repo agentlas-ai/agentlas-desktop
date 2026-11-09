@@ -1,7 +1,7 @@
 /**
  * What an agent does, as one plain line.
  *
- * observed in use: the owner asked the personal agent for a video, and it picked the teammate whose name sounded like the job.
+ * In production, the owner asked the personal agent for a video, and it picked the teammate whose name sounded like the job.
  * It was choosing from names alone (one_team_list carried no description), and the stored tagline of the teammate the owner
  * actually uses for that work was package boot text: "Read AGENTS.md with the package file reader. agentlas.json declares it
  * as the canonical entry ..." (13 of 189 installed agents had such a line: a numbered list item "1. Read [`AGENTS.md`](...)",

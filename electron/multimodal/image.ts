@@ -78,7 +78,7 @@ export interface ImageResult {
 /**
  * Why one engine produced no image, as a machine code (never the CLI's prose): the route is not installed, its product home is not
  * available on this host, its process could not start, it ran out of time, or it ended without writing an image. The caller's
- * ImageResult.reason names every engine's code, so "all-engines-unavailable" says what to fix (14 events, 5 chats: it
+ * ImageResult.reason names every engine's code, so "all-engines-unavailable" says what to fix (14 events, 5 chats, it
  * said nothing about quota, sign-in or a missing install).
  */
 type EngineNote = { reason?: string };

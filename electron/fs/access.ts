@@ -369,7 +369,7 @@ function chatWorkspaceRule(chatId: string): RootRule | null {
 /**
  * Working folders of the conversations this chat handed work to: Work and messages One delegated (one_supervisor_requests), teammates
  * a room started (one_team_dispatches), and the sessions those Work rooms delegated (work_session_dispatches). A result the owner opens
- * from this chat lives there. observed in use: One relayed a Work report whose README.md, WORK.md and skill-check .md lay in the
+ * from this chat lives there. Production One relayed a Work report whose README.md, WORK.md and skill-check.md lay in the
  * Work project folder; opening them from One's conversation was refused "outside the approved scope" (main.log 13:47:45Z), while the
  * PNG beside them showed, because media already admit every chat's working folder (authorizeLocalMediaPath). Read-only, bounded.
  */

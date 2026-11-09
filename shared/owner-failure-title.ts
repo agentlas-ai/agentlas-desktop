@@ -6,7 +6,7 @@ import { isToolFailureCode, type ToolFailureCode } from "./tool-failure";
  *
  * The cards (One's failure recovery card, a chat's recovery details) used to put `failure.code` in front of the owner as the
  * heading: `task-force-verification-failed`, `one-team-runtime-selection-changed`, `team_goal_context_changed`. Those are the
- * harness's own labels (owner rule: no internal harness code reaches the owner). The sentence that says what
+ * harness's own labels (rule no internal harness code reaches the owner). The sentence that says what
  * happened is the run's own message (the room's report, or shared/run-failure-notice.ts); this is only its heading.
  *
  * Closed tables of codes, never a word search. A code that is a plain one-word state ("cancelled") keeps its tool wording; a

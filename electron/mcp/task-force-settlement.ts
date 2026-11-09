@@ -8,7 +8,7 @@ import { PROVIDER_UNAVAILABLE_CODES } from "../../shared/run-failure-notice";
  * The room's report (the synthesis plus the host's typed "still to do" note) is already in the transcript, and the ledger already
  * holds the verdict (task_force_execution_receipt, verifierStatus "fail") that the Goal readers key on
  * (long-run/daemon-turn-goal.ts taskForceLeftWork, store/tasks.ts hasPassedTaskForceExecutionVerification). Ending such a turn
- * as a failed run reported our own bookkeeping as a failure of the owner's work: observed in 1.3.105, eight
+ * as a failed run reported our own bookkeeping as a failure of the owner's work: production 1.3.105, eight
  * `task-force-verification-failed` turns whose reports were complete.
  *
  * A turn fails only for an execution cause: a step that threw or was refused by a runtime or provider (phase "execution", an HTTP

@@ -173,7 +173,7 @@ export function parseMemoryEvents(text: string): ParsedMemory {
     // 2026-09-25) ended a Korean reply with "```Memory Events\n{…envelope…}" and never
     // closed the fence, so the whole ticket was shown to the user. Accept any info string
     // and a fence left open at the very end; the closed schema check below still decides.
-    // A ticket hidden in an HTML comment ("<!--\n```json\n{…}\n```\n-->") goes with its comment (observed in use).
+    // A ticket hidden in an HTML comment ("<!--\n```json\n{…}\n```\n-->") goes with its comment.
     const tailFence = text.match(/(?:^|\n)(?:[ \t]*<!--\s*)?```[^\n`]*\n\s*(\{[\s\S]*?\})\s*(?:```)?\s*(?:-->\s*)?$/);
     if (tailFence && tailFence.index != null) {
       try {

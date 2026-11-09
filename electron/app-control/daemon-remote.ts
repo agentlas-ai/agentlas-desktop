@@ -11,7 +11,7 @@ import { APP_CALL_ANSWER_WINDOW_MS, appCallPendingNotice, isAppCallPending } fro
 type AppBridge = Pick<DaemonDeviceBridge, "appControl"> & Partial<Pick<DaemonDeviceBridge, "attached" | "whenAttached">>;
 
 // The window process is not attached for a few seconds at app start and while its channel re-attaches (main.log "re-attach
-// scheduled"); a call made in that gap used to be refused at once with app-window-unavailable (observed in use: 35 refusals in two
+// scheduled"); a call made in that gap used to be refused at once with app-window-unavailable (production 10-20: 35 refusals in two
 // chats). Nothing has been sent while Main is not attached, so the call may wait for it. A window that is really closed stays closed:
 // the first call to find none waits this long, and the next ones within the memo are refused at once, as before.
 const MAIN_ATTACH_WAIT_MS = 6_000;
@@ -51,7 +51,7 @@ async function waitForMain(bridge: AppBridge, withinMs: number, mayStart: boolea
 /**
  * What the model reads (and may repeat to the owner) when the window process could not be asked. Plain words only: the machine code
  * travels in `code`, never inside the sentence. The sentence also has to be true: "the window is not open" is said only when no window
- * process is attached; a window that IS attached but did not answer is "did not answer" (observed in use: the same screen-control
+ * process is attached; a window that IS attached but did not answer is "did not answer" (production 2026-11: the same screen-control
  * sentence, with the bridge's internal code in brackets, answered every failure, including a call that came from a run while the app
  * window was open).
  */
@@ -107,7 +107,7 @@ export async function remoteAppControlCall(caller: AppControlCaller, input: { op
   const operation = typeof input.operation === "string" ? input.operation.trim() : "";
   const deadline = Date.now() + windowMs;
   // Only the owner's own turn starts the app: a check-in, a review or any other host turn waits for a running app and never opens one
-  // behind the owner's back (deploy review ; the window policy already asked for ownerTurn).
+  // behind the owner's back (deploy review; the window policy already asked for ownerTurn).
   await waitForMain(bridge, deadline - Date.now() - 1500, caller.ownerTurn === true);
   for (;;) {
     try { answer = await bridge.appControl({ kind: "call", ownerTurn: caller.ownerTurn === true, permission: caller.permission ?? "read", input: request }); }

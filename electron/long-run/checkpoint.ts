@@ -30,7 +30,7 @@ function producerInstructionSnapshot(invocationRunId: string | null | undefined,
  * A producer that never prepared its own instruction snapshot (it failed before dispatch, or took an early team route:
  * mcp/client.ts records the snapshot only on the single-runner path) left a checkpoint that latestTaskCheckpoint and
  * prepareCheckpointContinuation both refuse, so the Goal could neither reflect, wait nor hand its planner a retry
- * checkpoint ("checkpoint_missing" / "checkpoint_instructions_changed"). Observed in use: 172 of 437 checkpoints,
+ * checkpoint ("checkpoint_missing" / "checkpoint_instructions_changed"). a real installation 172 of 437 checkpoints,
  * every one of them from a failed Goal turn. Record the workspace's snapshot against that invocation now, through the one
  * writer every turn uses (idempotent per run and revision), so the checkpoint carries the instructions in force and later
  * change detection works. This never mints settled replay authority: that still needs the snapshot the producer recorded
@@ -49,7 +49,7 @@ function materializeProducerInstructionSnapshot(invocationRunId: string | null |
 }
 
 /** Most evidence references a checkpoint keeps, per kind. Every verification used to hand over ALL of its refs (one `event:` id per tool
- * event of every earlier invocation), and each wait wake appended one more `wait:` ref, so the list only grew: observed in use,
+ * event of every earlier invocation), and each wait wake appended one more `wait:` ref, so the list only grew: a real installation
  * 581 refs and a 36 KB checkpoint after 14 hours (max 644; 6% of all checkpoint bytes). The newest refs are the ones that matter. */
 export const CHECKPOINT_EVIDENCE_REF_LIMITS = { event: 32, other: 24 } as const;
 /** Newest-last unique refs, bounded per kind (`event:` ids vs invocation, message and wait refs). Order of the survivors is kept. */

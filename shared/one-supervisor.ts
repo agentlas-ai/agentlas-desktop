@@ -150,7 +150,7 @@ export function isOneQuietReply(text: string): boolean {
 /**
  * The one test every site uses for "this host-started review or check-in ended quietly" (mcp/client.ts decides whether to save,
  * invocation/service.ts decides whether the saved row must exist). Until the check was an exact match of the whole reply, so a
- * model that wrote a progress line before the marker was saved and alerted every time (108 of 111 check-in reviews in one observed in use);
+ * model that wrote a progress line before the marker was saved and alerted every time (108 of 111 check-in reviews in one owner database);
  * one helper keeps the save site and the verification site from disagreeing again.
  */
 export function isHostQuietReply(purpose: unknown, text: string): boolean {

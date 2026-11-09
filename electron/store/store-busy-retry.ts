@@ -4,7 +4,7 @@
  *
  * Why it exists: the model has already answered when the host writes the turn's own bookkeeping (the answer's row, its Goal
  * binding, the terminal receipt). A lock that is gone a few milliseconds later used to end that turn as a failed run
- * ("The Agentlas store was locked by another write, so this turn could not be fully recorded", observed in use and
+ * ("The Agentlas store was locked by another write, so this turn could not be fully recorded", production and
  * 2026-10-27) although the answer was complete. The failing statement is not the model turn, so it is the statement that
  * runs again, never the turn.
  *
@@ -84,7 +84,7 @@ export interface StoreBusyPatienceOptions {
 /**
  * The same rule as runWithStoreBusyRetry for the ONE write whose content exists only in memory and has to land: the turn's answer. The turn
  * already ran, so a store that stayed locked past its whole busy wait (the first attempt) must not turn a finished answer into a failed run
- * ("this turn could not be fully recorded", observed in use and). The write runs again after 1 s, 3 s and 8 s, the waits
+ * ("this turn could not be fully recorded", production and). The write runs again after 1 s, 3 s and 8 s, the waits
  * between attempts yield to the event loop (Main is not blocked while it waits), and the answer is held by the caller the whole time. Only a
  * store lock is retried, never inside an open transaction; any other error, and the last lock, are rethrown unchanged.
  */

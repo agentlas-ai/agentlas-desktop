@@ -31,7 +31,7 @@ const NON_GIT_IGNORED_DIRS = new Set([
 // as tracked or untracked source changes are observed.
 const refreshTriggered = new Map<string, string>();
 // A refresh that failed (a 15 s timeout on a 209k-file project, or a map that is not canonical afterwards) was retried on the very next
-// context build, killed again at 15 s and so on: 150 failed refreshes in 40 h on one project (observed in use). A failed
+// context build, killed again at 15 s and so on: 150 failed refreshes in 40 h on one project. A failed
 // project now waits 5 min, doubling to 6 h, before another child is spawned; slices keep being served from the last map
 // (`--allow-stale`), and a success clears the wait.
 const REFRESH_FAILURE_BASE_MS = 5 * 60_000;

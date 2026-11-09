@@ -139,7 +139,7 @@ export const AGENT_SURFACE_INTENT_MARKER = "<<surface-intent>>";
 /**
  * A team packet's completion envelope (electron/mcp/borrowed-task-force.ts writes it onto a worker's text; Main parses it
  * before the text is projected). An orchestrator that copies a worker's text into its own answer carried it into the owner's
- * reply: 98 stored One answers in 30 days ended in the raw JSON, the last one on the installed 1.3.125 .
+ * reply: 98 stored One answers in 30 days ended in the raw JSON, the last one on the installed 1.3.125.
  */
 export const AGENT_PACKET_OUTCOME_OPEN = "<<agentlas-packet-outcome>>";
 export const AGENT_PACKET_OUTCOME_CLOSE = "<</agentlas-packet-outcome>>";
@@ -244,7 +244,7 @@ const CLOSING_JSON_FENCE_AFTER_HEADING_RE = /^[ \t]*```[ \t]*\r?$/m;
 
 /**
  * A model that hides a control block inside an HTML comment (`<!--\n## Memory Events …\n-->`, or the heading before the
- * `<!--`) leaves the empty shell `<!--\n\n-->` in the answer when only the block is cut (observed in use, 30+ answers).
+ * `<!--`) leaves the empty shell `<!--\n\n-->` in the answer when only the block is cut (production 30+ answers).
  * The comment goes with the block only when nothing but whitespace sits between them; a comment holding anything else is
  * the model's own text and stays. Shared by the persisted-answer parser (electron/memory/events.ts) and the display strip.
  */

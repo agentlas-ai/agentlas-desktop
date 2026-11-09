@@ -2,7 +2,7 @@
  * The room's report when the model that was to write the final synthesis could not answer and no other permitted model is left.
  *
  * The finished teammates' results exist, are shown in the room, and are what the owner asked for. Throwing here ended the whole
- * turn as a failed run ("synthesis_runtime_pool_exhausted", observed in use) and the owner never got them in one
+ * turn as a failed run ("synthesis_runtime_pool_exhausted", production Z) and the owner never got them in one
  * place. The host assembles the report itself: no model is called (so no runtime pin and no permission boundary is crossed),
  * nothing is invented, each teammate's own words are quoted as delivered. It is a report of results, not a verified synthesis:
  * the caller keeps the run unverified (a "synthesis_runtime_unavailable" verifier issue) so a Goal is never satisfied by it.

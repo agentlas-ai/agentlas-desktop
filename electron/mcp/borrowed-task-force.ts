@@ -2986,7 +2986,7 @@ function taskForceCallIsProvablyLocal(call: TaskForceObservedOutwardCall): boole
  * click, an external write verb), a shell command or page script it cannot read as read-only, a call list that overflowed its bound,
  * or a runner that reports no tool rows at all (the legacy cursor hand driver, ACP disabled). A worker's own typed `effectState`
  * never comes through here: it is read as stated. Before this, every required step that said nothing was recorded "uncertain": a
- * step that only opened a page and found the owner signed out ended its turn as a failed run ("완료 여부가 불확실", observed in use
+ * step that only opened a page and found the owner signed out ended its turn as a failed run ("완료 여부가 불확실", owner DB
  * 2026-10-30 04:24 and 04:34).
  */
 export function taskForceUnreportedEffectState(input: {
@@ -3406,7 +3406,7 @@ function withEarlierOutwardFact(result: BorrowedAgentResult, earlier: BorrowedAg
  * A step the room runs again by itself before it reports: it did not finish, and nothing it left needs the owner or may not be
  * repeated. Not resumable: a typed provider failure (the worker pool was already walked), a step that acted outward, an
  * installed team (a rerun restarts every worker), a step that threw or reported itself failed (it was already tried twice), a lifted-access block and an
- * ask for the owner. What is left is a step that reported unfinished work, and a step withheld behind one. Typed fields only.
+ * decision. What is left is a step that reported unfinished work, and a step withheld behind one. Typed fields only.
  */
 export function taskForceStepResumable(result: Pick<BorrowedAgentResult, "ok" | "spec" | "runtimeFailure" | "actedOutward" | "usedTools" | "externalEffects" | "failureReports" | "completionStatus" | "accessBlock" | "accessNeeded" | "blockingRemaining"> | undefined): boolean {
   if (!result || result.ok || result.runtimeFailure || result.accessBlock || result.accessNeeded || result.failureReports?.length || result.completionStatus === "failed") return false;
@@ -5299,7 +5299,7 @@ async function runBorrowedAgentTurn(
   // approvals have nobody to answer them. Under the owner's full access the worker is still a project-rooted `write` worker
   // (taskForceChildPermission), so the worker's own permission cannot tell the two apart: the decision follows the HOST. Routing a
   // full host's worker through the reviewer let Codex refuse a call the owner's full access allows ("rejected due to unacceptable
-  // risk": speech.transcribe on the owner's own video; invoke.replay on the owner's own run, after
+  // risk": speech.transcribe on the owner's own video; invoke.replay on the owner's own run Z, after
   // 24845818a had tested `workerPermission === "write"`, which a full host's worker also satisfies). Its approvals go to the common
   // arbiter like every other full-access run's; the sandbox is unchanged.
   const runnerBase = taskForceRunnerBase(
@@ -5570,7 +5570,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         p.sink({ ...event, ...attributed });
       };
       // The nested firm's request carries this packet prompt, checkpoint included. The keys it carries travel down as typed data so
-      // the firm does not add the same checkpoint payload a second time (E1, 85 of 85 nested-firm prompts on).
+      // the firm does not add the same checkpoint payload a second time (E1, 85 of 85 nested-firm prompts).
       const nestedPacketPrompt = composeDeclaredPromptDetailed(authoritativePacketPromptParts(active, false, "worker-handoff", null), "\n");
       const teamResult = await runFirmInvocation({
         carriedContentKeys: nestedPacketPrompt.contentKeys,
@@ -8036,7 +8036,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     try {
       // A global One chat binds no folder: its steps run in the app's agent cwd, which the grant pins like any other
       // workspace (delegated-authority.ts runWorkspace). An absent folder used to refuse the lift even when the chip covered
-      // it (observed in 1.3.105: 8 of 8 lifts of a full-chip step ended live_grant_unavailable).
+      // it (production 1.3.105, /29: 8 of 8 lifts of a full-chip step ended live_grant_unavailable).
       const workspace = p.workspaceBinding ? revalidateInvocationWorkspaceBinding(p.workspaceBinding) : p.workingFolder ?? null;
       if (!p.req.runId) throw new DelegatedAuthorityError("delegated_authority_scope_missing");
       delegatedGrant = mintHostDelegatedGrant({ runId: p.req.runId, ownerChatId: p.chat.id,
@@ -8203,7 +8203,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     // here uses the same packet-local exclusion set, never a refused provider.
     const retried = await runWithRecovery(retryPacket);
     // The retry runs in the same sandbox as the first attempt and can be the one that meets its wall: a step whose first
-    // report was merely incomplete, then crashed Blender's Metal start in the retry (observed in use:
+    // report was merely incomplete, then crashed Blender's Metal start in the retry (production run 2a57d0f7:
     // sandbox death at 04:23:58, chip full, no lift receipt, "execution environment must be recovered") was returned as is.
     // The lift is the room's, never the owner's, so it applies to this result exactly as to the first one.
     if (!retried.ok && retried.accessNeeded && !retried.runtimeFailure && !p.signal?.aborted) {

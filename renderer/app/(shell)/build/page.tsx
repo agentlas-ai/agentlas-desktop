@@ -388,7 +388,7 @@ export default function BuildPage() {
   }, [ko, status, reattaching, startPending]);
 
   // 드롭/파일 인풋/붙여넣기 → 실제 디스크 경로(webUtils), 경로가 없으면(브라우저·붙여넣기) Main이 바이트를 고정한 파일 → 스토어 첨부.
-  // 사진·영상·파일·폴더 모두, 개수·크기 제한 없이(오너). 끝내 못 넣은 것은 이름과 함께 알린다(조용히 빼지 않는다).
+  // 사진·영상·파일·폴더 모두, 개수·크기 제한 없이. 끝내 못 넣은 것은 이름과 함께 알린다(조용히 빼지 않는다).
   const addDroppedFiles = async (files: FileList | File[]) => {
     if (!canEditBuildDraft()) return;
     const revision = uiStartRevision;
@@ -1054,7 +1054,7 @@ export default function BuildPage() {
 
           {/* 실행 중과 실패 직후에는 펼쳐 둔다. 접힌 채로 두면 "작업 중"이라는 글자만
               보이고 그 아래가 비어 있어, 아무 일도 안 일어나는 것처럼 읽힌다
-              (오너 제보). 완료된 빌드만 접어 둔다. */}
+              완료된 빌드만 접어 둔다. */}
           {log.length > 0 && (
             <details
               className="build-card build-log-card"

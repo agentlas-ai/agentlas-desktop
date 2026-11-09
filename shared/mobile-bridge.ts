@@ -5,7 +5,7 @@ import type {OneProviderRemoteErrorCode} from "./one-provider-remote";
 import type { MobileBridgeSpecificRefusalCode } from "./mobile-bridge-refusal";
 import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobileGoalControlMethod, validateMobileGoalControlParams } from "./mobile-goal-control";
 import type { OneSurfaceManifestV1 } from "./one-surface";
-import { supervisorIdentifier, supervisorObject, supervisorText } from "./one-supervisor";
+import { SUPERVISOR_DONE_WHEN_LIMITS, supervisorIdentifier, supervisorObject, supervisorText } from "./one-supervisor";
 import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
 import type { AutomationRunRecord, InvocationCurrentTurnSteerRequest, InvocationCurrentTurnSteerReceipt } from "./types";
 import type { automationRunPresentation } from "./automation-run-presentation";
@@ -116,6 +116,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "team.list",
   "one.org.get",
   "one.supervisor.snapshot",
+  "one.supervisor.receipt",
   "one.supervisor.send",
   "one.supervisor.startWork",
   "one.supervisor.startScience",
@@ -347,7 +348,7 @@ export function validateMobilePushParams(method: string, params: Record<string, 
  */
 export const ONE_SUPERVISOR_PARAM_KEYS = {
   "one.supervisor.send": ["commandId", "text", "runtimeSelection", "permissions", "oneId", "images", "fileGroupId"],
-  "one.supervisor.startWork": ["commandId", "projectId", "text", "permissions", "runtimeSelection", "oneId"],
+  "one.supervisor.startWork": ["commandId", "projectId", "text", "permissions", "runtimeSelection", "oneId", "doneWhen"],
   "one.supervisor.startScience": ["commandId", "projectId", "text", "oneId"],
   "one.supervisor.control": ["commandId", "taskId", "expectedVersion", "action", "text", "oneId"],
   "one.supervisor.stopReply": ["commandId", "runId", "oneId"],
@@ -3892,6 +3893,13 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "science.chat.send":
     case "science.chat.cancel":
       return validateMobileScienceChatParams(method, params);
+    case "one.supervisor.receipt":
+      try {
+        supervisorObject(params, ["oneId", "commandId"]);
+        supervisorIdentifier(params.oneId);
+        supervisorIdentifier(params.commandId);
+        return null;
+      } catch (error) { return error instanceof Error ? error.message : "supervisor_input_invalid"; }
     case "one.supervisor.send":
     case "one.supervisor.startWork":
     case "one.supervisor.startScience":
@@ -3915,6 +3923,11 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         if (method === "one.supervisor.send") {
           const attachmentError = firstError(validateImageAttachments(params.images), optionalString(params, "fileGroupId", 36));
           if (attachmentError) return attachmentError;
+        }
+        if (method === "one.supervisor.startWork" && params.doneWhen !== undefined &&
+            (!Array.isArray(params.doneWhen) || params.doneWhen.length > SUPERVISOR_DONE_WHEN_LIMITS.items ||
+             params.doneWhen.some(item => typeof item !== "string" || !item.trim() || item.length > SUPERVISOR_DONE_WHEN_LIMITS.chars || /\u0000/u.test(item)))) {
+          return "supervisor_done_when_invalid";
         }
         if (params.projectId !== undefined || method === "one.supervisor.startScience") supervisorIdentifier(params.projectId);
         if (params.permissions !== undefined && !["read","write","full"].includes(String(params.permissions))) return "supervisor_permission_invalid";

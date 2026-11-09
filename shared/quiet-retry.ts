@@ -2,7 +2,7 @@
  * Quiet retries for a read, or an idempotent write, that failed for a reason that clears by itself: a store that was busy for a moment,
  * a main process that was restarting, an IPC reply that was lost. The owner never sees these; they see the result.
  *
- * Rule: an internal cause must not show as failed, and anything idempotent is retried instead of being sent back to the
+ * rule an internal cause must not show as failed, and anything idempotent is retried instead of being sent back to the
  * owner. A caller keeps its own honest message for the case where every attempt fails (the app really is gone), and bounds the attempts:
  * the schedule below is the whole budget (about 22 seconds for a read-back, about 4 seconds for a load).
  */

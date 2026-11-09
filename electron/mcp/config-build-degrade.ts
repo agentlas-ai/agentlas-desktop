@@ -1,6 +1,6 @@
 /**
  * What a run does when the app's own tool host is still not ready after the bounded waits of config-build-retry.ts (owner rule
- *no internal harness code reaches the owner; the request completes, or the cause is external).
+ * no internal harness code reaches the owner; the request completes, or the cause is external).
  *
  * A plain conversation turn (no Goal tools, no team, no automation, no required tool, not One, not an app/Science/Work-session run)
  * depends on no tool: it runs as an ordinary turn without the tool table and the owner is told once. Every run whose protocol needs

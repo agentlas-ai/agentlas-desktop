@@ -214,7 +214,7 @@ function operations(): Operation[] {
   return [...HOST_OPERATIONS, ...fromCatalog];
 }
 
-// Any letter or digit is part of a word: an ASCII-only split cut "résumé" into "r" and "sum", which then matched "summary" .
+// Any letter or digit is part of a word: an ASCII-only split cut "résumé" into "r" and "sum", which then matched "summary".
 const words = (value: string) => value
   .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
 
@@ -339,7 +339,7 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
   const hangul = /[\u3131-\u318e\uac00-\ud7a3]/u.test(query);
   const meaningRanked = query && !exact && hangul && input.meaning !== false ? rankedByMeaningForHangul(query, matched) : null;
   if (meaningRanked?.length) {
-    // The owner rule's map and hint still come with it (the model searches in English).
+    // The rule's map and hint still come with it (the model searches in English).
     const offset = typeof input.offset === "number" && Number.isInteger(input.offset) ? Math.min(Math.max(input.offset, 0), 10_000) : 0;
     return { science_installed: science, total: meaningRanked.length, offset, next_offset: offset + limit < meaningRanked.length ? offset + limit : null,
       areas: areaList(), hint: "operation names and docs are English: search with English words; these are ranked by meaning",

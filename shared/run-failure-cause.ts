@@ -91,7 +91,7 @@ export function undispatchedInternalFailure(input: { code?: unknown; runtimeFail
   if (OWNER_ACTION_FAILURE_CODES.has(code) || HOST_FAILURE_CODE_CLASSES.has(code)) return false;
   // The start path excludes the same refusals the owner acts on (transient-send-refusal.ts startRefusalNeedsOwner: a cost cap, a stopped Goal,
   // a settings change, an attachment limit), each with a sentence of its own. A run that fails after admission with one of them is that
-  // refusal, not the app's own state: it must not be retried 12 times behind "the app will try again" (regression review C9).
+  // refusal, not the app's own state: it must not be retried 12 times behind "the app will try again".
   // The app-side families (Goal custody's goal_episode_admission_*, a ledger or channel state) share the `goal_` prefix or none: they stay internal.
   return !(startRefusalNeedsOwner(code) && appSideRunFailure(code) === null);
 }
@@ -100,7 +100,7 @@ export function undispatchedInternalFailure(input: { code?: unknown; runtimeFail
  * A settled run the owner must not be told "failed" about: their own Stop (cancelled), a steering interrupt, a host stop
  * (app closing, update restart, Goal paused/deleted), or a failure whose code is the app's own custody/channel state.
  * Those either continue by themselves or were the owner's own act; an OS toast "Run failed" for them is the app calling
- * its own state or the owner's own click a failure (observed in use: Stop, new direction and update restart all toasted).
+ * its own state or the owner's own click a failure (production Stop, new direction and update restart all toasted).
  * A real provider/tool failure, or a failure code this file does not know, still reads as a failure (conservative default).
  */
 export function settledRunIsNotAFailure(

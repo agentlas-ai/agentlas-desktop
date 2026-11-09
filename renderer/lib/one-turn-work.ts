@@ -366,7 +366,7 @@ export function isQuietHostNote(cell: OneWorkCell): cell is Extract<OneWorkCell,
 export function isOneOrchestratorGroup(group: Pick<OneWorkerWorkGroup, "agentId" | "name" | "lifecycle">): boolean {
   // The built-in orchestrator is the main agent of Work/Finance chats the way One is of One chats. A group that carries no
   // name and no delegation row is that main agent's own tool calls, not a worker: the owner saw "Unnamed worker ·
-  // Execution model unconfirmed" on every Finance turn .
+  // Execution model unconfirmed" on every Finance turn.
   return group.agentId === BUILTIN_ONE_AGENT_ID
     || group.agentId === BUILTIN_ORCHESTRATOR_AGENT_ID
     || (!group.name?.trim() && !group.lifecycle);

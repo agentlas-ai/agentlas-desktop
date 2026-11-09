@@ -329,7 +329,7 @@ export function bindAutomationRunStop(automationId: string, controller: AbortCon
   let prior = controllers.get(automationId);
   const identity = owner && owners.get(owner);
   // A parked browser-login wait keeps its Stop handle until the owner signs in. Every scheduled occurrence in that time used to
-  // fail here with automation_stop_handle_already_bound (observed in use: 10 consecutive 15-minute runs of one automation,
+  // fail here with automation_stop_handle_already_bound (production 10 consecutive 15-minute runs of one automation,
   // each recorded as an error and announced) although the graph kernel is built for the newer run (login-dependent nodes report
   // browser_login_required, other branches continue) and the wait's subscription already releases itself when a newer run took
   // the slot. Drop only the registry relation: the wait stays durable, and it is not resumed if a newer run replaced it

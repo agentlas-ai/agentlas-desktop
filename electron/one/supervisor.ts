@@ -123,7 +123,7 @@ function desktopTaskProjection(task:ReturnType<typeof listCanonicalTasks>[number
     const receipt=invocationService.latestReceipt(chat.id);
     const goalId=chat.goalId ?? supervisorStoppedGoalForTask(getDb(),task.id,receipt?.runId ?? null);
     const goal=goalId ? getLongRunByGoalId(goalId) : null;
-    // A Work turn that ended while sessions it delegated still run is not finished work (observed in use: the card said
+    // A Work turn that ended while sessions it delegated still run is not finished work (production the card said
     // "Work · Completed" while Sweet Designer was still running under it, and One told the owner the work had stopped at intake).
     const delegatedOpen=!goal && receipt?.status==="completed" && delegatedWorkPending(chat.id,receipt.runId);
     const state=delegatedOpen ? "running" : goal?.status ?? receipt?.status ?? task.status;

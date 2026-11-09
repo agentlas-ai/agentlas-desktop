@@ -4,7 +4,7 @@ import { formatRuntimeQuotaReset } from "./runtime-quota";
 import type { InvocationRuntimeFailure } from "./types";
 
 /**
- * One typed answer to "may the owner be told that this turn failed?" (owner rule, absolute).
+ * One typed answer to "may the owner be told that this turn failed?" (rule absolute).
  *
  * An owner turn that ends in failure is either
  *  - external: the cause is outside the app and the owner can act on it or only wait (network down, the model provider's outage,
@@ -43,15 +43,16 @@ export const EXTERNAL_FAILURE_TABLE: readonly ExternalFailureEntry[] = Object.fr
     "codex_http_connection_failed", "codex_response_stream_connection_failed",
   ]),
   ...entry("provider_outage", "The model provider could not take the request (outage, overload, capacity).",
-    [...PROVIDER_UNAVAILABLE_CODES, TRANSIENT_HOST_ENDED_SILENCE_CODE, "serving_unavailable", "http_502", "http_503", "http_504", "http_529"]),
+    [...PROVIDER_UNAVAILABLE_CODES, TRANSIENT_HOST_ENDED_SILENCE_CODE, "serving_unavailable", "http_502", "http_503", "http_504", "http_529", "kimi_turn_failed"]),
   { match: "pattern", code: "http_5\\d\\d", cause: "provider_outage", reason: "Any other 5xx answer of the provider or of Agentlas serving." },
   ...entry("provider_limit", "A usage, rate, credit or retry-window limit of the provider that lifts with time.", [
-    "http_429", "rate_limit", "rate_limited", "quota", "quota_exceeded", "quota_exhausted", "insufficient_credits",
+    "http_429", "rate_limit", "rate_limited", "serving_rate_limited", "quota", "quota_exceeded", "quota_exhausted", "insufficient_credits",
     "subscription_credits_disabled", "usage_limit_reached", "runtime_retry_not_before", "runtime_retry_budget_exhausted",
   ]),
   // Not waited on (WAITABLE_EXTERNAL_CAUSES): the same request fails the same way at every check.
   ...entry("fixed_limit", "A limit that waiting does not lift: the request does not fit the model's context window, or a budget the owner set.", [
     "model_context_capacity_exceeded", "codex_context_window_exceeded", "local_context_limit_exceeded", "prompt_too_long", "budget_cost_exhausted", "budget_cost_unavailable",
+    "serving_provider_refused",
   ]),
   ...entry("provider_auth", "The provider (or the signed-in browser) needs the owner to sign in.", [
     "http_401", "auth", "auth_expired", "auth_required", "auth-required", "login_required", "login-required", "not_signed_in",
@@ -135,8 +136,11 @@ export function classifyOwnerFailureDetailed(failure: OwnerFailureFacts): OwnerF
   const code = typeof failure.code === "string" ? failure.code : null;
   const runtimeFailure = failure.runtimeFailure ?? null;
   if (runtimeFailure) {
-    // The one list of transient causes outside the app (the provider at capacity, a lost stream, a silent stream the host ended).
-    if (isTransientExternalFailure(runtimeFailure)) return { klass: "external", cause: "provider_outage", decidedBy: "runtimeFailure" };
+    // The one list of transient causes outside the app (the provider at capacity, a lost stream, a silent stream the host ended). Its
+    // cause is the table's when the table names one (a connection failure is "network", woken by the connection coming back).
+    if (isTransientExternalFailure(runtimeFailure)) {
+      return { klass: "external", cause: externalFailureEntry(runtimeFailure.providerCode)?.cause ?? "provider_outage", decidedBy: "runtimeFailure" };
+    }
     const own = causeOfRuntimeFailure(runtimeFailure);
     if (own) return { klass: "external", cause: own, decidedBy: "runtimeFailure" };
     const behind = runtimeFailure.cause && typeof runtimeFailure.cause === "object"

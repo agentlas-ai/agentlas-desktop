@@ -43,7 +43,7 @@ export function isNonFailureInvocationStop(receipt: Pick<InvocationRunReceipt, "
 
 /**
  * The OWNER ended this run on purpose: their Stop (cancelled), a newer direction steered in over it, or a Goal they paused or deleted.
- * A message whose run ended so is never started again by the send queue (regression review C7: a Stop pressed before the
+ * A message whose run ended so is never started again by the send queue (regression review C7, a Stop pressed before the
  * runner was entered left only not-dispatched attempt rows, and the queue's older "nothing was sent, start it again" rule restarted the
  * message once the owner had said stop). An app close or an update restart is not the owner's choice about the message and still lets
  * it resume.

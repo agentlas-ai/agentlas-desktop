@@ -35,3 +35,21 @@ export function isRuntimeCredentialUnavailable(
 ): boolean {
   return runtime?.credentialAccess?.status === "unavailable";
 }
+
+/** A current local inventory can prove an explicit model absent; CLI catalogs cannot.
+ * Credential availability remains the caller's responsibility. */
+export function runtimeModelUnavailableByInventory(
+  runtime: { kind: string; availableModels?: readonly string[]; modelDiscovery?: { status: string; stale?: boolean } | null },
+  selectedModel: string | null | undefined,
+  ollamaModelListIncludes: (models: readonly string[], requested: string) => boolean,
+): boolean {
+  const model = selectedModel?.trim();
+  if (!model) return false;
+  const discovery = runtime.modelDiscovery;
+  if (discovery && (discovery.status !== "ok" || discovery.stale)) return false;
+  const authoritative = new Set(["ollama", "lmstudio", "mlx", "agentlas-local"]).has(runtime.kind);
+  return authoritative && (runtime.availableModels?.length ?? 0) > 0
+    && !(runtime.kind === "ollama"
+      ? ollamaModelListIncludes(runtime.availableModels!, model)
+      : runtime.availableModels!.includes(model));
+}

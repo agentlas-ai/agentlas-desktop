@@ -713,7 +713,7 @@ export async function fetchWithHubSession(
 }
 
 /**
- * A session ended 30 days after it was issued, however much it was used. A Desktop lost its session mid-work:
+ * A session ended 30 days after it was issued, however much it was used. The owner's Desktop lost its session mid-work:
  * the stored cookie was gone and Hope's supervisor calls were refused until a new sign-in. The server reissues a session in use with
  * less than 20 days left (web src/lib/auth/session.ts), so a running app asks well before the end. A server that does not reissue
  * answers with no cookie, and nothing changes.

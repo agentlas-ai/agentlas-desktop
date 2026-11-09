@@ -390,7 +390,7 @@ function withRevisionOutcomes(agentId: string, revisions: AgentWorkspaceRevision
   });
 }
 /**
- * EXPERIENCE: an applied learning keeps when it
+ * EXPERIENCE (harness2 selection._distil, docs/-agent-learning-lifecycle §11.2): an applied learning keeps when it
  * applies (the card's situation), what changed (the host's file summary), at most one lesson (the card's behaviour after the
  * change) and the runs it came from. Without a run to cite there is no record: an uncited lesson would be an invented one.
  * No effect is written: approval is not evidence the change helped, and the comparison is read from runs each time.
@@ -557,12 +557,21 @@ export function readyLessonsFor(agentId: string): Array<{ groupId: string; memor
     .map(([groupId, members]) => ({ groupId, memoryIds: members.map(member => member.id), runs: members[0].promotion?.runs ?? 0 }))
     .sort((a, b) => b.runs - a.runs);
 }
+/**
+ * The lessons a learning change was made from no longer match (retired, rescoped, or edited since): applying it is refused the same
+ * way (verifySources), so it can never apply. Only that typed answer counts; a failed read of the memory store is not "retired".
+ */
+function sourcesRetired(proposal: StoredProposal): boolean {
+  try { verifySources(proposal); return false; }
+  catch (error) { return error instanceof AgentWorkspaceError && ["memory_changed", "memory_ineligible", "memory_private"].includes(error.code); }
+}
 /** True while a learning change waits for the owner, so the proposer does not stack another on top of it. */
 export function hasOpenLearningProposal(agentId: string): boolean {
   const open = listProposals(agentId).filter(proposal => proposal.status === "review_ready" && proposal.memoryEntryIds.length > 0);
   if (!open.length) return false;
-  // A learning change whose base the agent's files have since moved past can never be applied; the diff view marks it stale the same
-  // way. Left "open", it held that agent's learning back until the owner happened to open it (three agents, 8-18 days).
+  // A learning change whose base the agent's files have since moved past, or whose lessons were retired or changed, can never be applied;
+  // the diff view marks it stale the same way. Left "open", it held that agent's learning back until the owner happened to open it
+  // (three agents, 8-18 days; the Blender agent's only source lesson was superseded and six newer lessons waited behind it).
   // A change that still applies keeps waiting for the owner's review. One snapshot per agent, every 30 minutes while idle.
   return withLock(agentId, () => {
     const digest = snapshotAgentWorkspace(rootFor(agentId).root).treeDigest;
@@ -570,7 +579,7 @@ export function hasOpenLearningProposal(agentId: string): boolean {
     for (const listed of open) {
       const proposal = getProposal(listed.id);
       if (proposal.status !== "review_ready") continue;
-      if (proposal.baseTreeDigest !== digest) { proposal.status = "stale"; saveProposal(proposal); } else held = true;
+      if (proposal.baseTreeDigest !== digest || sourcesRetired(proposal)) { proposal.status = "stale"; saveProposal(proposal); } else held = true;
     }
     return held;
   });

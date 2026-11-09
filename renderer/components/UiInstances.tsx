@@ -214,7 +214,7 @@ function UiInstanceCard({ instance, locale, part }: { instance: UiInstanceView; 
     </section>
   );
   // What the model read to answer a Finance question (ticker candidates, news, filing and price rows, an empty or failed read)
-  // is not a result the owner asked for: it folds into one closed line, as the phone leaves it out .
+  // is not a result the owner asked for: it folds into one closed line, as the phone leaves it out.
   const readRows = finance ? financeReadSourceRows(finance) : null;
   if (readRows === null) return card;
   return (

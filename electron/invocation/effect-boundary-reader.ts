@@ -35,7 +35,7 @@ const terminalKinds = new Set(["invoke_completed", "invoke_waiting", "invoke_fai
  * delegated_authority, workload_allocation, worker_capability_preparation, firm_plan_direct_execution, firm_verification_repair_round,
  * team_step_settlement, runtime_usage_unmeasured) is a note a team member's chat or the curator wrote under the PARENT run id with
  * the member's own chat id: it is not evidence this reader looks at and says nothing about the root chat's effects.
- * Observed in use: those 9 kinds in 48 runs; no kind this reader consumes ever carried a foreign chat id.
+ * a real installation -29: those 9 kinds in 48 runs; no kind this reader consumes ever carried a foreign chat id.
  */
 const effectEvidenceKinds = new Set([...terminalKinds, "invoke_started", "runtime_effect_boundary", "mcp_tool-use",
   "runtime_adapter_effect_started", "runtime_adapter_effect_completed", "runtime_science_schema_rejection_verified",
@@ -61,7 +61,7 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     }
     // Effect evidence of another chat under this run id is a binding violation; a team member's own bookkeeping rows are not
     // this chat's ledger and are read past, never turned into an unreadable boundary (every wait, verification and checkpoint
-    // of a team turn used to fail on exactly this: observed in use, 10 of 102 invocations of one room).
+    // of a team turn used to fail on exactly this: a real installation 10 of 102 Yotube-room invocations).
     const foreign = ledger.filter((row) => row.chat_id !== null && row.chat_id !== input.expectedChatId);
     if (foreign.some((row) => effectEvidenceKinds.has(row.kind))) throw new Error("runtime_effect_boundary_event_binding_mismatch");
     const rows = foreign.length ? ledger.filter((row) => row.chat_id === null || row.chat_id === input.expectedChatId) : ledger;

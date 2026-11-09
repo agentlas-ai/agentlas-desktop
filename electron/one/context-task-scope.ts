@@ -4,7 +4,7 @@
  * A Work, follow-up or chat-send request carries a canonical Task. A reply turn in One's own conversation has none: the supervisor
  * binds it as `one:<chatId>` (supervisor-os-execution.ts, one-vault-runtime.ts, OneSecurityFeatures.tsx). This check knew only
  * canonical Tasks, so every screen observation and action of a reply turn failed with a code-less error that the computer-use
- * server reported as `one-os-authority-unavailable` (observed in use: all 9 of Hope's calls from 12:47 to 13:35 UTC, while
+ * server reported as `one-os-authority-unavailable` (production all 9 of Hope's calls from 12:47 to 13:35 UTC, while
  * the owner was asking Hope to reopen a browser it could not see). The failures are typed now, so the real reason reaches the run.
  */
 import type { OneContextScope } from "../../shared/one-context";

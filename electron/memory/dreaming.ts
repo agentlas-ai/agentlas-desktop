@@ -299,7 +299,7 @@ async function tick(): Promise<void> {
     });
   } catch (err) {
     // The owner edited or forgot a memory entry while the pass ran: that is the owner's own action, not a failure. The pass
-    // ends here and the next tick starts it again against the new store (observed in use 07:23: memory_source_custody_changed).
+    // ends here and the next tick starts it again against the new store (production memory_source_custody_changed).
     if (isCustodyMovedByOwner(err)) { console.info("[dreaming] pass yielded: memory changed while it ran; it starts again on its own"); return; }
     // A pass that throws outside one agent's consolidation backs off too, with its machine code only.
     recordDreamingFailure(errorFailureCause(err), "pass");

@@ -299,11 +299,11 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
   if (req.model && req.model !== "auto") args.push("--model", req.model);
   args.push(promptFor(req));
   const cwd = req.cwd ?? agentRunCwd();
-  dispatch.started = true;
-
   return new Promise<RunnerResult>((resolve, reject) => {
     let child: ReturnType<typeof spawnCli>;
     try {
+      if (req.signal?.aborted) throw abortReasonError(req);
+      dispatch.started = true;
       child = spawnCli(bin, args, {
         stdio: ["ignore", "pipe", "pipe"],
         cwd,
@@ -331,6 +331,7 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
     });
     const onAbort = () => killCliTree(child);
     req.signal?.addEventListener("abort", onAbort, { once: true });
+    if (req.signal?.aborted) onAbort();
     let buffer = "";
     let text = "";
     let stderr = "";

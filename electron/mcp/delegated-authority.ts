@@ -32,7 +32,7 @@ function workspacePath(value: string): string {
 /** The workspace a run executes in. A global One chat has no bound folder; every runner then starts in the app's agent cwd
  * (`req.cwd ?? agentRunCwd()`), so that folder IS the step's workspace and a grant pins to it like to any other. A missing
  * workspace used to be a refusal on both sides (mint: delegated_authority_scope_missing, check: workspace_mismatch), which
- * made a full-chip step of a global chat impossible to lift (observed in 1.3.105: 8 of 8 lifts refused). */
+ * made a full-chip step of a global chat impossible to lift (production 1.3.105, /29: 8 of 8 lifts refused). */
 function runWorkspace(value: string | null | undefined): string {
   return workspacePath(value || agentRunCwd());
 }

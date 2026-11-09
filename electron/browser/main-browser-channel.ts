@@ -33,7 +33,7 @@ export const NATIVE_BROWSER_HOST_UNAVAILABLE = "native-browser-host-unavailable"
 /**
  * The broker is a loopback server that closes an idle connection after 5 s. Node's shared agent keeps connections alive and reuses
  * them, so a request sent just as the server closed its end died with ECONNRESET although nothing was wrong with Main or the grant
- * (observed in use-13:23Z, Hope: browser_resize / browser_snapshot ECONNRESET, 4 times in 14 days). A loopback connection
+ * (production -13:23Z, Hope: browser_resize / browser_snapshot ECONNRESET, 4 times in 14 days). A loopback connection
  * costs nothing: every broker request opens its own, so there is no stale socket to race.
  */
 const brokerAgent = new http.Agent({ keepAlive: false });
@@ -257,7 +257,7 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
     if (capture && capture.sequence > screenshotSequence && input.onScreenshot) {
       screenshotSequence = capture.sequence;
       // Publishing a capture to the run's record is not the browser's authority. A capture that could not be published used to
-      // reject this update, and refresh then released the whole grant: observed in use, a delegated Work child's first
+      // reject this update, and refresh then released the whole grant: production a delegated Work child's first
       // screenshot killed its browser mid-step and the ladder told the owner "the in-app browser window closed". Main's relay
       // keeps its grant in the same case; both hosts now only log it.
       try {
@@ -283,7 +283,7 @@ export async function createCanonicalNativeBrowserGrant(input: CanonicalNativeBr
         // Only an answer that says the grant is over (Main no longer has it, or the channel itself is gone) ends it here. A reset
         // connection, a slow Main or a snapshot that did not parse is one failed look at it: the run keeps its browser and the next
         // look reads it again. Releasing here sent "release" to Main, which closed the relay under a run that was still using it
-        // (observed in useZ: every later browser call ECONNREFUSED, the ladder "reestablish: grant-not-current").
+        // (production Z: every later browser call ECONNREFUSED, the ladder "reestablish: grant-not-current").
         if (grantEnded(error)) release();
         throw error;
       }).finally(() => {

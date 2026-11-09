@@ -719,7 +719,7 @@ function recoverStaleAutomationRunsInDb(db: Database.Database, now: Date): numbe
             ).run(now.toISOString(), now.toISOString(), event.id);
           } else {
             // The host died while this occurrence ran and the checkpoint cannot prove the step in flight only read. decision
-            //: an unknown outcome never stops to ask (this used to park the event for the owner). The occurrence is
+            // an unknown outcome never stops to ask (this used to park the event for the owner). The occurrence is
             // delivered again and resumes where it was; the dead run counts as one delivery with an unknown outcome and the third
             // closes it by itself (store/unconfirmed-occurrence.ts).
             settleDeadHostTriggerEvent(db, {

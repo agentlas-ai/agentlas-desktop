@@ -47,7 +47,7 @@ export function withMemorySourceScope<T>(metadata: Metadata, action: () => T, op
   if (!existing && !metadata.runId && !metadata.chatId) return action();
   // An owner-turn root (one invocation = one run) that starts inside ANOTHER run's scope (a Goal continuation, a teammate session or a
   // verification run started from the previous run's completion) is a new original source. Inheriting the outer token bound its own
-  // curation to the outer run id and refused it with memory_source_run_changed (observed in use: 7 refused curations and
+  // curation to the outer run id and refused it with memory_source_run_changed (production /26: 7 refused curations and
   // terminal receipts; the failure receipt was refused for the same reason, so nothing recorded why). Nested phases of the same
   // run, and scopes without a root flag, keep inheriting exactly as before.
   const outer = existing ? states.get(existing)?.metadata.runId : undefined;
@@ -87,7 +87,7 @@ export function withMemorySourceRunner(runner: Runner): Runner {
     // A scope may wait for admission/slots before actual inference. Rotation
     // during that wait must not expose the original source to the new owner.
     if (memorySourceSnapshot(token)) {
-      //: this check precedes the runner call, so a refusal sent nothing: typed "not-dispatched" (its own code kept).
+      // this check precedes the runner call, so a refusal sent nothing: typed "not-dispatched" (its own code kept).
       // Untyped, mcp/client.ts read it as a dispatched turn with no receipt and replayed it once.
       try { assertMemorySourceCustody(token); }
       catch (error) { throw (require("../runtime/runner") as typeof import("../runtime/runner")).markRefusedBeforeDispatch(error); }
@@ -102,7 +102,7 @@ export function withMemorySourceRunner(runner: Runner): Runner {
         // model call ran. The reply is already in hand and discarding it undoes nothing; the fence only has to keep THIS turn
         // from recording what it learned, and it does: the enclosing host scope still holds the original token, so every later
         // memory write of the turn is refused by its own assertMemorySourceCustody, and a run that began before the forget has
-        // its summary dropped (revocations.ts memoryRunPredatesAnyForget). Observed in use: a Goal wake's planner
+        // its summary dropped (revocations.ts memoryRunPredatesAnyForget). Production a Goal wake's planner
         // call ended "claude-code runtime exit: memory_source_custody_changed" and the whole turn failed. An owner-namespace
         // change (account rotation), a token minted only for this call, and every other custody error still throw.
         if (!enclosing || !custodyMovedByForgetOnly(error, token)) throw error;

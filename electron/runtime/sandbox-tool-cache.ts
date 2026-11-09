@@ -67,7 +67,7 @@ export function claudeSandboxEnvFile(dir: string, personalEnvFile: string | unde
  * names the person's real per-user temp folder and every tool that needs a temp file is refused there. Measured offline
  * against the real codex seatbelt (r4-step-sandbox/measure-tmpdir.cjs): `mktemp`, Node's fs.mkdtemp(os.tmpdir()) and
  * `ffmpeg ... -y "$TMPDIR/frame.jpg"` fail with "Operation not permitted"; Blender prints "Could not generate a temp file
- * name" before it dies. Observed in use: 17 tool failures of this shape in the owner store.
+ * name" before it dies. Production -30: 17 tool failures of this shape a real installation.
  *
  * The fix grants one product-owned root (never /tmp, never the real TMPDIR, never a sibling of the project) and points the
  * shell's TMPDIR/TMP/TEMP at a folder inside it. The folder is scoped to the chat, not to a single run: the shell

@@ -258,7 +258,7 @@ export async function buildRunnerEnv(
   // (ElevenLabs, Runway, OpenAI audio, ...) is not carried into every run because it exists: a tool the model selects for
   // the task gets its key through its own server env (mcp-config.ts) or through the host (harness keyed-provider reads it
   // in Main), and a missing or misnamed key is asked about on the run-key sheet at that moment (run-key-elicitation.ts).
-  // "tool use picks the MCP for the task; it is not on by default".
+  // Owner "tool use picks the MCP for the task; it is not on by default".
   const declaredKeys = new Set(vaultKeys);
 
   for (const key of vaultKeys) {
@@ -298,7 +298,7 @@ export async function buildRunnerEnv(
       ...wanted,
       ...MCP_TOOL_CATALOG.flatMap((entry) => entry.envRequirements.map((req) => req.key)),
     ];
-    // a declared key saved under a plainly misnamed name (ELEVENLABS_1 for ELEVENLABS_API_KEY) reaches the
+    // Owner a declared key saved under a plainly misnamed name (ELEVENLABS_1 for ELEVENLABS_API_KEY) reaches the
     // declaring agent under the name it reads. The vault entry keeps its own name. A runtime login key is never aliased:
     // a CLI that finds one can switch to metered API billing.
     for (const suggestion of planEnvKeyRenames(storedNames, wanted, knownRead)) {

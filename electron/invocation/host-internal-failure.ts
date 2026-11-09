@@ -6,7 +6,7 @@
  *
  * Why this exists: invocationFailure (mcp/client.ts) used to put an unexpected exception's own message in the run's error
  * event ("Cannot read properties of undefined (reading 'x')", "SQLITE_READONLY: attempt to write a readonly database",
- * "ENOENT: no such file or directory, open '<user path>'"). The chat stream drew it as "Reason: <message>" and the phone
+ * "ENOENT: no such file or directory, open '/Users/...'"). The chat stream drew it as "Reason: <message>" and the phone
  * received it the same way: system text the owner can do nothing with, with a path in it. The cause stays in the run record
  * (an invoke_error_diagnostic row, bounded and redacted); what the owner reads is one plain sentence.
  *

@@ -471,7 +471,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     const scratch = path.dirname(file);
     // The PATH the CLI runtimes get (runtime/exec.ts withCliPath): an app opened from the Dock inherits launchd's minimal PATH
     // (/usr/bin:/bin:/usr/sbin:/sbin), so a step that runs `ffmpeg` or `ffprobe` died with FileNotFoundError although
-    // /opt/homebrew/bin has them (observed on one machine: both were installed). The credential and startup-hook
+    // /opt/homebrew/bin has them (a real installation, both installed since 09-29). The credential and startup-hook
     // scrub of sandboxChildEnvironment still applies after the PATH is built.
     const childEnv = sandboxChildEnvironment(withCliPath(process.env), scratch);
     const env = input.lang === "python"

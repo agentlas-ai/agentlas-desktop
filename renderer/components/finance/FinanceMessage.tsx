@@ -162,7 +162,7 @@ const codeMessages: Record<string, [string, string]> = {
   finance_cloud_watchlist_in_use: ["클라우드 목록에 없는 자산을 이 기기의 보유 내역이나 대시보드가 사용 중이라 교체하지 않았습니다. 그 자산을 클라우드에 올리거나 사용을 먼저 해제하세요.", "The cloud list lacks assets this device's holdings or dashboards still use, so nothing was replaced. Upload those assets first or stop using them."],
   finance_feed_watchlist_required: ["관심 종목을 추가하면 이 피드를 볼 수 있습니다.", "Add assets to your watchlist to see this feed."],
   finance_earnings_no_upcoming_dates: ["예정된 실적 발표일이 아직 없습니다.", "No upcoming earnings dates are listed."],
-  finance_compute_history_too_short: ["가격 이력이 31개 거래일보다 짧아 계산하지 못했습니다. 이력이 더 긴 자산이나 더 긴 기간을 선택하세요.", "The price history is shorter than 31 trading days, so it could not be calculated. Choose an asset with a longer history or a longer period."],
+  finance_compute_history_too_short: ["자산별 가격 이력 또는 자산 간 공통 관측일이 31개보다 적어 계산하지 못했습니다. 요청에 맞는 경우 더 긴 기간이나 다른 자산을 선택하세요.", "An asset's price history or the dates shared by the assets have fewer than 31 observations. If appropriate for your request, choose a longer period or different assets."],
   finance_compute_currency_unknown: ["자산의 통화를 확인하지 못해 계산하지 않았습니다. 통화가 확인된 자산을 선택하세요.", "The asset's currency is unknown, so nothing was calculated. Choose an asset with a confirmed currency."],
   finance_compute_history_unavailable: ["가격 이력을 받지 못해 계산하지 못했습니다. 잠시 후 다시 시도하거나 다른 자산을 선택하세요.", "No price history was available, so it couldn't be calculated. Try again shortly or choose another asset."],
   finance_compute_period_invalid: ["지원하지 않는 기간입니다. 1M, 3M, 1Y, 5Y, all 중에서 고르세요.", "That period is not supported. Choose 1M, 3M, 1Y, 5Y or all."],

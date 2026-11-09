@@ -65,10 +65,14 @@ export async function readMobileBridgeHistoryPage(
   });
   // One read loads a chat's newest MOBILE_CARD_WINDOW cards. A window holding more leaves everything older than its 16th-newest card for the
   // next page (rows and cards alike), so no card is skipped between pages.
-  const cards = inRange.filter(isMobileCardInstance).sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
-  const floor = cards.length > MOBILE_CARD_WINDOW ? cards[cards.length - MOBILE_CARD_WINDOW].createdAt : undefined;
-  const stored = floor ? page.messages.filter(message => message.createdAt >= floor) : page.messages;
-  const inline = await mergeMobileInlineUiTranscript(chatId, stored, floor ? inRange.filter(instance => instance.createdAt >= floor) : inRange);
+  // Use the same (time, UI id) order as the cursor below, including when many cards share one millisecond.
+  // Stored rows at that time precede every UI row, so they belong to the next (older) page.
+  const cards = inRange.filter(isMobileCardInstance).sort((a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1
+    : a.instanceId < b.instanceId ? -1 : a.instanceId > b.instanceId ? 1 : 0);
+  const floor = cards.length > MOBILE_CARD_WINDOW ? cards[cards.length - MOBILE_CARD_WINDOW] : undefined;
+  const stored = floor ? page.messages.filter(message => message.createdAt > floor.createdAt) : page.messages;
+  const inline = await mergeMobileInlineUiTranscript(chatId, stored, floor ? inRange.filter(instance => instance.createdAt > floor.createdAt
+    || (instance.createdAt === floor.createdAt && instance.instanceId >= floor.instanceId)) : inRange);
   const storeIndex = new Map(stored.map((message, index) => [message.id, index]));
   inline.history.sort((left, right) => {
     if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? -1 : 1;

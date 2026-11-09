@@ -1353,7 +1353,7 @@ function registerRendererProtocol(): void {
       }
       if (url.hostname === "chat-attachment") {
         const id = url.pathname.replace(/^\//, "");
-        // media-carousel: ?w=<px> is a transcript thumbnail (a picture resized, a video's first frame), and a video is
+        // media-carousel ?w=<px> is a transcript thumbnail (a picture resized, a video's first frame), and a video is
         // served by byte range so it plays and seeks (electron/media/chat-attachment-response.ts).
         return serveChatAttachmentRequest(id, url.searchParams.get("w"), request.headers.get("range"), readChatMessageAttachment);
       }

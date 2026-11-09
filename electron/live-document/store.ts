@@ -288,7 +288,7 @@ export async function applyLiveDocument(input: { sessionId: string; chatId?: str
 /*
  * An insert that names an `after` id this document does not have goes to the end instead of failing.
  *
- * observed in use (hmg deck, 8 parallel document.apply add_slide calls): the model could not know the id the host gives a
+ * Production (hmg deck, 8 parallel document.apply add_slide calls): the model could not know the id the host gives a
  * slide the previous call is still creating, so it wrote the ids it expected (s2 ... s8); 7 of the 8 calls were refused
  * target_unknown "after s2" and the deck stood at 2 slides until a read and a second round. The intent of an insert after an
  * element that does not exist (yet) is the next place in the sequence, which for calls that build a document in order is the end.
@@ -341,7 +341,11 @@ export async function saveLiveDocumentReportingWrite(input: { sessionId: string;
     if (input.chatId !== undefined && meta.chatId !== input.chatId) return { ok: false, reason: "session_not_in_this_chat" };
     const revision = state.entries.length;
     let onDisk: Buffer | null = null;
-    try { onDisk = fs.readFileSync(meta.path); } catch { /* deleted: writing recreates it */ }
+    try { onDisk = fs.readFileSync(meta.path); } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") return { ok: false, reason: "save_failed", detail: code || "target_read_failed" };
+      // A deleted target may be recreated; other read failures do not establish absence.
+    }
     if (onDisk && sha256(onDisk) !== meta.savedSha256) return { ok: false, reason: "file_changed_on_disk", detail: "the file was changed outside this session since it was opened or last saved" };
     if (revision === meta.savedRevision && onDisk) return { ok: true, revision, sha256: meta.savedSha256, path: meta.path, written: false };
     const codec = LIVE_DOCUMENT_CODECS[meta.format];

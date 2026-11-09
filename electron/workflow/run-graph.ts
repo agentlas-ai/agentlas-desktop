@@ -357,7 +357,7 @@ export interface RunGraphResult {
   /**
    * One plain line for each step the run skipped for an internal reason (an unfinished step that does nothing, a connection that does not
    * say true or false, a check whose subject was never produced). The scheduler writes them into the automation's run history; the run keeps
-   * its result and nothing is asked or notified (Decided).
+   * its result and nothing is asked or notified (decided).
    */
   stepNotes?: string[];
   /** 시뮬레이션 실행이었는가. 결과를 실전 결과로 오해하지 않도록 항상 함께 전달한다. */
@@ -373,7 +373,7 @@ export interface RunGraphResult {
    * safely, already returned the same output with the same failing items, or used their rework budget.
    * Schedulers and trigger outboxes do not retry it automatically (production 2026-10-16: three resumes
    * re-judged one unchanged output). Typed; never derived from prose.
-   * A step the host died in the middle of is not one of these (decided): it runs again, see runGraph.
+   * A step the host died in the middle of is not one of these: it runs again, see runGraph.
    */
   automaticRetry?: { allowed: false; reasonCode: GraphRetryStopReason; nodeId: string; fingerprint: string | null };
 }
@@ -1145,8 +1145,8 @@ export function reconcileReadOnlyInterruptedAgentNodes(
 
 // ── A run whose host died mid-step (automation_run_interrupted, store/db.ts recovery) ────────────
 /*
- * Decision (a daily upload): when the app dies mid-run the occurrence is interrupted and the
- * owner is told. A later decision replaced the second half: the resume used to hold a step that may already
+ * decision (YouTube daily upload): when the app dies mid-run the occurrence is interrupted and the
+ * owner is told. decision replaced the second half: the resume used to hold a step that may already
  * have acted outside (declared mutation, a non-read receipt, a tool request that never reported a result) until the
  * owner chose [Rerun from this node] or [Skip]; an unknown outcome never stops to ask, and a duplicate is accepted.
  * Every interrupted step runs again on the resume. A step proven replay-safe runs as it was; any other AI step is told
@@ -2154,7 +2154,7 @@ const MAX_STEP_NOTE_LINES = 5;
 
 /**
  * A repair that spends a model call on a code step (rewriting a script that failed or returned nothing) runs at most once per saved graph
- * version (Decided), not once per run. The first run that needs it pays for the rewrite; a rewritten script that worked is
+ * version (decided), not once per run. The first run that needs it pays for the rewrite; a rewritten script that worked is
  * remembered with the version, so every later run uses it with no model call. The saved graph is not touched (a silent change would make
  * the resume of a stopped run refuse on a digest mismatch); the next saved version starts again. Kept in `meta`.
  */
@@ -2768,7 +2768,7 @@ export async function runGraph(
   const evalHistoricalStop = new Map<string, GraphNodeFailure>();
   /** Eval node → the steps that read its reasons in this run. A resumed rework is scoped to what the check judges. */
   const evalReworkScope = new Map<string, Set<string>>();
-  // An interrupted step is not a retry stop (decided): the run that resumes it fails or succeeds like any other, and the
+  // An interrupted step is not a retry stop: the run that resumes it fails or succeeds like any other, and the
   // scheduler's attempt cap and the outbox's unknown-outcome cap bound the repeats.
   // One entry per check, the newest stop of that check winning (graph-retry-diagnostic.ts): a second stop used to be lost to `??=`.
   const automaticRetryStops: GraphRetryStopLedger<GraphRetryStopReason> = new Map();
@@ -3143,7 +3143,7 @@ export async function runGraph(
   const codeRepairAttempted = new Set<string>();
   // 도구 0건으로 되돌린 노드 — 재시도 프롬프트에 그 사실을 실어 보낸다.
   const toolProofRetryNodes = new Set<string>();
-  /** Model steps that already got their one same-run retry after an unknown outside effect (decided). */
+  /** Model steps that already got their one same-run retry after an unknown outside effect. */
   const unknownOutcomeRetryNodes = new Set<string>();
   /** Steps whose write to a shared result name lost to a concurrent step declared later (applyProduces): a typed copy must not undo that. */
   const droppedWrites = new Set<string>();
@@ -5857,7 +5857,7 @@ export async function runGraph(
           // 다음에 무엇을 할지도 알 수 없었다(페르소나가 실제로 여기서 막혔다).
           if (envelope.result.kind === "none") {
             /*
-             * A model that ended with no result at all is asked once more in the same run (decided, the same rule
+             * A model that ended with no result at all is asked once more in the same run (decision the same rule
              * as an unknown outside effect): it may have used a tool before it stopped, so the second ask carries the host's one-line
              * note and the model checks the current state before it acts. One more ask per attempt chain, never after the owner's
              * Stop, a spent budget or a deadline; the second empty answer ends the step with the typed failure below.
@@ -6236,7 +6236,7 @@ export async function runGraph(
                 action: verdict.action, reason: verdict.reason, attention: verdict.attention, delivery: "claimed-without-tools" } });
           }
           /*
-           * Decision: a step whose outcome is
+           * decision ("every time it stops because it cannot confirm whether it posted"): a step whose outcome is
            * unknown keeps running, and the owner accepted the risk of a duplicate. This run asks the same step once more, with the
            * existing uncertain-effect note: the prompt already tells it to check the current state first (latest posts, sent
            * folder), do nothing twice, and leave the step pending when it cannot confirm. The per-item record (effect_item_check /

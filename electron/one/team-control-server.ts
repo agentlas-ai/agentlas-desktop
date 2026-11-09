@@ -225,7 +225,7 @@ export async function oneTeamStopOnOwnerTurn(
 /**
  * A teammate the model named wrongly, or one that cannot join a group, is an answer, not a failed tool step: nothing was started or changed
  * and the message already lists what is possible. It comes back as a normal result (no `ok:false`, so the step is not drawn failed) that
- * says so, and the model chooses again in the same turn (observed in use: the model corrected itself every time).
+ * says so, and the model chooses again in the same turn (production..: the model corrected itself every time).
  */
 const TEAM_REFUSALS_AS_ANSWER: readonly string[] = ["one-team-member-not-found", "one-team-member-ambiguous", "one-team-invite-refused", "one-team-group-compose-refused"];
 export function oneTeamRefusalAsAnswer(error: unknown): Record<string, unknown> | null {
@@ -592,7 +592,7 @@ export function removeOneTeamCapability(configKey: string, capabilityId: string)
 /**
  * A write that met another connection's lock ("database is locked", SQLITE_BUSY) changed nothing: the statement that hit the lock is
  * rolled back, and every One tool that writes is idempotent on its own key (command_id, expected_revision, the member/brief receipt).
- * It reached One as a plain failure twice in three weeks (one_graph_set_enabled, one_supervisor_follow_up) and
+ * It reached One as a plain failure twice in three weeks (one_graph_set_enabled one_supervisor_follow_up) and
  * One reported the action as not done. Two short retries, only for this error and never for a run that carries a history command.
  */
 export async function retryWhenStoreBusy<T>(run: () => Promise<T>, waitsMs: readonly number[] = [400, 1_200]): Promise<T> {

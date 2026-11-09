@@ -457,7 +457,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
    * queue could not send it again (earlier-attempt.ts decides from the receipt, a2979948a built that half for queued rows). The request
    * of a direct start is kept here only until its run settles; if the run ended with an unknown outcome, the message is queued as the one
    * resend the cap allows: same transcript row (no second copy of the message), the earlier-attempt line for the model, and the owner's
-   * Stop, a newer message of the owner or a message already waiting each cancel it. Decision (E2): an unknown outcome
+   * Stop, a newer message of the owner or a message already waiting each cancel it. decision (E2): an unknown outcome
    * never stops to ask. One and Work rooms, and a room that holds a Goal, all send through this path.
    */
   const directStarts = new Map<string, { event: IpcMainInvokeEvent; request: McpInvocationRequest }>();

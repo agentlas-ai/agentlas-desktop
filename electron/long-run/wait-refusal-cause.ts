@@ -7,7 +7,7 @@ export const WAIT_REFUSAL_CAUSE_MAX = 120;
 /**
  * A short, bounded, redacted cause for a wait that failed with an exception the host has no code for.
  *
- * Every such failure used to be recorded as `goal_wait_registration_failed` and nothing else (observed in use: 168 ledger
+ * Every such failure used to be recorded as `goal_wait_registration_failed` and nothing else (a real installation 168 ledger
  * rows), so a database lock, an authority gap and a bug could not be told apart afterwards. This keeps the exception's name, its
  * own code when it has one, and the first characters of its message: secrets are redacted (the run-event redaction), the home
  * folder is shortened and the text is cut. It is a diagnostic string only; no decision reads it.

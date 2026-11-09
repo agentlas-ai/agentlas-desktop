@@ -1,3 +1,4 @@
+import { assertScienceComposerRequestId } from "../../shared/science-composer-admission";
 import { scienceQuestionHost } from "../science-host/question-continuation";
 import { ScienceVideoTransfers, type ScienceVideoPrincipal, type ScienceVideoScope } from "./science-video";
 import { VideoCancelFence } from "../mobile-bridge/video-cancel-fence";
@@ -395,6 +396,7 @@ export function createDaemonScienceService(options: {
   };
   async function runCommand(command: DaemonScienceCommand): Promise<unknown> {
     if (!command || typeof command !== "object" || Array.isArray(command) || typeof command.op !== "string") throw new Error("science_daemon_command_invalid");
+    if (command.op === "composer.start") assertScienceComposerRequestId(command.input?.requestId);
     if (command.op === "autostart.hasRecoverableScienceWork") {
       options.assertOwner();
       if (state !== "ready" || !science || !runtimeOpened) throw new Error("science_daemon_not_ready");

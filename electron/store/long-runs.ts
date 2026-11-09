@@ -1235,7 +1235,7 @@ export function queueOwnerHeldGoalForResume(input: { runId: string; appInstanceI
 export const BLOCKED_GOAL_STARTUP_RETRY_MS = 30_000;
 
 /** Longest wait between automatic retries of a cause inside the app (its own bookkeeping, a binding, a check): nothing the app waits
- * for can change by waiting, so such a Goal looks again within 30 minutes. Observed in use: goal_obligation_candidate_changed
+ * for can change by waiting, so such a Goal looks again within 30 minutes. a real installation run_2e7c4394: goal_obligation_candidate_changed
  * retried at 39, 80, 159, 319 and 359 min (the Goal sat there for hours); goal_owner_grant_unrecorded reached 360 min the same way. */
 export const BLOCKED_GOAL_INTERNAL_RETRY_CAP_MS = 30 * 60_000;
 /** The long ladder (up to 6 h) is for a provider's typed stop only: goal-pass-stop.ts blocks the Goal as `goal_pass_<reason>`, and a usage

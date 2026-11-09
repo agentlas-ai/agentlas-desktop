@@ -356,7 +356,7 @@ export function mcpProxyApprovalPort(): number {
  * The approval gate's port for a run that is about to need it, binding or re-binding the gate when it is not listening yet.
  *
  * A config build used to read the port once and refuse the whole run with mcp_proxy_gate_unavailable when it was 0
- * (observed in use 23:08-23:09, three runs in a row: "Could not prepare this run's tool connections"). The port is 0
+ * (production -23:09, three runs in a row: "Could not prepare this run's tool connections"). The port is 0
  * in three states that are not a refusal of anything: the boot start has not bound yet (it is started without waiting), a
  * start is in flight, or the listener went away on its own (a server error clears it). This waits for a start in flight,
  * otherwise starts the gate once, so the build sees the port it needs. The invariant is unchanged: a build that gets no

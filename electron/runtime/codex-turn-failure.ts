@@ -90,6 +90,10 @@ function kindForStatus(kind: RunnerFailureKind, status: number | null): RunnerFa
   if (status === 401) return "auth";
   if (status === 403) return "refused";
   if (status === 429) return RATE_LIMIT_KIND;
+  // A payment the account owes is a quota; any other 4xx but a timeout is this request refused. Neither clears by waiting, so
+  // neither may stay the variant's "unavailable" (a connection failure), which the shared rule continues as an outage.
+  if (status === 402) return "quota";
+  if (status !== null && status >= 400 && status < 500 && status !== 408) return "refused";
   return kind;
 }
 

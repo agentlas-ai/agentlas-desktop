@@ -281,6 +281,12 @@ export function tidyFinanceArguments(raw: Record<string, unknown>, action: strin
     else if (key === 'request' && top && value && typeof value === 'object' && !Array.isArray(value)) out[key] = tidyFinanceArguments(value as Record<string, unknown>, action, false);
     else out[key] = value;
   }
+  // A single asset's historical close is the provider's raw daily close series, not its live price snapshot.
+  if (top && action === 'query' && Array.isArray(out.assetIds) && out.assetIds.length === 1 &&
+      Array.isArray(out.metrics) && out.metrics.length === 1 && out.metrics[0] === 'close' &&
+      typeof out.period === 'string' && ['1M', '3M', '1Y', '5Y', 'all'].includes(out.period)) {
+    out.metrics = ['price_history'];
+  }
   return out;
 }
 export function parseArguments<T extends z.ZodTypeAny>(schema: T, raw: Record<string, unknown>, action: string): z.output<T> {
@@ -471,10 +477,11 @@ export async function callFinanceTool(action: Action, raw: Record<string, unknow
     try { financeReceipt = financeReceiptStore().record(scope, ctx, `finance.${action}`, data, writes.has(action) ? 'saved-result' : ['load', 'report.read', 'monitor.runs', 'archives.read', 'archives.list'].includes(action) ? 'read-snapshot' : 'service-result'); }
     catch { scope.assertCurrent(); financeReceipt = { status: 'unavailable', reason: 'finance_receipt_not_recorded', operationOutcome: 'succeeded' }; }
     scope.assertCurrent();
-    const firstMetric=Array.isArray(raw.metrics)&&typeof raw.metrics[0]==='string'?raw.metrics[0]:undefined;
+    const metricArgs=action==='query'?tidyFinanceArguments(raw,action):raw;
+    const firstMetric=Array.isArray(metricArgs.metrics)&&typeof metricArgs.metrics[0]==='string'?metricArgs.metrics[0]:undefined;
     const dataFailure=action==='query'?financeDataFailure(data,firstMetric,hostWaited):action==='search'?financeSearchFailure(data,hostWaited):null;
     if(dataFailure)return { status: 'unavailable', reason: dataFailure.reason, next: dataFailure.next, data: dataFailure.cause&&data&&typeof data==='object'?{ ...data, cause: dataFailure.cause, ...(dataFailure.retryAfterSeconds?{ retryAfterSeconds: dataFailure.retryAfterSeconds }:{}) }:data };
-    const nativeUi=await presentFinanceResult(action,raw,data,ctx,scope);
+    const nativeUi=await presentFinanceResult(action,metricArgs,data,ctx,scope);
     if(action==='present'){
       const shown=(data as {view:{kind:string};warnings:string[]});
       if(nativeUi?.status!=='presented')return { status: 'unavailable', reason: 'finance_ui_not_presented', next: 'The card could not be shown. Give the same findings in the answer text.' };
@@ -554,7 +561,7 @@ const descriptors: { action: Action; purpose: string; required: string[]; inputS
     schema(['kind','optionType','symbol','currency','spot','strike','rate','volatility','years'],{kind:{const:'option'},optionType:{enum:['call','put']},symbol:text,currency:{type:'string',pattern:'^[A-Z]{3}$'},spot:{type:'number',exclusiveMinimum:0},strike:{type:'number',exclusiveMinimum:0},rate:{type:'number',minimum:-.5,maximum:1},dividendYield:{type:'number',minimum:0,maximum:1},volatility:{type:'number',exclusiveMinimum:0,maximum:5},years:{type:'number',exclusiveMinimum:0,maximum:30}}),
   ]},period,title:text,language:reportLanguage,narrative:{type:'string',maxLength:6000},chartTitle:{type:'string',minLength:1,maxLength:300},metricsTitle:{type:'string',minLength:1,maxLength:300},metricLabels:{type:'object',maxProperties:16,additionalProperties:{type:'string',minLength:1,maxLength:120}},highlightMetricIds:{type:'array',maxItems:8,items:{type:'string',minLength:1,maxLength:80}}})},
   { action: 'receipt.read', purpose: 'Read a bounded field page from an immutable Finance observation in this authenticated chat. A prior snapshot is not current state or Goal verification. Continue with nextCursor index and offset; offsets count Unicode code points.', required: ['receiptId'], inputSchema: schema(['receiptId'], { receiptId: { type: 'string', format: 'uuid' }, group: { enum: [...FINANCE_RECEIPT_GROUPS] }, index: rev, offset: rev }) },
-  { action: 'load', purpose: 'Read the authenticated Finance workspace, revision, dashboards, reports, sources and monitor state.', required: [], inputSchema: schema([], {}) },
+  { action: 'load', purpose: 'Read the authenticated Finance workspace, including saved stock and portfolio holdings, quantities, stored prices and their observation times, revision, dashboards, reports, sources and monitor state.', required: [], inputSchema: schema([], {}) },
   { action: 'portfolio.value', purpose: 'Refresh actual saved holdings prices and freeze complete per-currency portfolio values as a chart report. Missing or incompatible prices remain explicit; currencies are never converted or aggregated.', required: [], inputSchema: schema([], { expectedRevision: rev, title: text, language: reportLanguage, narrative: {type:'string',maxLength:6000} }) },
   { action: 'portfolio.propose', purpose: 'Show the owner an editable review of holdings you read from their photo or pasted text: one row per position, unknown fields null and never guessed. Nothing is saved: only the owner\'s Save in that card stores them in Finance, replacing (not adding to) the quantity of an asset already held. Tell the owner to review and save, and check finance.load before treating them as saved.', required: ['rows'], inputSchema: schema(['rows'], { rows: { type: 'array', minItems: 1, maxItems: 100, items: holdingRow }, warnings: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 500 } } }) },
   { action: 'guide', purpose: 'Method guides for Finance research by asset type and situation (a U.S. or Korean stock, an ETF, rates, crypto, FX and commodities, the macro backdrop, an earnings event, dividends, a portfolio review, risk, a comparison, a theme, a claim to check, the finished report). No topic lists them; a topic returns the ordered tool steps with metric and period, how to read the results, what the sources cannot tell, and the shape of the answer. Fixed host content, no account data.', required: [], inputSchema: schema([], { topic: { enum: FINANCE_GUIDE_TOPICS } }) },
@@ -587,7 +594,8 @@ const FINANCE_ACTION_PORTS = descriptors.map(({ action, purpose, required, input
     // The provider client accepts requests only after these actual Managed metadata are latched below.
     ...(managedFinanceHostAtImport&&['search','query','asset.add','query.save'].includes(action)?{callTimeoutMs:60000}:{}),
     ...(effectFreeReads.has(action)&&!(managedFinanceHostAtImport&&['search','query'].includes(action)) ? { effectFreeRead: true as const } : {}),
-    purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' ? 2 : action === 'present' ? 4 : action === 'query' ? 4 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
+    ...(action === 'load' ? { foundAsTool: true as const } : {}),
+    purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' || action === 'load' ? 2 : action === 'present' ? 4 : action === 'query' ? 4 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });
 // ui.canvas (electron/finance/canvas-ports.ts) is registered here until electron/harness/capability-ports.ts spreads CANVAS_PORTS itself (that file was being edited by another session).

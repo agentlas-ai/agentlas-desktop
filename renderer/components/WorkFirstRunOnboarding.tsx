@@ -15,6 +15,7 @@ import {
   usePluginCatalog,
   type KeyStepState,
   type LoginStepState,
+  type PluginPickerResult,
 } from "@/components/plugins/PluginPickerCore";
 import styles from "./WorkFirstRunOnboarding.module.css";
 
@@ -360,6 +361,15 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     });
   };
 
+  const finishToolSetup = (result: PluginPickerResult) => {
+    const notes = [
+      ...result.skipped.map(row => `${row.slug}: ${row.reason}`),
+      ...(result.pending ?? []).map(row => `${row.serverName}: ${ko ? "로컬 실행 승인 대기" : "Local execution approval needed"}`),
+    ];
+    if (notes.length) { setToolNote(notes.join(" · ")); setToolPicked(new Set()); return; }
+    finish();
+  };
+
   /** 고른 도구를 설치한다. 아무것도 고르지 않았으면 그대로 끝 — 그게 건너뛰기다. */
   const handleToolsNext = async () => {
     if (toolBusy) return;
@@ -373,7 +383,14 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     } finally {
       setToolBusy(false);
     }
-    await catalog.refresh();
+    let refreshComplete = false;
+    try {
+      const refreshed = await catalog.refresh();
+      refreshComplete = refreshed.catalog && refreshed.installed && refreshed.sites;
+    } catch { /* Preserve the install receipt even if refresh unexpectedly throws. */ }
+    if (!refreshComplete) {
+      outcome.result.skipped.push({ slug: ko ? "도구 목록" : "Tool list", reason: ko ? "도구 목록 또는 연결 상태를 다시 확인하지 못했습니다." : "The tool list or connection status could not be refreshed." });
+    }
 
     // 로그인이 먼저다. 키 입력은 사용자가 다른 사이트를 다녀와야 할 수도 있어
     // 흐름이 길어지는데, 로그인은 대개 클릭 두 번이라 여기서 끝내는 편이 낫다.
@@ -385,13 +402,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
       setKeyStage({ queue: outcome.needKeys, index: 0, result: outcome.result });
       return;
     }
-    if (outcome.result.skipped.length > 0) {
-      // 붙지 않은 것을 조용히 넘기지 않는다. 선택은 비워지므로 다음을 한 번 더 누르면 끝난다.
-      setToolNote(outcome.result.skipped.map((row) => `${row.slug}: ${row.reason}`).join(" · "));
-      setToolPicked(new Set());
-      return;
-    }
-    finish();
+    finishToolSetup(outcome.result);
   };
 
   // In the title-bar strip: at top 12 / 32px tall it covered the right end of the dashboard's status card (y 28).
@@ -565,7 +576,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
               onDone={(result, keyQueue) => {
                 setLoginStage(null);
                 if (keyQueue.length > 0) { setKeyStage({ queue: keyQueue, index: 0, result }); return; }
-                finish();
+                finishToolSetup(result);
               }}
               onAdvance={setLoginStage}
             />
@@ -576,7 +587,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
               chrome="inline"
               state={keyStage}
               brandMap={brandMap}
-              onDone={() => { setKeyStage(null); finish(); }}
+              onDone={(result) => { setKeyStage(null); finishToolSetup(result); }}
               onAdvance={setKeyStage}
             />
           )}

@@ -1,4 +1,5 @@
 import type { DeclaredPromptPart } from "./prompt-order";
+import { ollamaModelNamesEqual } from "../../shared/runtime-connect";
 import type { AgentRuntimeOverride, RuntimeStatus } from "../../shared/types";
 import { createHash } from "node:crypto";
 import { runtimeReadsWithTools } from "../../shared/runtime-capabilities";
@@ -319,8 +320,19 @@ export function normalizeWorkloadAllocation(
   };
 }
 
+function ollamaSelectedAliasSource(runtime: RuntimeStatus, selected: string): string | undefined {
+  if (runtime.kind !== "ollama") return undefined;
+  const sources = [...new Set(runtime.availableModels ?? [])].filter((model) =>
+    runtime.allocationModels?.includes(model) && ollamaModelNamesEqual(model, selected));
+  return sources.length === 1 ? sources[0] : undefined;
+}
+
 function liveModelInventory(runtime: RuntimeStatus): string[] {
-  const safe = (runtime.allocationModels ?? [])
+  const selected = runtime.kind === "ollama"
+    ? [runtime.model, ...Object.values(runtime.roleSelections ?? {}).map((selection) => selection?.model)]
+      .filter((model): model is string => typeof model === "string" && !!ollamaSelectedAliasSource(runtime, model))
+    : [];
+  const safe = [...(runtime.allocationModels ?? []), ...selected]
     .map((model) => cleanText(model, 180))
     .filter((model) => /^[A-Za-z0-9][A-Za-z0-9._:+/() -]{0,179}$/.test(model));
   return [...new Set(safe)];
@@ -340,7 +352,9 @@ function dedupedEfforts(values: unknown[]): WorkloadEffort[] {
 }
 
 function safeModelProfile(runtime: RuntimeStatus, modelId: string) {
-  const raw = runtime.allocationModelProfiles?.[modelId];
+  const source = ollamaSelectedAliasSource(runtime, modelId);
+  const raw = runtime.allocationModelProfiles?.[modelId]
+    ?? (source ? runtime.allocationModelProfiles?.[source] : undefined);
   if (!raw) return null;
   const costTier = normalizeWorkloadTier(raw.costTier);
   const capabilities = normalizeCapabilityList(raw.capabilities) ?? [];
@@ -583,18 +597,23 @@ function exactModelPolicyIssue(input: {
   if (totalTokens > 0 && (!profile?.contextWindow || profile.contextWindow < totalTokens)) {
     return "requested-exact-model-context-incompatible-active-preserved";
   }
-  if (input.allocation.requirements.toolRequired && profile?.supportsTools !== true && !profile?.capabilities.includes("tools")) {
+  if (input.allocation.requirements.toolRequired && (profile?.supportsTools === false ||
+      (profile?.supportsTools !== true && !profile?.capabilities.includes("tools")))) {
     return "requested-exact-model-tools-incompatible-active-preserved";
   }
   if (
     input.allocation.requirements.multimodalRequired &&
-    profile?.supportsMultimodal !== true &&
-    !profile?.capabilities.includes("multimodal")
+    (profile?.supportsMultimodal === false ||
+      (profile?.supportsMultimodal !== true && !profile?.capabilities.includes("multimodal")))
   ) {
     return "requested-exact-model-multimodal-incompatible-active-preserved";
   }
   const required = input.policy.requiredCapabilities ?? [];
-  if (required.length > 0 && (!profile || required.some((capability) => !profile.capabilities.includes(capability)))) {
+  if (required.length > 0 && (!profile || required.some((capability) => {
+    const observed = capability === "tools" ? profile.supportsTools
+      : capability === "multimodal" ? profile.supportsMultimodal : null;
+    return observed === false || (observed !== true && !profile.capabilities.includes(capability));
+  }))) {
     return "requested-exact-model-capability-incompatible-active-preserved";
   }
   return null;

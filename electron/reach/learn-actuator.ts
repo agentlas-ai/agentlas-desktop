@@ -8,7 +8,7 @@ import { toLearnElements, type LearnAction, type LearnDriver, type LearnElement 
 
 // The driver's structured `elements` carry only addressable controls. Static text (a display, a result, a status caption) is in its markdown tree as a
 // row without an index: `- AXStaticText = "15" (필드 편집)`, the value after `=` and the caption in parentheses (Cua Driver 0.38.0 on macOS, measured on
-// Calculator: the structured read had 33 elements and no static text, the markdown had the display). The learning side reads the app through
+// Calculator the structured read had 33 elements and no static text, the markdown had the display). The learning side reads the app through
 // get_app_state, which shows these, so a replay that wants to judge a check on one has to read them too. They carry no token: never a target.
 const STATIC_TEXT_ROW = /^\s*- AXStaticText(?: = ("(?:[^"\\]|\\.)*"))?(?: \(([^)]*)\))?\s*$/;
 

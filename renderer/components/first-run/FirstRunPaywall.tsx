@@ -1,7 +1,7 @@
 "use client";
 
 /*
-* First-run paywall (Desktop).
+ * First-run paywall (Desktop, owner).
  *
  * Where: right after sign-in, before the first-run steps — AuthGate has already signed the person in when
  * FirstRunGate mounts, so "after sign-in" is "before step 02". FirstRunGate wraps its content in

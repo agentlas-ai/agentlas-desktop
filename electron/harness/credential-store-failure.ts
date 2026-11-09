@@ -1,7 +1,7 @@
 /*
  * A saved key the credential store could not read is not a key that is not saved.
  *
- * Observed in use (3 runs): the Mac Keychain stopped answering for about an hour. The keyed
+ * Production..22:58 (Yotube room, 3 runs): the Mac Keychain stopped answering for about an hour. The keyed
  * harness ports swallowed the read failure and answered "provider_key_missing" / "no_transcribe_route" ("the owner saves a
  * key ... in Settings") for an ElevenLabs key the owner had saved and used that same day, auth.login surfaced the raw
  * "keychain_unavailable: read [redacted] — automatic retry suppressed" text, and the team told the owner the key was not set.

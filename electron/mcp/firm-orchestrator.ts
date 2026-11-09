@@ -1193,7 +1193,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   // Per-turn recall (curated memory, working-folder ontology, Work attachments) varies with every task text. It rides the
   // turn-context channel (RunnerRequest.turnContext, placed per runtime by serving-prefix.ts / each adapter) and never joins
   // the system prompt: there it sat above the stable permission, plugin, connector and locale lines, so the provider's prefix
-  // cache ended at the recall ( rollouts: same-agent worker calls diverged at "## Agentlas memory").
+  // cache ended at the recall (rollouts: same-agent worker calls diverged at "## Agentlas memory").
   const recallParts: DeclaredPromptPart[] = [];
   if (!p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn) {
     const memorySignal = turn.signal ?? p.signal;

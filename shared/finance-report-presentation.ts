@@ -281,7 +281,7 @@ function reportDate(value:string|null|undefined,locale:string):string {
  try{return new Intl.DateTimeFormat(canonical(locale)??'en',{dateStyle:'medium',timeZone:'UTC'}).format(new Date(match[1]+'T00:00:00Z'));}catch{return match[1];}
 }
 export interface FinanceReportKeyFigure {label:string;display:string;unit?:string}
-/** `figures` are host-computed key figures per chart section (arithmetic on the saved rows); `generatedAt` is when the file was made. Both optional. Decision: no source or as-of line is drawn in a report, so no provider record is accepted here. */
+/** `figures` are host-computed key figures per chart section (arithmetic on the saved rows); `generatedAt` is when the file was made. Both optional. decision no source or as-of line is drawn in a report, so no provider record is accepted here. */
 export function financeReportHtml({report,locale,charts={},mobileCharts={},fixedCharts=[],figures={},generatedAt}:{report:FinanceReport;locale?:string;charts?:Record<string,string>;mobileCharts?:Record<string,string>;fixedCharts?:readonly string[];figures?:Record<string,readonly FinanceReportKeyFigure[]>;generatedAt?:string}):string {
  const language=reportLanguage(report,locale),direction=financeReportDirection(report,locale),title=financeReportTitle(report,locale),warnings=financeReportWarnings(report,language);
  const isChartSection=(section:FinanceReportSection)=>section.presentation==='chart'||!section.presentation&&financeReportHasChart(section);

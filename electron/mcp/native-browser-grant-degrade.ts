@@ -1,7 +1,7 @@
 /**
  * Whether a failed native browser grant ends the run or the run goes on without the browser.
  *
- * The grant is the app's own broker answering (observed in useZ, One conversation, codex: "native-browser-broker-timeout"
+ * The grant is the app's own broker answering (production Z, One conversation, codex: "native-browser-broker-timeout"
  * after 25 s). The browser is a baseline capability of a One turn and a selection's pick, not something the owner asked for in
  * every message, so a grant that cannot be made must not end a turn before any model ran ("mcp-runtime-config-unavailable").
  * A run that NEEDS the browser (the owner chose the browser tool mode, a graph or automation declared it required) keeps the

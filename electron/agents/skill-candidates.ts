@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 /*
- * Skills of an agent package that a run leaves out instead of refusing to start.
+ * Skills of an agent package that a run leaves out instead of refusing to start (error catalog one.md R4).
  *
  * A package may carry `.agentlas/skill-registry.json` (kind agentlas-skill-lifecycle-registry): skills the curator proposed are
  * `tier: "candidate"` and quarantined until the owner promotes them. A candidate whose folder sits in the native `.claude/skills`

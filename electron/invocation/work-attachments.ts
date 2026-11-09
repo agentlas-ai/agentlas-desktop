@@ -66,7 +66,7 @@ export function chooseWorkAttachmentsToStage<T extends { groupId: string; size: 
   for (const [rank, id] of newestFirst.entries()) {
     const size = bytesOf.get(id)!;
     // The newest group is what the owner just attached: it is always copied whole, whatever its size (media-carousel
-    //: a 200 MB video or twenty full-size photos). The bound only chooses among the older groups.
+    // a 200 MB video or twenty full-size photos). The bound only chooses among the older groups.
     if (rank > 0 && (kept.size >= WORK_ATTACHMENT_MAX_GROUPS || total + size > WORK_ATTACHMENT_MAX_BYTES)) continue;
     kept.add(id); total += size;
   }
@@ -87,7 +87,7 @@ export function workAttachmentGroupIds(text: string): string[] {
 /**
  * The attachment groups a Goal-bound run also stages: the ones named by the Goal's original request and by its source message, read from
  * the Goal's CURRENT revision when the attachments are prepared. A revision that moved while the run was being prepared is not a reason to
- * refuse the run (decided): the groups follow the Goal as it is now. A source whose transcript message is not what the Goal
+ * refuse the run: the groups follow the Goal as it is now. A source whose transcript message is not what the Goal
  * recorded (removed, another chat or role, other text) contributes nothing, so a file is never staged from a message the Goal did not name.
  */
 export function goalSourceAttachmentGroupIds(input: {

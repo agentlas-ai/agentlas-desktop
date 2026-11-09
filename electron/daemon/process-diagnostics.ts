@@ -125,7 +125,7 @@ const CODE_KEYS: ReadonlySet<string> = new Set(["code", "errorCode", "reasonCode
  * kept nothing: the service's line for the refused One start was a bare tag, with its reasonCode in the object.
  */
 function codesInRecord(value: unknown, add: (code: string) => void, depth = 0): void {
-  // Bytes carry no code fields, and listing a large buffer's indexes before the cut cost 1.1 s for 5 MB (deploy review).
+  // Bytes carry no code fields, and listing a large buffer's indexes before the cut cost 1.1 s for 5 MB.
   if (depth > 3 || !value || typeof value !== "object" || ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return;
   if (Array.isArray(value)) { for (let index = 0; index < Math.min(8, value.length); index += 1) codesInRecord(value[index], add, depth + 1); return; }
   // The first 24 own keys, read one by one: a wide object is never listed whole.

@@ -3993,7 +3993,7 @@ async function main() {
     ]);
     // The screen part of the engine is offered only with its tool gate. A run whose gate session did not reach this process (a launcher
     // started without the host's gate variables: only the control-file variable was inherited) used to fail the WHOLE engine here, so even a
-    // browser-only call (cua.getState) died with "unified-cua-native-gate-unavailable" (observed in use, 1 run). The browser half
+    // browser-only call (cua.getState) died with "unified-cua-native-gate-unavailable" (production 1 run). The browser half
     // needs no screen gate, so it keeps working; a screen call then reads the adapter's own "no connection to the app window" sentence.
     let nativeGateReady = false;
     if (process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE || process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) {

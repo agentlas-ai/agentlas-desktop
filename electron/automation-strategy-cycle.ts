@@ -11,7 +11,7 @@ import { sha256Value } from "../shared/graph-execution-digest";
 import type { AutomationRunRecord, RuntimeSelection } from "../shared/types";
 import type { GoalStrategyAutomationRecommendationV1 } from "../shared/goal-strategy";
 import { getChatGoalContract, getChatGoalRevision } from "./store/chat-goals";
-import { getAutomation } from "./store/automations";
+import { automationOutputDigest, getAutomation, previousSuccessfulRunOutput } from "./store/automations";
 import {
   adjudicateAutomationStrategyProposal,
   createAutomationStrategyProposalForRun,
@@ -22,7 +22,7 @@ import {
   type AutomationStrategyProposalObservationV1,
 } from "./store/automation-strategy-proposals";
 import { getLatestAutomationStrategyRevision } from "./store/automation-strategy-revisions";
-import { readCurrentGoalAutomationBinding } from "./long-run/automation-provenance";
+import { getAutomationDefinitionDigest, readCurrentGoalAutomationBinding } from "./long-run/automation-provenance";
 import { reflectAutomationStrategyProposal, type AutomationStrategyReflectionInput } from "./automation-strategy-reflection";
 import type { JudgmentRuntimeReceipt } from "./system-agents/judgment";
 import { automationNoActionStreak, recentAutomationRunFacts } from "./automation-progress-facts";
@@ -201,6 +201,21 @@ function outputObservation(input: AutomationStrategyCycleInput, metrics: ReturnT
   };
 }
 
+/** The last review kept the strategy for this definition, and this run's output is the output of the run it reviewed. */
+export function unchangedSinceLastKeep(input: AutomationStrategyCycleInput): boolean {
+  if (input.status !== "ok") return false;
+  try {
+    const last = getDb().prepare(`SELECT source_run_id, intent, current_definition_digest FROM automation_strategy_proposals
+      WHERE automation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(input.automationId) as
+      { source_run_id: string | null; intent: string; current_definition_digest: string | null } | undefined;
+    if (!last || last.intent !== "keep" || !last.source_run_id || last.source_run_id === input.sourceRunId) return false;
+    const definition = getAutomationDefinitionDigest(input.automationId);
+    if (!definition || last.current_definition_digest !== definition) return false;
+    const previous = previousSuccessfulRunOutput(input.automationId, input.sourceRunId);
+    return previous?.runId === last.source_run_id && previous.outputDigest === automationOutputDigest(input.output ?? "");
+  } catch { return false; /* an unreadable record asks the model as before */ }
+}
+
 /**
  * Complete one post-Graph strategy cycle.  The function is advisory with
  * respect to the already-settled run: all reflection/admission failures are
@@ -217,6 +232,13 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
   if (!input.goalRecommendation && !input.episodePreparation
     && getAutomation(input.automationId)?.triggerType === "command") {
     unavailable(input, "strategy_reflection_skipped_command_trigger");
+    return;
+  }
+  // Nothing changed since the last review that kept the strategy: the same definition and the same output as the run it reviewed.
+  // Asking again is one more model call and one more "keep" row nobody reads (a real installation a daily 9 am automation, 43
+  // "keep" reviews in a row, one model call each). A changed graph, prompt or schedule (definition digest) or a new output asks again.
+  if (!input.goalRecommendation && !input.episodePreparation && unchangedSinceLastKeep(input)) {
+    unavailable(input, "strategy_reflection_skipped_unchanged");
     return;
   }
   let strategyRunEvents: AutomationStrategyRunEventLike[] = [];

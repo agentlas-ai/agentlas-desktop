@@ -6,7 +6,7 @@ import { userDataPath } from "../runtime-paths";
 import { FinanceStore, type FinanceScope } from "./store";
 import { queryFinanceData, refreshFinanceQuotes, searchFinanceAssets } from "./data";
 import { FinanceExperience, requireFinanceMonitoringAccess } from './experience';
-import type { FinanceDataSelection } from '../../shared/finance-data-routing';
+import { resolveFinanceDataSource, type FinanceDataSelection } from '../../shared/finance-data-routing';
 import { findIsharesFund } from "./providers/ishares-catalog";
 import { FINANCE_MONITOR_RUN_TIMEOUT_MS } from "../../shared/finance";
 import { financeReportSourceRecords, type FinanceReportSourceRecord } from "../../shared/finance-report-presentation";
@@ -257,7 +257,31 @@ export class FinanceService {
   private queryAssets(scope:FinanceScope,route:FinanceDataSelection,watchlist:FinanceAsset[],ids:readonly string[]):FinanceAsset[]{
     return [...watchlist,...this.searchCatalog.liveAssets(scope,this.searchCatalog.begin(scope,route),ids,watchlist)];
   }
-  async query(scope: FinanceScope,input:FinanceDataRequest,signal?:AbortSignal) { signal?.throwIfAborted();scope.assertCurrent();const workspace=await this.store.load(scope);input={...input,assetIds:this.resolveAssetIds(workspace.watchlist,input.assetIds)};const route={...await this.experience.consent(scope),signal,assertCurrent:()=>{scope.assertCurrent();signal?.throwIfAborted();}};route.assertCurrent();const result=await queryFinanceData(input,this.queryAssets(scope,route,workspace.watchlist,input.assetIds),route);route.assertCurrent();return savedPriceOnTransientFailure(result,input,workspace,workspace.watchlist.find(asset=>asset.id===input.assetIds[0])); }
+  async query(scope: FinanceScope,input:FinanceDataRequest,signal?:AbortSignal) {
+    signal?.throwIfAborted();scope.assertCurrent();
+    const workspace=await this.store.load(scope);
+    input={...input,assetIds:this.resolveAssetIds(workspace.watchlist,input.assetIds)};
+    const route={...await this.experience.consent(scope),signal,assertCurrent:()=>{scope.assertCurrent();signal?.throwIfAborted();}};
+    route.assertCurrent();
+    let assets=this.queryAssets(scope,route,workspace.watchlist,input.assetIds);
+    // An exact Yahoo listing ID may have come from a previous turn or a fresh
+    // model request. Reuse the owner-scoped search, never infer a listing from
+    // a name, a bare ticker, a different source, or a non-canonical ID.
+    const id=input.assetIds.length===1?input.assetIds[0]:'';
+    if(input.metrics.length===1&&['price','price_history'].includes(input.metrics[0])&&
+       resolveFinanceDataSource(route,input.metrics)==='finance-yfinance'&&!assets.some(asset=>asset.id===id)&&id.startsWith('yahoo:')) {
+      let symbol='';try{symbol=decodeURIComponent(id.slice(6));}catch{ /* invalid encoded IDs remain unresolved */ }
+      if(/^[A-Za-z0-9^=._-]{1,80}$/.test(symbol)&&`yahoo:${encodeURIComponent(symbol)}`===id) {
+        const found=await this.search(scope,{query:symbol},signal);route.assertCurrent();
+        const current=await this.experience.consent(scope);route.assertCurrent();
+        if(financeSearchRouteKey(current)!==financeSearchRouteKey(route))throw new Error('finance_search_selection_stale');
+        if(found.assets.filter(asset=>asset.id===id&&asset.symbol===symbol).length===1)
+          assets=this.queryAssets(scope,current,workspace.watchlist,input.assetIds);
+      }
+    }
+    const result=await queryFinanceData(input,assets,route);route.assertCurrent();
+    return savedPriceOnTransientFailure(result,input,workspace,workspace.watchlist.find(asset=>asset.id===input.assetIds[0]));
+  }
   async queryAndSave(scope:FinanceScope,input:FinanceDataSaveRequest,signal?:AbortSignal):Promise<FinanceDataSaveResult> {
     const parsed=FinanceDataSaveRequestSchema.safeParse(input);if(!parsed.success)throw new Error("finance_arguments_invalid");input=parsed.data;
     const savingScope:FinanceScope={...scope,assertCurrent(){scope.assertCurrent();if(signal?.aborted)throw new Error("finance_query_cancelled");}};

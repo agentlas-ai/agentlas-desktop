@@ -501,7 +501,7 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "steering",
       "composer-modes",
       "attachments",
-      // media-carousel: unlimited chunked attachments + file previews, phone files for remote Builds, Build mode.
+      // media-carousel unlimited chunked attachments + file previews, phone files for remote Builds, Build mode.
       // The optional request keys these unlock are listed in shared/mobile-bridge-media.ts.
       "chat-attachments-v2",
       "remote-build-attachments-v1",

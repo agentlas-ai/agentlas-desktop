@@ -630,7 +630,7 @@ function applyTacticMarker(plan: LiveGoalPlan, marker: TacticMarker, runId: stri
       move: move.kind, moveBoundary: move.kind === "escalate_boundary" ? move.boundary : null, moveAt: move.kind === "retry_backoff" ? move.at : null,
       reasonCode: decision.reasonCode, evidence: marker.evidence.slice(0, 600), runId } });
   // One request per plan: the receipt is a fact ("this plan asked to be reshaped"), not a per-failure counter. Writing it on
-  // every blocked report put 1,923 identical rows under one planSeq of one Goal (observed in use); `failures` is on the node.
+  // every blocked report put 1,923 identical rows under one planSeq of one Goal (a real installation); `failures` is on the node.
   if (plan.shape === "single_tactic" && failures >= SINGLE_TACTIC_PROMOTION_FAILURES
     && !listGoalPlanDecisions(plan.goalId, { revision: plan.revision, planSeq: plan.planSeq, kind: "reshape_requested", limit: 50 })
       .some((row) => row.payload.reason === "single_tactic_failed_twice")) {

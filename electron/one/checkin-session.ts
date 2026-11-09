@@ -4,7 +4,7 @@ import { redactSecrets } from "../../shared/secret-patterns";
 
 /*
  * A check-in review is a full One turn. Run on the personal conversation's own native session it re-reads that whole session each time:
- * 111 reviews in one observed in use averaged 1,206,076 input tokens (98.8% cached) while the host sent about 3.8K. A check-in needs its
+ * 111 reviews in one owner database averaged 1,206,076 input tokens (98.8% cached) while the host sent about 3.8K. A check-in needs its
  * instruction, the owner's profile and the last thing it reported, not the owner's whole conversation with One.
  *
  * So a check-in review runs on its OWN native session owner (`runtimeSessionOwnerId`, the isolated-owner key every runner already reads and

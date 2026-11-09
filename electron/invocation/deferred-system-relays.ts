@@ -148,7 +148,7 @@ export function releaseDeferredSystemRelays(runId: string, db?: Database.Databas
  * run, so the turn's own end settles whether that was true. Only the typed pre-dispatch refusal used to give a report back
  * (service.ts turnProvedNotDispatched); every other turn that ended before a model read it lost the report for good: the no-runtime and
  * one-team-runtime-selection-changed errors of mcp/client.ts carry no such type, an owner Stop or an app quit came first.
- * Observed in use: 46 of 251 relays were carried by a run with no turn placement (43 failed, 2 interrupted, 1 team turn);
+ * a real installation 46 of 251 relays were carried by a run with no turn placement (43 failed, 2 interrupted, 1 team turn);
  * 28 of them by 13 runs that failed one-team-runtime-selection-changed before any model call.
  *
  * The proof is the run ledger's typed facts, never prose: a turn placement (invocation/turn-placement.ts), a task-force model call

@@ -192,7 +192,7 @@ function codedIpcError(channel: string, error: unknown): unknown {
   const code = (error as { code?: unknown }).code;
   if (!isIpcErrorCode(code)) {
     // The app's own exception (a TypeError, a ReferenceError ...) never reaches a window as its text, its stack or a path
-    // (owner rule). The class and the channel stay in the log; the window gets one plain line and a stable code.
+    //. The class and the channel stay in the log; the window gets one plain line and a stable code.
     if (isHostExceptionClass(error)) {
       console.warn(`[ipc] host exception channel=${channel.slice(0, 96)} class=${(error as Error).name} message=${String((error as Error).message).slice(0, 200)}`);
       const plain = new Error(encodeIpcErrorMessage(HOST_EXCEPTION_IPC_CODE, HOST_EXCEPTION_OWNER_LINE));

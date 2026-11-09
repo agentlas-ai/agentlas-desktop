@@ -139,10 +139,15 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
       } };
     },
     /** A2 chat host handover: ask Main to release its idle resident runtime sessions for the chat (reply: busy/released/pending). */
-    async releaseChatSessions(chatId: string, deadlineMs: number): Promise<{ busy: boolean; released: number; pending: number }> {
+    async releaseChatSessions(chatId: string, deadlineMs: number): Promise<{ busy: boolean; released: number; pending: number; failed?: number; kept?: number }> {
       const reply = await ask("releaseChatSessions", { chatId, deadlineMs }, deadlineMs + 2000);
-      if (typeof reply.busy !== "boolean" || !Number.isSafeInteger(reply.released) || !Number.isSafeInteger(reply.pending)) throw new DeviceBridgeError("device_bridge_refused", "chat_handover_reply_invalid");
-      return { busy: reply.busy, released: reply.released as number, pending: reply.pending as number };
+      if (typeof reply.busy !== "boolean" || !Number.isSafeInteger(reply.released) || (reply.released as number) < 0
+        || !Number.isSafeInteger(reply.pending) || (reply.pending as number) < 0
+        || (reply.failed !== undefined && (!Number.isSafeInteger(reply.failed) || (reply.failed as number) < 0))
+        || (reply.kept !== undefined && (!Number.isSafeInteger(reply.kept) || (reply.kept as number) < 0))) {
+        throw new DeviceBridgeError("device_bridge_refused", "chat_handover_reply_invalid");
+      }
+      return { busy: reply.busy, released: reply.released as number, pending: reply.pending as number, ...(reply.failed === undefined ? {} : { failed: reply.failed as number }), ...(reply.kept === undefined ? {} : { kept: reply.kept as number }) };
     },
     /** Goal custody is Main's: hand an owner message that would become a Goal to Main (2026-10-11, run 97164057). Main answers
      * at once (accepted|duplicate) and does the classification and admission in the background, because the native channel

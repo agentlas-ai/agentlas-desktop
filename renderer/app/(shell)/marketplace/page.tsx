@@ -2,6 +2,7 @@
 import { Suspense, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { detailForUser } from "@/lib/invocation-failure";
 import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import { ipc } from "@/lib/ipc";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { classifyHubEntity, entityClassLabel } from "@/lib/agent-entity-kind";
@@ -1052,6 +1053,7 @@ function AgentCard({
     | { phase: "confirm"; rows: HubPluginPreviewRow[]; needsLocalExecution: boolean; skills: HubPluginPreviewSkill[] }
     | { phase: "installing" }
     | { phase: "done"; message: string }
+    | { phase: "partial"; message: string }
     | { phase: "error"; message: string }
   >({ phase: "idle" });
   /*
@@ -1331,28 +1333,35 @@ function AgentCard({
                     const connected = result.receipts.filter((r) => r.action === "connected").length;
                     const already = result.receipts.filter((r) => r.action === "already-installed").length;
                     const failed = result.receipts.filter((r) => r.action === "skipped");
+                    const pending = result.receipts.filter((r) => r.action === "needs-approval");
+                    const unconfirmed = failed.map((row) => `${row.serverName}: ${row.transport === "skills" ? (ko ? "스킬 설치 결과 확인 필요" : "Skill installation not confirmed") : ["stdio", "http", "sse"].includes(row.transport) ? (ko ? "MCP 연결 결과 확인 필요" : "MCP connection not confirmed") : (ko ? "도구 추가 결과 확인 필요" : "Tool setup not confirmed")}`);
                     const skillSummary = (result as typeof result & { skills?: HubPluginInstallSkillsSummary }).skills;
                     const skillsInstalled = skillSummary?.installed.length ?? 0;
-                    if (connected === 0 && already === 0 && skillsInstalled === 0) {
+                    if (connected === 0 && already === 0 && skillsInstalled === 0 && pending.length === 0) {
                       setInstall({
                         phase: "error",
-                        message: failed[0]?.reason
-                          ?? (ko ? "설치할 내용을 찾지 못했습니다." : "Nothing installable was found."),
+                        message: failed.length
+                          ? unconfirmed.join(" · ")
+                          : (ko ? "설치 결과를 확인하지 못했습니다." : "The installation result could not be confirmed."),
                       });
                       return;
                     }
                     // 스킬만 설치된 경우와 서버 연결이 섞인 경우를 구분해 말한다 —
                     // "연결됨"은 서버가 붙었을 때만 정직한 문장이다.
                     const serverPart = connected - (skillsInstalled > 0 ? 1 : 0) > 0 || already > 0;
-                    setInstall({
-                      phase: "done",
-                      message: skillsInstalled > 0 && !serverPart
+                    const successMessage = connected === 0 && already === 0 && skillsInstalled === 0 ? "" : skillsInstalled > 0 && !serverPart
                         ? (ko
                           ? `스킬 ${skillsInstalled}개 설치됨 — 모든 채널(데스크탑·터미널·OS)에서 바로 쓸 수 있습니다.`
                           : `${skillsInstalled} skill${skillsInstalled === 1 ? "" : "s"} installed — available to every channel (desktop, terminal, OS).`)
                         : ko
                           ? `연결됨 — 다음 대화부터 바로 쓸 수 있습니다${already ? " (이미 설치된 항목 포함)" : ""}${skillsInstalled ? ` (스킬 ${skillsInstalled}개 포함)` : ""}.`
-                          : `Connected — usable from your next conversation${already ? " (some were already installed)" : ""}${skillsInstalled ? ` (plus ${skillsInstalled} skill${skillsInstalled === 1 ? "" : "s"})` : ""}.`,
+                          : `Connected — usable from your next conversation${already ? " (some were already installed)" : ""}${skillsInstalled ? ` (plus ${skillsInstalled} skill${skillsInstalled === 1 ? "" : "s"})` : ""}.`;
+                    setInstall({
+                      phase: failed.length || pending.length ? "partial" : "done",
+                      message: [successMessage,
+                        ...unconfirmed,
+                        ...(pending.length ? [`${ko ? "로컬 실행 승인 대기" : "Local execution approval needed"}: ${pending.map((row) => row.serverName).join(", ")}`] : []),
+                      ].filter(Boolean).join(" · "),
                     });
                   })
                   .catch((error: unknown) => {
@@ -1373,12 +1382,13 @@ function AgentCard({
           </div>
         </div>
       ) : null}
-      {plugin && (install.phase === "done" || install.phase === "error") ? (
+      {plugin && (install.phase === "done" || install.phase === "partial" || install.phase === "error") ? (
         <div
           className="hub-plugin-approval-note"
-          data-tone={install.phase === "error" ? "error" : "ok"}
+          data-tone={install.phase === "done" ? "ok" : "error"}
         >
           {install.message}
+          {install.phase !== "done" && <> {" "}<Link href="/library/mcps?observe=1" onClick={(event) => event.stopPropagation()}>{ko ? "설치된 연결 확인" : "Review installed connections"}</Link></>}
         </div>
       ) : null}
       {!plugin && !graph && (download.phase === "done" || download.phase === "error") ? (
@@ -1473,7 +1483,7 @@ function AgentCard({
               // confirm 중에도 잠근다 — 승인 화면이 떠 있는데 같은 버튼이 다시 눌리면
               // 사용자는 어느 쪽이 실제 행동인지 알 수 없다.
               ? install.phase === "loading" || install.phase === "installing"
-                || install.phase === "done" || install.phase === "confirm"
+                || install.phase === "done" || install.phase === "partial" || install.phase === "confirm"
                 || (pluginServerInstalled && install.phase === "idle")
               : bookmarking || bookmarked
           }
@@ -1483,8 +1493,8 @@ function AgentCard({
               ? (ko ? "확인 중…" : "Checking…")
               : install.phase === "installing"
                 ? (ko ? "설치 중…" : "Installing…")
-                : install.phase === "done"
-                  ? (ko ? "설치됨" : "Installed")
+                : install.phase === "done" || install.phase === "partial"
+                  ? install.phase === "partial" ? (ko ? "일부 완료" : "Partially completed") : (ko ? "설치됨" : "Installed")
                   // Hub와 Desktop 카탈로그가 같은 도구를 다른 이름으로 부르므로
                   // (brave-search-mcp ↔ brave-search) slug를 정규화해 판정한다.
                   : pluginServerInstalled && install.phase === "idle"

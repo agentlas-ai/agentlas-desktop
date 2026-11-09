@@ -1537,7 +1537,7 @@ export async function oneTeamStop(caller: OneTeamCaller, input: { sessionId?: un
 }
 
 /**
- * What a teammate is, for the model that chooses one (observed in use: the personal agent handed a video to the teammate whose NAME sounded
+ * What a teammate is, for the model that chooses one (production the personal agent handed a video to the teammate whose NAME sounded
  * like the job, because the list carried names and ids only, and the one the owner uses for it had a name that does not say so).
  * `description`: one plain line of what it does, at most 160 characters, from the package's own words (shared/agent-description.ts;
  * the stored tagline is already read from the package when it was boot text, mcp/registry.ts). `package_name`: the agent's own name,

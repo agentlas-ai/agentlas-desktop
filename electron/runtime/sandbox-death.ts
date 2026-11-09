@@ -60,7 +60,7 @@ export function detectSandboxDeath(toolResultText: string): SandboxDeathSignal |
 
 /*
  * An operation the sandbox refused is the same permission boundary as a command it killed, and it leaves no signal at all.
- * Observed in use (one room, codex gpt-6.1-terra, chip full, steps resolved to write): a teammate's
+ * Production (Yotube room, codex gpt-6.1-terra, chip full, steps resolved to write): a teammate's
  * `ffmpeg ... -y /tmp/diffusion-review.jpg` ended "Could not open file : /tmp/... Operation not permitted" (exit 255) in
  * four runs; nothing read it as the boundary (the 132/133/134/139 table above needs a signal), so the step never asked the
  * room for the access the owner's chip already covered. Measured offline against the real codex seatbelt

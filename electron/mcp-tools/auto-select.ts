@@ -621,7 +621,7 @@ export async function autoSelectMcpTools(input: {
   groupRoom?: boolean;
   /**
    * The conversation is One's own (the personal agent's, or a goal continuation it owns): the only conversation that may hand work to
-   * a teammate, so it carries One Team on every turn instead of waiting for the judge to name it. Observed in use (Hope,
+   * a teammate, so it carries One Team on every turn instead of waiting for the judge to name it. Production (Hope,
    * "make it with the improved agent"): the judge picked no One Team tool, `team.start` answered not_available_in_this_run, the plugin
    * was only recorded as a mid-turn request, and the owner had to write again for the next turn to carry it. Main-derived from the
    * stored chat (oneTeamDispatchAllowedFor), never from renderer input; the control capability still enforces who may dispatch.
@@ -795,7 +795,7 @@ export async function autoSelectMcpTools(input: {
   // ★Owner 2026-09-23: plugin search is routing too. A project turn still sees a
   // capped Hub shelf (suggestions only — nothing from the Hub is installed without
   // the owner's approval); local plugins and installed tools stay first.
-  // the judge offers only what this machine has installed or connected. A Hub plugin is never a
+  // Owner the judge offers only what this machine has installed or connected. A Hub plugin is never a
   // pre-run candidate any more; when nothing installed fits, the model asks agentlas_resolve_plugins and the owner decides
   // on the install (hephaestus-network stays pinned for that). The Build flow still reads the Hub (build-plan.ts).
   const offerHubToJudge = false;
@@ -1104,7 +1104,7 @@ export async function autoSelectMcpTools(input: {
   // was only attached from the next turn.
   const oneOwnRun = input.oneOwnConversation === true;
   // The supervisor starts every reply turn of One's own conversation in Computer Use mode (supervisor-service.ts: full access and
-  // Computer Use), so the "auto" clause never matched it: Hope's own turns ran without the Agentlas browser (observed in use:
+  // Computer Use), so the "auto" clause never matched it: Hope's own turns ran without the Agentlas browser (production
   // Hope connected agentlas-browser mid-turn, was told its tools attach on the next turn, and stopped). Computer Use does not exclude
   // the browser (blockedByHostBinding only drops Playwright), so One's own conversation carries it in that mode as well.
   const oneOwnComputerUse = oneOwnRun && effectiveToolMode === "computer-use";

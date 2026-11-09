@@ -142,7 +142,7 @@ export interface AgiBlockerFacts {
   continuationAutomation?: boolean;
   /**
    * Whether the Goal's room can hand work to teammates (One's own conversation). A Work room cannot: create/invite/dispatch_teammate
-   * throw one-team-depth-limit there every time (observed in use, a Work Goal: 45 attempts on one incident). false removes the
+   * throw one-team-depth-limit there every time (production a Work Goal: 45 attempts on one incident). false removes the
    * teammate paths from the plan; absent = unknown, never refused.
    */
   teamAvailable?: boolean;
@@ -511,7 +511,7 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
   }
   // 7b. The Goal's wakes fail the same way every time: AGI moves the work another way (teammates, a new plan); a turn is still tried
   //     first when the host would admit one. Only a cause on our side is filed as a defect: a signed-out site or a provider limit
-  //     repeated three times is still that (observed in use: 23 attempts filed as ours while a site was signed out).
+  //     repeated three times is still that (production 10-28..30: 23 attempts filed as ours while YouTube Studio was signed out).
   const repeatedFailure = find("repeated_failure");
   if (repeatedFailure) {
     const { cause, ourDefect } = causeOfRunCode(repeatedFailure.code);

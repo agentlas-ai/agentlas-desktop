@@ -1,3 +1,4 @@
+import { serverFailureCodeForStatus } from "./provider-overload";
 import { selectionFor } from "../capabilities/one-capabilities";
 import type { ChildProcess } from "node:child_process";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
@@ -1061,13 +1062,17 @@ export function claudeFailureFromEvent(
       ?? prior?.providerCode;
     const lead = claudeErrorLead(startupReason ? "turn_setup_failed" : code, locale);
     const message = `${lead}${code ? ` (${code})` : ""}${providerText ? `: ${providerText}` : ""}`.slice(0, 2000);
+    // A 5xx (529 overloaded, 503, 500 ...) is the provider's outage: the shared server-failure code every runner uses, so it gets the
+    // same short continuation as on codex or an API lane (shared/transient-provider-failure.ts). It was a plain exit before.
+    const serverFailure = typeof ev.api_error_status === "number" ? serverFailureCodeForStatus(ev.api_error_status) : null;
     return {
       // A bare 429 with no window rejection before it is request throttling (rate_limit), retried after its reset hint.
       kind: ev.api_error_status === 429 ? "rate_limit"
+        : serverFailure ? "unavailable"
         : /not logged in|please run \/login/i.test(finalText) ? "auth"
         : "exit",
       message, runtime: "claude",
-      ...(ev.api_error_status === 429 ? { providerCode: code ?? "api_error_429" } : code ? { providerCode: code } : {}),
+      ...(ev.api_error_status === 429 ? { providerCode: code ?? "api_error_429" } : serverFailure ? { providerCode: serverFailure } : code ? { providerCode: code } : {}),
       source: ev.api_error_status !== 429 && /not logged in|please run \/login/i.test(finalText) ? "heuristic" : "marker",
       ...(prior?.retryAfterHint ? { retryAfterHint: prior.retryAfterHint } : {}),
     };

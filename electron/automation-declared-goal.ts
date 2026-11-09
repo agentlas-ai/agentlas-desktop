@@ -46,7 +46,7 @@ export function declaredGoalForAutomation(a: Pick<Automation, "id" | "name" | "g
   if (saved) return { name: a.name ?? null, goal: saved };
   // With no saved goal the judge used to see a name and, at best, the owning Goal. It never saw what the run was told to do, so a reply the
   // instruction itself defines ("nothing changed: answer exactly [quiet]") read as "no result in the record" and went to the owner every
-  // 15 minutes (64 of 103 needs_input rows of one tracker, observed in use).
+  // 15 minutes (64 of 103 needs_input rows of one tracker, a real installation).
   const instruction = String(a.promptTemplate ?? "").replace(/\s+/g, " ").trim();
   const instructionLine = instruction && instruction !== String(a.name ?? "").trim()
     ? `Instruction given to every run: ${instruction.slice(0, INSTRUCTION_TEXT_MAX)}` : null;

@@ -3,7 +3,7 @@ import { isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
 
 /**
  * An owner message whose first send ended with its outcome unknown (the run died or vanished before the runtime confirmed it took
- * the turn) is sent once more, with one line telling the model so. Decision: a step or message of unknown outcome
+ * the turn) is sent once more, with one line telling the model so. decision a step or message of unknown outcome
  * never stops to ask; the risk of doing something twice is accepted, and the model is told so it can check first.
  *
  * Main-only: a marker the send queue sets on the request it starts again. The renderer's own requests never carry it
@@ -74,7 +74,7 @@ const UNSETTLED_TURN_CODE = "runtime_turn_unsettled";
  *  - failed as an UNSETTLED turn (the turn was dispatched and ended without its completion receipt, after the host's one same-session
  *    continuation) with no cause from the provider (`runtimeFailure.cause`: quota, rate limit, login, a refusal or an empty reply are
  * outside causes the provider named and wait for their own remedy): the effect is unknown, which is the same case (decision
- *E2): send again with the earlier-attempt line;
+ * E2): send again with the earlier-attempt line;
  *  - the owner's Stop (cancelled), a steering interrupt (the owner's newer direction is the turn now), a host stop (the app
  *    closed or updated: a quit is the owner's act and an update is resumed by the update ledger) and a Goal pause or delete:
  *    never. Stop always wins;

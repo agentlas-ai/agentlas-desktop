@@ -10,7 +10,7 @@ export const ONE_ATTACHMENT_CONTRACT_VERSION = "1.0.0" as const;
 export const CHAT_FILE_STORE_MAX_BYTES = 1_000_000_000;
 
 /**
- * The bounds every Desktop had before this release. They are no longer limits on what may be attached. They remain only
+ * The bounds every Desktop had before. They are no longer limits on what may be attached. They remain only
  * where an old peer needs them: an old phone's inline `images` envelope, and the legacy inline copy of a file group's
  * pictures that old phones and old transcripts display (chatFileDisplayImages).
  */

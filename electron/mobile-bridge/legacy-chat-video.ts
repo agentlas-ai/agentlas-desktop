@@ -45,7 +45,7 @@ export class LegacyChatVideoTransfers {
   constructor(private readonly db:Database.Database | (()=>Database.Database),private readonly assertCurrent:(p:ChatVideoPrincipal)=>void,private readonly now:()=>number=Date.now,
     private readonly assertDispatch?:(scope:LegacyDispatchScope,chatId:string,messageId:string)=>void,
     private readonly captureChat?:(chatId:string)=>(()=>void),
-    // The folders the desktop shows this chat's files from (fs/access chat-assets). observed in use: of 43 owner
+    // The folders the desktop shows this chat's files from (fs/access chat-assets). Production of 43 owner
     // answers naming a video, 39 named files that existed and the phone was offered none — teammate chats have no folder of
     // their own and their results sit in agent-cwd, outside Hope's folder; the desktop showed the same files.
     private readonly assetRoots?:(chatId:string)=>string[],

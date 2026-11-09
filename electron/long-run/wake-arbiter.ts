@@ -115,7 +115,7 @@ export const SAME_CAUSE_RETRY_DELAYS_MS: readonly number[] = [5 * 60_000, 30 * 6
  * wait is for a cause outside the app (the provider's typed quota, rate limit or sign-in failure): nothing the app does shortens it. */
 export const SAME_CAUSE_WAIT_MS = 6 * 60 * 60_000;
 /** A cause inside the app (its own bookkeeping, a team verifier, a runtime-selection check ...) is ours to heal, so after the two
- * steps above it keeps a bounded spacing instead of the external wait. Observed in use: of 480
+ * steps above it keeps a bounded spacing instead of the external wait. Measured on a real installation: of 480
  * counted Goal wakes only 1 failed on an external cause, yet the Goals sat 6 h at a time on task-force-verification-failed,
  * one-team-runtime-selection-changed and runtime_turn_unsettled (run_2e7c4394 "shorts two a day": 00:57->06:57->13:01->19:05->01:10). */
 export const SAME_CAUSE_INTERNAL_WAIT_MS = 60 * 60_000;

@@ -126,7 +126,7 @@ const MAX_CONNECTIONS_PER_DEVICE = 1;
 const SUPERSEDED_CONNECTION_CLOSE_CODE = 4001;
 const SUPERSEDED_CONNECTION_CLOSE_REASON = "superseded by a newer connection";
 // "Try again later" (RFC 6455 1013). The phone treats close code 1008 (policy violation) as a permanent rejection in every build
-// in older app versions (web_socket_desktop_transport.dart onDone): it stops reconnecting until the app returns to the foreground or the
+// (web_socket_desktop_transport.dart onDone): it stops reconnecting until the app returns to the foreground or the
 // owner taps retry. A socket this Desktop closes because its own secure channel could not be set up, or was closed, says nothing
 // about the phone; a fresh connection starts from the full device authentication again. Those closes use this code instead.
 const RETRY_LATER_CLOSE_CODE = 1013;
@@ -1299,7 +1299,7 @@ export class AgentlasMobileBridgeServer {
    * the One supervisor's channel to the background service during a hand-off, a chat still settling, ...) is not a verdict on the
    * request. Writes were already answered `desktop_not_ready` and queued by the phone; reads got a final non-retryable
    * `authority_error`, so the Hope screen failed about three times a second for the whole minute of a daemon hand-off (219 failed
-   * reads in four windows) and showed its "needs review" banner. The read waits here instead, with the backoff the
+   * reads in four windows, /21) and showed its "needs review" banner. The read waits here instead, with the backoff the
    * send queue uses, and asks again, for at most readNotReadyWaitMs (below the phone's 30 s request timeout). Every other refusal
    * is thrown at once, as before; a read still not ready after the wait is answered desktop_not_ready (retryable) by dispatch.
    * Only refused-before-anything codes qualify (mobileBridgeNotReadyRefusal), so asking again can never run a request twice.

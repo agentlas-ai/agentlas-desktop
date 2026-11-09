@@ -688,7 +688,7 @@ function ChatFileOpenViewer({ file, locale, chatId = null, onClose, onExpand, on
 }) {
   const preview = file.viewer;
   // A rendered markdown file resolves its own relative links and images (`](WORK.md)`, `![](shots/a.png)`) against its folder; without
-  // a base they were dead text (observed in use, a Work report's README/WORK.md opened from One).
+  // a base they were dead text (production a Work report's README/WORK.md opened from One).
   const markdownBasePaths = useMemo(() => markdownFolderOf(preview.path), [preview.path]);
   const liveKinds = new Set<LiveOutputKind>(["image", "video", "audio", "pdf", "document", "spreadsheet", "presentation", "archive"]);
   const liveKind = liveKinds.has(preview.viewerKind as LiveOutputKind) ? preview.viewerKind as LiveOutputKind : null;

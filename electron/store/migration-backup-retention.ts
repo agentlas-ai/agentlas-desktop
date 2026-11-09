@@ -5,7 +5,7 @@
  * Why here and not in initStore: copies are only made on an update launch,
  * where the install journal stopped the old in-store prune, and every other
  * launch opens the store as a follower (daemon alive), which never pruned. The
- * cap therefore never held (owner Mac: 7 copies, 8.3 GB).
+ * cap therefore never held (owner Mac 7 copies, 8.3 GB).
  * Dropping those guards would have put ~29 s of synchronous integrity checks
  * before store-ready instead.
  *

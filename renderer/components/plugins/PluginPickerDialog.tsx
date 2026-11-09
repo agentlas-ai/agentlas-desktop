@@ -61,6 +61,7 @@ export function PluginPickerDialog({
   onKeySavePhase,
   onKeySaveInterrupted,
   isKeySaveOwnerCurrent,
+  onKeyDismiss,
 }: {
   ko: boolean;
   embedded?: boolean;
@@ -77,6 +78,7 @@ export function PluginPickerDialog({
   onKeySavePhase?: (phase: KeySavePhase | null) => void;
   onKeySaveInterrupted?: (phase: KeySavePhase) => void;
   isKeySaveOwnerCurrent?: () => boolean;
+  onKeyDismiss?: () => void;
 }) {
   const brandMap = usePluginBrandMap();
   const catalog = usePluginCatalog();
@@ -92,6 +94,7 @@ export function PluginPickerDialog({
   const [installing, setInstalling] = useState(false);
   const [keyStep, setKeyStep] = useState<KeyStepState | null>(null);
   const [loginStep, setLoginStep] = useState<LoginStepState | null>(null);
+  const [completion, setCompletion] = useState<PluginPickerResult | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
 
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -104,11 +107,15 @@ export function PluginPickerDialog({
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       if (filterOpen) { setFilterOpen(false); return; }
-      if (!installing && !keyStep) onClose();
+      if (keyStep && onKeyDismiss) { event.preventDefault(); onKeyDismiss(); return; }
+      if (!installing && !keyStep) {
+        if (completion) { onCompleted?.(completion); setCompletion(null); setSelected(new Set()); }
+        onClose();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, filterOpen, installing, keyStep, onClose]);
+  }, [active, completion, filterOpen, installing, keyStep, onClose, onCompleted, onKeyDismiss]);
 
   /*
    * 필터 메뉴는 바깥을 누르면 닫혀야 한다.
@@ -172,6 +179,11 @@ export function PluginPickerDialog({
 
   const guidedOnly = chosen.length > 0 && chosen.every((listing) => !usesLiveSetup(listing) && !!bundledSetupFor(listing.slug)?.connectSetup && !(bundledSetupFor(listing.slug)?.mcp?.length));
 
+  const finish = (result: PluginPickerResult) => {
+    if (result.skipped.length > 0 || (result.pending?.length ?? 0) > 0) setCompletion(result);
+    else { onCompleted?.(result); onClose(); }
+  };
+
   const install = async () => {
     if (chosen.length === 0 || installing) return;
     setInstalling(true);
@@ -182,7 +194,14 @@ export function PluginPickerDialog({
       setInstalling(false);
     }
 
-    await refresh();
+    let refreshComplete = false;
+    try {
+      const refreshed = await refresh();
+      refreshComplete = refreshed.catalog && refreshed.installed && refreshed.sites;
+    } catch { /* Preserve the install receipt even if refresh unexpectedly throws. */ }
+    if (!refreshComplete) {
+      outcome.result.skipped.push({ slug: ko ? "도구 목록" : "Tool list", reason: ko ? "도구 목록 또는 연결 상태를 다시 확인하지 못했습니다." : "The tool list or connection status could not be refreshed." });
+    }
 
     // 로그인이 먼저다. 키 입력은 사용자가 다른 사이트를 다녀와야 할 수도 있어
     // 흐름이 길어지는데, 로그인은 대개 클릭 두 번이라 여기서 끝내는 편이 낫다.
@@ -194,9 +213,24 @@ export function PluginPickerDialog({
       setKeyStep({ queue: outcome.needKeys, index: 0, result: outcome.result });
       return;
     }
-    onCompleted?.(outcome.result);
-    onClose();
+    finish(outcome.result);
   };
+
+  if (completion) return (
+    <div className={embedded ? styles.embedded : styles.overlay} role={embedded ? undefined : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="plugin-result-title">
+      <div className={styles.panel}>
+        <header className={styles.header}><h2 id="plugin-result-title" className={styles.title}>{ko ? "도구 추가 결과" : "Tool setup results"}</h2></header>
+        <div className={styles.body} role="status">
+          {completion.installed.length > 0 && <p>{ko ? "처리된 항목" : "Processed items"}: {completion.installed.join(", ")}</p>}
+          {completion.skipped.length > 0 && <><p>{ko ? "결과 확인이 필요한 항목:" : "Results requiring review:"}</p>
+            <ul>{completion.skipped.map((row, index) => <li key={`${row.slug}:${index}`}>{row.slug}: {row.reason}</li>)}</ul></>}
+          {(completion.pending?.length ?? 0) > 0 && <><p>{ko ? "로컬 실행 승인 대기:" : "Local execution approval needed:"}</p>
+            <ul>{completion.pending?.map((row, index) => <li key={`${row.slug}:${index}`}>{row.serverName}</li>)}</ul></>}
+        </div>
+        <footer className={styles.footer}><button type="button" className={styles.primary} onClick={() => { onCompleted?.(completion); setCompletion(null); setSelected(new Set()); onClose(); }}>{ko ? "확인" : "Done"}</button></footer>
+      </div>
+    </div>
+  );
 
   if (loginStep) {
     return (
@@ -211,8 +245,7 @@ export function PluginPickerDialog({
             setKeyStep({ queue: keyQueue, index: 0, result: finalResult });
             return;
           }
-          onCompleted?.(finalResult);
-          onClose();
+          finish(finalResult);
         }}
         onAdvance={setLoginStep}
       />
@@ -226,13 +259,13 @@ export function PluginPickerDialog({
         state={keyStep}
         brandMap={brandMap}
         chrome={embedded ? "inline" : "modal"}
+        onDismiss={onKeyDismiss}
         onSavePhase={onKeySavePhase}
         onSaveInterrupted={onKeySaveInterrupted}
         isSaveOwnerCurrent={isKeySaveOwnerCurrent}
         onDone={(finalResult) => {
           setKeyStep(null);
-          onCompleted?.(finalResult);
-          onClose();
+          finish(finalResult);
         }}
         onAdvance={setKeyStep}
       />

@@ -32,7 +32,7 @@ type CandidateEmbeddingRow = {
 
 // A candidate row is immutable, so a vector stored under an older adapter identity (the Unigram normalizer fix moved the
 // identity to semantic-v2) is rejected on every read and never rewritten. Re-embedding it per read would cost every candidate
-// again on each relation rebuild (2,183 rows on a real store, about 0.6 s). The text of a row never changes, so the
+// again on each relation rebuild (2,183 rows on the owner's store, about 0.6 s). The text of a row never changes, so the
 // re-embedding is kept for the life of the process; a degraded (hash-96) fallback is never kept, because the real model may
 // appear later in the same process.
 const reembeddedCandidates = new Map<string, LocalMemoryEmbedding>();

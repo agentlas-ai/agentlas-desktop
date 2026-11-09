@@ -33,7 +33,7 @@ export function createNativeCapturePublisher(input: {
     const captureTask = resolveTask();
     // The chat belongs to the Task the same way the artifact binder below decides it (canonicalTaskOwnsChat): its origin chat, or a
     // registered working session under it. A Work session's delegated child chat is the second kind. Requiring the origin chat
-    // here refused every capture of such a child (observed in use, Sweet Designer's first screenshot), and the daemon then
+    // here refused every capture of such a child (production Sweet Designer's first screenshot), and the daemon then
     // released the run's whole browser grant.
     const taskBindingCurrent = () => {
       const task = resolveTask();
@@ -76,16 +76,17 @@ export function createNativeCapturePublisher(input: {
       const artifacts = bindOneRuntimeToolArtifacts({ taskId: task.id, taskVersion: task.version,
         chatId: input.chatId, runId: input.runId, toolId: `native-capture:${randomUUID()}`, paths: [file] });
       if (artifacts.length !== 1) throw new Error("native-browser-capture-unavailable");
+      // The binding now owns this file even if a later notification fails.
+      committed = true;
+      retained.add(digest);
+      if (retained.size > 64) retained.delete(retained.values().next().value!);
+      retainedBytes += capture.png.length;
       // No await between authority check, binding, and durable event ingestion.
       input.emit({ kind: "notice", notice: { level: "info", code: "native-browser-capture-bound",
         message: currentUiLocale() === "ko" ? "브라우저 캡처를 저장했습니다." : "Browser capture saved." }, oneArtifacts: artifacts.map((artifact) => ({
           ...artifact, taskId: task.id, taskVersion: task.version, chatId: input.chatId, runId: input.runId,
         })) });
       input.onCommittedImage?.(file);
-      committed = true;
-      retained.add(digest);
-      if (retained.size > 64) retained.delete(retained.values().next().value!);
-      retainedBytes += capture.png.length;
     } finally {
       if (!committed) fs.rmSync(file, { force: true });
     }

@@ -604,7 +604,7 @@ export const AGENTLAS_TURN_TOOLS = ([
 // called reach.* 0/4 either way, and "explore 1Password" (off limits) never reached reach.explore in 4/4 either way (the port refuses it).
 // Local models (ollama, 8 per cell): gpt-oss:20b reach use 1/48 -> 17/48 and qwen3:30b-a3b 0/48 -> 28/48 over the tasks, with few
 // completed tasks (small models); the line is not what limits them.
-// Reach r2 (owner, Hope told to show Finder): r1 ended "Do not script or drive the app yourself", so a run holding the computer
+// Reach r2 (Hope told to show Finder): r1 ended "Do not script or drive the app yourself", so a run holding the computer
 // tools never used them on an app, in any app, and a refused reach.invoke ended with the owner told to do it by hand.
 const AGENTLAS_TURN_INSTRUCTIONS = purposePrompt([
   { id: "tool.agentlas-turn.server-instructions", revision: 1, stability: "fixed-policy",
@@ -684,7 +684,7 @@ function instructionsText() {
   return names.length ? baseInstructions + "\n" + installedTemplate.replace("{names}", names.join(", ")) : baseInstructions;
 }
 function handle(requestValue) {
-  if (requestValue.method === "initialize") return { protocolVersion: "", capabilities: { tools: {} }, serverInfo: { name: "agentlas-turn", version: "1.0.0" }, .(allowedTools.includes("harness_call") ? { instructions: instructionsText }: {}) };
+  if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-turn", version: "1.0.0" }, ...(allowedTools().includes("harness_call") ? { instructions: instructionsText() } : {}) };
   if (requestValue.method === "notifications/initialized") return undefined;
   if (requestValue.method === "ping") return {};
   if (requestValue.method === "tools/list") return { tools: tools.filter((tool) => allowedTools().includes(tool.name)) };

@@ -41,7 +41,7 @@ function assertDaemonOwner(owner: ScienceDaemonProjectionOwner): void {
 /** Called after the previous Science execution host has relinquished its lease.
  * Only canonical Science projections move; task, attempt and result states do not. Ended runs move too: the startup reconcile
  * re-projects every loop session, ended ones included, and that projection requires the current owner. Only a run that can still act
- * gets the run.host_owner_changed event. Nothing reads it, and an ended run gained one per service boot (measured on a real installation: 230 on
+ * gets the run.host_owner_changed event. Nothing reads it, and an ended run gained one per service boot (a real installation 230 on
  * 2 runs cancelled in September). */
 export function adoptScienceLongRunOwnership(input: {
   appInstanceId: string;

@@ -1,5 +1,5 @@
 /*
-* Desktop first-run paywall. Same window, drag bar, brand mark and tokens as the other
+ * Desktop first-run paywall. Same window, drag bar, brand mark and tokens as the other
  * first-run screens (FirstRun.module.css supplies .root/.drag/.brand); only the paywall's own parts live here.
  * Values come from the existing Desktop tokens in app/globals.css — no new colour, face or radius.
  *

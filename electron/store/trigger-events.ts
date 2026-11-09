@@ -513,11 +513,11 @@ export type UnconfirmedSettlement =
   | { closed: true; reason: "cap" | "repeat"; deliveries: number; runId: string | null };
 
 /**
- * A delivery ended with an unknown outside effect. The occurrence keeps running (Decision: no stop-and-ask, a
+ * A delivery ended with an unknown outside effect. The occurrence keeps running (decision no stop-and-ask, a
  * duplicate is accepted), but only within bounds, decided here in one commit:
  *  - cap: the 3rd delivery that ends unconfirmed closes it (the scheduled-occurrence cap, UNCONFIRMED_OCCURRENCE_MAX_DELIVERIES);
  *  - repeat: a redelivery that ends with the same held steps as the one before closes it at once when no model step is among them
- * (a direct tool call or a code step reads no note, so asking again can only fail the same way: observed in use, three
+ * (a direct tool call or a code step reads no note, so asking again can only fail the same way: production three
  *    command graphs redelivered 17-20 times each).
  * "Closes" means status delivered with the typed reason kept in last_error: the owner is asked nothing, and the next occurrence of
  * the automation is a different event that runs normally. Otherwise the event goes back to pending on the usual backoff.
@@ -594,7 +594,7 @@ export type StoppedCheckClosure = { id: string; automationId: string; runId: str
 /**
  * A check that failed and cannot change by running the occurrence again (the kernel's typed retry stop: the output it judged is the one it
  * would judge again, its rework budget is used, or a judged step may already have acted outside) ends the occurrence. decision
- *the app closes it by itself, like an occurrence whose step stayed unconfirmed at its cap: status delivered with the typed
+ * the app closes it by itself, like an occurrence whose step stayed unconfirmed at its cap: status delivered with the typed
  * reason kept in last_error, the owner is asked nothing, and the next occurrence of the automation is another event that runs normally.
  * Parked, it showed the owner a Retry that could only judge the same result again and park it again.
  */
@@ -621,7 +621,7 @@ export function closeTriggerEventAfterStoppedCheck(
 }
 
 /**
- * Occurrences the app parked for a failed check before it closed them itself (the owner's database holds two of and 10-21).
+ * Occurrences the app parked for a failed check before it closed them itself (a real installation holds two and 10-21).
  * They are closed the same way the next time the outbox drains, through the app's own path and never by hand: only a parked row whose
  * stored failure is the check's (EVAL_FAILED / EVAL_STUCK) and that did not exhaust the ordinary retry budget. Each closure is compare-and-set
  * on the row it read, so an owner's reconcile in between wins.

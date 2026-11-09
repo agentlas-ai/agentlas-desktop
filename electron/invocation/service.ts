@@ -3041,7 +3041,7 @@ export class InvocationService {
         if (releaseQueuedSteerRecoveryHold(row.id, row.recoveryReason)) row = getDurableQueuedSteer(row.id)!;
       }
       // The owner's own direction held behind an original run that nothing alive owns any more (no live owner here or in the other
-      // host, no terminal receipt): the hold protects nobody. Decision: an unknown outcome never stops to ask; the
+      // host, no terminal receipt): the hold protects nobody. decision an unknown outcome never stops to ask; the
       // direction runs as the next turn. Host relays (promptOrigin "system") keep their hold and its retirement below.
       if (row.request.promptOrigin !== "system" && row.status === "queued" && !row.drainedRunId && row.recoveryState === "held"
         && row.recoveryReason === "original-run-start-uncertain" && !previousExecutionClosed
@@ -3970,7 +3970,7 @@ export class InvocationService {
     // (2026-10-04, verify-one-improvement-proof-producer failed-worker scenario).
     let durableAssistantReplyBound = false;
     /*
-     * Host-level safety net (owner rule): one decision for the failure of an owner turn, taken at the one place the failure
+     * Host-level safety net: one decision for the failure of an owner turn, taken at the one place the failure
      * becomes visible (the three terminal sites below). External causes keep their honest message; an INTERNAL failure never reaches the
      * owner as a code or an exception text: when nothing acted the host starts one ordinary retry of the same request, otherwise it says
      * in plain words what happened. shared/owner-failure-class.ts, invocation/host-recovery.ts.
@@ -4045,7 +4045,7 @@ export class InvocationService {
     const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null, failure?: McpInvocationEvent["error"], delivery?: "not-dispatched"): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
       // A host-started Goal continuation (promptOrigin "system") stays quiet, except for a cause only the owner can clear
-      // (shared/run-failure-notice.ts OWNER_ACTION_FAILURE_CODES): the waiting Goal says why and what to do (observed in use),
+      // (shared/run-failure-notice.ts OWNER_ACTION_FAILURE_CODES): the waiting Goal says why and what to do (YouTube),
       // and for the app's own failure of that wake (decideOwnerFailure plan "goal"): one plain line, never repeated while it is the
       // chat's latest reply, so a Goal whose wake died inside the app does not look stuck.
       const ownerActionCause = typeof errorCode === "string" && OWNER_ACTION_FAILURE_CODES.has(errorCode);
@@ -4100,7 +4100,7 @@ export class InvocationService {
           ? forecastAppResend(getDb(), runId, { errorCode, runtimeFailure: failure?.runtimeFailure,
               ...(storeLockAfterDispatch && runFailedByHostInternalException(runId) ? { hostInternalFailure: true as const } : {}) }) : undefined;
         // The queue's own rule, for ANY cause (not one code): a run that provably sent nothing and whose message the queue starts again by
-        // itself must not tell the owner to send it again (E20: only work_project_residency_busy was covered, so the same
+        // itself must not tell the owner to send it again (E20, only work_project_residency_busy was covered, so the same
         // queue-owned retry of every other typed cause still said "send it again" while the app was sending it).
         let queuedRetry = false;
         if (!hostCause && terminalKind !== "invoke_interrupted" && (delivery ?? failure?.turnDelivery) === "not-dispatched") {
@@ -4716,7 +4716,7 @@ export class InvocationService {
       const code = refusalCode(producerAdmissionFailure) ?? "goal_episode_admission_failed";
       // Only Main opens Desktop's long-run admission; the background service never does, because Goal custody is Desktop-only.
       // On a service-hosted turn this is the design, not a cause: it left a refusal on every service turn (25 Hope turns,
-      // observed in use, none bound to a Goal). The turn runs the same; a Goal it names is answered as an ordinary turn
+      // none bound to a Goal). The turn runs the same; a Goal it names is answered as an ordinary turn
       // (goal_dispatch_ordinary_turn, service_hosted_turn).
       if (code === "desktop_long_run_admission_closed" && record.ownerLease?.ownerKind === "daemon") return;
       tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_episode_admission_refused", payload: {
@@ -4813,7 +4813,7 @@ export class InvocationService {
     /*
      * A host-started Goal continuation (promptOrigin "system") can reach its first dispatch without producer custody: the canonical
      * runtime-selected notice had not arrived (the selection came as metadata first) or its capture raced a host event. It was
-     * refused goal_episode_admission_missing and drawn "App problem" until the Goal sweep's next retry (observed in use,
+     * refused goal_episode_admission_missing and drawn "App problem" until the Goal sweep's next retry (production
      * 10-24, 10-26). Admit it ONCE more from the Goal's state now, through the same capture and the same admitGoalProducer a
      * canonical selection uses (bindGoalControllerAttempt): its custody checks, the Goal's own state and the dispatch re-check
      * below still decide, so a Goal that really moved, or belongs to another app instance, is refused again. A second refusal stands.
@@ -4885,7 +4885,7 @@ export class InvocationService {
       bindWorkAttachmentRun({ runId, chatId: chat.id, signal: controller.signal, readGroups: () => {
         const groups = explicitChatFiles.length ? [invocationRequest.fileGroupId!] : workAttachmentGroupIds(runReq.userPrompt);
         // The Goal's own sources are read from its revision as it is when the attachments are prepared: a revision bump while they
-        // were prepared no longer refuses the run (decided).
+        // were prepared no longer refuses the run.
         if (goalLongRun) {
           groups.push(...goalSourceAttachmentGroupIds({
             chatId: chat.id,
@@ -6100,7 +6100,7 @@ export class InvocationService {
               // Main never established its own custody record for this Goal turn (none captured, none bound). The owner's own
               // message in the chat (desktop or phone: any origin but a host-started turn) is answered all the same, as an
               // ordinary turn that holds no Goal custody and leaves the Goal untouched, exactly like a message on a stopped
-              // Goal above; refusing it left the room with "App problem" and nothing to do (observed in use, 10-24,
+              // Goal above; refusing it left the room with "App problem" and nothing to do (production 10-24,
               // 10-26). Nothing is fabricated: no producer admission is created late (that would bless a Goal that moved
               // during preparation). A host-started continuation, whose purpose is the Goal's own episode, still refuses
               // and the Goal sweep retries it.

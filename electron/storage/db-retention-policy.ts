@@ -1,6 +1,6 @@
 /**
  * The typed retention policy of the Desktop SQLite store (agentlas.sqlite) and the memory store attached to it
- * (memory.sqlite, `agentlas_memory`). One table, declared here, enforced by db-retention.ts. Owner complaint:
+ * (memory.sqlite, `agentlas_memory`). One table, declared here, enforced by db-retention.ts. Owner complaint
  * "the DB keeps piling up" (agentlas.sqlite 3.37 GB, memory.sqlite 2.55 GB on the owner's Mac).
  *
  * Every row says: what is written, by whom, who reads it, what stays, and the evidence. A table or kind that is not listed
@@ -59,7 +59,7 @@ export interface DbRetentionRule {
   table: string;
   /** Row kinds (run_events.kind, agent_context_entries.kind) the rule covers; empty for the whole table. */
   kinds: readonly string[];
-  /** Observed on a real store (table + indexes where the rule trims them), in MB. */
+  /** Observed a real installation (table + indexes where the rule trims them), in MB. */
   observedMb: number;
   action: DbRetentionAction;
   writer: string;
@@ -145,8 +145,8 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     writer: "store/automations.ts recordAutomationTerminalReceipt: one receipt per finished run, carrying the run's output (up to the chain budget)",
     readers: "automations.ts previousSuccessfulRunOutput (the newest ok receipt of an automation; unchanged = same outputDigest) and "
       + "reconcileDurableChainDeliveries (receipts with fan-out targets, whose output is the chained input)",
-    evidence: "Owner store: 8,488 receipts, 37 MB. One 10-minute change watch wrote 4,414 receipts with 15 distinct outputs (32 MB), "
-      + "147 identical ones in a day. The row, digest, status, byte count and fan-out list stay. Only the output text of an ok receipt "
+    evidence: "In a real installation a 10-minute change watch wrote thousands of receipts with few distinct outputs, "
+      + "many identical ones in a day. The row, digest, status, byte count and fan-out list stay. Only the output text of an ok receipt "
       + "with no fan-out is emptied (outputTruncated true, which the receipt parser accepts), and only when a newer ok receipt of the same "
       + "automation repeats its outputDigest. The newest ok receipt of every output keeps its text, so both readers read what they read before.",
   },

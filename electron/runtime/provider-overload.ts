@@ -50,6 +50,34 @@ export function refineServerFailureCode(code: ServerFailureCode, modelResident: 
   return code === RUNTIME_SERVER_ERROR_CODE && modelResident === false ? LOCAL_MODEL_UNLOADED_CODE : code;
 }
 
+/**
+ * The server-failure class of an error frame INSIDE a stream that already opened (HTTP 200): the same outage as a 5xx at the
+ * header, arriving after it. Anthropic sends {"type":"error","error":{"type":"overloaded_error"|"api_error"}}; Gemini sends
+ * {"error":{"code":503,"status":"UNAVAILABLE"}}; OpenAI-compatible servers (llama.cpp, Ollama /v1) send {"error":{"code":500 or
+ * "type":"server_error"|"api_error"}}. Read from these typed fields only, never from the message. Null for a request error, a
+ * frame whose error is prose only, or any other frame: the stream's own end decides those, as before.
+ */
+export function streamErrorFrameCode(frame: unknown): ServerFailureCode | null {
+  if (!record(frame) || !record(frame.error) || (frame.type !== undefined && frame.type !== "error")) return null;
+  const error = frame.error;
+  // A status may come as a number or as its digits ("503", some OpenAI-compatible local servers).
+  const status = [error.code, error.status]
+    .map((value) => typeof value === "string" && /^[1-5]\d\d$/.test(value) ? Number(value) : value)
+    .find((value): value is number => typeof value === "number" && Number.isInteger(value));
+  if (status !== undefined) return serverFailureCodeForStatus(status);
+  const names = [error.type, error.status, error.code].filter((value): value is string => typeof value === "string");
+  if (names.some((name) => STREAM_OVERLOADED_NAMES.has(name))) return RUNTIME_OVERLOADED_CODE;
+  if (names.some((name) => STREAM_SERVER_ERROR_NAMES.has(name))) return RUNTIME_SERVER_ERROR_CODE;
+  return null;
+}
+const STREAM_OVERLOADED_NAMES = new Set(["overloaded_error", "UNAVAILABLE", "DEADLINE_EXCEEDED", "server_is_overloaded"]);
+const STREAM_SERVER_ERROR_NAMES = new Set(["api_error", "INTERNAL", "server_error"]);
+
+/** The error object of an in-stream error frame, bounded, for the failure message (never parsed for the cause). */
+export function streamErrorFrameBody(frame: unknown): string {
+  try { return JSON.stringify(record(frame) ? frame.error : frame).slice(0, 300); } catch { return ""; }
+}
+
 export function serverFailureResendable(code: ServerFailureCode): boolean {
   return code === RUNTIME_OVERLOADED_CODE || code === LOCAL_MODEL_UNLOADED_CODE;
 }
@@ -78,17 +106,19 @@ export function waitForServerResend(ms: number, signal?: AbortSignal): Promise<v
 }
 
 export function serverFailure(input: {
-  code: ServerFailureCode; status: number; runtime: string; providerLabel: string; locale?: string; body?: string; retryAfter?: string | null;
+  /** Null for an error frame inside a stream that opened (no HTTP status of its own). */
+  code: ServerFailureCode; status: number | null; runtime: string; providerLabel: string; locale?: string; body?: string; retryAfter?: string | null;
 }): RunnerFailure {
   const ko = input.locale === "ko";
+  const http = input.status === null ? "" : `(HTTP ${input.status})`;
   const sentence = input.code === RUNTIME_OVERLOADED_CODE
-    ? ko ? `${input.providerLabel} 서버가 지금 요청을 받을 수 없다고 답했습니다(HTTP ${input.status}). 잠시 뒤 다시 시도해 주세요.`
-      : `${input.providerLabel} said it cannot take the request right now (HTTP ${input.status}). Try again shortly.`
+    ? ko ? `${input.providerLabel} 서버가 지금 요청을 받을 수 없다고 답했습니다${http}. 잠시 뒤 다시 시도해 주세요.`
+      : `${input.providerLabel} said it cannot take the request right now${http ? ` ${http}` : ""}. Try again shortly.`
     : input.code === LOCAL_MODEL_UNLOADED_CODE
-      ? ko ? `${input.providerLabel} 서버가 오류(HTTP ${input.status}) 뒤 모델을 메모리에 두지 못했습니다. 메모리가 부족할 수 있으니 다른 모델을 내리거나 더 작은 모델을 고르세요.`
-        : `${input.providerLabel} lost the model from memory after an error (HTTP ${input.status}). It may need more memory than is free: unload other models or choose a smaller one.`
-      : ko ? `${input.providerLabel} 서버 오류(HTTP ${input.status})로 답을 받지 못했습니다.`
-        : `${input.providerLabel} returned a server error (HTTP ${input.status}).`;
+      ? ko ? `${input.providerLabel} 서버가 오류${http} 뒤 모델을 메모리에 두지 못했습니다. 메모리가 부족할 수 있으니 다른 모델을 내리거나 더 작은 모델을 고르세요.`
+        : `${input.providerLabel} lost the model from memory after an error${http ? ` ${http}` : ""}. It may need more memory than is free: unload other models or choose a smaller one.`
+      : ko ? `${input.providerLabel} 서버 오류${http}로 답을 받지 못했습니다.`
+        : `${input.providerLabel} returned a server error${http ? ` ${http}` : ""}.`;
   const detail = String(input.body ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
   const retryAfterHint = httpRetryAfterIso(input.retryAfter);
   return { kind: "unavailable", runtime: input.runtime, source: "marker", providerCode: input.code,

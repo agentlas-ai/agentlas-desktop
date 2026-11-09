@@ -4,7 +4,7 @@
  * app.call / one_app_call run the screen's IPC handlers, and a handler's custody or ledger check throws a bare code
  * (`goal_control_binding_changed`, `trigger_event_reconciliation_conflict`, `[agentlas:code=alive-input-invalid] alive-input-invalid`, an
  * `ENOENT ... operation.json` with a private path). The model got exactly that, with no cause and no next step, and told the owner the
- * code (production failure_events: 14 such refusals in one day; chats.getGoalResumeReview with a stale expectedGoalId three
+ * code (production failure_events 14 such refusals in one day; chats.getGoalResumeReview with a stale expectedGoalId three
  * times in a row). Each code now carries what it means and the call that gets the model to the owner's goal; a code the table does not
  * name gets the generic line, so no bare code is the whole answer. Matching is on the exact code, never on prose. Pure: no host, no
  * Electron (the daemon relays Main's message, which is already this text).

@@ -151,7 +151,9 @@ function collectItems(): SyncItem[] {
   // 2) pending 큐 — 엔진의 실시간 신호. done 이동으로 재큐잉을 멈추므로 항상 소비한다.
   let pendingFiles: string[] = [];
   try {
-    pendingFiles = fs.readdirSync(pendingDir()).filter((f) => f.endsWith(".json"));
+    // The publisher writes .tmp-*.json before its atomic rename. It still owns
+    // those paths; reading or moving one can destroy an in-flight write.
+    pendingFiles = fs.readdirSync(pendingDir()).filter((f) => f.endsWith(".json") && !f.startsWith(".tmp-"));
   } catch {
     pendingFiles = [];
   }

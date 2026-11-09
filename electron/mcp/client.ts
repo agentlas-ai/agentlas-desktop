@@ -1027,7 +1027,7 @@ export function invocationFailure(
     };
   }
   // The app's own unexpected exception (told by class, SQLite driver and syscall facts, never by its words) is not read out to
-  // the owner: "Cannot read properties of undefined", "ENOENT ... open '<user path>'" are system text with nothing to act on.
+  // the owner: "Cannot read properties of undefined", "ENOENT... open '/Users/...'" are system text with nothing to act on.
   // The code stays the caller's fallback code; the cause is kept, bounded and redacted, in the run record.
   if (!typedFailure && !runtimeFailure && isHostInternalException(error)) {
     // A vanished working folder is the owner's folder, not the app's bug: the sentence the runner uses for the same fact, and the run is not
@@ -2716,7 +2716,7 @@ async function runMcpInvocationInContext(
   if (ownHostPrompt) excludedSupervisorInputs.add(ownHostPrompt);
   // An ingress that opens a new conversation commits the person's first words itself before the run (the phone's first One turn,
   // mobile-bridge one.invoke.start): it is this run's message, not history, and it is not written a second time. Before, the owner's
-  // words showed twice and the model read its own prompt as history (measured on a real installation: 8 such conversations since August).
+  // words showed twice and the model read its own prompt as history (a real installation 8 such conversations since August).
   const ingressFirstMessage = req.promptOrigin === "system" || req.agentAppMode ? null : ingressFirstUserMessage(chat.id, req);
   if (ingressFirstMessage) excludedSupervisorInputs.add(ingressFirstMessage);
   const history = req.agentAppMode || executionContext?.source === "automation" || scienceRecovery
@@ -4441,7 +4441,7 @@ async function runMcpInvocationInContext(
             : await grantBrowser();
         } catch (grantError) {
           /*
-           * The browser grant is the app's own broker answering (observed in useZ, One conversation: the broker did not answer
+           * The browser grant is the app's own broker answering (production Z, One conversation: the broker did not answer
            * in 25 s, "native-browser-broker-timeout", and the owner's message ended "the tool connections were not ready" before any
            * model ran). A run that did not ask for the browser (the baseline capability of One, or a selection's pick) goes on without
            * it, exactly like a browser whose host is not ready (hostBindingWithdrawn above); a run that needs the browser (owner tool
@@ -4980,7 +4980,7 @@ async function runMcpInvocationInContext(
       });
   // A declared key saved under a plainly misnamed name (ELEVENLABS_1 for ELEVENLABS_API_KEY) already reaches the tools under
   // the read name (don't ask), so it is only recorded. A key a tool really lacks is asked on the run-key sheet
-  // when the tool is selected ; nothing is announced at spawn and nothing is renamed here.
+  // when the tool is selected; nothing is announced at spawn and nothing is renamed here.
   if (!req.agentAppMode) {
     for (const alias of runnerEnv.aliasedKeys ?? []) {
       tryRecordRunEvent({
@@ -7495,7 +7495,7 @@ async function runMcpInvocationInContext(
         // The cause is the provider's (nothing else lands here: a sign-in has its own card above, a keychain refusal returned earlier), so the
         // sentence names whose it was and what to do; the stopping reason and the original failure stay in the details.
         // The runtime is named as the owner knows it ("Claude Code"), never by its machine id, and an engine on the owner's own machine (Ollama,
-        // LM Studio, MLX) is not a provider: the sentence does not blame one (regression review C13).
+        // LM Studio, MLX) is not a provider: the sentence does not blame one.
         const stoppedRuntime = (originalFailure ?? failure).runtime;
         const stoppedName = runtimeDisplayName(stoppedRuntime);
         const ownMachine = runtimeCostClass(stoppedRuntime) === "local";
@@ -7684,7 +7684,7 @@ async function runMcpInvocationInContext(
             {runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId}), memoryScope.boundary);
           runnerInvoked = true;
           result = await withCurrentHistoryProvider(async()=>{
-            //: these guards run before the runner is called (runnerInvoked is already set): a refusal sent nothing, so it is
+            // these guards run before the runner is called (runnerInvoked is already set): a refusal sent nothing, so it is
             // typed "not-dispatched", never an unsettled turn. The same guards after the runner returned stay untyped.
             try{assertAppMemory();assertScienceAliveMemory();}catch(refused){throw markRefusedBeforeDispatch(refused);}
             const returned=await selected.runner(boundRequest, attemptEvents.events);historyReturnedUsage=returned.observedUsage;assertAppMemory();assertScienceAliveMemory();return assertCurrentHistoryRunnerResult(returned);});
@@ -7727,7 +7727,7 @@ async function runMcpInvocationInContext(
             if (runtimeFailureBlocksReplay(runnerFailureFromError(error, selectedRuntime.kind))) throw error;
             // Unknown effect after dispatch, but never an anonymous one: the thrown error stays the standard cause (its
             // innermost code is still readable) with the delivery it carried (docs 31 W1, audit A7 M4).
-            //: the wrapper below keeps the thrown error as `cause`, but the error event reports only the wrapper's code;
+            // the wrapper below keeps the thrown error as `cause`, but the error event reports only the wrapper's code;
             // the first throw is recorded as a run-record-only diagnostic (no host-internal mark: it is not read as the app's own fault).
             try { recordInternalFailureCause(req, error, true); } catch { /* evidence only; the unsettled outcome below stands */ }
             throw unsettledTurnError({ runtimeKind: selectedRuntime.kind, locale, cause: error });

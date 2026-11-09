@@ -15,7 +15,12 @@ export interface SupervisorDispatchFrame { locale: "ko" | "en"; runtimeSelection
 export function supervisorInternalStartRefusal(error: unknown): boolean {
   const code = sendRefusalCode(error);
   const runtimeFailure = (error as {runtimeFailure?:InvocationRunReceipt["runtimeFailure"]} | null)?.runtimeFailure;
-  return code !== "runtime_not_signed_in" && !runtimeFailure && (code === "store_busy" || undispatchedInternalFailure({code,
+  // These are immutable command identity failures, not transient availability failures.
+  // Retrying them could execute an old instruction later after the binding changes again.
+  const bindingFailure = code === "supervisor_native_command_binding_changed"
+    || code === "supervisor_native_exact_command_required"
+    || code === "supervisor_native_source_occurrence_missing";
+  return !bindingFailure && code !== "runtime_not_signed_in" && !runtimeFailure && (code === "store_busy" || undispatchedInternalFailure({code,
     runtimeFailure,
     delivery:"not-dispatched"}));
 }
@@ -92,7 +97,7 @@ export function supervisorDispatchFrame(store: OneSupervisorStore, row: Supervis
 }
 /**
  * A command the host received stays alive until it is delivered: neither an attempt count nor an age ends a start that was refused
- * before dispatch (owner rule). Only a refusal the owner alone can clear (startRefusalNeedsOwner) and the capped backoff
+ * before dispatch. Only a refusal the owner alone can clear (startRefusalNeedsOwner) and the capped backoff
  * (supervisorRefusalDelay) still apply. Kept as a function because the work executor reads it; the attempts counter stays as a log.
  */
 export function supervisorRetryExhausted(_row: SupervisorRequestRow, _now = Date.now()): boolean {

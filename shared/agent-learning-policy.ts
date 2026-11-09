@@ -27,7 +27,7 @@ export interface LessonEvidence {
 }
 
 /**
- * Auto-evolution (an opt-in per agent): a lesson of the narrow, host-checkable kind may be applied without the
+ * Auto-evolution (owner opt-in per agent): a lesson of the narrow, host-checkable kind may be applied without the
  * owner reading the diff, and is taken back when the agent's own runs get worse. Everything else keeps the owner's diff review.
  * Nothing here is a quality threshold: the window only bounds how long one change is watched before the next may be applied.
  */

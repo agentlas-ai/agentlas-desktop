@@ -27,6 +27,7 @@ export function ServiceConnectionsButton({ locale, requestServerId, requestName,
   const showing = useRef(false);
   const savePhase = useRef<KeySavePhase | null>(null);
   const [interruption, setInterruption] = useState<KeySavePhase | null>(null);
+  const [dismissedSave, setDismissedSave] = useState(false);
   const rememberInterruption = (phase: KeySavePhase) => setInterruption(current => current === "write-started" ? current : phase);
   const trigger = useRef<HTMLButtonElement>(null);
   const previousActive = useRef(active);
@@ -62,13 +63,19 @@ export function ServiceConnectionsButton({ locale, requestServerId, requestName,
       const changed = identity === undefined || next === null || identity !== next;
       identity = next;
       if (!changed) return;
-      if (savePhase.current) rememberInterruption(savePhase.current);
+      if (savePhase.current) { setDismissedSave(false); rememberInterruption(savePhase.current); }
       close();
     });
     return () => { alive = false; generation.current += 1; unsubscribe?.(); };
   }, []);
   const owner = generation.current;
-  const picker = <div id={pickerId}><PluginPickerDialog ko={ko} embedded={embedded} active={active} onClose={() => { if (generation.current === owner) close(); }}
+  const dismissKeySetup = () => {
+    if (generation.current !== owner) return;
+    if (savePhase.current) { setDismissedSave(true); rememberInterruption(savePhase.current); }
+    close();
+    if (!portalTargetRef.current) requestAnimationFrame(() => trigger.current?.focus());
+  };
+  const picker = <div id={pickerId}><PluginPickerDialog onKeyDismiss={dismissKeySetup} ko={ko} embedded={embedded} active={active} onClose={() => { if (generation.current === owner) close(); }}
       onKeySavePhase={phase => { if (generation.current === owner) savePhase.current = phase; }}
       onKeySaveInterrupted={phase => { if (generation.current === owner) rememberInterruption(phase); }}
       isKeySaveOwnerCurrent={() => generation.current === owner}
@@ -78,7 +85,7 @@ export function ServiceConnectionsButton({ locale, requestServerId, requestName,
         : undefined}
       onCustomSetup={() => { if (locked.current || generation.current !== owner) return; close(); navigate("/library/mcps#custom"); }} /></div>;
   return <>
-    {interruption && <p role="status">{keySaveInterruptionText(interruption, ko)}{" "}<button type="button" onClick={() => setInterruption(null)}>{ko ? "닫기" : "Dismiss"}</button></p>}
+    {interruption && <p role="status">{dismissedSave ? (interruption === "before-write" ? (ko ? "연결 화면을 닫았습니다. 이번 저장 요청은 아직 보내지 않았습니다." : "Connection setup closed. No save request was sent in this attempt.") : (ko ? "연결 화면을 닫았습니다. 이미 시작된 저장의 결과는 확인되지 않았습니다." : "Connection setup closed. The result of the save already started is unconfirmed.")) : keySaveInterruptionText(interruption, ko)}{" "}<button type="button" onClick={() => setInterruption(null)}>{ko ? "닫기" : "Dismiss"}</button></p>}
     <button ref={trigger} type="button" disabled={disabled || (embedded && portalTarget === null)} onClick={() => { if (locked.current) return; if (showing.current) { if (portalTargetRef.current) { onOpenChange?.(true); } return; } generation.current += 1; showing.current = true; setOpen(true); onOpenChange?.(true); }} aria-haspopup={embedded ? undefined : "dialog"} aria-expanded={embedded ? (portalTarget ? active && open : open) : undefined} aria-controls={embedded && open ? pickerId : undefined}
       style={{ padding: "8px 12px", border: "1px solid var(--paper-edge)", borderRadius: 8, background: "var(--paper)", color: "var(--ink)" }}>
       {requestServerId ? ko ? "서비스 연결 확인" : "Review service connection" : ko ? "서비스 검색·연결" : "Find and connect services"}

@@ -3544,7 +3544,7 @@ export function registerIpcHandlers(): void {
   // ── harness capability ports: UI / SDK / One app control use the same dispatcher as the model's harness_call ──
   // The owner's screen calls these with chat "ui", which the owner-only ports trust (cache billing, pricing, wire format, ui.action).
   // A model reaching the same handler through app.call is not the owner's screen: it gets its own scope and its own permission, so an
-  // owner-only port refuses it as it refuses harness_call (audit ; no production call has come this way).
+  // owner-only port refuses it as it refuses harness_call (audit; no production call has come this way).
   const harnessUiContext = () => {
     const viaAppControl = appControlInvocationPermission();
     return viaAppControl ? { chatId: "app-control", runId: "app-control", permission: viaAppControl } : { chatId: "ui", runId: "ui", permission: "full" as const };
@@ -6881,7 +6881,7 @@ export function registerIpcHandlers(): void {
   };
   ipcMain.handle("workLiveView:listTabs", (event, input: { taskScopeId: string }) => {
     // A read of the tabs of a conversation that does not exist (a stale or mistyped id from an agent, a chat deleted meanwhile) has no
-    // tabs; it is answered as an empty list instead of "native-browser-chat-missing" (observed in use, two Work runs).
+    // tabs; it is answered as an empty list instead of "native-browser-chat-missing" (production two Work runs).
     if (typeof input?.taskScopeId === "string" && !getChat(input.taskScopeId)) {
       assertTrustedSitePublishIpcSender(event);
       return { ok: true, tabs: [] };

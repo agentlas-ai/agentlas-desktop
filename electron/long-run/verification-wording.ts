@@ -1,6 +1,6 @@
 /**
  * Plain sentences for the host's typed "durable evidence is not ready" codes. A verdict reason is read by the owner (Goal panel,
- * phone) and by the next episode's model; it must say what is missing, not print an internal code. Observed in use: 643 of 948
+ * phone) and by the next episode's model; it must say what is missing, not print an internal code. a real installation 643 of 948
  * verification receipts read "unavailable (invocation_failed)", "(verification_boundary_unconfirmed)" or "(durable_evidence_ready)",
  * the last one contradicting itself ("unavailable" while the cause says ready). The code stays the typed source; only the sentence changes.
  */

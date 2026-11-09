@@ -43,7 +43,7 @@ export function firstRunLocalModelReady(row: {
     && Boolean(row.model || (row.availableModels?.length ?? 0) > 0);
 }
 
-/** 온보딩의 Agentlas 칸이 "사용 가능"을 켜는 조건: 로그인. 무료 계정도 매주 무료 사용분으로 Light 를 쓴다(오너: 무료도
+/** 온보딩의 Agentlas 칸이 "사용 가능"을 켜는 조건: 로그인. 무료 계정도 매주 무료 사용분으로 Light 를 쓴다(무료도
  *  Light, 크레딧은 똑같이 차감). 칸과 첫 역할 배정이 같이 읽는다. 다 쓰면 서빙이 크레딧 부족을 알린다. */
 export function agentlasServingReady(credits: { authenticated: boolean; plan?: string; remainingCredits?: number } | null | undefined): boolean {
   return Boolean(credits?.authenticated);

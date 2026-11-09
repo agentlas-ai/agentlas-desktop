@@ -1,5 +1,5 @@
 /**
- * Literature tools for the agents of an ordinary Work or One conversation (PLAN S9 C1; owner: Science's own tools stay out of
+ * Literature tools for the agents of an ordinary Work or One conversation (PLAN S9 C1; owner Science's own tools stay out of
  * the owner's menus but the agents use them internally).
  *
  * Science's literature tools (search_academic_literature, retrieve_open_access_full_text) belong to a Science turn's tool server and

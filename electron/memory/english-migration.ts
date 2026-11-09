@@ -711,7 +711,7 @@ export function translateResultFromJudgment(result: {
 /**
  * Translate calls this job has in flight. A call through a subscription CLI holds a run slot of its own (runtime/selection.ts
  * withRunSlot), so the watchdog must not read that slot as "a run started": it did, and every call longer than one watchdog
- * period aborted itself (owner log: 151 of 172 haiku calls cancelled at ~15 s, one translated).
+ * period aborted itself (owner log -07: 151 of 172 haiku calls cancelled at ~15 s, one translated).
  */
 let ownCallsInFlight = 0;
 

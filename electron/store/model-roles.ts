@@ -246,13 +246,18 @@ function memberRowToMember(row: ModelRoleMemberRow): ModelRoleMember {
 }
 
 /** 역할 풀의 순서 있는 후보 목록. 테이블이 없거나 비면 []. */
+function listModelRoleMembersStrict(role: RuntimeRole): ModelRoleMember[] {
+  assertRole(role);
+  const rows = getDb()
+    .prepare("SELECT * FROM model_role_members WHERE role = ? ORDER BY position ASC")
+    .all(role) as ModelRoleMemberRow[];
+  return rows.map(memberRowToMember);
+}
+
 export function listModelRoleMembers(role: RuntimeRole): ModelRoleMember[] {
   assertRole(role);
   try {
-    const rows = getDb()
-      .prepare("SELECT * FROM model_role_members WHERE role = ? ORDER BY position ASC")
-      .all(role) as ModelRoleMemberRow[];
-    return rows.map(memberRowToMember);
+    return listModelRoleMembersStrict(role);
   } catch {
     return [];
   }
@@ -309,7 +314,7 @@ export function setModelRoleMembers(
   }
   const db = getDb();
   const updatedAt = new Date().toISOString();
-  const replace = db.transaction(() => {
+  return db.transaction(() => {
     db.prepare("DELETE FROM model_role_members WHERE role = ?").run(role);
     const insert = db.prepare(
       `INSERT INTO model_role_members
@@ -331,24 +336,23 @@ export function setModelRoleMembers(
         updatedAt,
       );
     });
-  });
-  replace();
-  markModelRolesOrigin(origin);
-  if (selections.length > 0) {
-    setModelRole({ ...selections[0], role, inherit: false });
-  } else if (role === "worker") {
-    // 빈 worker 풀 → v79 상속 행으로 미러(의미 동일: 오케스트레이터를 따른다).
-    const orchestratorHead = listModelRoleMembers("orchestrator")[0];
-    if (orchestratorHead) {
-      setModelRole({ ...orchestratorHead.selection, role: "worker", inherit: true });
+    markModelRolesOrigin(origin);
+    if (selections.length > 0) {
+      writeModelRoleMirror({ ...selections[0], role, inherit: false });
+    } else if (role === "worker") {
+      // 빈 worker 풀 → v79 상속 행으로 미러(의미 동일: 오케스트레이터를 따른다).
+      const orchestratorHead = listModelRoleMembersStrict("orchestrator")[0];
+      if (orchestratorHead) {
+        writeModelRoleMirror({ ...orchestratorHead.selection, role: "worker", inherit: true });
+      }
+    } else {
+      // 멀티모달은 대화 역할처럼 오케스트레이터를 상속하지 않는다. 마지막 후보를
+      // 제거했는데 v79 단일 행을 남기면 Dashboard에는 빈 풀로 보이면서도
+      // generate_image는 이전 엔진을 계속 노출한다. 풀과 단일 정본을 함께 비운다.
+      db.prepare("DELETE FROM model_roles WHERE role = ?").run(role);
     }
-  } else {
-    // 멀티모달은 대화 역할처럼 오케스트레이터를 상속하지 않는다. 마지막 후보를
-    // 제거했는데 v79 단일 행을 남기면 Dashboard에는 빈 풀로 보이면서도
-    // generate_image는 이전 엔진을 계속 노출한다. 풀과 단일 정본을 함께 비운다.
-    db.prepare("DELETE FROM model_roles WHERE role = ?").run(role);
-  }
-  return listModelRoleMembers(role);
+    return listModelRoleMembersStrict(role);
+  })();
 }
 
 /**
@@ -425,7 +429,7 @@ export function pickModelRoleFromPool(
   };
 }
 
-export function setModelRole(selection: RuntimeSelection): ResolvedModelRole {
+function writeModelRoleMirror(selection: RuntimeSelection): { role: RuntimeRole; inherit: boolean; updatedAt: string } {
   const role = selection.role ?? "orchestrator";
   assertRole(role);
   if (!VALID_KINDS.has(selection.kind)) {
@@ -466,6 +470,11 @@ export function setModelRole(selection: RuntimeSelection): ResolvedModelRole {
       inherit ? 1 : 0,
       updatedAt,
     );
+  return { role, inherit, updatedAt };
+}
+
+export function setModelRole(selection: RuntimeSelection): ResolvedModelRole {
+  const { role, inherit, updatedAt } = writeModelRoleMirror(selection);
   // 단일 설정(구 UI·모바일·채팅 경로)은 "풀 헤드 교체"다 — 풀이 있는데 헤드를
   // 안 바꾸면 v79 미러와 풀 1순위가 서로 다른 모델을 가리키게 된다.
   try {

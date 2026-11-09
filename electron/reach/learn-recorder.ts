@@ -181,7 +181,7 @@ export function deriveCheck(first: readonly TapElement[], last: readonly TapElem
     if (!element.role || !element.label || SECRET_LABEL.test(element.label)) continue;
     if (!/button|checkbox|radio|tab|link|text/i.test(element.role)) continue;
     // The menu bar and its items are the app's own frame, not an effect of pressing a window control. An agent reads the app twice at different depths
-    // (dev-app run: depth 9 / 160 nodes, then depth 12 / 500), so a menu item only the deeper read reaches looked "new" and became the check
+    // (dev-app run depth 9 / 160 nodes, then depth 12 / 500), so a menu item only the deeper read reaches looked "new" and became the check
     // ("신용카드…"); no replay can ever see it again and every replay answered outcome_unsatisfied.
     if (MENU_FRAME_ROLE.test(element.role)) continue;
     if (!firstByKey.has(key(element))) return { check: { kind: "element-present", role: element.role, label: element.label }, heldBefore: false };

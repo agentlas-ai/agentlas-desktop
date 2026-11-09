@@ -74,6 +74,11 @@ async function installOrUpgrade(args: Record<string, unknown>, ctx: Ctx, upgrade
   const manifestVersion = typeof manifest.version === "string" ? manifest.version : null;
   if (version && manifestVersion && version !== manifestVersion) return refused("version_mismatch", `the manifest is ${manifestVersion}`);
   if (ctx.dryRun) return refused("dry_run");
+  // A normalized manifest without either connectable rows or skill content
+  // cannot produce an install effect. Do not record it as an installed revision.
+  if (manifest.mcp.length === 0 && !manifest.skills.some((skill) => skill.files.length > 0)) {
+    return refused("nothing_installable", "the manifest carried no skills or connectable MCP servers");
+  }
   const result = await bridge.installHubPlugin({ slug, manifestUrl, approveLocalExecution: args.approveLocalExecution === true },
     { fetchManifest: async () => manifest });
   const installedSkills = result.skills?.installed?.length ?? 0;

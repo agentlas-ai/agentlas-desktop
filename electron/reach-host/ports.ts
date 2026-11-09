@@ -289,7 +289,7 @@ const WINDOW_WAIT_MS = 15_000;
 
 /**
  * Opens the app when it is not running, for a run that may act (write permission). "Reach only drives an app that is already running" ended
- * a Calculator job the owner had asked for whenever the app had been closed (observed in use). Never for an app Reach treats as
+ * a Calculator job the owner had asked for whenever the app had been closed. Never for an app Reach treats as
  * sensitive, and only where the OS can be asked from what the map knows (a bundle id, an AppX id, a desktop entry).
  */
 async function ensureOpen(rt: ReachRuntime, app: KnownApp, actuator: import("../reach/actuator").Actuator, signal?: AbortSignal): Promise<{ error: string } | null> {

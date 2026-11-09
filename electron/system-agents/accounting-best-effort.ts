@@ -8,7 +8,7 @@ export const USAGE_START_SOURCE_MISMATCH = "long_run_usage_start_source_mismatch
  *
  * Accounting is a ledger beside the model call, not a condition of it. The ledger refusing to open its own start row
  * (the host's usage-start source could not be matched back to what it just wrote) failed the whole turn before any model
- * call: observed in use, one Goal-wake tool selection ended "Could not prepare this run's tool connections
+ * call: production 15, one Goal-wake tool selection ended "Could not prepare this run's tool connections
  * (long_run_usage_start_source_mismatch)". The transaction that threw rolled its start row back, so the inference simply
  * runs without a usage row (the same as a call outside any accounting scope) and the cause is logged by its machine code.
  *

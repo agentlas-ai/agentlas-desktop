@@ -783,10 +783,12 @@ export function releaseIdleAgentResidencyForChat(chatId: string): { busy: boolea
       dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
       released += 1;
     }
-    if (entry.closeFailed) failed += 1;
-    if (entry.closeCompletion) completions.push(entry.closeCompletion.catch(() => { failed += 1; }));
+    let countedFailure = entry.closeFailed === true;
+    if (countedFailure) failed += 1;
+    const countFailure = (): void => { if (!countedFailure) { countedFailure = true; failed += 1; } };
+    if (entry.closeCompletion) completions.push(entry.closeCompletion.then(() => { if (entry.closeFailed) countFailure(); }, countFailure));
   }
-  return { busy: false, released, failed, kept, completions };
+  return { busy: false, released, get failed() { return failed; }, kept, completions };
 }
 
 export function disposeAgentResidency(): void {

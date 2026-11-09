@@ -74,7 +74,7 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
   const { view } = checked.data;
   const blocks: InlineUiPresentationContent[] = [];
   // Ticker candidates and the news, filings and price rows a query returned are what the model read to answer, not something
-  // the owner asked to see: they stay out of the phone chat . A drawn series, a report and a holdings
+  // the owner asked to see: they stay out of the phone chat. A drawn series, a report and a holdings
   // proposal are results and stay.
   if (view.kind === 'search') return [];
   else if (view.kind === 'query') {
@@ -127,7 +127,7 @@ export function financeNativeTranscriptContents(value: unknown, options: { state
     const card = warnings.length ? validateInlineUiPresentationContent(native(warnings.map(line => text(clipText(line, INTELLECT_UI_LIMITS.inputChars))))) : null;
     if (card?.ok) blocks.push(card.content);
   // A valuation with no saved report is what the model read to answer; its one line was a negative sentence even when the
-  // holdings were priced . The answer says what it found.
+  // holdings were priced. The answer says what it found.
   } else return [];
   if (!blocks.length || blocks.length > 16) return unavailable();
   const validated = blocks.map(block => validateInlineUiPresentationContent(block));

@@ -9,7 +9,7 @@ import type Database from "better-sqlite3";
  * It lives on the run's own `agent_revision_run_finished` receipt (payload.toolSummary), the row the revision comparison
  * already reads for each run. No new kind of event exists, and the comparison needs no further query: a separate summary row
  * had to be looked up per run, and a lookup that finds nothing reads every event of the run (73,626 events took 297 ms on the
- * a real ledger), at every run start. The receipt gets the summary when the run finishes (mcp/client.ts); the trim adds it
+ * owner's ledger), at every run start. The receipt gets the summary when the run finishes (mcp/client.ts); the trim adds it
  * to a receipt that has none (a run that finished before the summary existed) just before it deletes the tool rows.
  */
 const RECEIPT_KIND = "agent_revision_run_finished";

@@ -201,12 +201,12 @@ export function graphMcpEffectProblems(graph: Pick<WorkflowGraph, "nodes">, loca
 /** The launcher's typed mark on the answer it gives when the browser itself did not start (electron/mcp-tools/browser-cdp-launcher.ts). */
 export const BROWSER_START_FAILED_META = "agentlas/browserStartFailed";
 
-/** Pauses before the second and third ask of a read-only call that got no answer (graph_mcp_call_failed "timed out", observed in use). */
+/** Pauses before the second and third ask of a read-only call that got no answer (graph_mcp_call_failed "timed out", production). */
 export const GRAPH_READ_CALL_RETRY_WAITS_MS: readonly number[] = [3_000, 9_000];
 
 /**
  * A tool step declared `read` whose actual call (tool and arguments together) is not read-only - the browser's URL-dependent reads
- * are the case - used to be refused on every run (graph_mcp_effect_mismatch: 6 nodes and 5 graph runs, observed in use).
+ * are the case - used to be refused on every run (graph_mcp_effect_mismatch: 6 nodes and 5 graph runs, production).
  * The label cannot grant read authority and the host measured the call, so a write-permitted automation runs it as the mutation it
  * is: a second pass with the effect set to mutation, the same approvals and the same kernel treatment (onAdmission reports
  * readOnly=false) as a step authored as a mutation. A read-only automation, a simulation and a `pure` step are still refused.

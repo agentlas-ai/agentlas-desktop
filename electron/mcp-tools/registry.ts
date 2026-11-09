@@ -164,7 +164,7 @@ export function installCustomServer(def: {
   envKeys?: string[];
   /** Connection-owned Vault keys (credential-refs.ts); only for keys this connection alone holds. */
   credentialRefs?: Record<string, string>;
-}): InstalledMcpServer {
+}, options: { initialEnabled?: boolean } = {}): InstalledMcpServer {
   const name = def.name.trim();
   if (!name) throw new Error("MCP server name required");
   if (def.transport === "stdio" && !def.command?.trim()) {
@@ -192,7 +192,7 @@ export function installCustomServer(def: {
     db.prepare(
       `INSERT INTO mcp_servers
          (id, catalog_id, name, name_en, transport, command, args_json, url, env_keys_json, enabled, installed_at)
-       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+       VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       id,
       name,
@@ -202,6 +202,7 @@ export function installCustomServer(def: {
       JSON.stringify(def.args ?? []),
       def.url?.trim() ?? null,
       JSON.stringify(def.envKeys ?? []),
+      options.initialEnabled === false ? 0 : 1,
       now,
     );
     if (Object.keys(parsedRefs.refs).length) {

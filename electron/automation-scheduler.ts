@@ -377,7 +377,7 @@ const appClosedControllers = new WeakSet<AbortController>();
  * System Optimizer recovery runs whose own total time budget ran out. A maintenance run that did not finish is not a failure
  * of the owner's work (the automation's own failure notice is written either way, and the next failure starts another
  * diagnosis), so it ends as an interrupted maintenance run: no failure row, no extra "diagnostic run itself failed" line in
- * the automation chat (observed in use and 2026-10-22: "System Optimizer total timeout after 600s" as runner-failed).
+ * the automation chat (production and "System Optimizer total timeout after 600s" as runner-failed).
  */
 const optimizerTimedOut = new WeakSet<AbortController>();
 export const SYSTEM_OPTIMIZER_TIMEOUT_CODE = "system_optimizer_timeout";

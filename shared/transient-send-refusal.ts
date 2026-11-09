@@ -192,7 +192,7 @@ const SQLITE_STORE_BUSY_RE = /^SQLITE_(?:BUSY|LOCKED)(?:_[A-Z]+)?$|^SQLITE_PROTO
  * A start the host refused BEFORE anything reached a runtime (InvocationService.start marks the thrown error
  * `turnDelivery: "not-dispatched"`) because the shared store stayed locked past its own 15 s busy wait. The driver's raw
  * `SQLITE_BUSY` error carries no transient code, so the owner's message was held as a hard refusal and never started again
- * (observed in use: supersedeGoalWaitForInvocation threw `database is locked` inside start()). A lock is not a verdict
+ * (production Z: supersedeGoalWaitForInvocation threw `database is locked` inside start). A lock is not a verdict
  * on the message: it waits and starts again like every other "not ready yet" refusal. Only a provably undispatched start qualifies;
  * a lock after dispatch is the run's own settlement and never reaches this check.
  */

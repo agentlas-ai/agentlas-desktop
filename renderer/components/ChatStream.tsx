@@ -1240,7 +1240,7 @@ const Bubble = memo(function Bubble({
     }
     return (
       <div data-chat-user-message="true" style={{ alignSelf: "flex-end", maxWidth: "75%" }}>
-        {/* media-carousel: pictures and videos as one swipeable strip, other files as cards (components/media). */}
+        {/* media-carousel pictures and videos as one swipeable strip, other files as cards (components/media). */}
         <MessageAttachments files={message.chatFiles} imageUrls={message.imageDataUrls} locale={locale === "ko" ? "ko" : "en"} onOpenFile={onOpenChatFile} />
         {message.text && (
           <div
@@ -1807,7 +1807,7 @@ function buildToolGroups(
 }
 
 /** A Finance turn that ended in its own result card (finance.present): the answer is what the model wrote after its last tool call.
- * Sentences written while it was still looking things up ("Checking whether…") are not the answer . */
+ * Sentences written while it was still looking things up ("Checking whether…") are not the answer. */
 export function financePresentAnswerText(text: string, steps: readonly StreamStep[] | undefined): string {
   const tools = (steps ?? []).filter((step) => step.tool);
   if (!tools.some((step) => /"finance\.present"/.test(step.args ?? ""))) return text;

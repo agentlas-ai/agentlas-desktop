@@ -101,8 +101,8 @@
     "files": [
       {
         "path": "bin/finance-server.cjs",
-        "sha256": "02f22235632378d6f069d868711ca427f0162a6c528bbeada8f3af5c3a3a64b6",
-        "bytes": 4300
+        "sha256": "a54802f473ee9ffcf412e3cc071131371132ddada748d6cdd84f0c024dd5f312",
+        "bytes": 4522
       },
       {
         "path": "capabilities.json",

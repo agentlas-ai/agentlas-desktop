@@ -279,7 +279,7 @@ const KNOWN_FAILURES: readonly KnownFailure[] = [
     },
   },
   {
-    // The app was closed or restarted, or another copy of it took over the run's lease, while the step ran (observed in use/10-30).
+    // The app was closed or restarted, or another copy of it took over the run's lease, while the step ran (production 10-25/10-30).
     match: /\bapp_closed\b|lease ownership lost|automation_lease_lost/i,
     reason: {
       ko: "앱이 종료되거나 다시 시작되면서 이 단계가 멈췄어요.",
@@ -368,7 +368,7 @@ const BARE_MACHINE_REASON_RE = /^\[?(?:[a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][A-Z0-
 /**
  * The reason line stored on a run result. A sentence passes through untouched (whatever its language: the judge wrote it for the
  * owner). A reason that is nothing but a machine token never reaches the owner: it becomes the plain sentence of a known code, or a
- * generic one (the code stays in the run's own reasonCode column and in the raw record). observed in use: two runs showed
+ * generic one (the code stays in the run's own reasonCode column and in the raw record). a real installation two runs showed
  * `automation_goal_execution_review_required` as their reason.
  */
 export function plainRunReason(raw: string | null | undefined, locale: OwnerActivityLocale): string | null {
@@ -414,7 +414,7 @@ export function ownerFailureText(
 /**
  * A step's failure reason as it is stored on the run (run_automation node_failures_json), read by Hope, the phone and the run history as
  * well as the flow page. Run-graph used to store the thrown message as is: `graph_mcp_call_failed:### Error\nError: browserBackend.callTool: ...`
- * or a bare `work_recovery_*` code (observed in use: 13 failures on one automation). A tool's own error answer keeps what the
+ * or a bare `work_recovery_*` code (a real installation 13 failures on one automation). A tool's own error answer keeps what the
  * tool said (that is the external cause: the page, the server) behind one plain lead; any other machine-only message becomes the known
  * sentence or the generic one; a sentence stays untouched. The raw message stays in the run's failure event.
  */

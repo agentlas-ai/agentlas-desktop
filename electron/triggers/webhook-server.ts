@@ -36,15 +36,23 @@ function readBody(
   req: http.IncomingMessage,
   maxBytes = 256 * 1024,
 ): Promise<{ body: string; tooLarge: boolean }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let ended = false;
     req.on("data", (c: Buffer) => {
       total += c.length;
       if (total <= maxBytes) chunks.push(c);
     });
-    req.on("end", () => resolve({ body: Buffer.concat(chunks).toString("utf8"), tooLarge: total > maxBytes }));
-    req.on("error", () => resolve({ body: "", tooLarge: false }));
+    req.on("end", () => {
+      ended = true;
+      resolve({ body: Buffer.concat(chunks).toString("utf8"), tooLarge: total > maxBytes });
+    });
+    // A disconnected or failed upload is not an empty request. Never enqueue
+    // its partial input under the sender's durable idempotency key.
+    req.on("aborted", () => reject(new Error("webhook_body_aborted")));
+    req.on("error", reject);
+    req.on("close", () => { if (!ended) reject(new Error("webhook_body_incomplete")); });
   });
 }
 
@@ -139,6 +147,9 @@ export function startWebhookServer(): Promise<number> {
          * 안 나가고 요청이 매달렸다. **응답은 무조건 나간다**가 규칙이다.
          * 재시도 가능한 실패이므로 503 + retry-after 로 답한다.
          */
+        // A disconnected caller cannot receive an answer; avoid a stack trace
+        // for the expected abort while retaining diagnostics for live errors.
+        if (res.destroyed && req.aborted) return;
         console.error("[triggers] webhook body read failed:", error);
         try {
           res.writeHead(503, { "content-type": "application/json", "retry-after": "5" })

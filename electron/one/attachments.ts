@@ -39,7 +39,7 @@ const MEDIA_BY_EXTENSION: Readonly<Record<string, string>> = Object.freeze({
   ".zip": "application/zip", ".gz": "application/gzip", ".tar": "application/x-tar",
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
   ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".m4v": "video/x-m4v",
-  // media-carousel: phone and camera formats. Only PNG/JPEG/GIF/WEBP go to a model as pictures (PROVIDER_PICTURES);
+  // media-carousel phone and camera formats. Only PNG/JPEG/GIF/WEBP go to a model as pictures (PROVIDER_PICTURES);
   // these stay files the run can open by path.
   ".heic": "image/heic", ".heif": "image/heif", ".avif": "image/avif", ".bmp": "image/bmp", ".tif": "image/tiff", ".tiff": "image/tiff", ".svg": "image/svg+xml",
   ".ogv": "video/ogg", ".3gp": "video/3gpp", ".3g2": "video/3gpp2", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",

@@ -38,7 +38,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   // The owner's standing permission to apply learning changes without reading the diff. An agent switching it on for itself would
   // be self-escalation (the review grant exists so no tool can approve a diff), so it is the owner's own switch only.
   [/^agentWorkspace\.setAutoEvolution$/, "applying learning changes without the owner reading the diff is the owner's own switch", "consent"],
-  // Operations that can never succeed (observed in use: four refused calls and five minutes before the working route
+  // Operations that can never succeed (10-30 Hope run: four refused calls and five minutes before the working route
   // was found). Their handlers throw for every caller and no screen calls them; a call by name is answered with the route that works,
   // and a search does not list them. The handlers keep refusing, so nothing can reach the old storage path.
   [/^agentEvolution\.createProposal$/, AGENT_FILE_CHANGE_ROUTE, "write"],

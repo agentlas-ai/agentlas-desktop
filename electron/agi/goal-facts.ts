@@ -244,7 +244,7 @@ function continuationRefusedSignal(db: Database.Database, run: AgiGoalRow, nowMs
  * due retry (status_changed to queued, reason same_cause_backoff:*), resumes it seconds later (resume-dispatched) and the controller
  * attempt begins a second after that. The Goal's earlier failures are still the typed signals in that window, so the AGI claimed an
  * attempt (a paid model call) the instant the host started the retry, and every action of it was refused agi.action.state-changed
- * when the Goal woke: observed in use, 10 of the 11 attempts whose fence moved were this, one per sweep retry. A turn that
+ * when the Goal woke: production 10 of the 11 attempts whose fence moved were this, one per sweep retry. A turn that
  * has not begun after the grace is not being started by anyone, and the AGI looks at it again.
  */
 export const AGI_HOST_START_GRACE_MS = 2 * 60_000;
@@ -303,7 +303,7 @@ function repeatedStrategyRefusal(db: Database.Database, run: AgiGoalRow): { sign
   // A refusal whose own episode settled with nothing to reflect on (its checkpoint's strategy "unknown") is the expected
   // result, not a host refusal; the host stopped recording it
   // (evaluateGoalStrategySettlementGate nothingToReflect). Rows recorded before that still name it, so here it breaks the
-  // streak like a dispatch does. Observed in use: three such rows in a row were filed as an app defect for one Goal.
+  // streak like a dispatch does. Owner DB 10-30: three such rows in a row were filed as an app defect for the YouTube Goal.
   const rows = db.prepare(`SELECT e.seq, e.kind, json_extract(e.payload_json, '$.reason') AS reason,
       (SELECT json_extract(c.payload_json, '$.checkpoint.sideEffects.state') = 'settled'
           AND json_extract(c.payload_json, '$.checkpoint.capsule.plan.episodeStrategy.state') = 'unknown'

@@ -9,7 +9,7 @@ import { currentUiLocale } from "../ui-locale";
  * the approval is dropped and nothing is applied that the owner did not read.
  *
  * While a run holds the files a pass does nothing: no approval receipt is written and no folder is hashed (regression review C6,
- *a new never-consumed receipt file and two full tree hashes every 10 s for the length of the run). The pass runs when the run
+ * a new never-consumed receipt file and two full tree hashes every 10 s for the length of the run). The pass runs when the run
  * gives the files back (onAgentWorkspaceRunLeaseReleased); a slow check remains for a run that ended without releasing (a dead holder,
  * another process). A dropped approval is told to the owner on the change itself, in one plain line, because the screen said it was kept.
  */

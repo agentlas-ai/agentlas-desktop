@@ -68,7 +68,7 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
     if (operation === "cancel") return;
     if (row.queue_id !== queueId) throw new Error("queued_input_queue_changed");
     // The account is the authority. The room's settings (model pin, seat, participants, project, folder) are not: the owner changing the
-    // room's model while a message with attachments waited must not strand it (decided). A room that was archived or
+    // room's model while a message with attachments waited must not strand it. A room that was archived or
     // removed is the owner's own act and still revokes. The scope digest is still recorded at capture, but no longer compared.
     if (row.state !== "active" || operation !== "complete" && (row.account_digest !== account() || !chatAvailable(original(row)))) {
       throw new Error("queued_input_owner_changed");
@@ -146,7 +146,7 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
   /**
    * The input's last run is over and cannot be started again, so the custody has done its job. A team run has no runtime placement fact (its
    * turn does not pass the direct runner), so a team run that FAILED stayed "unconfirmed" for ever: the input kept its sealed bytes and its
-   * `active` row (two owner rows of sat so for days). The run showed its own failure; the input is released, never started again.
+   * `active` row (two owner rows sat so for days). The run showed its own failure; the input is released, never started again.
    * Not for a run that provably sent nothing (it can still be queued again), a run that is still live, or an input whose queue row is still
    * waiting or starting.
    */

@@ -15,7 +15,7 @@ export function effectiveInvocationPermission(
  * taskForceChildPermission / firmNodePermission), so a write worker is also what the owner's full access produces. The reviewer
  * serves a host that is NOT full: a write host's worker has nobody to answer its approvals, and the reviewer is the limit that
  * host keeps. Under a full host the owner has already decided, and the reviewer refused the owner's own read of a run
- * ("rejected due to unacceptable risk", invoke.replay), so that worker's approvals go to the common arbiter
+ * ("rejected due to unacceptable risk", invoke.replay, Z), so that worker's approvals go to the common arbiter
  * like every other full run's. The sandbox is untouched: a full host's worker stays `write`, a read worker stays read.
  */
 export function delegatedWorkerAutoReview(hostPermission: unknown, workerPermission: unknown): boolean {

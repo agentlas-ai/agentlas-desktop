@@ -24,7 +24,7 @@ export const RUNTIME_NATIVE_CAPABILITIES: Record<string, string[]> = {
  * read and edit files themselves; an API or local-model lane gets the host's read_file / write_file / edit_file built-in tools
  * (shared/builtin-tools.ts). `files.read` / `files.write` were met only by the optional `filesystem` MCP server, so a graph
  * step that declared them could not be turned on or run until the owner installed it: "Not connected yet, so this cannot be
- * turned on: This computer" (one_graph_run, observed in use). Empty when no runtime is detected: nothing could run.
+ * turned on: This computer" (one_graph_run, production). Empty when no runtime is detected: nothing could run.
  */
 export const RUNTIME_BASELINE_CAPABILITIES: readonly string[] = ["files.read", "files.write"];
 

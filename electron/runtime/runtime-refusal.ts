@@ -40,7 +40,7 @@ const CLI_NOTICE_PATTERNS: RegExp[] = [
   /\bsubscription (required|expired)\b/i,
 ];
 
-// ── 모델이 쓴 기계 자기보고 ( ollama 실측) ──
+// ── 모델이 쓴 기계 자기보고 (ollama 실측) ──
 // "The system encountered a timeout error while processing a request. No further
 // function calls are required. Please retry the operation..." — 도구 왕복이 무너진 뒤
 // 로컬 모델이 뱉은 문장이 최종 답으로 저장됐다. 이건 사람에게 하는 답이 아니라

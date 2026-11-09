@@ -1683,7 +1683,7 @@ const batchFits = (items: readonly { id: string; criterion: string }[], inputLen
 /**
  * How many model requests a set of criteria needs. Criteria are packed greedily under the preferred packet size, EXCEPT
  * when the shared evidence alone already exceeds it: no packing can fit then, and every extra request re-sends the same
- * evidence. Measured: a 48k-char evidence packet against a 28k preferred size turned a two-criterion Goal
+ * evidence. Measured a 48k-char evidence packet against a 28k preferred size turned a two-criterion Goal
  * verification into two model calls 6-7 s apart, ~50k chars each. One request with every complete criterion is the same
  * judgment at half the cost (and N-fold for N criteria).
  */

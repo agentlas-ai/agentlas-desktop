@@ -17,7 +17,7 @@ type FailureFacts = Pick<InvocationRunReceipt, "runId" | "status" | "errorCode" 
  * A settled run that failed before any model call for the app's own state: the queue starts its message again, silently, up to
  * UNDISPATCHED_START_MAX_ATTEMPTS times. A failed run only (the owner's Stop, a steering interrupt and a host stop are not failures to
  * retry), and the app-side families (a ledger or custody state) count: they are the app's own state too, so they get the same bounded
- * retries as an unknown code instead of the single legacy start-again (regression review C9). The queue's `internalFailure`
+ * retries as an unknown code instead of the single legacy start-again. The queue's `internalFailure`
  * dependency (renderer-send-queue.ts) and queueWillStartRunAgain below are this one rule.
  */
 export function queuedSendInternalFailure(receipt: Pick<InvocationRunReceipt, "status" | "errorCode" | "runtimeFailure" | "interruptionCause" | "hostStopCause"> | null | undefined): boolean {
@@ -33,7 +33,7 @@ export function queuedSendInternalFailure(receipt: Pick<InvocationRunReceipt, "s
  * message whose tries are spent, is not retried, and is the failure the owner is told about.
  *
  * The owner is told once, about an attempt that finally does not go through: no alert, toast, sound or bounce for each retried
- * attempt (regression review C4: up to 13 "Run failed" alerts for one queued message, each with sound and a Dock bounce,
+ * attempt (regression review C4, up to 13 "Run failed" alerts for one queued message, each with sound and a Dock bounce,
  * while the line in the chat said "the app will try again by itself"). When unsure, false: the alert is kept.
  */
 export function queueWillStartRunAgain(

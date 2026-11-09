@@ -660,7 +660,6 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
     return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure: mcpReconcile.failure };
   }
   try {
-    dispatch.started = true;
     return await runGrokProcess();
   } finally {
     await mcpReconcile.cleanup();
@@ -670,6 +669,8 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
     return new Promise<RunnerResult>((resolve, reject) => {
     let child: ReturnType<typeof spawnCli>;
     try {
+      if (req.signal?.aborted) throw abortReasonError(req);
+      dispatch.started = true;
       child = spawnCli(grokBin, args, { stdio: ["ignore", "pipe", "pipe"], env, cwd, ...detachedSpawnOpts() });
     } catch (e) {
       void fs.rm(promptFile, { force: true });

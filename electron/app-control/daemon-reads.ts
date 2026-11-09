@@ -5,7 +5,7 @@ import { appControlHandlerRegistered, recordAppControlDomainHandler } from "./ip
  *
  * One/Hope turns run in the daemon while the app is closed, restarting or updating. Every app operation used to be asked of Main over
  * the device bridge, so while Main was away even a plain read of the database (the team's resolved org, an automation, a chat's latest
- * receipt) was refused as app-window-unavailable (observed in use: 35 refusals in two chats).
+ * receipt) was refused as app-window-unavailable (production 35 refusals in two chats).
  *
  * This list is closed and exact, and every entry is the very call Main's handler makes (ipc.ts registerAppControlDomainIpc, same channel,
  * same store function): operations that only read the owner's database. They go through appControlCallLocal like any call, so the

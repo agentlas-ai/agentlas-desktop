@@ -1,5 +1,5 @@
 /*
- * The plain sentence every harness refusal carries (owner rule: no internal code reaches the owner's screen).
+ * The plain sentence every harness refusal carries (rule no internal code reaches the owner's screen).
  *
  * Why this exists. A port answers a model with a machine code: `reason` on a refusal, `data.code` / `data.error` when app.call ran the
  * operation and its handler said no, `data.state` on an auth answer. The model quoted them to the owner word for word (production
@@ -35,7 +35,7 @@ const REASON_SENTENCES: Readonly<Record<string, string>> = {
   "turn-tools-operation-invalid": "That tool is not available in this turn, so the step was not done; it can be repeated in the next message.",
   "turn-tools-capability-invalid": "The tools for this turn are no longer connected, so the step was not done; it can be repeated in the next message.",
   "turn-tools-control-unavailable": "The app's tool connection is not ready, so the step was not done; it can be repeated in a moment.",
-  // Seen in production (observed in use, assistant messages).
+  // Seen in production (a real installation, assistant messages -05).
   goal_control_binding_changed: "The Goal in this chat is not the one that request was about (it was replaced or finished, or this chat has none), so the Goal was not changed; the current Goal is read first and the request is repeated against it.",
   goal_panel_no_plan: "This Goal has no plan yet, so that plan change could not be saved; the plan has to exist before it can be changed.",
   one_graph_target_not_in_context: "That automation does not belong to this conversation, so it could not be changed here; it can be read, or changed from the conversation that created it.",

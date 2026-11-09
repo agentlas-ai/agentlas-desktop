@@ -35,7 +35,7 @@ export const HEPHAESTUS_NETWORK_WORK_CORE_TOOLS: readonly string[] = Object.free
 /**
  * The Context Map tools. They gate a change to a source project (the engine's own instructions: work that changes no source code
  * does not use the Context Map). A run whose folder is the app's scratch folder has no source project, and the model called them
- * anyway on its output files: 503 failed calls in 68 chats over one month (`context_changed_target_unknown` 237, `context_map_stale`
+ * anyway on its output files: 503 failed calls in 68 chats (`context_changed_target_unknown` 237, `context_map_stale`
  * 119, `project_not_initialized` 44), 444 of them naming the scratch folder `agent-cwd`.
  */
 export const HEPHAESTUS_NETWORK_CONTEXT_MAP_TOOLS: readonly string[] = Object.freeze([

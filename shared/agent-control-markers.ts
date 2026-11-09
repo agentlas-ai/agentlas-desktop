@@ -5,7 +5,7 @@
  * - `NEEDS-INPUT:`: an unattended run that needs a person (runtime/runner.ts UNATTENDED_NO_ASK_DIRECTIVE).
  *
  * Codex-family models put a one-line progress preamble ("기존 실행과 Studio의 영상 상태를 확인하겠습니다.") in front
- * of their final text. Observed in 1.3.105: 95 of 96 quiet One reviews ended "preamble\n\n[quiet]" and
+ * of their final text. Production 1.3.105: 95 of 96 quiet One reviews ended "preamble\n\n[quiet]" and
  * 38 unattended answers read "preamble NEEDS-INPUT: …". Exact-whole-text and must-lead matching missed both, so the
  * owner saw the raw markers every 15 minutes and the automation was judged "completed" instead of "needs input".
  * A marker is read where the model actually puts it; it is never shown.

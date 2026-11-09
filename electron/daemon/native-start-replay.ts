@@ -6,7 +6,7 @@ import type { NativeStartDescriptor } from "./native-start-protocol";
  * - "replayed": refused, nothing recorded: the same descriptor again, or a new one while the earlier attempt is still on its way;
  * - "replayed-closed": refused, and recorded as the typed pre-boundary refusal of this reservation, because the earlier attempt's
  *   authority is closed (it ended or never began). Desktop re-arms a refused reservation and sends the run id again; without that row
- * its ledger kept the re-armed reservation pending for the rest of the boot .
+ * its ledger kept the re-armed reservation pending for the rest of the boot.
  */
 export function nativeStartReplay(owned: ReadonlyMap<string, unknown>, known: ReadonlyMap<string, { released: boolean; start: NativeStartDescriptor }>,
   start: NativeStartDescriptor, authorityClosed: (start: NativeStartDescriptor) => boolean): "fresh" | "replayed" | "replayed-closed" {

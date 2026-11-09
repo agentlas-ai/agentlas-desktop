@@ -613,7 +613,7 @@ const UNREADABLE_PRIOR_EVIDENCE = new Set([
   "automation_graph_reconciliation_graph_malformed", "automation_graph_reconciliation_graph_unavailable",
 ]);
 /**
- * a record that cannot be read is set aside and the rest keeps working; it never stops a listing, and it never stops a
+ * Owner a record that cannot be read is set aside and the rest keeps working; it never stops a listing, and it never stops a
  * run, which starts fresh on the current graph. This used to throw for the occurrence the new run belongs to ("same-source recovery stays
  * strict"), so the run history showed "the recovery record is malformed, automatic replay remains blocked" and the whole listing failed
  * for one bad run. Now it is returned as no held view, and a read context is told (the kernel then gives the model of each outside-acting
@@ -1343,11 +1343,9 @@ function scheduleCursorHold(automation: Automation): ScheduleCursorHold | null {
 }
 
 /**
- * Upgrade old enabled/NULL schedule cursors and stop timer-only quarantine
- * loops. This never reconciles a mutation or changes a checkpoint. The existing
- * effect-observation sweep remains responsible for exact external evidence;
- * its successful reconciliation restores the clock. Other automations and
- * independent nodes keep their own execution authority.
+ * Upgrade old enabled/NULL schedule cursors. This never reconciles a mutation or changes a checkpoint. A hold whose steps cannot
+ * run in their own occurrence starts fresh at the next regular slot, where the earlier unconfirmed effect is a note the model reads
+ * (run-graph historicalEffectNotes), never a hold. Other automations and independent nodes keep their own execution authority.
  */
 export function recoverGraphScheduleCursors(now = new Date()): Array<{ automationId: string; action: string }> {
   const db = getDb();
@@ -1371,9 +1369,24 @@ export function recoverGraphScheduleCursors(now = new Date()): Array<{ automatio
         // Empty completed occurrences and ordinary future schedules have no repair
         // authority here. A ready cursor is never advanced or fired twice.
         if (!observationOnly && (automation.nextRunAt !== null || !runnableNodeIds.length)) return;
-        const action = observationOnly ? "observe_quarantined_effects" : "resume_independent_nodes";
-        const nextRunAt = observationOnly ? null : now.toISOString();
-        const sourceEventId = `schedule-recovery:${checkpoint.checkpointDigest}:${action}:${nextRunAt ?? "hold"}`;
+        // A hold whose steps cannot run in their occurrence waits for nothing: the old run stays in its record and the next regular slot
+        // starts fresh (/10-31: a step of unknown outcome never stops the work, the model is told). On a changed graph
+        // the fresh run uses the current graph; on the same graph the earlier unconfirmed effect is only a note in the new occurrence
+        // (run-graph.ts historicalEffectNotes), the hold binds only its own occurrence. It used to set the cursor to NULL for an
+        // "effect-observation sweep" that no longer exists (retired), so the automation never ran again and nobody was told
+        // (a real installation: "유튜브 업로드 복구 추적" enabled, next_run_at NULL; 6ff27a3d0 fixed the changed-graph case only).
+        const startFreshNextSlot = observationOnly;
+        // Only an empty cursor is filled: a slot that is set (due or ahead) dispatches the fresh run itself, and moving it here would
+        // skip that run on every tick.
+        if (startFreshNextSlot && automation.nextRunAt !== null) return;
+        const action = startFreshNextSlot ? (graphRevised ? "start_fresh_on_revised_graph" : "start_fresh_next_slot") : "resume_independent_nodes";
+        const nextRunAt = startFreshNextSlot
+          ? computeNextRun(automation.scheduleHuman, now, { scheduleJson: automation.scheduleSpec ? JSON.stringify(automation.scheduleSpec) : null,
+            timezone: automation.timezone ?? null })
+          : now.toISOString();
+        // A schedule with no next slot (once, manual) has nothing to start fresh: no cursor to fill and no receipt saying one was.
+        if (!nextRunAt) return;
+        const sourceEventId = `schedule-recovery:${checkpoint.checkpointDigest}:${action}:${nextRunAt}`;
         const prior = db.prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind = ?
           AND json_extract(payload_json, '$.checkpointDigest') = ?
           AND json_extract(payload_json, '$.action') = ? LIMIT 1`)

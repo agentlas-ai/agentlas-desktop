@@ -514,7 +514,7 @@ function readName(dir: string): string {
  * The one-line description stored as the agent's tagline: what the package itself says it does (its cards, then its own prose).
  * The first non-heading line of the first markdown file stored "Read AGENTS.md with the package file reader ..." and
  * "1. Read [`AGENTS.md`]..." for 13 of the owner's 189 agents, and the model that staffs work chose teammates by name alone
- * (observed in use). A thin adapter, a list step or a file instruction is never a tagline; see shared/agent-description.ts.
+ *. A thin adapter, a list step or a file instruction is never a tagline; see shared/agent-description.ts.
  */
 function readTagline(dir: string, names: readonly string[]): string {
   return readPackageDescription(dir, { names }) ?? "";

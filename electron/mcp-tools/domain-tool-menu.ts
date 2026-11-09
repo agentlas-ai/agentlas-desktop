@@ -1,5 +1,5 @@
 /**
- * Which plugins a conversation's tool menu carries, by the product domain the conversation belongs to (owner:
+ * Which plugins a conversation's tool menu carries, by the product domain the conversation belongs to (
  * "각 도메인은 지원하는 툴 종류를 따로 해 놓고, One·Work에서는 Science 도구(biomed 등)가 보이지 않게").
  *
  * Data, not a prompt line: the judge menu, the plugin lookup the model can call, and the explicit-mention path all read this.

@@ -84,7 +84,7 @@ function processAlive(pid: number): boolean {
 }
 
 /**
- * Process-local, device-bound uploads (media-carousel: no count or size limit). Received chunks go straight to a
+ * Process-local, device-bound uploads (media-carousel no count or size limit). Received chunks go straight to a
  * Main-owned staging file, never into memory, and are hashed as they arrive. Partial bytes never become a conversation
  * attachment. A `chat` upload becomes a conversation file group when it is bound; a `build` upload is claimed once by a
  * remote Build and handed to the builder as files.

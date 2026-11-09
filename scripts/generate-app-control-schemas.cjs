@@ -831,6 +831,9 @@ function generateAppControlSchemas({ root, operations, check, outputDirectory = 
     };
     const record = (ops, statements) => {
       const expressions = returnsOf(statements);
+      // An early validation branch may name an operation without returning its
+      // result. It must not shadow the actual typed switch case below.
+      if (expressions.length === 0) return;
       const delegate = expressions.length === 1 ? delegateOf(expressions[0]) : null;
       const delegated = delegate ? commandOutputs(delegate) : null;
       for (const op of ops) {

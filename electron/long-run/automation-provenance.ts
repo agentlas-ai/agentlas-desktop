@@ -206,7 +206,7 @@ export function bindCreatedAutomationToGoal(input: {
   }
   return getDb().transaction(() => {
     // The Goal may have moved while this turn ran: its revision rose after the attempt began (an owner amendment, a re-plan). A
-    // Goal revision bump is never by itself a reason to refuse ; the automation binds to the revision the
+    // Goal revision bump is never by itself a reason to refuse; the automation binds to the revision the
     // Goal has NOW, with the revision the turn began under recorded beside it. An invocation that is no attempt of this Goal
     // (null) proves nothing and stays unverified.
     const attempt = invocationAttemptRevision(input.invocationRunId, input.goalId);

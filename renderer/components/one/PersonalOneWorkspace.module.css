@@ -134,7 +134,7 @@
 /* While Hope answers: the three typing dots, in an incoming bubble. */
 /* The typing bubble is the next bubble of Hope's run, drawn in the same row as the blocks Hope has already put there (a card, a hand-off, a
    bubble of an open code block). It sits below them with a real gap, and the block before it gives up its tail: two tails 3px apart read as
-   one bubble drawn over the other (owner screenshot). Also when the typing row directly follows another reply row. */
+   one bubble drawn over the other. Also when the typing row directly follows another reply row. */
 .turn>*+.typing{margin-top:6px}
 .turn[data-role=assistant]+.turn[data-role=assistant]:has(>.typing:first-child){margin-top:9px}
 .typing{position:relative;align-self:flex-start;display:inline-flex;gap:5px;padding:14px 16px;border-radius:19px;background:var(--im-in)}

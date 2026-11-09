@@ -1223,7 +1223,7 @@ export interface WorkSessionChildSummary {
   cancel_requested: boolean; effect_reconciliation_required: boolean; updated_at: string;
 }
 /** What a Work conversation delegated, read-only, newest first, with the dispatcher's own owner scope and parent check. Never
- * initializes the dispatcher. observed in use: One had started this Work but could not see the Sweet Designer session under
+ * initializes the dispatcher. Production One had started this Work but could not see the Sweet Designer session under
  * it, so it told the owner the work had stopped at intake and later relayed "in progress" from the Work AI's words alone. */
 export function workSessionChildrenOf(parentChatId: string, limit = 8, ports?: WorkSessionChildReadPorts): WorkSessionChildSummary[] {
   try {

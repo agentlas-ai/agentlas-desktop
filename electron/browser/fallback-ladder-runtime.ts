@@ -530,7 +530,7 @@ function answerFor(result: LadderRunResult, input: { mutating: boolean; neverRan
   return { replay, meta, text };
 }
 
-/** One tells the owner instead of a "press Retry" card in this room. The run itself never stopped (the agent was told to
+/** Owner One tells the owner instead of a "press Retry" card in this room. The run itself never stopped (the agent was told to
  * continue other work); the card stays only when One cannot take the report. */
 function announceStopCard(card: LadderOwnerCard, scope: LadderScope): void {
   const binding = scope.binding;

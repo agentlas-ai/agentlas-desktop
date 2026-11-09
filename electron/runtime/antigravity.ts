@@ -1,3 +1,4 @@
+import { RUNTIME_OVERLOADED_CODE, RUNTIME_SERVER_ERROR_CODE, serverFailureCodeForStatus } from "./provider-overload";
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -1384,6 +1385,18 @@ export function antigravityFailureKind(_error: string, providerCode?: string): R
   }
 }
 
+/**
+ * The provider code a runner failure carries: a server failure (5xx, UNAVAILABLE, INTERNAL) is told with the shared codes every
+ * runner uses (provider-overload.ts), so the same outage gets the same short continuation on every runtime
+ * (shared/transient-provider-failure.ts). Any other code is carried as the provider sent it.
+ */
+export function antigravityProviderCode(code: string | undefined): string | undefined {
+  const normalized = normalizeAntigravityFailureCode(code);
+  if (normalized === "UNAVAILABLE") return RUNTIME_OVERLOADED_CODE;
+  if (normalized === "INTERNAL") return RUNTIME_SERVER_ERROR_CODE;
+  return normalized && /^5\d\d$/.test(normalized) ? serverFailureCodeForStatus(Number(normalized)) ?? code : code;
+}
+
 /** A terminal ERROR is a failure even when the provider omitted its reason. */
 export function antigravityResultFailure(state: {
   resultStatus?: string; resultError?: string; resultErrorCode?: string;
@@ -2379,7 +2392,7 @@ function antigravityConversationLostFailure(locale: string | undefined): RunnerF
  * A stored agy conversation can disappear (the owner's 30-day deletion of unused CLI originals, agy's own pruning). agy
  * then answers from a new, empty conversation (measured, antigravity-conversation-metadata.ts antigravityConversationGone);
  * saving that conversation and returning its answer made the turn, and every later one, run without the chat's history
- * (A3 live probe: 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
+ * (A3 live probe 33 of 49 agy bindings named missing conversations). The turn instead continues once in a
  * fresh conversation that carries the conversation (unattended-session-turns.ts rule 4): the chat's own history for a
  * per-chat binding, the agent-context journal for its native handle. The dead binding is replaced and one typed
  * receipt is emitted. A turn that cannot be handed the conversation, or whose lost run already produced text or a tool
@@ -3404,7 +3417,7 @@ async function runPreparedAntigravityAttempt(
             message: resultFailure.message,
             runtime: "antigravity" as const,
             source: "marker" as const,
-            ...(agyState.resultErrorCode ? { providerCode: agyState.resultErrorCode } : {}),
+            ...(agyState.resultErrorCode ? { providerCode: antigravityProviderCode(agyState.resultErrorCode) } : {}),
             ...(agyState.resultRetryAfterHint ? { retryAfterHint: agyState.resultRetryAfterHint } : {}),
             exitCode: 0,
           }
@@ -3511,7 +3524,7 @@ async function runPreparedAntigravityAttempt(
             message: resultFailure.message,
             runtime: "antigravity",
             source: "marker",
-            ...(agyState.resultErrorCode ? { providerCode: agyState.resultErrorCode } : {}),
+            ...(agyState.resultErrorCode ? { providerCode: antigravityProviderCode(agyState.resultErrorCode) } : {}),
             ...(agyState.resultRetryAfterHint ? { retryAfterHint: agyState.resultRetryAfterHint } : {}),
             ...(typeof code === "number" ? { exitCode: code } : {}),
           },

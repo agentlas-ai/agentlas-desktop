@@ -252,7 +252,7 @@ const START_RECORD_TRIES = 3;
  *
  * The bounded tries are not the last word: when they are spent, the one start-again every message that provably sent nothing gets
  * (MAX_NOT_DISPATCHED_RETRIES, settleStarting) still follows, so the line of the last bounded try must not invite a resend that would
- * overlap it (regression review C13: "Sending it again is safe" was written for the 12th and again for the 13th run). An input
+ * overlap it (regression review C13, "Sending it again is safe" was written for the 12th and again for the 13th run). An input
  * the queue keeps in custody gets no such extra try. The app's own host being not ready is not bounded at all (pass the run's error code):
  * the queue keeps that message and starts it again for as long as it takes.
  */
@@ -281,7 +281,7 @@ export function pendingSendRetriesAfterInternalFailure(
  * the queue will start it again after a backoff): that retry is cancelled. Only a row that already had an attempt (attempts > 0), is back
  * in the queue (no live run) and is an ordinary message is touched: a message still waiting for a busy chat was never retried, and a
  * custody-owned input (one-use refs) has its own Stop (queued-owner-input-custody.ts). SQL only, so any host holding the shared store can
- * call it; the queue reads its rows afresh on every look. Returns how many messages were set aside (regression review C8).
+ * call it; the queue reads its rows afresh on every look. Returns how many messages were set aside.
  */
 export function abandonWaitingRetries(
   db: { prepare(sql: string): { all(...args: unknown[]): unknown[]; run(...args: unknown[]): { changes?: number } } },
@@ -761,7 +761,7 @@ export function createPendingChatSends<Sender>(deps: PendingChatSendsDeps<Sender
             continue;
           }
         }
-        // A host-received input stays alive until it is delivered (owner rule): no refusal window ends it. The window only
+        // A host-received input stays alive until it is delivered: no refusal window ends it. The window only
         // restarts its clock; the row stays queued and is retried with the capped backoff below.
         if (row.refused_since !== null && row.refused_since !== undefined && deps.now() - row.refused_since > TRANSIENT_SEND_DEADLINE_MS) {
           clearRefusedSince.run(row.id);

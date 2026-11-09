@@ -68,7 +68,7 @@ export const AGI_TACTIC_DAILY_LIMIT_CODE = "agi.team.tactic-daily-limit";
 /**
  * How far back an action counts as "already taken" for the repeat escalation. An incident outlives its digests (a repeated failure
  * lasted 20+ hours, 19 attempts, still open), and a count over its whole life left it with nothing but the work turn the host defers
- * (observed in use: after two teammate dispatches on 10-28, 31 of 31 later dispatches were replaced by agi.turn.deferred).
+ * (production after two teammate dispatches on 10-28, 31 of 31 later dispatches were replaced by agi.turn.deferred).
  * The same window the per-tactic dispatch limit uses: the next day the move is open again, so a long incident is not a dead end.
  */
 export const AGI_REPEAT_WINDOW_MS = 24 * 60 * 60_000;

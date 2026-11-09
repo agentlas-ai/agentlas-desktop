@@ -14,7 +14,7 @@ import { isNonProductionInstance } from "./autostart-eligibility";
 /** The flag the app reads at start (electron/main.ts): run in the tray, open no window. */
 export const GUI_BACKGROUND_START_ARG = "--agentlas-background-start";
 export const RELAUNCH_BACKOFF_MS = 10 * 60_000;
-/** How long after a start the app counts as starting at most (a cold start measured 8-21 s on the owner's machine). */
+/** How long after a start the app counts as starting at most (a cold start measured 8-21 s on a real installation). */
 export const GUI_STARTING_MS = 60_000;
 
 let lastLaunchAt = 0;

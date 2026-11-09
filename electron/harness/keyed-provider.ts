@@ -119,7 +119,7 @@ async function providerKey(adapter: KeyedAdapter): Promise<string | null> {
     const saved = await readEnvVarAliased(adapter.envKey);
     if (saved) return saved;
   } catch (error) {
-    // A store that did not answer is not a store without the key (observed in use: an hour of "key missing" for a saved
+    // A store that did not answer is not a store without the key (production an hour of "key missing" for a saved
     // key while the Keychain was locked). Only a host with no vault module at all falls through to Main's environment as before.
     if (isCredentialStoreFailure(error)) unreadable = true;
   }
@@ -459,7 +459,7 @@ export async function speechSynthesize(args: Record<string, unknown>, ctx: Keyed
   if (!text) return refused("text_required", "text or an absolute textPath");
   const limit = routeId === "openai-audio" ? 4_096 : 10_000;
   if (text.length > limit) return refused("text_too_long", `at most ${limit} characters per call; split by scene and call once per part`);
-  // No outputDir (observed in use: a first call with no arguments was refused arguments_missing): the narration goes to the app's own
+  // No outputDir (production a first call with no arguments was refused arguments_missing): the narration goes to the app's own
   // media folder, like a generated image, and is handed to the run as its output; a given outputDir wins.
   let outputDir = str(args.outputDir);
   if (!outputDir) {
