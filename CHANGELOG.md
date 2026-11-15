@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 — 2026-11-15
+## 2.0.1 — 2026-11-16
 
 - Memory: memory is kept in four places (personal, agent, project and session). A one-time step on first launch sorts what earlier versions stored, using the engine that ships inside the app, so it also goes ahead without an internet connection. If you quit in the middle it carries on at the next start and it never runs again once finished. It removes only empty turn records, memory that no screen could read, and tables nothing uses any more.
 - Personal conversation: a preference or a fact you tell your personal agent in your own words, in the app, on the phone or in Telegram, is saved as yours, and "forget it" is carried out. When a memory cannot be saved, the answer says in one sentence that nothing was stored.
@@ -9,6 +9,7 @@
 - Quit: quitting, logging out and shutting down the computer no longer wait 30 seconds.
 - Phone: the 2.0 phone app gets the values it shows from this computer, such as a new chat without a project, the always-allowed rules and the minutes into a session.
 - Fixes: hidden rooms left by deleted group chats are cleaned up at start, and failure messages say what happened in plain words.
+- Note: version 2.0.0 was tagged but never published, because its macOS packaging stopped on a packaging check file that the public source did not contain; 2.0.1 carries the same changes and that file.
 
 This release binds Agentlas OS v1.2.98 at 85c15a292effd2c9a9063e6d677608a438c66853; public runtime asset `agentlas-os-runtime-v1.2.98.tar.gz` is pinned at SHA-256 `f141e34e6bf5420cf4b2458126ccdf3dbe6c9a7948f3a2b7402bbb69d7c7e7d5`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 
