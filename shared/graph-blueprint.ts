@@ -13,6 +13,8 @@ import { layoutGraph, needsLayout } from "./graph-layout";
 import { CAPABILITIES, CAPABILITY_LABEL, findProvider, providersFor } from "./graph-tool-binding";
 import { humanizeScheduleLabel } from "./schedule-describe";
 import { valueIsReadAsData, type ValueReader } from "./graph-node-protocol";
+import { CONDITION_OPS } from "./graph-condition";
+export { CONDITION_OPS } from "./graph-condition";
 
 export const BLUEPRINT_SCHEMA = "agentlas.graph-blueprint.v1";
 
@@ -186,9 +188,8 @@ export interface BlueprintProblem {
  * 자기가 못 읽는 자동화를 저장했고, 사람은 마지막 단계에서야 알았다(실사용 실측).
  * scripts/test-graph-interview-contract.cjs 가 커널 소스와 이 목록을 대조한다.
  */
-export const CONDITION_OPS = ["truthy", "falsy", "eq", "ne", "gt", "lt", "contains"] as const;
 const OPS = new Set<string>(CONDITION_OPS);
-const VALUE_OPS = new Set(["contains", "eq", "ne", "gt", "lt"]);
+const VALUE_OPS = new Set(["contains", "eq", "ne", "gt", "gte", "lt", "lte"]);
 const MAX_STEPS = 20;
 export const MAX_REPEATS = 20;
 
@@ -686,7 +687,7 @@ export function validateBlueprint(
     if (!branch.var || !produced.has(branch.var)) {
       push(`${at}가 보는 "${branch.var}" 값을 아무도 만들지 않습니다.`);
     }
-    if (VALUE_OPS.has(branch.op) && (branch.value === undefined || branch.value === null || branch.value === "")) {
+    if (VALUE_OPS.has(branch.op) && (branch.value === undefined || branch.value === null)) {
       push(`${at}가 무엇과 비교하는지 정해져 있지 않습니다.`, {
         id: `branch-${branch.afterStep}-value`,
         question: `${at}에서, 어떤 경우에 "예"로 갈까요?`,
@@ -1151,7 +1152,9 @@ export function branchLabel(branch: BlueprintBranch, locale: "ko" | "en" = "ko")
       case "eq": return `Is ${branch.var} ${shown}?`;
       case "ne": return `Is ${branch.var} not ${shown}?`;
       case "gt": return `Is ${branch.var} greater than ${shown}?`;
+      case "gte": return `Is ${branch.var} at least ${shown}?`;
       case "lt": return `Is ${branch.var} less than ${shown}?`;
+      case "lte": return `Is ${branch.var} at most ${shown}?`;
       default: return `Check ${branch.var}`;
     }
   }
@@ -1162,7 +1165,9 @@ export function branchLabel(branch: BlueprintBranch, locale: "ko" | "en" = "ko")
     case "eq": return `${branch.var}이(가) ${shown}인가?`;
     case "ne": return `${branch.var}이(가) ${shown}이 아닌가?`;
     case "gt": return `${branch.var}이(가) ${shown}보다 큰가?`;
+    case "gte": return `${branch.var}이(가) ${shown} 이상인가?`;
     case "lt": return `${branch.var}이(가) ${shown}보다 작은가?`;
+    case "lte": return `${branch.var}이(가) ${shown} 이하인가?`;
     default: return `${branch.var} 확인`;
   }
 }

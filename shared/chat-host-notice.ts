@@ -125,9 +125,9 @@ export function parseChatHostNotice(role: string, json: unknown): ChatHostNotice
   try { return normalizeChatHostNotice(role, JSON.parse(json)); } catch { return undefined; }
 }
 
-/** automation-report rows written by the AGI unblocker (electron/agi/wiring.ts). One quiet line, never a report card. */
+/** automation-report rows the removed AGI unblocker wrote (older chats keep them). One quiet line, never a report card. */
 export const AGI_ACTION_NOTICE_AUTOMATION_ID = "agi-unblocker";
-/** Alive orchestrator notices (electron/alive-organisms/action-notice.ts) — also AGI's own voice. */
+/** The removed One/Work Alive orchestrator's notices (older chats keep them) — also AGI's own voice. */
 export const ALIVE_ACTION_NOTICE_AUTOMATION_ID_SHARED = "alive-orchestrator";
 
 /**

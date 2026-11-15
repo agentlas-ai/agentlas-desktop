@@ -314,12 +314,8 @@ export function setScienceToolApprovalWatch(senderId: number, chatId: string | n
   return { ok: true };
 }
 
-/** One's app-control call has no Science view: it is held to what the active, verified release itself declares. */
-export function assertScienceExtensionReleasePermission(permission: ProductExtensionPermission): void {
-  const release = activeScienceExtension();
-  if (!release) throw new Error("science-extension-not-active");
-  if (!release.manifest.permissions.includes(permission)) throw new Error("science-extension-permission-denied");
-}
+// Lives in ./science (no window code) so the background service can ask it; re-exported for the main process.
+export { assertScienceExtensionReleasePermission } from "./science";
 
 export function assertScienceExtensionViewPermission(senderId: number, permission: ProductExtensionPermission): void {
   const active = activeViewForSender(senderId);

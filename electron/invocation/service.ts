@@ -1,4 +1,6 @@
 import { isAutoMessageGoalId } from "../../shared/auto-goal";
+import { isLeadRoomChat, routeLeadRoomOwnerMessage, routeLeadRoomPeerMessage } from "../one/room-lead-runtime";
+import { assertAgentChatWritable } from "../one/personal-agent-rooms";
 import { generatedVideoAccountKey } from "./generated-video-receipts";
 import { createHostVideoCustody } from "./host-video-custody";
 import { goalObligationContinuationPrompt, releaseGoalObligationContinuation, abandonGoalObligationContinuation } from "../long-run/goal-obligation-context";
@@ -8,12 +10,13 @@ import { recordInvocationArtifactWorkspace } from "../fs/invocation-workspace";
 import { createClosedFactRetry } from "../runtime/fresh-reservation-frontier";
 import { withoutOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
 import { captureOrdinaryOneTurn, type OrdinaryOneTurnSource, type OrdinaryOneTurnMode, type OrdinaryOneTurnState } from "./ordinary-one-turn";
+import { noteOwnerSteer, ownerSpokeOfTurn } from "./owner-spoke";
 import { nativeOwnerTextChoices, NATIVE_OWNER_TEXT_CONTEXT_OMITTED } from "./native-owner-text";
 import type { NativeOwnerTextBinding, NativeOwnerTextInput, NativeOwnerTextReceipt } from "./native-owner-text";
 import { withNativeApprovalExecution } from "../runtime/native-approval-provenance";
 import { withNativeWriterExecution } from "../runtime/native-writer-host";
 import { stopWorkSessionRunIfLoaded, stopWorkSessionChatIfLoaded } from "../work/session-dispatch";
-import { invocationRunPriority, withRunPriority } from "../runtime/run-priority";
+import { invocationRunPriority, withHarnessOpenedTurn, withRunPriority } from "../runtime/run-priority";
 import { getAuthenticatedActorIds, onAuthSessionOwnershipChanged, onAuthSessionRestored } from "../auth";
 import { assertFinanceWorkChatOwner } from "../finance/work-project";
 import { agentContextOwnerBinding } from "../runtime/agent-context-admission";
@@ -38,7 +41,6 @@ import { goalVerificationReasonCode, TRANSIENT_GOAL_VERIFICATION_REASON_CODES } 
 import { withAdapterEffectContext, mainToolStartRequiresDurability } from "./adapter-effect-context";
 import { RunEventDeliveryJournal } from "./event-delivery";
 import { replayHostedElsewhere } from "./native-gui-events";
-import { SemanticRunStepProjector } from "../one/semantic-run-step";
 import { MainWorkRecoveryContext, mainWorkRecoveryApplies } from "./main-work-recovery";
 import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
 import { withInvocationAccounting } from "../long-run/accounting-context";
@@ -50,6 +52,7 @@ import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
   captureGoalProducerAdmission, admitGoalProducer, assertGoalProducerDispatch, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
 import { latestGoalWaitSubscription, goalWaitContinuationPermission, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { recordGoalWaitProposal } from "../long-run/goal-wait-proposal";
+import { automaticGoalClosesWhenIdle } from "../long-run/auto-goal-quiescence";
 import { boundedWaitRefusalCause } from "../long-run/wait-refusal-cause";
 import type { ParsedGoalWait } from "../long-run/wait-emitter";
 import { finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, GOAL_WAIT_FINITE_TIMER_NOTICE, waitRefusalDisposition } from "../long-run/goal-wait-refusal";
@@ -72,6 +75,7 @@ import type { InvocationRunOwner } from "../store/invocation-owner-core";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { agentRunCwd } from "../runtime/exec";
+import { noProjectSessionCwd } from "../runtime/session-cwd";
 import { resolveInvocationRunId } from "../runtime/run-id";
 import {
   onAgentResidencyChange,
@@ -90,7 +94,7 @@ import { runFailureNoticeText } from "../../shared/run-failure-notice";
 import { internalFailureOwnerLine, type InternalFailurePlan } from "../../shared/owner-failure-class";
 import {
   HOST_RECOVERY_LINK, decideOwnerFailure, hostRecoveryOf, hostRecoveryOriginalOf, isOwnerTurnRequest, claimHostRecovery, buildHostRecoveryReplay, hostRecoveryFailedParkable, parkHostRecovery,
-  recordHarnessDefect, recordHostRecoveryOutcome, requestIsReplayable, scheduleHostRecovery, sweepOrphanedHostRecoveries,
+  recordHarnessDefect, recordHostRecoveryOutcome, requestIsReplayable, scheduleHostRecovery, sweepCutOffOwnerTurns, sweepOrphanedHostRecoveries,
   type OwnerFailureDecision,
 } from "./host-recovery";
 import { hostInternalFailureMessage, isHostInternalException, isMissingWorkingFolderError, workingFolderMissingMessage } from "./host-internal-failure";
@@ -112,8 +116,9 @@ import {
   startLongRunWorkerAttempt,
   transitionLongRun, liveLongRunAttemptCount,
   longRunOwnerHold, goalOwnerAnswerHold, holdGoalForOwnerAnswer, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
-import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
-import { automaticGoalReplayBlockerCode, prepareInvocationAutomaticGoal } from "./automatic-goal";
+import { closeGoal } from "../store/goal-close";
+import { armChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
+import { automaticGoalReplayBlockerCode, chatCanHoldAutomaticGoal, prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { classifyAndHandGoalIntakeToMain } from "./goal-intake-forward";
 import { followDaemonTurnGoalOfChat, goalAdmittedForServiceRun } from "../long-run/daemon-turn-goal";
 import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
@@ -188,7 +193,9 @@ import {
 import { getProject } from "../store/projects";
 import { getAgentApp } from "../store/agent-apps";
 import { getDb } from "../store/db";
-import { resumeGoalsWaitingOnProject } from "../long-run/blocked-goal-sweep";
+import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
+import { askRuntimeSignInOnce, resumeGoalsWaitingOnProject } from "../long-run/blocked-goal-sweep";
+import { armGoalLook, noteGoalTurnSettled } from "../long-run/goal-signals";
 import { adoptExplicitGoalGrant, ensureExplicitGoalContract } from "../long-run/explicit-goal-authority";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
@@ -202,13 +209,17 @@ import {
   type InvocationAdmissionIdentity,
 } from "../store/invocation-admissions";
 import { ownerVisiblePrompt } from "../one/owner-prompt";
-import { claimDeferredSystemRelays, parkSystemRelay, peekDeferredSystemRelays, releaseDeferredSystemRelays, releaseUnreadDeferredSystemRelays } from "./deferred-system-relays";
+import { claimDeferredSystemRelays, parkSystemRelay, peekDeferredSystemRelays, relayWaiting, releaseDeferredSystemRelays, releaseUnreadDeferredSystemRelays } from "./deferred-system-relays";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import { GOAL_CONTINUATION_HOST_WAKE } from "../store/goal-continuation-rows";
 import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAutomationGoalExecutionOwnerMatches, nativeGoalStopOwnerMatches, snapshotAutomationGoalRunStops,
   stopKnownAutomationGoalRuns, type NativeGoalStopOwner } from "../automation-execution-control";
 import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
+import { normalizePeerBody, notePeerChainRun, peerChainOfRequest, peerChainRowExists, peerChainStopped } from "../harness/peer-chain";
+import { resumeInterruptedPeerTurns as resumePeerTurns, type PeerResumeReport } from "../harness/peer-turn-resume";
+import { withEarlierAttempt } from "./earlier-attempt";
+import { PEER_BUNDLE_MAX_CHARS, splitPeerBundle, stripPeerEnvelopeRule } from "../harness/peer-envelope";
 import {
   beginQueuedSteerDrain,
   bindQueuedTeamReportCustody,
@@ -219,7 +230,11 @@ import {
   cancelQueuedSteersForChat,
   getDurableQueuedSteer,
   holdQueuedSteerForRecovery,
+  claimPeerTurnResume,
   listRecoverableQueuedSteers,
+  listStartedPeerSteers,
+  mergeQueuedPeerSteer,
+  releasePeerTurnResume,
   persistQueuedSteer,
   requeueUndispatchedQueuedSteer,
   retireHeldQueuedSteer,
@@ -251,14 +266,18 @@ import {
   tryRecordDurableOneSurfaceResult,
 } from "../store/one-surface-results";
 import { getOneProfile } from "../store/one-profile";
+import { memoryClassificationRules, workspaceRulesOn } from "../memory/classification";
+import { isPersonalAgentConversation } from "../workspace-rules/scope";
 import { personalSupervisorConversationInDb } from "../one/supervisor-store";
 import { CARRIED_FOLLOWUP_STEER_PREFIX, carryUndeliveredOwnerFollowups as carryOwnerFollowupsToNextTurn } from "./carried-owner-followups";
 import { OWNER_INTAKE_NOTICE_AFTER_MS, OWNER_INTAKE_START_HOLD_MAX_MS, OWNER_INTAKE_STEER_PREFIX, OWNER_STEERED_PREFIX, ownerIntakeHeldNotice, ownerIntakeReceivedNotice, ownerIntakeWaits, ownerMessageSurface, type OwnerIntakeOutcome } from "./owner-intake";
 import { ownerDirectionReviewSkip } from "./owner-direction-review";
 import { personalSupervisorGuidance } from "../../shared/one-supervisor-context";
+import { composeOneProfileContextWithRelay, joinOneContextParts, ONE_PROFILE_CONTEXT_LIMIT, type OneContextPart } from "../../shared/one-profile-context-trim";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import {
   buildApprovedOneMemoryContext,
+  approvedOneMemoryContextParts,
   claimPreparedOneMemoryUseOnce,
   getOneMemoryState,
   prepareOneMemoryUseOnceClaim,
@@ -468,7 +487,8 @@ interface RunRecord {
   oneMode: boolean;
   goal: string;
   pendingQuestion: boolean;
-  browserLoginWait?: { handle: BrowserLoginWaitHandle; durable: InvocationBrowserLoginWait; unsubscribe?: () => void };
+  /** `unclosedAttemptId`: the Goal attempt this turn left "running" because the runtime was not measured to have stopped; the wait's end closes it. */
+  browserLoginWait?: { handle: BrowserLoginWaitHandle; durable: InvocationBrowserLoginWait; unsubscribe?: () => void; unclosedAttemptId?: string };
   userDecisionRequest?: AgentlasUserDecisionRequest;
   goalWaitRequest?: ParsedGoalWait;
   questionContinuationSourceMessageId?: string;
@@ -485,13 +505,25 @@ interface RunRecord {
   /** Main-owned monotonic sequence shared by provider and resident-process events. */
   observableStepSequence: number;
   /** Run-owned semantic projection; original audit events retain every observation. */
-  semanticSteps: SemanticRunStepProjector;
   deliveryOrdinal: number;
   executionSource?: InvocationExecutionContext["source"];
   /** Main-only provenance retained while waiting; never reconstructed from a receipt. */
   executionContext?: InvocationExecutionContext;
   oneTeamReportCustody?: QueuedTeamReportCustody;
   oneTeamReportOriginalRequest?: Readonly<McpInvocationRequest>;
+}
+
+/**
+ * Agentlas 2.0 a session with no project works in `agent-cwd/<chat id>` (its own folder) instead of the one folder every such
+ * session shared. The personal agent's own conversation keeps the shared folder (its phone/mail results are read from there), and so does a
+ * conversation that has already answered (a CLI resumes by working folder). See runtime/session-cwd.ts.
+ */
+function noProjectSessionFolder(chat: { id: string; projectId?: string | null; agentId?: string | null }): string | null {
+  if (chat.projectId || chat.agentId === BUILTIN_ONE_AGENT_ID) return null;
+  return noProjectSessionCwd(chat.id, (chatId) => {
+    try { return Boolean(getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'assistant' LIMIT 1").get(chatId)); }
+    catch { return true; } // cannot tell: keep the shared folder
+  });
 }
 
 function nextObservableSequence(record: RunRecord): number {
@@ -678,11 +710,19 @@ function relayParkedForRun(runId: string): boolean {
   }
 }
 
-/** An undelivered parked copy of exactly this text waits for the chat's next turn (deferSystemRelay's duplicate rule). */
-function relayCopyParked(chatId: string, text: string): boolean {
+/**
+ * The rows a relay request is parked as: a message of another conversation (it carries a peer chain mark) is one row per message and is never cut, so
+ * everything the sender was told was delivered is read by the Goal's next turn; any other relay is one row (cut at the report limit with its marker).
+ */
+function relayPartsOf(request: object): string[] | undefined {
+  const prompt = (request as { userPrompt?: unknown }).userPrompt;
+  return typeof prompt === "string" && peerChainOfRequest(request) ? splitPeerBundle(prompt) : undefined;
+}
+
+/** An undelivered parked copy of every row of this relay waits for the chat's next turn (deferSystemRelay's duplicate rule). */
+function relayCopyParked(chatId: string, text: string, parts?: readonly string[]): boolean {
   try {
-    return Boolean(getDb().prepare("SELECT 1 FROM deferred_system_relays WHERE chat_id = ? AND text_hash = ? AND delivered_at IS NULL LIMIT 1")
-      .get(chatId, createHash("sha256").update(text.trim()).digest("hex")));
+    return relayWaiting(chatId, { text, ...(parts ? { parts } : {}) });
   } catch {
     return false;
   }
@@ -906,7 +946,7 @@ function ownerWrittenSteers(queue: QueuedSteer[]): QueuedSteer[] {
 }
 
 function publicSteerRecoveryReason(reason:DurableQueuedSteerRecoveryReason|undefined):InvocationSteerRecovery["reason"] {
-  return !reason || reason==="one-team-report-owner-unbound" || reason==="run-stopped-withdraw-unconfirmed" ? "original-run-start-uncertain" : reason;
+  return !reason || reason==="one-team-report-owner-unbound" || reason==="run-stopped-withdraw-unconfirmed" || reason==="peer-turn-resumed" ? "original-run-start-uncertain" : reason;
 }
 /** Canonical source reference, Main-only positional argument; not an authority DTO. */
 export interface QueuedTeamReportSourceRef { dispatchId:string;childRunId:string;roomChatId:string }
@@ -1222,30 +1262,6 @@ function oneWorkspaceTerminalPhase(
 }
 
 
-function recordObservableRunStep(
-  task: CanonicalTask | null,
-  runId: string,
-  event: McpInvocationEvent,
-  sequence: number,
-  projector: SemanticRunStepProjector,
-): void {
-  if (!task) return;
-  projector.record(event, sequence, (step) => tryRecordOneDomainEvent({
-    eventType: "run.step_changed",
-    occurredAt: new Date().toISOString(),
-    actor: event.agentId ? "agent" : "system",
-    entityId: task.id,
-    ...(task.projectId ? { projectId: task.projectId } : {}),
-    taskId: task.id,
-    version: task.version,
-    visibility: domainVisibility(task),
-    entries: [
-      { name: "stepId", value: step.stepId },
-      { name: "status", value: step.status },
-      { name: "publicSafeSummary", value: step.publicSafeSummary },
-    ],
-  }) !== null);
-}
 
 function recordManifestArtifactEvidence(
   task: CanonicalTask,
@@ -1522,18 +1538,13 @@ function closeGoalOnModelJudgment(goalId: string, reason: string): boolean {
   const run = getLongRunByGoalId(goalId);
   if (!run || LONG_RUN_TERMINAL_STATUSES.has(run.status) || longRunOwnerHold(run.id)) return false;
   try {
-    const step = (to: "queued" | "running" | "verifying" | "completed", why: string) =>
-      transitionLongRun({ runId: run.id, to, actorKind: "host", reason: why });
-    if (run.status === "blocked") step("queued", reason);
-    if (["blocked", "queued", "waiting_user"].includes(run.status)) step("running", reason);
-    if (getLongRunByGoalId(goalId)?.status !== "verifying") step("verifying", reason);
+    // A close is not a step (Agentlas 2.0 N4): the one close writes the end state, the contract, the link, the open tasks and the due line.
     appendLongRunEvent({ runId: run.id, kind: "verification.model_judgment_accepted", actorKind: "host", payload: { reason } });
-    step("completed", "model-declared-completion");
+    closeGoal(goalId, "completed", "model-judgment", { reason: "model-declared-completion" });
   } catch (error) {
     console.warn("[long-run] model-declared completion could not close the Goal:", error instanceof Error ? error.message : String(error));
     return false;
   }
-  completeChatGoalContract(goalId, "completed");
   return true;
 }
 
@@ -1563,9 +1574,10 @@ function beforeDispatch<T>(write: () => T): T {
  */
 function successorRequestFrom(request: McpInvocationRequest, successorRunId: string, userPrompt: string, readOnly: boolean): McpInvocationRequest {
   // Consumed single-use capabilities and the original action prompt cannot be replayed.
+  // The owner's words are not replayed either: a successor is the host's own turn, never "the owner wrote this" (invocation/owner-spoke.ts).
   const { runId: _old, images: _images, oneUserAuthoredPrompt: _authored, oneMemoryUseOnceRef: _memory,
     oneBriefingActionRef: _briefing, oneTeamPreflightRef: _team, oneAttachmentRef: _attachment,
-    oneRecurrenceSelection: _recurrence, ...rest } = request;
+    oneRecurrenceSelection: _recurrence, ownerSpoke: _ownerSpoke, ...rest } = request as McpInvocationRequest & { ownerSpoke?: unknown };
   return { ...rest, runId: successorRunId, promptOrigin: "system", taskIntent: "task",
     ...(readOnly ? { permissions: "read", onePermissionMode: "read" } : {}), userPrompt } as McpInvocationRequest;
 }
@@ -2884,6 +2896,7 @@ export class InvocationService {
     executionSource: string | null;
     workspaceSource: string | null;
     request: Pick<McpInvocationRequest, "taskIntent" | "permissions" | "onePermissionMode" | "runtimeSelection" | "locale" | "oneMode">;
+    peerChain: boolean;
   }> {
     // A completed producer retained only by its background judge is no longer
     // foreground work. Actual transport drainage still belongs to settlingRuns.
@@ -2895,6 +2908,7 @@ export class InvocationService {
       automaticGoalId: record.automaticGoalId ?? null,
       executionSource: record.executionSource ?? null,
       workspaceSource: record.workspaceBinding?.source ?? null,
+      peerChain: peerChainOfRequest(record.request) !== null,
       request: {
         ...(record.request.taskIntent ? { taskIntent: record.request.taskIntent } : {}),
         ...(record.request.permissions ? { permissions: record.request.permissions } : {}),
@@ -3149,6 +3163,64 @@ export class InvocationService {
     return { examined: rows.length, resumed, settled, held };
   }
 
+  private routePersonalAgentMessageToLeadRoom(req: McpInvocationRequest): InvocationStartResult | null {
+    try {
+      if (!isLeadRoomChat(req.chatId)) return null;
+      const mark = peerChainOfRequest(req);
+      const chainId = mark?.id ?? (req.runId ? `chain:${req.runId}` : null);
+      if (!chainId) return null;
+      const label = (mark?.from ? getChat(mark.from)?.title : null) || "One";
+      const routed = routeLeadRoomPeerMessage({ chatId: req.chatId, body: req.userPrompt, envelope: req.userPrompt, fromLabel: label, fromKind: "session", chainId,
+        permission: this.latestOwnerReceipt(req.chatId)?.executionPermission ?? "write", ...(req.runId ? { runId: req.runId } : {}) });
+      return routed ? { runId: routed.runId } as InvocationStartResult : null;
+    } catch (error) {
+      console.warn("[invocation] a message to a group room could not be routed to its lead:", error instanceof Error ? error.message : error);
+      return null;
+    }
+  }
+
+  /**
+   * A turn another conversation's message opened that a restart cut short is continued once, inside its chain (harness/peer-turn-resume.ts, Agentlas 2.0 N7).
+   * Called at Main's start after the queued directions are recovered and at the background service's start for the chats its boot freed; the claim of the
+   * row's mark is one compare-and-set, so both looking at the same moment start it once. Never throws.
+   */
+  resumeInterruptedPeerTurns(chatId?: string): PeerResumeReport {
+    const none: PeerResumeReport = { examined: 0, resumed: 0, skipped: {} };
+    try {
+      const db = getDb();
+      return resumePeerTurns({
+        now: () => Date.now(),
+        candidates: (since, only) => listStartedPeerSteers(since, only).map((row) => ({ id: row.id, chatId: row.chatId, drainedRunId: row.drainedRunId ?? "", updatedAt: row.queuedAt,
+          request: row.request, ...(row.workspaceBinding ? { workspaceBinding: row.workspaceBinding } : {}), ...(row.executionContext ? { executionContext: row.executionContext } : {}) }))
+          .filter((row) => row.drainedRunId !== ""),
+        chatUsable: (id) => { const chat = getChat(id); return Boolean(chat && !chat.archivedAt); },
+        chatLive: (id) => this.activeChatIds().includes(id) || this.settlingRuns.size > 0 && [...this.settlingRuns.values()].some((record) => record.chatId === id) || invocationRunOwners.getActiveOwner(id) !== null,
+        receipt: (runId) => { const receipt = getInvocationRunReceipt(runId); return receipt ? { status: receipt.status, hostStopCause: receipt.hostStopCause ?? null, updatedAt: receipt.updatedAt } : null; },
+        startedAfter: (id, runId) => {
+          // seq counts inside one run; the row id is the order the ledger was written in.
+          const own = db.prepare("SELECT rowid AS rid FROM run_events WHERE run_id = ? AND kind = 'invoke_started' ORDER BY rowid LIMIT 1").get(runId) as { rid: number } | undefined;
+          if (!own) return false;
+          return Boolean(db.prepare("SELECT 1 FROM run_events WHERE chat_id = ? AND kind = 'invoke_started' AND run_id <> ? AND rowid > ? LIMIT 1").get(id, runId, own.rid));
+        },
+        ownerSpokeAfter: (id, sinceIso) => Boolean(db.prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1").get(id, sinceIso)),
+        chain: (chainId) => peerChainStopped(db, chainId) ? "stopped" : peerChainRowExists(db, chainId) ? "live" : "missing",
+        clearLive: (chain, runId, id) => notePeerChainRun(db, chain.id, runId, id, false),
+        claim: (rowId) => claimPeerTurnResume(rowId),
+        unclaim: (rowId) => releasePeerTurnResume(rowId),
+        newRunId: () => randomUUID(),
+        start: (request, row) => {
+          const binding = (row.workspaceBinding ?? undefined) as InvocationWorkspaceBinding | undefined;
+          const context = (row.executionContext ?? undefined) as InvocationExecutionContext | undefined;
+          this.start(withEarlierAttempt(request), binding, context);
+        },
+        log: (line) => console.info(line),
+      }, chatId);
+    } catch (error) {
+      console.warn("[peer-resume] not run:", error instanceof Error ? error.message : error);
+      return none;
+    }
+  }
+
   start(
     req: McpInvocationRequest,
     workspaceBinding?: InvocationWorkspaceBinding,
@@ -3167,6 +3239,21 @@ export class InvocationService {
     queuedRoomInheritance?: typeof QUEUED_ONE_ROOM_INHERITANCE,
     oneTeamReportCustody?: QueuedTeamReportCustody,
   ): InvocationStartResult {
+    // A group room under the lead model never runs a turn itself: the owner's message goes to its lead / the member it names
+    // (one/room-lead-runtime.ts). Telegram, mail, the personal agent's chat-send, automations and every other caller pass here.
+    // Nobody answers in a one-to-one room whose agent was deleted - for every route, not only the renderer and the phone.
+    if (req.promptOrigin !== "system" && req.agentAppMode !== true) assertAgentChatWritable(req.chatId);
+    const leadRouted = routeLeadRoomOwnerMessage(req);
+    if (leadRouted) return leadRouted;
+    // The personal agent's message to a group room under the lead model (one_chat_send: system-written, the hand-off purpose): the room's lead receives
+    // it like any other message from outside, under the run id the personal agent's receipt and settlement are bound to. The room chat itself never
+    // runs a turn (defect 10). The words go as written: the envelope rule belongs to messages between conversations of a project.
+    if (hostNoticePurpose === "one-dispatch-brief" && req.promptOrigin === "system" && req.agentAppMode !== true && typeof req.userPrompt === "string") {
+      const toLead = this.routePersonalAgentMessageToLeadRoom(req);
+      if (toLead) return toLead;
+    }
+    // A turn a message of a stopped chain would open does not start (Agentlas 2.0 N6: the Stop of any conversation of the chain stops the chain).
+    { const chain = peerChainOfRequest(req); if (chain && peerChainStopped(getDb(), chain.id)) throw Object.assign(new Error("peer_chain_stopped"), { code: "peer_chain_stopped" }); }
     if(req.oneTeamReportTurn===true){
       oneTeamReportCustody ??= captureQueuedTeamReportCustody(req);
       if(!queuedTeamReportCurrent(oneTeamReportCustody,req))throw new Error("one_team_report_owner_unbound");
@@ -3326,13 +3413,11 @@ export class InvocationService {
     const chat = backgroundObservation ? { ...storedChat } : repairRootChatSurfaceController(storedChat);
     let boundGoal = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
     if (!backgroundObservation && chat.goalId && boundGoal && LONG_RUN_TERMINAL_STATUSES.has(boundGoal.status)) {
-      completeChatGoalContract(chat.goalId, boundGoal.status === "completed" ? "completed" : "cancelled");
-      setChatGoalBinding(chat.id, null);
+      closeGoal(chat.goalId, boundGoal.status === "completed" ? "completed" : "cancelled", "cleanup", { reason: "bound_goal_already_ended" });
       chat.goalId = null;
       boundGoal = null;
     } else if (!backgroundObservation && isAutoMessageGoalId(chat.goalId) && !boundGoal) {
-      completeChatGoalContract(chat.goalId, "cancelled");
-      setChatGoalBinding(chat.id, null);
+      closeGoal(chat.goalId!, "cancelled", "cleanup", { reason: "auto_goal_without_run" });
       chat.goalId = null;
     }
     if (!backgroundObservation && !chat.goalId) {
@@ -3349,7 +3434,7 @@ export class InvocationService {
           chat.goalId = orphan.goal_id;
           boundGoal = orphanRun;
         } else {
-          completeChatGoalContract(orphan.goal_id, orphanRun?.status === "completed" ? "completed" : "cancelled");
+          closeGoal(orphan.goal_id, orphanRun?.status === "completed" ? "completed" : "cancelled", "cleanup", { reason: "orphan_contract_without_live_run" });
         }
       }
     }
@@ -3358,13 +3443,22 @@ export class InvocationService {
     // room and writes the summary once, and no automatic Goal is admitted from it. Finance validation 2026-10-28: the choice
     // reopened the Goal as words, its summary was verified inconclusive and the same card came back three times.
     let ownerCardStoppedGoalId: string | null = null;
+    let ownerCardHeldGoal = false;
     if (!backgroundObservation && chat.goalId && req.promptOrigin !== "system" && req.agentAppMode !== true) {
       try {
         const answer = hostOwnerCardAnswer({ goalId: chat.goalId, chatId: chat.id, reply: incoming.userPrompt,
           sourceMessageId: questionContinuation?.sourceMessageId ?? null });
         const via = questionContinuation ? "question_continuation" : workspaceBinding?.source ?? executionContext?.source ?? "composer";
-        if (answer && applyHostOwnerCardDecision(answer, { chatId: chat.id, via }) === "stopped") {
+        const applied = answer ? applyHostOwnerCardDecision(answer, { chatId: chat.id, via }) : "unchanged";
+        if (answer && applied === "stopped") {
           ownerCardStoppedGoalId = answer.run.goalId;
+          chat.goalId = null;
+          boundGoal = null;
+        } else if (answer && applied === "held") {
+          // "Keep it stopped": the Goal is on the owner's pause now. This message answers the card; it is not the word that resumes the
+          // Goal, so the turn is an ordinary one of the room and no automatic Goal is admitted from it (#2).
+          ownerCardStoppedGoalId = answer.run.goalId;
+          ownerCardHeldGoal = true;
           chat.goalId = null;
           boundGoal = null;
         }
@@ -3420,6 +3514,10 @@ export class InvocationService {
       oneLaneAllowedForBinding: !workspaceBinding || remoteOneBoundary, agentAppMode: req.agentAppMode === true });
     if ("refuse" in oneLane) throw new Error(ONE_LANE_REFUSAL_MESSAGE[oneLane.refuse]);
     const requestedOneMode = oneLane.oneMode;
+    const companionFrontTurn = requestedOneMode && (require("../one/companion-front-inbox") as typeof import("../one/companion-front-inbox"))
+      .isCompanionFrontOwnLane(getDb(),req.runId,chat.id);
+    if(companionFrontTurn && !(require("../one/companion-front-context") as typeof import("../one/companion-front-context"))
+      .readAdmittedCompanionFrontContext(getDb(),req.runId!,chat.id)) throw new Error("companion_front_context_unavailable");
     const selectedOnePermissionMode = requestedOneMode
       ? normalizeOnePermissionMode(incoming.onePermissionMode)
       : null;
@@ -3489,6 +3587,13 @@ export class InvocationService {
       req.runId,
       (candidate) => this.activeRuns.hasSeen(candidate) || hasInvocationRunReceipt(candidate),
     );
+    // The runner boundary binds a provider call to the chat's Goal by chat alone; the Goal the owner just left on pause is not this turn's.
+    if (ownerCardHeldGoal) markOrdinaryGoalTurn(runId);
+    // This is a host decision, never a request field. Old runs without proof stay unknown.
+    const {recordScienceHostRun, scienceWorkRunBlocked, scienceWorkRunHasDesktopProof} = require("../one/science-reply-origin") as typeof import("../one/science-reply-origin");
+    const scienceSurface = executionContext?.source === "mobile" || scienceWorkRunBlocked(getDb(), req.chatId, runId)
+      ? "mobile" : executionContext?.source === "science" || scienceWorkRunHasDesktopProof(getDb(),req.chatId,runId) || (!executionContext?.source && req.promptOrigin !== "system") ? "desktop" : "unknown";
+    recordScienceHostRun(getDb(), req.chatId, runId, scienceSurface);
     // 효과 관찰 실행(Main 발행 표)은 정확히 그 번호·그 대화·읽기 전용으로만 돈다 — 요청 본문이
     // 아니라 Main 이 들고 있는 표로 판정하고, 조금이라도 어긋나면 디스패치 전에 거절한다.
     const effectObservation = effectObservationTicket(req.runId);
@@ -3620,7 +3725,7 @@ export class InvocationService {
       invocationRequest = { ...invocationRequest, taskForceTargets: inheritedOneRoom.taskForceTargets,
         sessionRouting: false, borrowAgents: undefined, borrowVersions: undefined };
     }
-    const explicitMemoryIntent = requestedOneMode && !preparedOneBriefingAction
+    const explicitMemoryIntent = requestedOneMode && !companionFrontTurn && !preparedOneBriefingAction
       ? detectExplicitOneMemoryIntent(invocationRequest.userPrompt,
           (prompt) => judgedOneMemoryIntent(prompt, invocationRequest.runtimeSelection))
       : null;
@@ -3647,6 +3752,7 @@ export class InvocationService {
       }>;
     } | null = null;
     let oneProfileContext: string | undefined;
+    let oneContextParts: OneContextPart[] | undefined;
     let oneMachineTurnContext: string | undefined;
     // A teammate in a One room does its piece and answers One. One's persona, the owner's One profile and the approved One
     // memory are One's own; a teammate re-reading them every turn only costs input (production 2026-10-12: the Motiondirector
@@ -3656,7 +3762,12 @@ export class InvocationService {
       try { roomTeammateTurn = Boolean((require("../one/room-chat") as typeof import("../one/room-chat")).roomMemberContext(chat.id)); }
       catch { roomTeammateTurn = false; }
     }
-    if (requestedOneMode && !roomTeammateTurn) {
+    if (companionFrontTurn) {
+      // The signed mobile turn supplies its own explicitly scoped profile and
+      // preference data later. Do not silently substitute Desktop personal data.
+      oneContextParts = [{ kind: "persona", text: ONE_PERSONA_DIRECTIVE }];
+      oneProfileContext = joinOneContextParts(oneContextParts);
+    } else if (requestedOneMode && !roomTeammateTurn) {
       const profile = getOneProfile();
       const invocationScope = {
         projectId: chat.projectId,
@@ -3664,13 +3775,21 @@ export class InvocationService {
         teamId: chat.firmId,
       };
       const appliedPrinciples = selectApprovedOneOperatingPrinciples(profile, invocationScope);
+      // Agentlas 2.0 P3a (matrix row L2): with the workspace-rules switch on, a One-surface conversation that is not the personal agent's own (a one-to-one with a folder agent,
+      // a group room's lead) does not receive One's persona, the profile's identity or the approved One memory: only the owner-written "[Owner preferences]" text a Work session receives
+      // (the branch below, same value, same receipt shape). The personal agent's own conversation, and the switch off, are untouched.
+      let ownerWorkOnly = false;
+      try { ownerWorkOnly = workspaceRulesOn() && memoryClassificationRules() !== null && !isPersonalAgentConversation(getDb(), chat.id); } catch { ownerWorkOnly = false; }
       let approvedMemoryContext: string | undefined;
+      let approvedMemoryPieces: OneContextPart["memory"] | undefined;
       // Approved memory is an optional overlay. A legacy reader or unavailable
       // store must not refuse a fresh owner turn or alter the stored authority.
-      try {
+      if (!ownerWorkOnly) try {
         const memoryState = getOneMemoryState();
         const appliedMemories = selectApprovedOneMemoryAssets(invocationScope, memoryState);
         const memoryContext = buildApprovedOneMemoryContext(invocationScope, memoryState);
+        const memoryPieces = approvedOneMemoryContextParts(invocationScope, memoryState);
+        if (memoryPieces.items.length > 0) approvedMemoryPieces = memoryPieces;
         const memoryReceipt = {
           storeVersion: memoryState.version,
           memoryIds: appliedMemories.map((item) => item.id),
@@ -3694,16 +3813,29 @@ export class InvocationService {
       }
       // One 페르소나 오버레이 — Main만 붙인다. 실행 경계(solo_locked·preflight)는
       // 위에서 이미 고정됐고, 이 블록은 정체성/능력 서술만 더한다.
-      oneProfileContext = [
-        ONE_PERSONA_DIRECTIVE,
-        buildApprovedOneProfileContext(profile, invocationScope),
-        approvedMemoryContext,
-        ...(preparedOneMemoryUseOnce ? [preparedOneMemoryUseOnce.context] : []),
-        ...(preparedOneBriefingAction ? [preparedOneBriefingAction.context] : []),
-      ].filter(Boolean).join("\n\n");
+      // Kept as parts: the personal conversation adds its supervisor guidance below and the whole is cut by priority when over the limit.
+      oneContextParts = [
+        { kind: "persona", text: ONE_PERSONA_DIRECTIVE },
+        { kind: "profile", text: buildApprovedOneProfileContext(profile, invocationScope) },
+        { kind: "memory", text: approvedMemoryContext ?? "", ...(approvedMemoryPieces ? { memory: approvedMemoryPieces } : {}) },
+        ...(preparedOneMemoryUseOnce ? [{ kind: "memory-once" as const, text: preparedOneMemoryUseOnce.context }] : []),
+        ...(preparedOneBriefingAction ? [{ kind: "briefing" as const, text: preparedOneBriefingAction.context }] : []),
+      ];
+      oneProfileContext = joinOneContextParts(oneContextParts);
       // A turn whose output the host parses never gets the persona, identity or voice above: they end the owner's reply.
       oneMachineTurnContext = composeMachineTurnOwnerContext(profile, invocationScope,
         [approvedMemoryContext, preparedOneMemoryUseOnce?.context]) || undefined;
+      if (ownerWorkOnly) {
+        // The parts above are not sent: only the owner-written preferences of a Work session (approved memory was not read), the one-time memory use and the briefing action the owner asked for.
+        const ownerWorkPreference = buildApprovedOwnerWorkPreferenceContext(profile, invocationScope);
+        oneContextParts = [
+          ...(ownerWorkPreference ? [{ kind: "profile" as const, text: ownerWorkPreference }] : []),
+          ...(preparedOneMemoryUseOnce ? [{ kind: "memory-once" as const, text: preparedOneMemoryUseOnce.context }] : []),
+          ...(preparedOneBriefingAction ? [{ kind: "briefing" as const, text: preparedOneBriefingAction.context }] : []),
+        ];
+        oneProfileContext = joinOneContextParts(oneContextParts);
+        oneMachineTurnContext = composeMachineTurnOwnerContext(profile, invocationScope, [preparedOneMemoryUseOnce?.context]) || undefined;
+      }
       oneProfileReceipt = {
         oneId: profile.oneId,
         profileVersion: profile.version,
@@ -3735,8 +3867,11 @@ export class InvocationService {
         };
       }
     }
-    const personalSupervisor = requestedOneMode && personalSupervisorConversationInDb(getDb(), getOneProfile().oneId, chat.id);
-    if (personalSupervisor) oneProfileContext = [oneProfileContext, personalSupervisorGuidance(getOneProfile().displayName)].filter(Boolean).join("\n\n");
+    const personalSupervisor = requestedOneMode && !companionFrontTurn && personalSupervisorConversationInDb(getDb(), getOneProfile().oneId, chat.id);
+    // The personal conversation's supervisor guidance joins the parts; the cut itself happens once the relay block is known (below).
+    if (oneContextParts) {
+      if (personalSupervisor) oneContextParts = [...oneContextParts, { kind: "guidance", text: personalSupervisorGuidance(getOneProfile().displayName) }];
+    } else if (personalSupervisor) oneProfileContext = [oneProfileContext, personalSupervisorGuidance(getOneProfile().displayName)].filter(Boolean).join("\n\n");
     const judgedTaskIntent = requestedOneMode && !personalSupervisor
       && invocationRequest.taskIntent === "conversation"
       && classifyOneRequestIntent(invocationRequest.userPrompt,
@@ -3783,7 +3918,7 @@ export class InvocationService {
       ? runWorkspaceBinding.canonicalPath ?? agentRunCwd()
       : targetAppFolder
         ? path.resolve(targetAppFolder)
-        : storedWorkingFolder ?? projectFolder ?? promptFolder ?? agentRunCwd();
+        : storedWorkingFolder ?? projectFolder ?? promptFolder ?? noProjectSessionFolder(chat) ?? agentRunCwd();
     if (nativeController && !isLocalInvocationPreparationPort(nativePreparation!.port) && requestedOneAttachmentRef) {
       const ingress = this.nativeIngress.get(runId);
       if (!ingress || ingress.controller !== nativeController || ingress.selectedCwd !== undefined) throw new Error("native_service_cwd_source_required");
@@ -3836,10 +3971,13 @@ export class InvocationService {
       && req.agentAppMode !== true && !effectObservation;
     let deferredRelays: ReturnType<typeof peekDeferredSystemRelays> = null;
     if (deferredRelayEligible) {
-      try { deferredRelays = peekDeferredSystemRelays(chat.id, 15_000 - (oneProfileContext?.length ?? 0) - 2); }
+      try { deferredRelays = peekDeferredSystemRelays(chat.id, 15_000 - (oneContextParts ? joinOneContextParts(oneContextParts) : oneProfileContext ?? "").length - 2); }
       catch (error) { console.warn("[invocation] deferred relays unreadable; the turn runs without them:", error); }
     }
-    if (deferredRelays) oneProfileContext = [oneProfileContext, deferredRelays.block].filter(Boolean).join("\n\n");
+    if (oneContextParts) {
+      // The cut leaves room for the relay block: together they never pass the limit the prompt builder enforces.
+      oneProfileContext = composeOneProfileContextWithRelay(oneContextParts, deferredRelays?.block, ONE_PROFILE_CONTEXT_LIMIT, (line) => console.warn(line)).text;
+    } else if (deferredRelays) oneProfileContext = [oneProfileContext, deferredRelays.block].filter(Boolean).join("\n\n");
     const runReq: OneInvocationRequest = {
       ...invocationRequest,
       runId,
@@ -3927,7 +4065,6 @@ export class InvocationService {
         : {}),
       settlementPublished: false,
       observableStepSequence: 0,
-      semanticSteps: new SemanticRunStepProjector(runId, req.chatId),
       deliveryOrdinal: 0,
       ...(executionContext?.source ? { executionSource: executionContext.source } : {}),
       ...(executionContext ? { executionContext } : {}),
@@ -4219,6 +4356,7 @@ export class InvocationService {
             latestUserMessageRowId: (getDb().prepare("SELECT MAX(rowid) AS cursor FROM chat_messages WHERE chat_id=? AND role='user'")
               .get(runReq.chatId) as { cursor: number | null }).cursor ?? undefined,
             onePermissionMode: selectedOnePermissionMode ?? undefined,
+            peerChain: peerChainOfRequest(runReq)?.id,
             fastMode: runReq.fastMode === true || undefined,
             locale: pickLocale(runReq),
             // Persist the semantic boundary that Main actually received. This
@@ -4277,6 +4415,7 @@ export class InvocationService {
       });
       startBoundary.crossed = true;
       startBoundary.runId = runId;
+      { const chain = peerChainOfRequest(runReq); if (chain) notePeerChainRun(getDb(), chain.id, runId, runReq.chatId, true); }
       if (record.workspaceBinding) recordInvocationArtifactWorkspace({chatId:record.chatId,runId,binding:record.workspaceBinding});
       startBoundary.cleanups = nativeController && !isLocalInvocationPreparationPort(nativePreparation!.port) ? [] : [() => releaseOneAttachmentRun(requestedOneAttachmentRef)];
       if (nativePreparation?.ordinaryTurn) {
@@ -4497,7 +4636,6 @@ export class InvocationService {
       sequence: lifecycleStartSequence,
       observedAt: new Date().toISOString(),
     };
-    recordObservableRunStep(canonicalTask, runId, lifecycleStartEvent, lifecycleStartSequence, record.semanticSteps);
     record.events.push(lifecycleStartEvent);
     recordMcpInvocationEvent(runId, runReq, lifecycleStartEvent);
     this.publishRunEvent(record, { runId, chatId: runReq.chatId, event: lifecycleStartEvent });
@@ -4526,7 +4664,7 @@ export class InvocationService {
     let ordinaryTurnOnStoppedGoal = hostRecoveryOf(req) !== null;
     // A goal-mode turn in a chat still bound to an ENDED Goal starts a new Goal instead of attaching to the ended one.
     if (projectionGoalId && runReq.goalMode && !executionContext && boundGoalIsTerminal(projectionGoalId)) {
-      setChatGoalBinding(chat.id, null);
+      closeGoal(projectionGoalId, getLongRunByGoalId(projectionGoalId)?.status === "completed" ? "completed" : "cancelled", "cleanup", { reason: "bound_goal_already_ended" });
       projectionGoalId = null;
     }
     let effectObservationParsed: ParsedEffectObservation | null = null;
@@ -4631,8 +4769,9 @@ export class InvocationService {
        */
       if (invocationRequest.oneMode && invocationRequest.taskIntent === "conversation") {
         try {
+          const parts = relayPartsOf(invocationRequest);
           parkSystemRelay({ chatId: chat.id, text: invocationRequest.userPrompt, cause: `goal_${goalLongRun.status}`,
-            goalStatus: goalLongRun.status, originRunId: runId });
+            goalStatus: goalLongRun.status, originRunId: runId, ...(parts ? { parts } : {}) });
         } catch (deferError) { console.warn("[invocation] refused system relay could not be parked:", deferError); }
       }
       throw new Error("goal_waiting_system_start_refused");
@@ -4742,11 +4881,15 @@ export class InvocationService {
      * own first turn is exempt from that (W7 2026-10-17, YouTube room, on 1.3.63 and 1.3.64 alike).
      */
     const adoptRecordedExplicitGrant = (): void => {
-      if (!goalLongRun || executionContext || goalLongRun.surface === "science" || getChatGoalRevision(goalLongRun.goalId)) return;
+      if (!goalLongRun || (executionContext && !(ownerRemoteTurn && record.ownerLease?.ownerKind !== "daemon")) || goalLongRun.surface === "science" || getChatGoalRevision(goalLongRun.goalId)) return;
       try {
         // No goal-mode turn of this Goal is recorded (a Goal defined through chats:defineGoal): the owner's own message
         // turn running now is the instruction the "send one more message" notice asks for (explicit-goal-authority.ts).
-        const ownerTurn = localUserTurn && !backgroundObservation && !effectObservation && goalLongRun.rootChatId === chat.id
+        // The owner's own paired channel (the phone, Telegram One) is the owner's hand as the composer is: its message is the same instruction
+        // (ownerMessageSurface is the one typed test of that; a system prompt or an agent-app turn is never one). Audit 44 #1: a card that
+        // rings the phone ("no instruction of yours is recorded, say so here") was answered from the phone and the Goal stayed parked.
+        // Goal custody is Desktop-only: a turn the background service hosts never adopts it (it holds no admission, long-run/daemon-turn-goal.ts).
+        const ownerTurn = (localUserTurn || (ownerRemoteTurn && record.ownerLease?.ownerKind !== "daemon")) && !backgroundObservation && !effectObservation && goalLongRun.rootChatId === chat.id
           ? { invocationRunId: runId } : undefined;
         if (adoptExplicitGoalGrant(goalLongRun.goalId, ownerTurn)) {
           goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
@@ -4917,7 +5060,7 @@ export class InvocationService {
         nativeRuntimeDiagnostic: diagnostic => tryRecordRunEvent({ runId, chatId: chat.id, agentId: chat.agentId ?? null,
           kind: "runtime_native_diagnostic", sourceEventId: `native-runtime-diagnostic:${diagnostic.diagnosticAttemptId}:${diagnostic.phase}:${diagnostic.sequence}`,
           evidencePhase: "observed", payload: { ...diagnostic } }),
-        begin: admission => { effectBoundary.adapterStarted(admission); record.semanticSteps.admitAdapter(admission); }, finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report),
+        begin: admission => { effectBoundary.adapterStarted(admission); }, finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report),
         hostControl: observation => effectBoundary.hostControl(observation), recordingFailed: () => effectBoundary.recordingFailed(),
         provesNoOutsideEffect: () => effectBoundary.provesNoOutsideEffect() }, () => Promise.resolve().then(() => {
         if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
@@ -5515,7 +5658,6 @@ export class InvocationService {
             event = { ...event, error: { ...event.error, message: hostDecision.line, hostWorded: hostDecision.action === "say" ? "stopped" : "recovering" } };
           }
         }
-        recordObservableRunStep(canonicalTask, runId, event, observableStepSequence, record.semanticSteps);
 
         const wireEvent = liveWirePartial(record, event);
         if (!wireEvent) return;
@@ -5937,6 +6079,10 @@ export class InvocationService {
         // "every day ... upload" brief here, so no One chat could ever become a continuous Goal. Classify off the critical path
         // with Desktop's own resolver; a Goal-bound message goes to Main (which owns Goal custody), or leaves a durable marker
         // when Main is away. Once the chat holds a live Goal, ownerTurnStartsOnDesktop routes its next turn to Desktop.
+        // Agentlas 2.0 a session with no project cannot hold a Goal (the composer's Goal row is off there and says why), so its
+        // messages are not sent to the intake judgment at all: that call's answer would have no reader. The personal agent's own conversation
+        // keeps the intake (its recurring briefs become Goals there), and a chat that already holds a Goal is handled above.
+        if (!chatCanHoldAutomaticGoal(chat, BUILTIN_ONE_AGENT_ID)) return;
         if (record.ownerLease?.ownerKind === "daemon") {
           void classifyAndHandGoalIntakeToMain({ runId, chatId: chat.id, sourceMessageId, userPrompt: ownerVisiblePrompt(runReq),
             permission: runReq.permissions ?? "read", signal: controller.signal,
@@ -5958,10 +6104,7 @@ export class InvocationService {
                 let goal = getLongRunByGoalId(prepared.run.goalId);
                 if (goal && !LONG_RUN_TERMINAL_STATUSES.has(goal.status)) {
                   if (stopReason === "goal_deleted_by_user") {
-                    if (goal.status !== "cancelling") goal = transitionLongRun({ runId: goal.id, to: "cancelling", actorKind: "user", reason: "user" });
-                    transitionLongRun({ runId: goal.id, to: "cancelled", actorKind: "host", reason: "user" });
-                    completeChatGoalContract(goal.goalId, "cancelled");
-                    if (getChat(chat.id)?.goalId === goal.goalId) setChatGoalBinding(chat.id, null);
+                    closeGoal(goal.goalId, "cancelled", "owner-stop", { reason: "user" });
                   } else if (stopReason === STOPPED_BY_USER || isOwnerGoalStopCause(stopReason)) {
                     appendLongRunEvent({ runId: goal.id, kind: "run.user_control", actorKind: "user",
                       payload: { action: "pause", source: "turn-stop", chatId: chat.id, goalId: goal.goalId, invocationRunId: runId } });
@@ -6158,7 +6301,11 @@ export class InvocationService {
         };
         // The owner's own message takes the owner slot lane (NH20); anything this turn starts for others does not inherit it.
         const runPriority = invocationRunPriority({ promptOrigin: runReq.promptOrigin, oneTeamReportTurn: runReq.oneTeamReportTurn, source: executionContext?.source });
-        const prioritizedDispatch = () => withRunPriority(runPriority, dispatch);
+        // N8: a turn the product opened (not the owner's message) goes through a run slot whatever its runner is, an API run included.
+        // A system-written turn that answers the owner's own message (the personal agent's reply, a group room member's first turn) is not a turn the product
+        // opened on its own: it does not wait for a slot behind the turns it spawned (section F).
+        const answersOwner = runPriority !== "owner" && ownerSpokeOfTurn(runReq, { hostRecovery: hostRecoveryOf(runReq) !== null, hostNoticePurpose });
+        const prioritizedDispatch = () => withRunPriority(runPriority, runPriority === "owner" || answersOwner ? dispatch : () => withHarnessOpenedTurn(dispatch));
         return handedOver ? handedOver.then(prioritizedDispatch) : prioritizedDispatch(); })
       .then((result) => {
         // The runner promise has settled. Persist host effect completeness
@@ -6186,6 +6333,14 @@ export class InvocationService {
             resultFolder: record.resultFolder,
             tokens: result.tokens,
             hasFinalText: Boolean(result.finalText?.trim()),
+            // Codex: how many of the turn's messages the app-server marked commentary / answer (a reported answer can then be
+            // proven from this row). Diagnostics only; kept and deleted with this run-event row by the run-event retention.
+            ...(result.agentMessages ? {
+              agentMessageCommentary: result.agentMessages.commentary,
+              agentMessagePartialAnswer: result.agentMessages.partialAnswer,
+              agentMessageFinalAnswer: result.agentMessages.finalAnswer,
+              agentMessageUnmarked: result.agentMessages.unmarked,
+            } : {}),
             // A role-free invocation summary must not be added again to the
             // per-provider orchestrator/worker usage rows.
             observedUsageScope: "invocation",
@@ -6228,6 +6383,9 @@ export class InvocationService {
             state: "waiting", successorInvocationId: null,
             reason: !sourceCanResume ? "browser_login_resume_requires_source_controller"
               : !handle.runtimeQuiesced ? "browser_login_runtime_not_quiesced" : null };
+          // Only measured runtime drainage settles the interrupted attempt now; a runtime that has not stopped leaves it running until the
+          // wait ends (cancelParkedBrowserLoginWait), or no one would ever close it and the Goal stood "running" for good (#5).
+          let unclosedAttemptId: string | null = null;
           getDb().transaction(() => {
             recordRunEvent({ runId, chatId: chat.id, kind: "invoke_waiting", sourceEventId: `login-wait:${handle.prerequisite.prerequisiteId}`,
               payload: { errorCode: "authentication_required", prerequisite: handle.prerequisite,
@@ -6241,6 +6399,7 @@ export class InvocationService {
               // Only measured runtime drainage can settle the interrupted attempt.
               if (handle.runtimeQuiesced) settleLongRunWorkerAttempt({ attemptId: goalControllerAttemptId, state: "interrupted",
                 errorCode: "authentication_required" });
+              else unclosedAttemptId = goalControllerAttemptId;
             }
             try { effectsSettled = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id }).effects === "settled"; } catch { /* preserve uncertainty */ }
             durable.effectsSettled = effectsSettled;
@@ -6251,7 +6410,7 @@ export class InvocationService {
               if (current?.status === "running") transitionLongRun({ runId: current.id, to: "waiting_user", actorKind: "host", reason: "authentication_required" });
             }
           })();
-          record.browserLoginWait = { handle, durable };
+          record.browserLoginWait = { handle, durable, ...(unclosedAttemptId ? { unclosedAttemptId } : {}) };
           this.browserLoginWaitingRuns.set(runId, record);
           terminalObserved = true;
           taskMaterialized = Boolean(canonicalTask);
@@ -6331,8 +6490,6 @@ export class InvocationService {
             const disposition = applyGoalEpisodeRest({ requestId: captureId, captureId, goalId,
               intent: result.goalWaitRequest.intent, signal: controller.signal,
               hasTransientAttachments: record.hasTransientAttachments, projectDir: executionCwd,
-              latestReceipt: chatId => { const receipt = this.latestReceipt(chatId);
-                return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null; },
             }, registerGoalWaitSubscription);
             episodeDecisionRecorded = disposition.code !== "goal_episode_request_conflict";
             if (disposition.status !== "wait_registered") { episodeRefused = true; throw new Error(disposition.code); }
@@ -6503,6 +6660,11 @@ export class InvocationService {
             }
           }
         }
+        // A Goal the host admitted from a plain sentence whose invocation ended because its passes had nothing left to do (the idle
+        // yield: the host drove the Goal again and nothing happened) is finished as far as anyone can tell. Like a model-declared
+        // completion it closes unless the verifier says "failed" (long-run/auto-goal-quiescence.ts); it never loops on "inconclusive".
+        const idleAutomaticGoalClose = !modelDeclaredCompletion && automaticGoalClosesWhenIdle({ goalId: completionClaim?.goalId,
+          idleYield: Boolean(result.goalIdleYield), lifecycle: getChatGoalRevision(completionClaim?.goalId ?? "")?.lifecycle });
         if (completionClaim?.claimed && completionClaim.goalId) {
           const ongoingRevision = getChatGoalRevision(completionClaim.goalId);
           if (ongoingRevision?.lifecycle === "ongoing" && getChat(chat.id)?.goalId === completionClaim.goalId
@@ -6617,15 +6779,19 @@ export class InvocationService {
               const verifierPassed = !controller.signal.aborted && ["completed", "cycle_completed"].includes(verification?.disposition ?? "");
               settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: verifierPassed,
                 ...(modelJudgmentClosed && !verifierPassed ? { verificationScope: "goal" as const, verificationState: "inconclusive" as const } : {}) });
-              if (modelJudgmentClosed) {
-                if (getChat(chat.id)?.goalId === completionClaim.goalId) setChatGoalBinding(chat.id, null);
+              if (modelJudgmentClosed) return; // closeGoal already ended the run, the contract, the link, the tasks and the due line
+              if (controller.signal.aborted || getChat(chat.id)?.goalId !== completionClaim.goalId) return;
+              // An idle automatic Goal closes on the same rule unless a criterion positively failed (the claim here is the host's own, so the rule above
+              // never applied to it; the evidence is the idle yield). Closed, not verified: the result keeps the unverified mark.
+              if (idleAutomaticGoalClose && !["completed", "cycle_completed"].includes(verification?.disposition ?? "")
+                && !(verification?.verdicts ?? []).some((criterion) => criterion.verdict === "failed")
+                && closeGoalOnModelJudgment(completionClaim.goalId!, verification ? `idle_automatic_${verification.disposition}` : "idle_automatic_verification_unavailable")) {
+                settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: false, verificationScope: "goal" as const, verificationState: "inconclusive" as const });
                 return;
               }
-              if (controller.signal.aborted || getChat(chat.id)?.goalId !== completionClaim.goalId) return;
               const verifiedGoalId = completionClaim.goalId!;
               if (verification?.disposition === "completed") {
-                completeChatGoalContract(verifiedGoalId, "completed");
-                if (getChat(chat.id)?.goalId === verifiedGoalId) setChatGoalBinding(chat.id, null);
+                closeGoal(verifiedGoalId, "completed", "verifier", { reason: "all-criteria-verified" });
               } else if (verification?.disposition === "cycle_completed") {
                 // This episode registers its exact wait after verification below.
                 // Do not announce an absent receipt or an assumed 30-minute time.
@@ -6663,11 +6829,14 @@ export class InvocationService {
               settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: false,
                 ...(modelJudgmentClosed ? { verificationScope: "goal" as const, verificationState: "inconclusive" as const } : {}) });
               console.warn("[long-run] terminal verification failed:", error);
-              if (modelJudgmentClosed) {
-                if (getChat(chat.id)?.goalId === completionClaim.goalId) setChatGoalBinding(chat.id, null);
+              if (modelJudgmentClosed) return; // closeGoal already ended the run, the contract, the link, the tasks and the due line
+              if (controller.signal.aborted) return;
+              // An idle automatic Goal whose verifier could not run is closed the same way (nothing positively failed).
+              if (idleAutomaticGoalClose && getChat(chat.id)?.goalId === completionClaim.goalId
+                && closeGoalOnModelJudgment(completionClaim.goalId!, "idle_automatic_verification_failed_to_run")) {
+                settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId, verified: false, verificationScope: "goal" as const, verificationState: "inconclusive" as const });
                 return;
               }
-              if (controller.signal.aborted) return;
               // A verifier that never answered must still leave the goal somewhere a person can act
               // on. Silence here was the difference between "blocked, here is why" and a run stuck
               // in `verifying` with no way forward.
@@ -6953,6 +7122,9 @@ export class InvocationService {
         }
         if (!effectObservation && !hasQueuedSteer && !record.nativeGoalEpisodePending) this.scheduleGoalContinuation(record.automaticGoalId ?? projectionGoalId ?? undefined, record,
           observedRuntimeErrorCode ?? "goal_turn_settled");
+        // The end of a turn is a signal of the Agentlas Harness (long-run/goal-signals.ts): the Goal of this chat is looked at once the follow-up
+        // above has been written (the replay-barrier card, the browser ladder's human-check card, an owner amendment waiting for a stop).
+        if (!effectObservation) noteGoalTurnSettled(runReq.chatId);
         if (retryGoalCheckpoint && !hasQueuedSteer) this.continueGoalCheckpoint({
           ...retryGoalCheckpoint, record, executionContext,
         });
@@ -7048,6 +7220,14 @@ export class InvocationService {
       parked.unsubscribe?.();
       parked.handle.cancel();
       record.controller.abort(new Error(reason));
+      // The wait is over and the runtime has been told to stop: its Goal attempt is closed now, so the owner's next message (and the sweep)
+      // is not refused for an attempt nothing will ever settle. A late result of that runtime has no turn to land in. Never throws: the
+      // wait's own cleanup above must finish.
+      if (parked.unclosedAttemptId) {
+        try { settleLongRunWorkerAttempt({ attemptId: parked.unclosedAttemptId, state: "interrupted", errorCode: "authentication_required" }); }
+        catch (error) { console.warn("[browser-login-wait] the unclosed Goal attempt could not be closed:", error instanceof Error ? error.message : String(error)); }
+        parked.unclosedAttemptId = undefined;
+      }
       if (cancelled) {
         record.browserLoginWait = undefined;
         if (getLatestInvocationRunReceipt(record.chatId)?.runId === runId) {
@@ -7268,12 +7448,15 @@ export class InvocationService {
         detail: followUpReason, trigger: "goal-turn-background",
         appInstanceId: desktopAppInstanceId() });
       if (held) console.info("[long-run] same-cause wait", JSON.stringify({ runId: run.id, cause: held.cause, failures: held.failures, nextAt: held.retryAt }));
+      if (held?.row === "auth_no_runtime") askRuntimeSignInOnce(run.id, record.chatId, "goal-turn-background");
       setTimeout(() => {
         try { runMainBackgroundTask(() => maybeDispatchEffectObservation(this, goalId, "goal-turn-background")); }
         catch (error) { console.warn("[effect-observation] background check unavailable:", error); }
       }, 0).unref?.();
     } catch (error) {
       console.warn("[long-run] continuation scheduling will retry:", error);
+      // Nothing else retries a next step that failed to write: the Goal is looked at again in a minute (a Goal that says running with no schedule).
+      armGoalLook(record.chatId, 60_000);
     }
   }
 
@@ -7342,6 +7525,7 @@ export class InvocationService {
     const refuse = (code: string) => {
       console.warn(`[permission-escalation] continuation refused run=${sourceRunId} code=${code}`);
       this.announceContinuationRefused(input.record, sourceRunId, "permission-escalation", code);
+      armGoalLook(input.chatId, 60_000); // the Goal was put back to running by the approval: nothing else looks at a refused start
     };
     if (input.signal.aborted || controlEpoch() !== originalControlEpoch) return;
     if (input.goalId) {
@@ -7392,13 +7576,10 @@ export class InvocationService {
     try {
       const current = getLongRunByGoalId(record.automaticGoalId);
       if (current && ["pausing", "cancelling"].includes(current.status)) {
-        const next = transitionLongRun({ runId: current.id, to: current.status === "cancelling" ? "cancelled" : "paused", actorKind: "host",
+        if (current.status === "cancelling") closeGoal(current.goalId, "cancelled", "owner-stop", { reason: "user" });
+        else transitionLongRun({ runId: current.id, to: "paused", actorKind: "host",
           reason: record.controller.signal.reason instanceof Error && ["app_closed", "app_shutdown", "update_restart"].includes(record.controller.signal.reason.message)
             ? "app_closed" : "user" });
-        if (next.status === "cancelled") {
-          completeChatGoalContract(next.goalId, "cancelled");
-          if (getChat(record.chatId)?.goalId === next.goalId) setChatGoalBinding(record.chatId, null);
-        }
       }
     } catch { /* Requested stop remains durable and non-admitting. */ }
   }
@@ -7476,10 +7657,7 @@ export class InvocationService {
           let current = getLongRunByGoalId(expectedGoalId)!;
           if (!["completed", "failed", "cancelled"].includes(current.status)) {
             if (action === "delete") {
-              if (!["draft", "paused", "blocked", "cancelling"].includes(current.status)) {
-                current = transitionLongRun({ runId: current.id, to: "cancelling", actorKind: "user", reason: "user", expectedVersion: current.version });
-              }
-              transitionLongRun({ runId: current.id, to: "cancelled", actorKind: "user", reason: "user", expectedVersion: current.version });
+              // closed below by the one close (closeGoal): the run, the contract, the link, the tasks, the due line, the queued steers
             } else if (!["paused", "cancelling"].includes(current.status)) {
               if (["draft", "queued", "blocked"].includes(current.status)) {
                 transitionLongRun({ runId: current.id, to: "paused", actorKind: "user", reason: "user", expectedVersion: current.version });
@@ -7500,11 +7678,7 @@ export class InvocationService {
         }
         cancelQueuedSteersForChat(chatId, false, "goal-stopped");
         cancelQueuedOnePreflightSteersForChat(chatId);
-        if (action === "delete") {
-          completeChatGoalContract(expectedGoalId, "cancelled");
-          setChatGoalBinding(chatId, null);
-          setChatContinuousMode(chatId, false);
-        }
+        if (action === "delete") closeGoal(expectedGoalId, "cancelled", "owner-stop", { reason: "user" });
       })();
     } finally {
       // Even a storage failure must not keep the live invocation running.
@@ -7640,7 +7814,11 @@ export class InvocationService {
    */
   private clearQueuedDirectionsForStop(record:RunRecord,reason:Error,runId:string):void {
     if (record.background || HOST_SHUTDOWN_ABORT_CAUSES.has(reason.message)) return;
+    // The owner's Stop of this conversation's turn does not withdraw what other conversations sent it (their chain's Stop does): the bundle waits
+    // for the turn that comes next, here and in the store (cancelQueuedSteersForChat keeps the same rows).
+    const keptPeer = (this.steerQueues.get(record.chatId) ?? []).filter((item) => { const chain = peerChainOfRequest(item.request); return chain !== null && !peerChainStopped(getDb(), chain.id); });
     this.steerQueues.delete(record.chatId);
+    if (keptPeer.length > 0) this.steerQueues.set(record.chatId, keptPeer);
     const preserveReports=reason.message==="one_team_report_owner_changed" && Boolean(record.oneTeamReportCustody);
     // A store refusal never keeps the original run alive, and never leaves the withdrawal unwritten either.
     withdrawQueuedDirectionsForStop(record.chatId, runId, preserveReports, new Date().toISOString(), 0);
@@ -7910,11 +8088,54 @@ export class InvocationService {
       ...(record.ownerLease ? { ownerId: record.ownerLease.ownerId, leaseId: record.ownerLease.leaseId } : {}),
       agentId: record.actualAgentId, workspaceBinding: record.workspaceBinding,
       permission: record.request.permissions, runtime: record.request.runtimeSelection });
+    // The owner added a message to this running turn (every caller of this method is an owner's own channel: the composer, the phone, a Science direction, the
+    // native owner-text channel): from here on the turn is one the owner spoke into (invocation/owner-spoke.ts).
+    noteOwnerSteer(input.expectedRunId);
     this.reviewCurrentTurnDirection(input.chatId, input.expectedRunId, intake.messageId, record);
     this.deliverNativeOwnerControls(input.expectedRunId, record);
     this.publishQueuedNativeBoundaryNotice(input.expectedRunId, record, input.intentId);
     return intake.code || record.nativeTurnController ? intake : { ...intake,
       code: record.nativeControlState?.code ?? "native_control_pending" };
+  }
+
+  /**
+   * A second message from the same conversation (Agentlas 2.0 N6, harness/peer-chain.ts; defects 7 and 8) for a conversation whose first one
+   * still waits joins that waiting row, whatever chain it came in (one turn of a Goal begins a chain of its own every time it wakes): a conversation
+   * holds ONE waiting bundle per sender, so what waits never grows with the number of messages sent. A message already held there is `repeated`;
+   * a bundle that would read more than one turn can take (PEER_BUNDLE_MAX_CHARS) is `bundle_full`. Neither is delivered. The joined message belongs to
+   * the row's chain; its own chain is listed on the row so that a Stop of it reaches the bundle too. Text and hash change in the row and in the queue
+   * entry; the retry of an intent that already joined is the same delivery. Null: nothing to join (queue it as usual).
+   */
+  private joinWaitingPeerSteer(chatId: string, queue: QueuedSteer[], request: McpInvocationRequest, intentId: string | undefined): InvocationSteerResult | null {
+    const mark = peerChainOfRequest(request);
+    if (!mark) return null;
+    const waitingOf = (item: QueuedSteer): boolean => item.drainedRunId === undefined && item.recoveryState !== "held";
+    // The bundle of this sender first (the same chain's, then any chain's); a message of the same chain from another sender joins that chain's bundle as before.
+    const sender = (item: QueuedSteer): boolean => waitingOf(item) && peerChainOfRequest(item.request)?.from === mark.from;
+    const index = queue.findIndex((item) => sender(item) && peerChainOfRequest(item.request)?.id === mark.id) >= 0
+      ? queue.findIndex((item) => sender(item) && peerChainOfRequest(item.request)?.id === mark.id)
+      : queue.findIndex((item) => sender(item) || (waitingOf(item) && peerChainOfRequest(item.request)?.id === mark.id));
+    const waiting = index >= 0 ? queue[index] : undefined;
+    if (!waiting) return null;
+    const was = peerChainOfRequest(waiting.request)!;
+    const receipt = (): InvocationSteerResult => ({ accepted: true, chatId, queued: true, interruptsCurrent: false, activeRunId: waiting.originalRunId,
+      position: index + 1, queuedRequestId: waiting.id, promptHash: waiting.promptHash });
+    if (intentId && was.intents?.includes(intentId)) return receipt();
+    const joining = stripPeerEnvelopeRule(request.userPrompt);
+    const hashOf = (text: string): string => createHash("sha256").update(normalizePeerBody(text), "utf8").digest("hex").slice(0, 16);
+    const hash = hashOf(joining);
+    const held = was.bodies ?? [hashOf(stripPeerEnvelopeRule(waiting.request.userPrompt))];
+    if (held.includes(hash)) throw Object.assign(new Error("peer_repeated"), { code: "peer_repeated" });
+    const mergedPrompt = `${waiting.request.userPrompt}\n\n${joining}`;
+    if (mergedPrompt.length > PEER_BUNDLE_MAX_CHARS) throw Object.assign(new Error("peer_bundle_full"), { code: "peer_bundle_full" });
+    const intents = [...(was.intents ?? []), ...(intentId ? [intentId] : [])].slice(-32);
+    const joined = mark.id !== was.id ? [...new Set([...(was.joined ?? []), mark.id])].slice(-8) : was.joined;
+    const merged: McpInvocationRequest = { ...waiting.request, userPrompt: mergedPrompt,
+      peerChain: { ...was, intents, bodies: [...held, hash].slice(-32), ...(joined && joined.length ? { joined } : {}) } } as McpInvocationRequest;
+    try { if (!mergeQueuedPeerSteer(waiting.id, merged)) return null; } catch { return null; }
+    waiting.request = merged;
+    waiting.promptHash = createHash("sha256").update(merged.userPrompt, "utf8").digest("hex");
+    return receipt();
   }
 
   /**
@@ -8087,7 +8308,9 @@ export class InvocationService {
     const request = { ...req, runId: undefined, permissions: effectiveInvocationPermission(req.permissions, req.planMode) };
     const existing = getDurableQueuedSteer(id);
     if (existing) {
-      if (existing.chatId !== req.chatId || canonicalQueuedSteerRequest(existing.request) !== canonicalQueuedSteerRequest(request)) {
+      // A message that joined a waiting bundle of its chain changed that row's text: the retry of an earlier intent is the same delivery.
+      const sameBundle = peerChainOfRequest(request) !== null && peerChainOfRequest(existing.request)?.id === peerChainOfRequest(request)!.id;
+      if (existing.chatId !== req.chatId || !sameBundle && canonicalQueuedSteerRequest(existing.request) !== canonicalQueuedSteerRequest(request)) {
         throw new Error("invocation_steer_identity_conflict");
       }
       return this.durableSteerReceipt(existing, intentId);
@@ -8117,6 +8340,14 @@ export class InvocationService {
       // the same two refusals). It takes the drain queue with backoff under a new run id; a start that may have crossed a
       // provider boundary is not retryable and is held below.
       if (this.queueRefusedIdleSteer(req.chatId, row, runId, error) === "scheduled") {
+        return this.durableSteerReceipt(getDurableQueuedSteer(id) ?? row, intentId);
+      }
+      // A waiting Goal refuses a system turn before anything runs: the message is handed to the Goal's next step exactly as a message that waited behind a
+      // running turn is (failQueuedSteerStart), instead of being held and retired an hour later with nobody having read it (defect 5).
+      if (refusalCode(error) === "goal_waiting_system_start_refused"
+        && (relayParkedForRun(runId) || this.parkRefusedQueuedRelay(req.chatId, queuedSteerFromDurable(row), runId))) {
+        this.settleQueuedSteerDurably(id, "cancelled", "parked-for-waiting-goal");
+        console.info(`[invocation] idle steer parked for the waiting Goal steer=${id} chat=${req.chatId} cause=parked-for-waiting-goal`);
         return this.durableSteerReceipt(getDurableQueuedSteer(id) ?? row, intentId);
       }
       // A thrown start may already have crossed a provider boundary. Preserve
@@ -8154,6 +8385,9 @@ export class InvocationService {
     | { kind: "queued"; plannedRunId: string; steer: InvocationSteerResult } {
     const { workspaceBinding, executionContext } = input;
     if (!ownerMessageSurface(req, workspaceBinding, executionContext)) throw new Error("owner_intake_not_owner_message");
+    assertAgentChatWritable(req.chatId);
+    const leadRouted = routeLeadRoomOwnerMessage(req);
+    if (leadRouted) return { kind: "started", runId: leadRouted.runId };
     if (typeof input.intakeId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.intakeId)) {
       throw new Error("owner_intake_invalid_id");
     }
@@ -8321,8 +8555,9 @@ export class InvocationService {
     if (preflightSteerId) {
       const existing = getDurableQueuedSteer(preflightSteerId);
       if (existing) {
+        const sameBundle = peerChainOfRequest(steerRequest) !== null && peerChainOfRequest(existing.request)?.id === peerChainOfRequest(steerRequest)!.id;
         if (existing.chatId !== req.chatId || expectedRunId && existing.originalRunId !== expectedRunId
-          || canonicalQueuedSteerRequest(existing.request) !== canonicalQueuedSteerRequest(steerRequest)
+          || !sameBundle && canonicalQueuedSteerRequest(existing.request) !== canonicalQueuedSteerRequest(steerRequest)
           || JSON.stringify(existing.workspaceBinding) !== JSON.stringify(workspaceBinding)
           || JSON.stringify(existing.executionContext) !== JSON.stringify(executionContext)) {
           throw new Error("invocation_steer_identity_conflict");
@@ -8352,6 +8587,12 @@ export class InvocationService {
       );
     }
     const queue = this.steerQueues.get(req.chatId) ?? [];
+    // A second message of the same chain for a conversation whose first one still waits joins it: the conversation holds ONE waiting bundle
+    // of other conversations' messages (Agentlas 2.0 N6), so what waits never grows with the number of messages sent.
+    if (peerChainOfRequest(steerRequest)) {
+      const joined = this.joinWaitingPeerSteer(req.chatId, queue, steerRequest, preflightSteerId);
+      if (joined) return joined;
+    }
     if (queue.length >= MAX_STEER_QUEUE_DEPTH) {
       throw Object.assign(new Error("invocation_steer_queue_full"), { code: "invocation_steer_queue_full" });
     }
@@ -8779,11 +9020,33 @@ export class InvocationService {
       }, Date.now(), (job) => this.startHostRecovery(job)); } catch { /* swept at the next boot */ }
   }
 
+  /** A turn of this chat held by a live process of the OTHER kind (Desktop <-> background service): its run looks cut off from here, but it is running there. */
+  private otherKindOwnsChat(chatId: string): boolean {
+    try {
+      const owner = invocationRunOwners.getActiveOwner(chatId);
+      return Boolean(owner && owner.state !== "released" && owner.ownerKind !== invocationProcessOwner().ownerKind);
+    } catch { return true; } // unreadable: the sweep stays quiet rather than say something false
+  }
+
+  /**
+   * Desktop repair 11 (N2): at the app's start, a single turn that the app's sudden end cut off gets one plain line under the owner's message
+   * (invocation/host-recovery.ts sweepCutOffOwnerTurns). Called once from Main's start-up; it never starts a run.
+   */
+  noteCutOffOwnerTurns(): number {
+    try {
+      return sweepCutOffOwnerTurns(getDb(), (chatId, plan, runId) => {
+        const lastOwnerText = listChatMessages(chatId, 40).filter((entry) => entry.role === "user").at(-1)?.text;
+        this.sayHostFailurePlan(chatId, runId, plan, inferOwnerLocale(lastOwnerText, "en"));
+      }, { chatBusy: (chatId) => this.activeChatIds().includes(chatId) || this.otherKindOwnsChat(chatId) });
+    } catch { return 0; }
+  }
+
   private sayHostFailurePlan(chatId: string, originalRunId: string, plan: InternalFailurePlan, locale: "ko" | "en"): void {
     try {
       const line = internalFailureOwnerLine(locale, plan);
       if (listChatMessages(chatId, 20).filter((entry) => entry.role === "assistant").at(-1)?.text === line) return;
-      appendChatMessage(chatId, "assistant", line, { hostNotice: { purpose: "host-status", runId: originalRunId, status: "app-failed" } });
+      // A cut-off turn needs the owner's move (send it again); the other plans are the app's own state.
+      appendChatMessage(chatId, "assistant", line, { hostNotice: { purpose: "host-status", runId: originalRunId, status: plan === "cut_off" ? "needs-owner" : "app-failed" } });
       emitDesktopStoreChange({ entity: "chat", id: chatId });
     } catch { /* the defect row and the outcome row remain */ }
   }
@@ -8813,6 +9076,7 @@ export class InvocationService {
     const receipt = getInvocationRunReceipt(runId);
     if (!receipt || receipt.status === "running" || receipt.status === "cancelling") return;
     record.settlementPublished = true;
+    { const chain = peerChainOfRequest(record.request); if (chain) notePeerChainRun(getDb(), chain.id, runId, record.chatId, false); }
     if (record.background) return;
     try { this.settleHostRecoveryOutcome(runId, record, receipt.status); } catch { /* the ledger keeps the retry's own terminal */ }
     const envelope: InvocationSettledEnvelope = {
@@ -9084,8 +9348,9 @@ export class InvocationService {
     try {
       const goalId = getChat(chatId)?.goalId;
       const status = goalId ? getLongRunByGoalId(goalId)?.status : undefined;
+      const parts = relayPartsOf(request);
       return parkSystemRelay({ chatId, text, cause: status ? `goal_${status}` : "goal_waiting", goalStatus: status ?? null,
-        originRunId: drainedRunId }) || relayCopyParked(chatId, text);
+        originRunId: drainedRunId, ...(parts ? { parts } : {}) }) || relayCopyParked(chatId, text, parts);
     } catch (error) {
       console.warn(`[invocation] refused queued relay could not be parked steer=${next.id} chat=${chatId} code=${innermostTypedCode(error) ?? "none"}`);
       return false;

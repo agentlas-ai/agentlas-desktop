@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { getDb } from "../store/db";
 import { getMemoryDb } from "./database";
-import { listMemoryForContext, type MemoryEntry } from "./store";
+import { listMemoryForContext, subStoreFingerprint, type MemoryEntry } from "./store";
 import { nativeRecallFor, ensureNativeTextTables } from "./native-text";
 import { memoryGenerationState, type MemoryContextGeneration } from "./context-generation";
 import { localEmbeddingTokens } from "./local-embedding";
@@ -79,6 +79,8 @@ function changes() {
 export interface GenerationPackResult { text: string; eligibleIds: string[]; selectedIds: string[]; prefix: string; }
 type GenerationPackInput = {
   query: string; maxApproxTokens: number;
+  /** Anything beyond the generation, the query and the budget that decides which lines the select callback keeps (the lines the always-loaded owner piece already carries). Absent = the same cache entry as before. */
+  variant?: string;
   select(entries: MemoryEntry[], query: string, tokenBudget: number): MemoryEntry[];
   render(entries: MemoryEntry[]): string;
 };
@@ -88,10 +90,13 @@ export function readGenerationMemoryPack(token: MemoryContextGeneration, input: 
 function readGenerationMemoryPackAttempt(token: MemoryContextGeneration, input: GenerationPackInput, retries: number): GenerationPackResult | null {
   try {
     const identity = memoryGenerationState(token), journal = changes();
+    const packKey = input.variant ? `${identity.key}\0${input.variant}` : identity.key;
     const custody = JSON.stringify([identity.ownerNamespace, identity.revocationEpoch]);
     if (cacheCustody !== custody) { cache.clear(); cacheCustody = custody; }
     if (!journal.complete) { counts.fallbacks++; return null; }
     const scope = { projectId: identity.projectId, projectPath: identity.projectPath, agentId: identity.actorId, chatId: identity.chatId, visibilityDomain: identity.visibilityDomain };
+    // Writes to the project/agent stores never reach the root's change journal: their fingerprint rides in the watch value (empty while the switch is off).
+    const storesKey = subStoreFingerprint(scope), watch = journal.watch + storesKey;
     const dependencies = (ids: string[]) => {
       counts.dependencyReads++;
       const entries = listMemoryForContext(scope, -1, ids);
@@ -104,7 +109,7 @@ function readGenerationMemoryPackAttempt(token: MemoryContextGeneration, input: 
         ORDER BY memory_id,source_kind,source_id,source_revision`).all(...ids) : [];
       return { entries, digest: sha([entries, [...native], linked, projects, origins, input.render(entries)]) };
     };
-    let pack = cache.get(identity.key);
+    let pack = cache.get(packKey);
     let updateIds: string[] = [];
     if (pack) {
       const rows = journal.db.prepare("SELECT seq,source_id FROM memory_recall_changes WHERE seq>? ORDER BY seq LIMIT ?")
@@ -113,7 +118,7 @@ function readGenerationMemoryPackAttempt(token: MemoryContextGeneration, input: 
         || (rows.length > 0 && rows[rows.length - 1].seq !== journal.max)
         || rows.length > CHANGE_LIMIT || rows.some((row, index) => row.seq !== pack!.seenSeq + index + 1);
       const source = dependencies(pack.dependencyIds);
-      if (gap || pack.watch !== journal.watch || source.digest !== pack.dependencyDigest) pack = null;
+      if (gap || pack.watch !== watch || source.digest !== pack.dependencyDigest) pack = null;
       else updateIds = [...new Set(rows.map(row => row.source_id))];
     }
     if (!pack) {
@@ -128,7 +133,7 @@ function readGenerationMemoryPackAttempt(token: MemoryContextGeneration, input: 
       pack = { text, baseIds: base.map(entry => entry.id), eligibleIds: entries.map(entry => entry.id), deltaIds: [],
         dependencyDigest: dependencies(base.map(entry => entry.id)).digest, dependencyIds: base.map(entry => entry.id),
         probeTerms: [...new Set(localEmbeddingTokens(input.query))].sort(),
-        seenSeq: journal.max, watch: journal.watch, byteSize: 0 };
+        seenSeq: journal.max, watch, byteSize: 0 };
     } else counts.prefixReuse++;
     if (updateIds.length) {
       const eligible = new Set(pack.eligibleIds);
@@ -139,7 +144,7 @@ function readGenerationMemoryPackAttempt(token: MemoryContextGeneration, input: 
       const base = new Set(pack.baseIds);
       const deltaIds = [...new Set([...changed.map(entry => entry.id).filter(id => !base.has(id)), ...pack.deltaIds.filter(id => !updateIds.includes(id))])];
       if (deltaIds.length > DELTA_SOURCE_LIMIT) {
-        cache.delete(identity.key);
+        cache.delete(packKey);
         return readGenerationMemoryPackAttempt(token, input, retries);
       }
       pack.deltaIds = deltaIds;
@@ -155,7 +160,7 @@ function readGenerationMemoryPackAttempt(token: MemoryContextGeneration, input: 
       const base = new Set(pack.baseIds);
       const deltaIds = [...new Set([...probe.map(entry => entry.id).filter(id => !base.has(id)), ...pack.deltaIds])];
       if (deltaIds.length > DELTA_SOURCE_LIMIT) {
-        cache.delete(identity.key);
+        cache.delete(packKey);
         return readGenerationMemoryPackAttempt(token, input, retries);
       }
       pack.deltaIds = deltaIds;
@@ -187,14 +192,14 @@ function readGenerationMemoryPackAttempt(token: MemoryContextGeneration, input: 
     try { currentClock = journal.db.prepare("SELECT seq,nonce FROM memory_recall_clock WHERE id=1").get() as typeof currentClock; }
     catch { /* Do not publish a pack whose source clock could not be verified. */ }
     if (!currentClock || currentClock.seq !== journal.max || currentClock.nonce !== journal.nonce) {
-      cache.delete(identity.key);
+      cache.delete(packKey);
       if (sourceScope) sourcePacks.get(sourceScope)?.delete(channel);
       if (currentClock && retries > 0) return readGenerationMemoryPackAttempt(token, input, retries - 1);
       counts.fallbacks++;
       recordMemoryGenerationFallback("generation-pack-source-changed");
       return { text: "", prefix: "", eligibleIds: [], selectedIds: [] };
     }
-    cache.set(identity.key, pack);
+    cache.set(packKey, pack);
     if (sourceScope && pack.text && baseDigest) {
       const capturedIdentity = { ...identity };
       const grants = sourcePacks.get(sourceScope) ?? new Map<string, PackGrant>();

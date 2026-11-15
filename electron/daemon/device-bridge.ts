@@ -11,7 +11,14 @@ import { randomBytes } from "node:crypto";
 export const DEVICE_BRIDGE_VERSION = "agentlas.device-bridge.v1";
 export const DEVICE_STATE_VERSION = "agentlas.device-state.v1";
 export const DEVICE_BRIDGE_DEFAULT_DEADLINE_MS = 15000;
-/** The native channel closes for good on a request that outlives 10 s, so app-control stays well under it. */
+/**
+ * App-control keeps its own short deadline: a request that outlives it fails ALONE (this file's timer: device_bridge_timeout; the channel's own:
+ * native_auth_reply_timeout) and the channel stays up. It closes only when every callback slot of a lane (8 ordinary, 2 terminal) is held by an
+ * expired request (native-auth-channel.ts:46-55, flow audit I-D5; the older "closes for good on a request that outlives 10 s" is no longer true).
+ * basis: 정한 값 — 근거 없음. 8 s leaves 2 s under the channel's 10 s default reply bound for a request (nativeGuiReplyTimeoutMs, native-auth-channel.ts:64), and Main answers at 7 s
+ * so its answer is on the wire before the daemon's timer. Reached: the daemon's request fails with device_bridge_timeout; a catalog read is reported, an operation call keeps running in Main
+ * and the daemon's repeat joins it (invocation/device-bridge-main.ts, app-control/pending-calls.ts).
+ */
 export const APP_CONTROL_DEADLINE_MS = 8000;
 export const APP_CONTROL_MAIN_BUDGET_MS = 7000;
 /** Shown to the model when a computer-use tool call cannot run because the window process is not there. */
@@ -26,7 +33,7 @@ export class DeviceBridgeError extends Error {
 }
 export type DeviceSession = "awake" | "locked" | "sleeping" | "unknown";
 export interface DeviceStateSnapshot { session: DeviceSession; idleSeconds: number | null; observedAt: string }
-export type DeviceOp = "prepareOsExecution" | "disposeOsExecution" | "idle" | "releaseChatSessions" | "forwardGoalIntake" | "appControl" | "aliveAction" | "aliveChanged";
+export type DeviceOp = "prepareOsExecution" | "disposeOsExecution" | "idle" | "releaseChatSessions" | "forwardGoalIntake" | "appControl" | "phoneTool";
 export interface DeviceFrame { version: typeof DEVICE_BRIDGE_VERSION; requestId: string; op: DeviceOp; deadlineMs: number; payload: Record<string, unknown> }
 export interface PreparedOsExecutionWire { capability: { version: "agentlas.one-os-execution.v1"; executionId: string; token: string } }
 
@@ -150,8 +157,8 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
       return { busy: reply.busy, released: reply.released as number, pending: reply.pending as number, ...(reply.failed === undefined ? {} : { failed: reply.failed as number }), ...(reply.kept === undefined ? {} : { kept: reply.kept as number }) };
     },
     /** Goal custody is Main's: hand an owner message that would become a Goal to Main (2026-10-11, run 97164057). Main answers
-     * at once (accepted|duplicate) and does the classification and admission in the background, because the native channel
-     * closes for good on a request that outlives its 10 s limit. */
+     * at once (accepted|duplicate) and does the classification and admission in the background, because classification is a model call
+     * and a request that outlives the channel's 10 s reply bound fails (native_auth_reply_timeout) while Main goes on without a caller. */
     async forwardGoalIntake(input: { runId: string; chatId: string; sourceMessageId: string; permission: "read" | "write" | "full" }): Promise<{ status: "accepted" | "duplicate" }> {
       const reply = await ask("forwardGoalIntake", { runId: input.runId, chatId: input.chatId, sourceMessageId: input.sourceMessageId, permission: input.permission }, 8000);
       if (reply.status !== "accepted" && reply.status !== "duplicate") throw new DeviceBridgeError("device_bridge_refused", "goal_intake_reply_invalid");
@@ -165,16 +172,10 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
       if (reply.outcome === "error" && typeof reply.code === "string" && typeof reply.message === "string") return { outcome: "error", code: reply.code, message: reply.message };
       throw new DeviceBridgeError("device_bridge_refused", "app_control_reply_invalid");
     },
-    /** NH21: the service owns the Alive clock, Main owns Goal custody. Main re-reads this executing reservation from the
-     * shared store, runs the Goal action once (durable action-id claim) and answers with the settled result. */
-    async aliveAction(input: { domain: "work" | "one"; actionId: string }): Promise<{ result: unknown }> {
-      const reply = await ask("aliveAction", { domain: input.domain, actionId: input.actionId }, 8000);
-      return { result: reply.result };
-    },
-    /** A life changed: Main's screens and its phone projection refresh (no content, the same invalidation as Main's own). */
-    async aliveChanged(event: { surface: "one" | "work"; chatId?: string; scopeId: string }): Promise<void> {
-      if (!transport) return;
-      await ask("aliveChanged", { surface: event.surface, scopeId: event.scopeId, ...(event.chatId !== undefined ? { chatId: event.chatId } : {}) }, 5000);
+    /** A short authenticated step: phone consent may outlive the native channel's per-request deadline. */
+    async phoneToolStep(input: { phase: "start" | "poll" | "cancel"; runId: string; chatId: string; inputDigest: string;
+      callId: string; name: "phone.location.get" | "phone.device.context"; input: Record<string, unknown> }): Promise<Record<string, unknown>> {
+      return ask("phoneTool", input, 8000);
     },
     failPending: failAll,
   };

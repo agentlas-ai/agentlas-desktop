@@ -1,0 +1,26 @@
+/*
+ * The one quiet line a conversation keeps where an approval card was (pictures desktop-impl-gaps-9 AL-1..AL-4). Existing tokens only. No border, no fill:
+ * the colour is on the result ICON alone (approved = grey-green, declined = red, the rest grey). Opened, the line shows request / target / answer in a
+ * ruled block (values only); there is no button in it (a record, nothing to answer again).
+ */
+.list { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0; margin: 6px 0; }
+.row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; column-gap: 10px; width: 100%; min-height: 36px; box-sizing: border-box; padding: 6px 2px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-size: 14px; line-height: 1.4; text-align: left; cursor: pointer; }
+.row:hover, .row:focus-visible { background: var(--fill-1); outline: none; }
+.icon { display: grid; place-items: center; color: var(--muted-deep, var(--ink-soft)); }
+.icon[data-icon="approved"] { color: #5d7c70; }
+.icon[data-icon="declined"] { color: #b3402f; }
+.left { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-soft); }
+.result { font-weight: 700; color: var(--ink); }
+.right { display: inline-flex; align-items: center; gap: 8px; flex: none; color: var(--muted-deep, var(--ink-soft)); font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.chev { display: grid; place-items: center; transition: transform 0.12s ease; }
+.row[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 22px; margin: 2px 0 8px 28px; padding: 2px 0 2px 16px; border-left: 2px solid var(--paper-edge); font-size: 13.5px; line-height: 1.5; }
+.dLabel { color: var(--muted-deep, var(--ink-soft)); white-space: nowrap; }
+.dValue { min-width: 0; color: var(--ink); overflow-wrap: anywhere; }
+.groupLines { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; column-gap: 10px; row-gap: 0; margin: 2px 0 8px 28px; padding: 0 0 0 16px; border-left: 2px solid var(--paper-edge); font-size: 13.5px; }
+.groupRow { display: contents; }
+.groupRow > * { padding: 7px 0; min-width: 0; }
+.groupText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.groupTime { color: var(--muted-deep, var(--ink-soft)); font-variant-numeric: tabular-nums; text-align: right; }
+.more { grid-column: 2 / -1; padding: 7px 0; border: 0; background: transparent; color: var(--muted-deep, var(--ink-soft)); font: inherit; font-size: 13.5px; text-align: left; cursor: pointer; white-space: nowrap; }
+.more:hover, .more:focus-visible { color: var(--ink); outline: none; }

@@ -12,6 +12,7 @@ import { readFinanceSourceRouting, writeFinanceSourceRouting } from './source-ro
 import { userDataPath } from '../runtime-paths';
 import { managedOneAuthentication, wasManagedOneConfigured } from '../managed-one/auth';
 import { prepareFinanceDailyCheckin,registerFinanceDailyCheckin,revokeFinanceDailyCheckin,observeFinanceDailyCheckin,type FinanceDailyBinding } from './daily-briefing';
+import { personalWriteRefusal } from '../one/write-gate';
 
 const OVERLAP_CODES=new Set(['EBUSY','EPERM','EACCES']);
 const pause=(ms:number):void=>{Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,ms);};
@@ -52,6 +53,8 @@ const warnOnce=(code:string,reason?:unknown):void=>{if(warned.has(code))return;w
 const UNVERIFIED:Access={plan:null,monitoringAllowed:false,status:'unavailable'};
 /** The billing answer a read waits for before showing "unavailable"; turning monitoring on, admission and the firing guard wait for the full check. */
 const BILLING_READ_WAIT_MS=2_500;
+/** One built-in plugin activation may take this long before the screen is given an error to try again from (desktop 3). */
+const FINANCE_PREPARE_DEADLINE_MS=120_000;
 /** A failed attempt waits twice as long each time (15 s, 30 s, ...) up to this long; the sweep ticks every 30 s. */
 const RETRY_MAX_MS=600_000;
 /** A registration waiting on something only the owner can change (plan, sign-in, consent) is asked again this rarely; a request that sees it lifted asks at once. */
@@ -154,8 +157,11 @@ export class FinanceExperience {
     let selection:FinanceDataSelection={sourceId:value.sourceId},sourceRoutingStatus:'ready'|'unavailable'='ready';
     try{selection=this.selection(scope,value);}catch{scope.assertCurrent();sourceRoutingStatus='unavailable';}
     const builtins=inspectBuiltins?await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION):undefined;scope.assertCurrent();
+    // Audit 61 (desktop 5): the daily briefing is registered as a check-in of the personal agent, and a sealed (moving) or away (not the home) computer does not create those (`one_sealed` / `one_away`). Monitoring that is on and not registered says WHY as a code
+    // (read from the live write gate, nothing stored; the sweep registers it by itself once this computer is the home again).
+    const refusal=isPending(value.monitoring)?personalWriteRefusal():null;const blocked=refusal?{registrationBlocked:refusal}:{};
     return {consent:value.consent,...(builtins?{builtins}:{}),...selection,sourceRoutingStatus,dashboardCustomized:value.dashboardCustomized,sources,enabledFeedIds:[...value.enabledFeedIds],
-      monitoring:{enabled:value.monitoring.enabled,localTime:value.monitoring.localTime,timezone:value.monitoring.timezone,lastSentAt:value.monitoring.lastSentAt,nextRunAt:value.monitoring.enabled?value.monitoring.nextRunAt:null,...(unconfirmedReview?{unconfirmedReview:true}:{})},access};
+      monitoring:{enabled:value.monitoring.enabled,localTime:value.monitoring.localTime,timezone:value.monitoring.timezone,lastSentAt:value.monitoring.lastSentAt,nextRunAt:value.monitoring.enabled?value.monitoring.nextRunAt:null,...(unconfirmedReview?{unconfirmedReview:true}:{}),...blocked},access};
   }
   /**
    * The built-in Finance tools are ready for an owner who accepted the current notice. After an app update the saved activation names the
@@ -167,9 +173,16 @@ export class FinanceExperience {
   private async prepared(scope:FinanceScope){
     const key=financeScopeHash(scope),shared=this.preparing.get(key);
     if(shared){try{const result=await shared;scope.assertCurrent();return result;}catch{scope.assertCurrent();}}
+    // The activation has an end (desktop 3, F-D17 `consent-preparing`): a prepare that never answers (a held plugin lock, a stuck file operation) used to leave the screen on "Opening Finance..." for ever.
+    // After the deadline the caller gets `finance_plugin_prepare_timeout` (the screen already words a failed start with a way to try again); the late answer of the old attempt is dropped, and the next try starts a new one.
     const run=financeBuiltinPlugin().prepare(scope,FINANCE_NOTICE_VERSION);this.preparing.set(key,run);
-    try{const result=await run;scope.assertCurrent();return result;}finally{if(this.preparing.get(key)===run)this.preparing.delete(key);}
+    let timer:NodeJS.Timeout|null=null;
+    const deadline=new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>{if(this.preparing.get(key)===run)this.preparing.delete(key);reject(new Error('finance_plugin_prepare_timeout'));},this.prepareDeadlineMs);timer.unref?.();});
+    run.catch(()=>undefined);
+    try{const result=await Promise.race([run,deadline]);scope.assertCurrent();return result;}finally{if(timer)clearTimeout(timer);if(this.preparing.get(key)===run)this.preparing.delete(key);}
   }
+  /** How long one activation may take before it is given up (see prepared). */
+  prepareDeadlineMs=FINANCE_PREPARE_DEADLINE_MS;
   private async pluginReady(scope:FinanceScope):Promise<boolean>{
     const status=await financeBuiltinPlugin().status(scope,FINANCE_NOTICE_VERSION);scope.assertCurrent();
     if(status.ready)return true;

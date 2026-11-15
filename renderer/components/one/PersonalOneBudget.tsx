@@ -70,7 +70,7 @@ export function PersonalOneBudget({open,embedded=false,active=true,isOwnerCurren
   const valid=amount(reserve)&&Number(reserve)>0&&(mode==="observe"||amount(limit))&&(!selected||!!policy)&&!revisionChanged;
   return <OneBottomSheet open={open} embedded={embedded} onClose={onClose} closeLabel={copy("실행 예산 닫기","Close execution budgets")} title={copy("실행 예산과 비용 관측","Execution budgets and billing observations")} ariaLabel={copy("실행 예산과 비용 관측","Execution budgets and billing observations")} size="compact">
     <div className={styles.root}>
-      <p>{copy("기본은 제한 없이 관측만 합니다. 선택한 예산은 이 컴퓨터의 실행 접수를 제한합니다. 공급자의 실제 청구 비용 상한을 보장하지 않습니다.","The default is unrestricted observation. A selected budget limits local execution admission. It does not guarantee a cap on actual provider charges.")}</p>
+      <p>{copy("기본은 제한 없이 관측만 합니다. 선택한 예산은 이 데스크탑의 실행 접수를 제한합니다. 공급자의 실제 청구 비용 상한을 보장하지 않습니다.","The default is unrestricted observation. A selected budget limits local execution admission. It does not guarantee a cap on actual provider charges.")}</p>
       <p>{copy("각 새 실행은 지정액을 예약합니다. 같은 업무의 후속 실행도 같은 예산을 사용합니다. 청구가 미확정이면 예약은 유지되며 만료가 자동 환급을 뜻하지 않습니다.","Each new native run reserves the configured amount. Follow-up runs use the same task budget. Reservations remain while billing is unconfirmed; expiry does not mean an automatic refund.")}</p>
       {unconfirmed&&<p role="status">{copy("최신 비용·예산 관측을 확인하지 못했습니다. 마지막 관측을 표시하며 새 설정은 보류합니다.","Current budget and billing observations are unconfirmed. The last observation is shown; new configuration is held.")}</p>}
       {storageError&&<p role="status">{copy("저장된 예산 요청을 읽지 못했습니다. 새 설정을 보류합니다.","Saved budget requests could not be read. New configuration is held.")}</p>}

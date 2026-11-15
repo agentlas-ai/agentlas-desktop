@@ -4,7 +4,7 @@
  * Science registers its domain action (science.continue_research). An action is any kind a
  * playground registered in ./action-registry ("<family>.<verb>", e.g. goal.continue), with an `expected`
  * fence whose exact keys and value shapes that registration validates. Nothing in this directory knows
- * about One, Work, goals or model providers; the host glue lives in electron/alive-organisms/.
+ * about One, Work, goals or model providers; the host glue lives in electron/science-host/alive-core.ts.
  */
 export interface AliveBudget { tokenLimit: number | null; tokensUsed: number; deadlineMs: number | null }
 export interface AliveAttachment {
@@ -107,14 +107,6 @@ export type AliveOwnerWait = "owner-stopped" | "needs-owner";
  *  - no-handler:  no unblocker is installed yet; re-attempted for the same state once one is.
  */
 export type AliveUnblockOutcome = "acted" | "needs-human" | "failed" | "no-handler";
-export interface AliveUnblockAttempt {
-  kind: "unblock_attempt_due";
-  agentId: string; attachment: AliveAttachment; blockedBy: string; stateSha: string;
-  observation: Record<string, unknown>;
-  /** Host admission at this moment (plan access / pool); a non-null code means the attempt must not spend. */
-  admissionCode: string | null;
-}
-export interface AliveUnblockResult { outcome: Exclude<AliveUnblockOutcome, "no-handler">; code?: string }
 export interface AlivePlaygroundPort {
   observe(attachment: AliveAttachment, nowMs: number): AlivePlaygroundObservation;
   /** Must verify current domain authority and durably deduplicate actionId before any side effect. */

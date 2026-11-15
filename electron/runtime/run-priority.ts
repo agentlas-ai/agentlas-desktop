@@ -34,6 +34,23 @@ export function withRunPriority<T>(priority: RunPriority, fn: () => T): T {
   return priorityContext.run(priority, fn);
 }
 
+const harnessOpenedContext = new AsyncLocalStorage<true>();
+
+/**
+ * Marks fn, and everything it starts, as a turn the product opened rather than the owner's own message (a goal continuation, a
+ * teammate's message, an update resume, an automation step: invocationRunPriority is not "owner"). Such a turn goes through a run
+ * slot whatever its runner is (an API run holds no CLI child, but it is still work the host started and may start in the hundreds
+ * after a restart; N8). The owner's own message is never marked, so it never waits for a slot an API run would have taken.
+ */
+export function withHarnessOpenedTurn<T>(fn: () => T): T {
+  return harnessOpenedContext.run(true, fn);
+}
+
+/** True inside a turn the product opened (withHarnessOpenedTurn). */
+export function harnessOpenedTurn(): boolean {
+  return harnessOpenedContext.getStore() === true;
+}
+
 /**
  * 현재 문맥의 우선순위. 표시가 없으면 interactive — 사람이 기다리는 채팅 턴이
  * 기본이고, background 는 명시적으로 감싼 경로에서만 나온다(조용한 강등 금지).
@@ -76,4 +93,18 @@ export function slotPriorityForCall(priority: RunPriority, role: string | undefi
  */
 export function nicenessForPriority(priority: RunPriority): number {
   return priority === "background" ? 10 : 2;
+}
+
+/*
+ * A member turn of a lead room tells its slot waits (run slot, local-inference slot, room-member pool - the tool-need judgement's
+ * included, whose status lines are dropped) that it is waiting / let in, so the turn's time limit does not run while it waits.
+ * Same carrier as the priority: the call context, no dependencies.
+ */
+const queueReporterContext = new AsyncLocalStorage<(queued: boolean) => void>();
+export function withMemberQueueReporter<T>(report: (queued: boolean) => void, fn: () => T): T {
+  return queueReporterContext.run(report, fn);
+}
+/** The reporter of the member turn this call belongs to, or null. Taken when a wait STARTS: a freed slot is handed over from another turn's context. */
+export function memberQueueReporter(): ((queued: boolean) => void) | null {
+  return queueReporterContext.getStore() ?? null;
 }

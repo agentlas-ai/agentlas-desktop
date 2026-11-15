@@ -937,10 +937,11 @@ export class LocalModelHubManager {
         "--cache-reuse", "256",
         "--jinja",
         "--no-webui",
-        "--api-key", authToken,
+        // VD: the key is NOT an argument (a program's arguments are readable by every process of the machine: `ps`, Task Manager); llama-server reads it from its own environment (`--help` of the pinned build
+        // b10903 lists `--api-key KEY (env: LLAMA_API_KEY)`; run with the variable set and no argument: no key / a wrong key = 401, the right key = 200, the arguments show no key).
         "--log-jsonl",
         "--verbosity", "4",
-      ], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, cwd: dirname(executable), env: { ...process.env, GGML_BACKEND_PATH: undefined } });
+      ], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, cwd: dirname(executable), env: { ...process.env, GGML_BACKEND_PATH: undefined, LLAMA_API_KEY: authToken } });
       let engineLog = "";
       // Always drain: a full pipe would block the server. Only the load window is kept.
       child.stdout?.on("data", (chunk: Buffer) => { if (engineLog.length < 262_144) engineLog += chunk.toString("utf8"); });

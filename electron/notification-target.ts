@@ -14,23 +14,27 @@ export type NotificationClickTarget =
   | { kind: "one"; chatId?: string; taskId?: string }
   | { kind: "work-room"; chatId: string; route: string };
 
-/** The Work room route the renderer already uses for a Work chat (PersonalOneWorkspace taskRoute). */
+/**
+ * The screen address that opens a conversation's tab in Home's Space: the same place the left list opens it.
+ * Space reads `open`, opens (or brings forward) the tab and removes the parameter. Work chats and Agent Chat rooms alike.
+ */
 export function workRoomRoute(chatId: string): string {
-  return `/workspace/task?id=${encodeURIComponent(chatId)}`;
+  return `/workspace?open=${encodeURIComponent(chatId)}`;
 }
 
 /**
- * `originSurface` is the chat's stored origin (store/chats.ts chatOriginSurface): "work" opens the
- * Work room, "one" opens One. An unknown chat (deleted, or no chat at all) opens One, as before.
+ * `originSurface` is the chat's stored origin (store/chats.ts chatOriginSurface): "work" opens its tab in Space, "room" (an
+ * Agent Chat room of an agent, solo or group) opens its tab in Space too, "one" (the personal agent's own conversation) opens
+ * One. An unknown chat (deleted, or no chat at all) opens One, as before.
  */
 export function notificationClickTarget(input: {
   chatId?: string | null;
   taskId?: string | null;
-  originSurface: "one" | "work" | null;
+  originSurface: "one" | "work" | "room" | null;
 }): NotificationClickTarget {
   const chatId = typeof input.chatId === "string" && input.chatId.trim() ? input.chatId : undefined;
   const taskId = typeof input.taskId === "string" && input.taskId.trim() ? input.taskId : undefined;
-  if (chatId && input.originSurface === "work") return { kind: "work-room", chatId, route: workRoomRoute(chatId) };
+  if (chatId && (input.originSurface === "work" || input.originSurface === "room")) return { kind: "work-room", chatId, route: workRoomRoute(chatId) };
   return { kind: "one", ...(chatId ? { chatId } : {}), ...(taskId ? { taskId } : {}) };
 }
 

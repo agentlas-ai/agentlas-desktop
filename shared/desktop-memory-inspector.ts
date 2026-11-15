@@ -12,6 +12,14 @@ export interface DesktopMemoryEntry extends DesktopMemoryTarget {
   kind: string; scope: string; content: string; title: string; status: DesktopMemoryStatus; createdAt: string;
   actorName: string; projectSlug: string | null;
 }
+/** A line of the memory LIST (the query's entries). */
+export interface DesktopMemoryListEntry extends DesktopMemoryEntry {
+  /**
+   * Redesign backend C: the skills made from this line, read BEFORE it is forgotten (the same skills the forget answer's `derivedSkills` names afterwards). `[]` = none, absent = not known
+   * (a split memory layout or an unreadable agent, and none found): never "none". Their text is not here.
+   */
+  derivedSkills?: Array<{ agentId: string; skillName: string; proposalId: string }>;
+}
 export interface DesktopMemoryDetail extends DesktopMemoryEntry {
   contentEnglish: string; contentNative: string | null; sensitivity: string; confidence: string;
   originRefs: Array<{ kind: string; id: string; revision: string | null }>;
@@ -24,12 +32,14 @@ export interface DesktopMemoryDetail extends DesktopMemoryEntry {
 }
 export interface DesktopMemoryQueryResult {
   schemaVersion: typeof DESKTOP_MEMORY_INSPECTOR_VERSION; ownerRef: string; revocationEpoch: number; authorityRevision: number;
-  entries: DesktopMemoryEntry[]; map: OneMemoryMapSnapshot; total: number; truncated: boolean;
+  entries: DesktopMemoryListEntry[]; map: OneMemoryMapSnapshot; total: number; truncated: boolean;
   actors: Array<{ id: string | null; name: string }>;
   projects: Array<{ id: string; name: string }>;
 }
 export interface DesktopMemoryMutationResult { ok: true; memoryId: string; replacementId: string | null;
-  revocationEpoch: number; authorityRevision: number; affectedMemoryIds: string[] }
+  revocationEpoch: number; authorityRevision: number; affectedMemoryIds: string[];
+  /** Forget only (Agentlas 2.0 P2): the skills an applied learning change made from the forgotten lines. Their text is not touched. `[]` = none; absent = this build could not look (unknown, not "none"). */
+  derivedSkills?: Array<{ agentId: string; skillName: string; proposalId: string }> }
 export interface DesktopMemoryInspectorAPI {
   query(input?: DesktopMemoryQuery): Promise<DesktopMemoryQueryResult>;
   detail(input: { memoryId: string; ownerRef: string }): Promise<DesktopMemoryDetail>;

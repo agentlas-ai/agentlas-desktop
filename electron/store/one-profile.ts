@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { looksSecret } from "../../shared/secret-patterns";
+import { ONE_NAME_SERVER_MAX, nameSaveAllowed } from "../../shared/one-agent-name";
 import {
   ONE_PROFILE_CONTRACT_VERSION,
   ONE_BUBBLE_COLORS,
@@ -250,6 +251,39 @@ export function getOneProfileOrigin(): OneProfileOrigin {
   return slot.legacyLineage ? "inherited" : "fresh";
 }
 
+export type OneProfilePeek = {state:"unknown"} | {state:"absent";userId:string;workspaceId:string} |
+  {state:"present";userId:string;workspaceId:string;oneId:string;revision:number;name:string};
+
+/** Inspect only the current authenticated account slot. Unlike getOneProfile,
+ * this never creates a default or claims a machine-wide legacy profile. */
+export function peekOneProfile(): OneProfilePeek {
+  try {
+    const auth = require("../auth") as typeof import("../auth"), owner = auth.peekAuthenticatedSessionBinding();
+    if (!owner) return {state:"unknown"};
+    const result = getDb().transaction(():OneProfilePeek => {
+      const slotKey = `${META_KEY}#acct:${accountKeyFor(owner.userId)}`;
+      const slot = getDb().prepare("SELECT value FROM meta WHERE key=? LIMIT 1").get(slotKey) as {value:string}|undefined;
+      if (slot) {
+        const profile = parseProfile(slot.value);
+        return {state:"present",userId:owner.userId,workspaceId:owner.workspaceId,oneId:profile.oneId,revision:profile.version,name:profile.displayName};
+      }
+      const legacy = getDb().prepare("SELECT value FROM meta WHERE key=? LIMIT 1").get(META_KEY) as {value:string}|undefined;
+      const claim = getDb().prepare("SELECT value FROM meta WHERE key=? LIMIT 1").get(LEGACY_CLAIM_KEY) as {value:string}|undefined;
+      if (claim) {
+        const parsed:unknown = JSON.parse(claim.value);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || typeof (parsed as {accountKey?:unknown}).accountKey !== "string" ||
+            !ACCOUNT_KEY_RE.test((parsed as {accountKey:string}).accountKey)) return {state:"unknown"};
+        // A claimed-but-missing own slot cannot prove that the owner's legacy
+        // profile was never there. The other owner's legacy is not this slot.
+        if (legacy && (parsed as {accountKey:string}).accountKey === accountKeyFor(owner.userId)) return {state:"unknown"};
+      } else if (legacy) return {state:"unknown"};
+      return {state:"absent",userId:owner.userId,workspaceId:owner.workspaceId};
+    }).deferred();
+    const current = auth.peekAuthenticatedSessionBinding();
+    return current && current.userId === owner.userId && current.workspaceId === owner.workspaceId && current.sessionId === owner.sessionId ? result : {state:"unknown"};
+  } catch { return {state:"unknown"}; }
+}
+
 /** Directory segment for One's own portrait: null = the pre-update shared location. */
 export function oneProfileAvatarSegment(): string | null {
   const slot = resolveSlot();
@@ -442,7 +476,11 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
     }
     previousDisplayName = current.displayName;
     const next: OneProfile = { ...current };
-    if ("displayName" in input.patch) next.displayName = cleanText(input.patch.displayName, "displayName", 1, 64);
+    if ("displayName" in input.patch) {
+      next.displayName = cleanText(input.patch.displayName, "displayName", 1, 64);
+      // A name that is NEW must be one the server takes (12 characters, shared/one-agent-name.ts); the name already stored is kept as it is, so a save that carries it unchanged (the profile sheet sends every field) still passes.
+      if (!nameSaveAllowed(next.displayName, current.displayName)) throw new RangeError(`displayName must contain 1-${ONE_NAME_SERVER_MAX} characters`);
+    }
     if ('bubbleColor' in input.patch) {
       if(typeof input.patch.bubbleColor!=='string' || !Object.hasOwn(ONE_BUBBLE_COLORS,input.patch.bubbleColor)) throw new TypeError('Invalid One bubble color');
       next.bubbleColor=input.patch.bubbleColor;

@@ -284,7 +284,18 @@ function daemonServesCall(input: AppControlCallInput): boolean {
   const policy = appControlPolicy(entry);
   return policy.allowed && policy.effect === "read" && daemonServesAppControlChannel(entry.channel);
 }
-export async function appControlCall(caller: AppControlCaller, input: AppControlCallInput, answerWindowMs: number = APP_CALL_ANSWER_WINDOW_MS): Promise<Record<string, unknown>> {
+export async function appControlCall(caller: AppControlCaller, input: AppControlCallInput, answerWindowMs: number = APP_CALL_ANSWER_WINDOW_MS,
+  turnScope?: { chatId: string; runId: string; permission: "read" | "write" | "full" } | null): Promise<Record<string, unknown>> {
+  if (turnScope !== undefined) {
+    const operation = typeof input.operation === "string" ? input.operation : "";
+    const harness = await import("../harness/capability-ports");
+    if (harness.HARNESS_EFFECT_FREE_READ_OPERATIONS.has(operation)) {
+      if (!turnScope || turnScope.permission !== (caller.permission ?? "read")) return { status: "unavailable", reason: "turn_capability_unavailable" };
+      if (input.args !== undefined && (!input.args || typeof input.args !== "object" || Array.isArray(input.args))) return { status: "refused", reason: "arguments_invalid" };
+      const outcome = await (await import("../turn-tools/control-server")).bridgeLiveTurnRead(turnScope, "harness_call", { operation, args: input.args ?? {} });
+      return outcome && typeof outcome === "object" && !Array.isArray(outcome) ? outcome as Record<string, unknown> : { status: "unavailable", reason: "turn_capability_unavailable" };
+    }
+  }
   // The background service answers a database-only read itself (daemon-reads.ts); everything else is the window process's.
   if (!host && !daemonServesCall(input)) return remoteAppControlCall(caller, input);
   // The window process answers within the model's tool timeout: an operation that runs longer (automations.runNow awaits the whole
@@ -441,7 +452,7 @@ function build(arg: AppControlInvokeArg, named: Record<string, unknown>): unknow
   return object;
 }
 
-const OWNER_LOCAL_MAP_OPERATIONS: ReadonlySet<string> = new Set(["experience.ontologyGraph", "agents.borrowedOntologyGraph"]);
+const OWNER_LOCAL_MAP_OPERATIONS: ReadonlySet<string> = new Set(["agents.borrowedOntologyGraph"]);
 
 // Operations that show what belongs to one conversation. A call through app.call or one_app_call has no conversation of its
 // own, so these answer only a harness port that checked the conversation first and passed it as input.scope.chatId (the
@@ -681,11 +692,14 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   if (!named) throw new AppControlError("invalid-arguments", "args must be an object of named arguments.");
   // A name the model's catalog does not carry is answered as an unknown operation: no "not available to One" that confirms it exists.
   const catalogEntry = APP_CONTROL_CATALOG.find((entry) => entry.path === path && !appControlOmittedFromModelCatalog(entry));
+  const terminal = isAppControlTerminalOperation(path,named);
   if (catalogEntry) {
     const policy = appControlPolicy(catalogEntry);
-    if (!policy.allowed) throw new AppControlError("operation-not-allowed", `${path} is not available to One: ${policy.reason}.`);
+    if (!policy.allowed && !terminal) throw new AppControlError("operation-not-allowed", `${path} is not available to One: ${policy.reason}.`);
   }
-  const operation = operations().find((candidate) => candidate.path === path);
+  const operation = operations().find((candidate) => candidate.path === path) ??
+    (terminal && catalogEntry?.surface === "science" && scienceInstalled() ? {path:catalogEntry.path,surface:catalogEntry.surface,
+      params:catalogEntry.params,signature:catalogEntry.signature,doc:catalogEntry.doc,effect:"write" as const,entry:catalogEntry} : undefined);
   if (!operation) {
     if (catalogEntry?.surface === "science") throw new AppControlError("science-not-installed", "Agentlas Science is not installed or not active.");
     // The refusal names the closest catalog operations (the same deterministic search). Dev 2026-10-18 run11: Haiku guessed
@@ -706,7 +720,7 @@ export async function appControlCallLocal(caller: AppControlCaller, input: AppCo
   const requiredKeys = APP_CONTROL_ARGUMENT_SCHEMAS[path]?.required;
   const missing = Array.isArray(requiredKeys) ? requiredKeys.filter((key) => typeof key === "string" && named[key] === undefined) : [];
   if (missing.length) throw new AppControlError("invalid-arguments", `${path} needs ${missing.join(", ")}; pass them in args.`);
-  if (operation.effect !== "read" && !isAppControlTerminalOperation(path)
+  if (operation.effect !== "read" && !terminal
     && effectiveInvocationPermission(caller.permission, false) === "read") {
     throw new AppControlError("execution-permission-read-only", "app_control_write_permission_required");
   }

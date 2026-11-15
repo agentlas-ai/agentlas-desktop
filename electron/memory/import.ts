@@ -14,7 +14,7 @@ import { isGeneratedMemoryView } from "./projections";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { getMemoryDb as getDb, getMemoryStoreInfo } from "./database";
-import { insertMemoryEntry } from "./store";
+import { evidenceRowsInStores, insertMemoryEntry } from "./store";
 import { isMemoryContentRevoked, MemoryRevokedError } from "./revocations";
 import { autoIntakeCuratedMemory } from "../experience/store";
 import { getAgentById } from "../mcp/registry";
@@ -438,6 +438,8 @@ function importedTokens(): Set<string> {
     .all(`%${SOURCE_TOKEN_PREFIX}:%`) as Array<{ evidence_json: string }>;
   const shape = new RegExp(`${SOURCE_TOKEN_PREFIX}:[0-9a-f]{16}`, "g");
   for (const row of rows) for (const found of String(row.evidence_json).matchAll(shape)) tokens.add(found[0]);
+  // Rows an earlier import put into another store (layout switch not OFF) count as already imported.
+  for (const evidence of evidenceRowsInStores(`%${SOURCE_TOKEN_PREFIX}:%`)) for (const found of String(evidence).matchAll(shape)) tokens.add(found[0]);
   return tokens;
 }
 
@@ -532,7 +534,7 @@ function existsByToken(token: string): boolean {
     getDb()
       .prepare("SELECT 1 FROM memory_entries WHERE evidence_json LIKE ? LIMIT 1")
       .get(`%${token}%`),
-  );
+  ) || evidenceRowsInStores(`%${token}%`).length > 0;
 }
 
 export async function importMemoryPreview(

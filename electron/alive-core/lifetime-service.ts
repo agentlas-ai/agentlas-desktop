@@ -12,13 +12,11 @@
  */
 import { createHash } from "node:crypto";
 import type { AliveActionPacket, AliveAgent, AliveAttachment, AlivePlaygroundObservation, AlivePlaygroundPort, AliveRuntimePort,
-  AliveRuntimeStart, AliveUnblockAttempt, AliveUnblockOutcome, AliveUnblockResult } from "./contracts";
+  AliveRuntimeStart, AliveUnblockOutcome } from "./contracts";
 import { aliveActionKindsForDomain, aliveActionRegistration } from "./action-registry";
 import { AliveLifetimeStore } from "./lifetime-store";
 import { aliveResumeAuthorized, aliveWakeRequiresOwnerResume } from "./owner-resume";
 
-/** Unblock-attempt failure codes that are a passing host condition, not an outcome (electron/alive-organisms/index.ts unblockAttempt). */
-export const ALIVE_TRANSIENT_UNBLOCK_CODES: ReadonlySet<string> = new Set(["agi.monitor-starting", "agi.admission-closed"]);
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export interface AliveLifetimeBeat { agentId: string; outcome: "wait" | "dispatched" | "failed"; reasonCode: string }
 export interface AliveLifetimeServiceOptions {
@@ -40,13 +38,6 @@ export interface AliveLifetimeServiceOptions {
    * intermediate change re-acts on it. Isolated live run 2026-09-24: 21 wakes + 21 accepted actions in 10 min.
    */
   actionSpacingMs?: number;
-  /**
-   * Decision point "unblock_attempt_due": called at most once per exact owner-blocked state (ownerWait
-   * "needs-owner"), never for an owner stop. Absent = no unblocker installed yet (recorded as no-handler).
-   * The controller model is never woken for such a state: its no-tools "wait" was ~23k tokens per hour for a
-   * fact the host already knew (owner store 2026-09-27..28: 30 wakes, 0 actions).
-   */
-  unblockAttempt?: (input: AliveUnblockAttempt) => AliveUnblockResult;
 }
 
 /** Agent time belongs to the host clock, and survives the completion or removal of a playground. */
@@ -83,8 +74,8 @@ export class AliveLifetimeService {
   /**
    * Owner-blocked admission (zero model calls). For the exact owner-blocked state (hash of each owner-wait
    * attachment's blockedBy + salience):
-   *  1. "needs-owner" → decision point unblock_attempt_due, once per state (a no-handler record is retried once an
-   *     unblocker exists); an owner stop gets no attempt;
+   *  1. "needs-owner" → one "agent.unblock-attempt-due" record per state, always "no-handler" (the unblocker is gone);
+   *     an owner stop gets none;
    *  2. then one zero-cost "agent.owner-wait-skipped" record per state, and quiet until the state changes or clears
    *     (an owner answer / resume / stop moves the ledger, so its hash changes or the owner wait disappears).
    * Leaving every owner wait clears the record, so the same block reached again later is a new episode.
@@ -102,33 +93,16 @@ export class AliveLifetimeService {
     const stateSha = digest(waiting.map(({ attachment, result }) => ({ attachmentId: attachment.attachmentId,
       blockedBy: result.blockedBy, ownerWait: result.ownerWait, salience: result.salience ?? result.observation })));
     const sameState = recorded?.stateSha === stateSha;
-    const retryNoHandler = sameState && recorded?.unblock === "no-handler" && Boolean(this.options.unblockAttempt);
-    if (sameState && !retryNoHandler) return agent;
+    if (sameState) return agent;
     let unblock: AliveUnblockOutcome | null = null;
     const needsOwner = waiting.filter(({ result }) => result.ownerWait === "needs-owner");
     if (needsOwner.length) {
       const outcomes: AliveUnblockOutcome[] = [];
       const pending: Array<{ attachmentId: string; blockedBy: string; outcome: AliveUnblockOutcome; code: string | null }> = [];
       for (const { attachment, result } of needsOwner) {
-        let outcome: AliveUnblockOutcome = "no-handler";
-        let code: string | null = null;
-        if (this.options.unblockAttempt) {
-          let admissionCode: string | null = null;
-          try { admissionCode = this.options.admission?.(agent, nowMs) ?? null; } catch { admissionCode = "alive.admission-unavailable"; }
-          const input: AliveUnblockAttempt = { kind: "unblock_attempt_due", agentId: agent.agentId, attachment,
-            blockedBy: String(result.blockedBy), stateSha, observation: result.observation, admissionCode };
-          let answer: AliveUnblockResult | null = null;
-          try { answer = this.options.unblockAttempt(input); } catch { answer = { outcome: "failed", code: "alive.unblock-threw" }; }
-          outcome = answer && ["acted", "needs-human", "failed"].includes(answer.outcome) ? answer.outcome : "failed";
-          code = typeof answer?.code === "string" && /^[a-z][a-z0-9._-]{2,119}$/.test(answer.code) ? answer.code : null;
-        }
-        outcomes.push(outcome);
-        pending.push({ attachmentId: attachment.attachmentId, blockedBy: String(result.blockedBy), outcome, code });
+        outcomes.push("no-handler");
+        pending.push({ attachmentId: attachment.attachmentId, blockedBy: String(result.blockedBy), outcome: "no-handler", code: null });
       }
-      // A passing host condition (monitor still starting, admission closed for this tick) is not a verdict on the owner wait:
-      // nothing is written (no event, no ownerWait record), so the next tick attempts this state again at zero model cost.
-      if (pending.some((row) => row.outcome === "failed" && row.code !== null && ALIVE_TRANSIENT_UNBLOCK_CODES.has(row.code))
-        && !outcomes.includes("acted") && !outcomes.includes("needs-human")) return agent;
       for (const row of pending) {
         this.store.event(agent.agentId, "agent.unblock-attempt-due", { stateSha, attachmentId: row.attachmentId,
           blockedBy: row.blockedBy, outcome: row.outcome, code: row.code }, nowMs);
@@ -141,7 +115,7 @@ export class AliveLifetimeService {
     this.store.update(agent.agentId, { state: { ...current.state,
       ownerWait: { stateSha, reasonCode, ownerWait: waiting[0].result.ownerWait, unblock, atMs: nowMs } } }, nowMs);
     // An unblocker that acted changed the world; its own notice tells the owner. Otherwise the skip is recorded.
-    if (unblock !== "acted" && !retryNoHandler) {
+    if (unblock !== "acted") {
       this.store.event(agent.agentId, "agent.owner-wait-skipped", { stateSha, reasonCode,
         ownerWait: waiting[0].result.ownerWait, unblock, tokensUsed: 0 }, nowMs);
     }

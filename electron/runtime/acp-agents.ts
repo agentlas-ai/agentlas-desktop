@@ -10,6 +10,7 @@
 //
 // Reading the profile store needs the DB; detection already runs on main with the
 // store open. Everything degrades to "no profiles" if the store is unavailable.
+import { isAbsolutePathEntry } from "./safe-executable";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { TerminalProfile } from "../../shared/types";
@@ -97,7 +98,8 @@ export async function resolveAcpCommand(spec: AcpAgentSpec): Promise<{ path: str
 }
 
 async function whichOnPath(name: string): Promise<string | null> {
-  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  // An absolute PATH entry only: a relative one yields a relative file that spawnCli then resolves in the project folder.
+  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter((entry) => isAbsolutePathEntry(entry, process.platform));
   const exts = process.platform === "win32" ? ["", ".exe", ".cmd", ".bat"] : [""];
   for (const dir of dirs) {
     for (const ext of exts) {

@@ -1,0 +1,60 @@
+/* "My rules" (F-D11). Tokens only; buttons take the one Button rule (globals.css) through `composes`. Warn rows keep the tinted fill the owner kept in picture F. */
+.page { height: 100%; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 20px 24px 22px; background: var(--rd-bg); color: var(--rd-ink); font-family: var(--rd-f-body); }
+.head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
+.head h1 { margin: 0 auto 0 0; font-size: 16px; font-weight: 700; line-height: 1.3; }
+.headActions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.btn { composes: agentlas-btn from global; }
+.btn { display: inline-flex; align-items: center; gap: 7px; min-height: 32px; padding: 0 var(--agentlas-btn-pad-x); border: 1px solid var(--rd-hair-2); border-radius: 10px; background: var(--rd-surface); color: var(--rd-ink); font: inherit; font-size: 12.5px; font-weight: 650; cursor: pointer; }
+.btn:hover:not(:disabled) { background: var(--rd-surface-2); }
+.btn:focus-visible { outline: 2px solid var(--rd-ink-3); outline-offset: 2px; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btnQuiet { color: var(--rd-ink-3); }
+.who { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; color: var(--rd-ink-2); }
+.who span { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 9px; border-radius: 999px; background: var(--rd-surface-2); }
+.who .no { background: transparent; border: 1px dashed var(--rd-hair-2); color: var(--rd-ink-3); }
+.editor { flex: 1 1 220px; min-height: 180px; width: 100%; resize: none; padding: 12px 14px; border: 1px solid var(--rd-hair); border-radius: 12px; background: var(--rd-surface); color: var(--rd-ink); font-family: var(--rd-f-mono); font-size: 12.5px; line-height: 1.75; box-sizing: border-box; }
+.editor:focus-visible { outline: 2px solid var(--rd-ink-3); outline-offset: 1px; }
+.editor[readonly] { background: var(--rd-surface-2); color: var(--rd-ink-3); }
+.foot { padding-right: 52px; display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; font-size: 12px; color: var(--rd-ink-3); }
+.result { margin: 0; font-size: 12.5px; color: var(--rd-ink-2); }
+.quiet { margin: 0; font-size: 13px; color: var(--rd-ink-3); }
+.lines { display: grid; gap: 8px; margin-top: 4px; padding-right: 52px; }
+.line { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border: 1px solid var(--rd-hair); border-radius: 12px; background: var(--rd-surface); }
+/* desktop-final-pieces-2 F: the warning line is the picture's orange - #fffaf2 fill, #f3d9b4 line, #b8621b icon and dashed-line text, #e5a04f dashes (no token holds them;
+   the picture is light only, so the dark theme keeps the --rd-warn mix: "dark is made up"). */
+.line[data-kind="warn"] { border-color: #f3d9b4; background: #fffaf2; }
+:global(:root[data-theme="dark"]) .line[data-kind="warn"] { border-color: color-mix(in srgb, var(--rd-warn) 32%, var(--rd-hair)); background: color-mix(in srgb, var(--rd-warn) 9%, var(--rd-surface)); }
+.lineIcon { flex: 0 0 auto; display: inline-flex; color: var(--rd-ink-2); }
+.line[data-kind="warn"] .lineIcon { color: #b8621b; }
+:global(:root[data-theme="dark"]) .line[data-kind="warn"] .lineIcon { color: var(--rd-warn); }
+.lineText { min-width: 0; flex: 1; display: grid; gap: 1px; }
+.lineText b { font-size: 13px; font-weight: 650; }
+.lineText span { font-size: 12px; line-height: 1.45; color: var(--rd-ink-3); overflow-wrap: anywhere; }
+.lineBtn { composes: agentlas-btn from global; }
+.lineBtn { flex: 0 0 auto; min-height: 30px; padding: 0 var(--agentlas-btn-pad-x-sm); border: 1px solid var(--rd-hair-2); border-radius: 9px; background: var(--rd-surface); color: var(--rd-ink); font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
+.lineBtn:hover:not(:disabled) { background: var(--rd-surface-2); }
+.lineBtn:focus-visible { outline: 2px solid var(--rd-ink-3); outline-offset: 2px; }
+.lineBtn:disabled { opacity: .5; cursor: default; }
+.divider { display: flex; align-items: center; gap: 12px; margin: 2px 0; color: #b8621b; font-size: 12px; font-weight: 650; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px dashed #e5a04f; }
+:global(:root[data-theme="dark"]) .divider { color: var(--rd-warn); }
+:global(:root[data-theme="dark"]) .divider::before, :global(:root[data-theme="dark"]) .divider::after { border-top-color: color-mix(in srgb, var(--rd-warn) 55%, transparent); }
+.pickGroup { display: grid; gap: 6px; }
+.pickGroup h3 { margin: 4px 0 0; font-size: 11.5px; font-weight: 700; color: var(--rd-ink-3); }
+.pickRow { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--rd-hair); border-radius: 9px; background: var(--rd-surface); font-size: 12.5px; line-height: 1.45; cursor: pointer; }
+/* desktop-final-pieces-ko E: a picked line is a black-filled 15px square. */
+.pickRow input { flex: 0 0 auto; appearance: none; -webkit-appearance: none; width: 15px; height: 15px; margin: 0; border: 1.5px solid var(--paper-edge-strong, #dcdedb); border-radius: 4px; background: var(--paper, #fff) center / 11px no-repeat; cursor: pointer; }
+.pickRow input:checked { border-color: var(--ink); background-color: var(--ink); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2l2.4 2.4 4.6-5' fill='none' stroke='white' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+.pickRow input:focus-visible { outline: 2px solid var(--rd-ink-3); outline-offset: 1px; }
+.pickRow input:disabled { opacity: .5; cursor: default; }
+.pickText { min-width: 0; flex: 1; overflow-wrap: anywhere; white-space: normal; }
+.pickRow small { flex: 0 1 auto; margin-left: auto; padding-left: 10px; color: var(--rd-ink-3); font-size: 11.5px; text-align: right; }
+.pickNote { margin: 2px 0 0; font-size: 12px; color: var(--rd-ink-3); }
+.pickEmpty { margin: 0; font-size: 13px; color: var(--rd-ink-3); }
+.pickFooter { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; width: 100%; }
+.pickHint { margin-right: auto; font-size: 12px; color: var(--rd-ink-3); }
+.linkBtn { composes: agentlas-btn from global; }
+.linkBtn { min-height: 28px; padding: 0 var(--agentlas-btn-pad-x-sm); border: 1px solid var(--rd-hair-2); border-radius: 8px; background: var(--rd-surface); color: var(--rd-ink); font: inherit; font-size: 12px; cursor: pointer; }
+.confirmBody { margin: 0; font-size: 13px; line-height: 1.6; color: var(--rd-ink-2); }
+.pickFooter .dark[data-primary] { background: var(--rd-ink); border-color: var(--rd-ink); color: var(--rd-bg); box-shadow: none; }
+.pickFooter .dark[data-primary]:disabled { opacity: .4; }

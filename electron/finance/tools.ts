@@ -594,7 +594,7 @@ const FINANCE_ACTION_PORTS = descriptors.map(({ action, purpose, required, input
     // The provider client accepts requests only after these actual Managed metadata are latched below.
     ...(managedFinanceHostAtImport&&['search','query','asset.add','query.save'].includes(action)?{callTimeoutMs:60000}:{}),
     ...(effectFreeReads.has(action)&&!(managedFinanceHostAtImport&&['search','query'].includes(action)) ? { effectFreeRead: true as const } : {}),
-    ...(action === 'load' ? { foundAsTool: true as const } : {}),
+    ...(action === 'load' ? { foundAsTool: true as const, oneNativeReadAdmission: '__one_finance_read_admission_v2' } : {}),
     purpose: composeDeclaredPrompt([{ id: `tool.finance.${action}.description`, revision: action === 'query.save' || action === 'load' ? 2 : action === 'present' ? 4 : action === 'query' ? 4 : 1, stability: 'fixed-policy', changeTriggers: ['release'], text: purpose }]),
     handler: (args: Record<string, unknown>, ctx: HarnessCallContext) => callFinanceTool(action, args, ctx) };
 });

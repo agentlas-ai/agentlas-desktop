@@ -128,6 +128,7 @@ export function CredentialRecoveryPanel({
       case "api-metadata": return `${text("Saved API-key metadata", "저장된 API 키 메타데이터")}${name}`;
       case "env": return `${text("Saved connection key", "저장된 연결 키")}${name}`;
       case "secret": return `${text("Saved secret", "저장된 시크릿")}${name}`;
+      case "native-one": return text("One background connection", "One 백그라운드 연결");
     }
   };
   const unavailableFor = (failure: CredentialRecoveryFailure) => {

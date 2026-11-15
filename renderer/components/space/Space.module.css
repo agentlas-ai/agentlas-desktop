@@ -1,0 +1,114 @@
+/* Home's Space: panes side by side, each with a tab strip. Colours come from the shared --rd tokens. */
+.space { height: 100%; min-height: 0; position: relative; overflow: hidden; background: var(--rd-hair, #e8e8e5); }
+.grid { height: 100%; min-height: 0; display: grid; gap: 1px; overflow-x: hidden; overflow-y: auto; }
+.pane { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--paper, #fcfcfb); }
+.pane[data-focused="true"] .paneHead { background: var(--rd-surface-2, #f6f6f4); }
+.pane[data-focused="true"] .paneTitle { font-weight: 700; }
+.running { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; border: 2px solid var(--rd-hair-2, #ccc); border-top-color: var(--rd-ink-2, #666); animation: spaceSpin .9s linear infinite; }
+.pinMark { flex: 0 0 auto; display: inline-flex; color: var(--rd-ink-3, #777); }
+.body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.note { margin: auto; padding: 24px; max-width: 320px; text-align: center; color: var(--rd-ink-3, #777); font-size: 13px; line-height: 1.5; }
+.note button { margin-top: 10px; padding: 6px 12px; border: 1px solid var(--rd-hair-2, #ccc); border-radius: 8px; background: var(--rd-surface, #fff); color: var(--rd-ink, #111); font: inherit; font-size: 12px; cursor: pointer; }
+.border { position: absolute; top: 0; width: 9px; transform: translateX(-50%); z-index: 3; cursor: col-resize; background: transparent; touch-action: none; }
+.border::after { content: ""; position: absolute; left: 4px; top: 0; bottom: 0; width: 1px; background: var(--rd-hair-2, #ccc); }
+.border:hover::after, .border:focus-visible::after, .border[data-dragging="true"]::after { left: 3px; width: 3px; background: var(--rd-ink-3, #777); }
+.border:focus-visible { outline: none; }
+/* workspace-v3-two .grip: a 12x36 white pill with a hairline, in the middle of the line (the line and its hit area are unchanged). */
+.grip { position: absolute; left: calc(50% - 6px); top: 50%; width: 12px; height: 36px; margin-top: -18px; display: grid; place-items: center; border: 1px solid var(--paper-edge-strong, #dcdedb); border-radius: 6px; background: var(--paper, #fff); color: var(--muted-deep, #868483); pointer-events: none; }
+.dropLayer { position: absolute; inset: 0; z-index: 5; display: flex; background: rgba(120, 120, 120, .06); }
+.dropZone { display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 650; color: var(--rd-ink, #111); border: 2px dashed transparent; margin: 6px; border-radius: 10px; transition: background .08s; }
+.dropZone[data-on="true"] { background: rgba(120, 120, 120, .16); border-color: var(--rd-ink-3, #777); }
+.dropTabs { flex: 7 1 0; }
+.dropSplit { flex: 3 1 0; }
+.empty { position: relative; height: 100%; }
+.emptyDrop { position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; margin: 10px; border: 2px dashed var(--rd-ink-3, #777); border-radius: 14px; background: rgba(120, 120, 120, .1); font-size: 14px; font-weight: 650; color: var(--rd-ink, #111); }
+.toast { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 20; max-width: min(520px, calc(100% - 24px)); padding: 8px 14px; border: 1px solid var(--rd-hair-2, #ccc); border-radius: 10px; background: var(--rd-surface, #fff); color: var(--rd-ink, #111); font-size: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, .14); }
+.menu { position: fixed; z-index: 1000; min-width: 190px; display: flex; flex-direction: column; padding: 4px; border: 1px solid var(--rd-hair-2, #ccc); border-radius: 10px; background: var(--rd-surface, #fff); box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
+.menu button { border: 0; background: transparent; color: var(--rd-ink, #111); text-align: left; padding: 8px 10px; border-radius: 7px; font: inherit; font-size: 12px; cursor: pointer; }
+.menu button:has(> .menuIcon) { display: flex; align-items: center; gap: 9px; }
+.menuIcon { flex: 0 0 auto; display: inline-flex; color: var(--ink-soft, #51504e); }
+.menu button[data-danger="true"] .menuIcon { color: inherit; }
+.menu button:hover, .menu button:focus-visible { background: var(--rd-surface-2, #eee); outline: none; }
+.menu button[data-divider="true"] { margin-top: 5px; position: relative; }
+.menu button[data-divider="true"]::before { content: ""; position: absolute; left: 6px; right: 6px; top: -3px; height: 1px; background: var(--rd-hair, #ddd); }
+.menu button[data-danger="true"] { color: var(--rd-err, #9a5a4c); }
+.menu button:disabled { color: var(--rd-ink-3, #999); cursor: default; background: transparent; }
+@keyframes spaceSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .running { animation: none; border-top-color: var(--rd-ink-2, #666); } }
+.notice { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 21; max-width: min(640px, calc(100% - 24px)); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--rd-hair-2, #ccc); border-radius: 10px; background: var(--rd-surface, #fff); color: var(--rd-ink, #111); font-size: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, .14); }
+.noticeBtn { composes: agentlas-btn from global; }
+.notice .noticeBtn { min-height: var(--agentlas-btn-min-h); padding: 4px var(--agentlas-btn-pad-x-sm);} 
+.notice button { padding: 4px 10px; border: 1px solid var(--rd-hair-2, #ccc); border-radius: 7px; background: var(--rd-surface-2, #f1f1ef); color: var(--rd-ink, #111); font: inherit; font-size: 12px; cursor: pointer; }
+.paneHead { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 10px 0 14px; border-bottom: 1px solid var(--rd-hair, #e8e8e5); background: var(--paper, #fcfcfb); }
+.paneKind { flex: 0 0 auto; display: inline-flex; color: var(--ink-soft, #51504e); }
+.paneFaces { display: inline-flex; }
+.paneFaces > * + * { margin-left: -9px; }
+.paneTitle { min-width: 0; display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--rd-ink, #111); font: inherit; font-size: 14px; font-weight: 650; cursor: pointer; }
+.paneTitle:hover { background: var(--rd-surface-2, #eee); }
+.paneTitleText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.paneSpacer { flex: 1; }
+.paneIcon { flex: 0 0 auto; width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 7px; background: transparent; color: var(--ink-soft, #51504e); cursor: pointer; padding: 0; }
+.paneIcon:hover { background: var(--rd-surface-2, #eee); color: var(--rd-ink, #111); }
+.paneTitle:focus-visible, .paneIcon:focus-visible { outline: 2px solid var(--rd-ink-3, #777); outline-offset: -2px; }
+
+/* ---- F-D5: a conversation in a pane has one head (the pane's) and one composer shape. Everything below is scoped to .pane, so Finance, Science,
+   the personal agent's own screen and Build (none of them inside a pane) keep their own head and composer. ---- */
+.paneSub { flex: 0 0 auto; color: var(--rd-ink-3, #777); font-size: 12.5px; white-space: nowrap; }
+.paneSubButton { border: 0; background: transparent; padding: 4px 6px; border-radius: 7px; font: inherit; font-size: 12.5px; cursor: pointer; }
+.paneSubButton:hover { background: var(--rd-surface-2, #eee); color: var(--rd-ink, #111); }
+.paneSubButton:focus-visible { outline: 2px solid var(--rd-ink-3, #777); outline-offset: -2px; }
+.paneIcon[data-active="true"] { background: var(--rd-surface-2, #eee); color: var(--rd-ink, #111); }
+.paneIcon:disabled { opacity: .4; cursor: default; }
+
+/* The old conversation head (work surface): not drawn in a pane. The one thing it holds that nothing else holds, the personal-agent room's release
+   menu, stays (marked data-pane-keep) and the header is drawn only when that menu is there. */
+.pane :global(.task-cockpit-header) { display: none !important; }
+.pane :global(.task-cockpit-header:has([data-pane-keep])) { display: flex !important; justify-content: flex-end; }
+.pane :global(.task-cockpit-header:has([data-pane-keep]) > :not(.task-cockpit-header-actions)) { display: none !important; }
+.pane :global(.task-cockpit-header-actions > :not([data-pane-keep])) { display: none !important; }
+
+/* The composer, work surface: a pill with "+" on the left and the mic / send on the right; model, effort and permission are plain words under it,
+   right-aligned. The pieces keep their own buttons and menus; only where they sit changes. */
+.pane :global(.chat-input-shell[data-pane-composer="true"]) {
+  --pane-meta-h: 28px; --pane-gap: 8px; --pane-pill-h: 44px;
+  --pane-btn-bottom: calc(var(--pane-meta-h) + var(--pane-gap) + (var(--pane-pill-h) - 30px) / 2);
+  border: 0 !important; border-radius: 0 !important; box-shadow: none !important; background: transparent !important; padding: 0 !important;
+  gap: var(--pane-gap) !important; max-width: none !important;
+}
+.pane :global(.chat-input-shell[data-pane-composer="true"] textarea[data-chat-input]) {
+  box-sizing: border-box !important; min-height: var(--pane-pill-h) !important; padding: 11px 92px 11px 48px !important;
+  border: 0 !important; border-radius: 24px !important; background: var(--paper) !important;
+  --pill-rest: inset 0 0 0 1px color-mix(in srgb, var(--ink) 12%, var(--paper-edge)); box-shadow: var(--pill-rest), 0 8px 24px rgba(15, 18, 20, 0.07), 0 1px 2px rgba(15, 18, 20, 0.05);
+}
+.pane :global(.chat-input-shell[data-pane-composer="true"] textarea[data-chat-input]:focus) { box-shadow: var(--pill-rest), 0 12px 32px rgba(15, 18, 20, 0.1) !important; }
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar) { height: var(--pane-meta-h); min-height: var(--pane-meta-h); flex: 0 0 var(--pane-meta-h); justify-content: flex-end; padding: 0 4px; gap: 4px; }
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-tools-left) { flex: 0 1 auto !important; margin-left: auto; justify-content: flex-end; gap: 10px; }
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-tools-right) { display: contents !important; margin-left: 0 !important; }
+/* "+" inside the pill, left */
+.pane :global(.chat-input-shell[data-pane-composer="true"] [data-popover-trigger="plus"]) { position: absolute; left: 10px; bottom: var(--pane-btn-bottom); width: 30px !important; height: 30px !important; z-index: 1; }
+/* mic and send / stop inside the pill, right */
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-voice > *) { position: absolute; right: 50px; bottom: var(--pane-btn-bottom); z-index: 1; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; }
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-voice button) { width: 30px !important; height: 30px !important; min-height: 30px !important; }
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-send-button),
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-stop-button) { position: absolute; right: 10px; bottom: var(--pane-btn-bottom); z-index: 1; }
+/* The History pill and the Run-with-HEP caret are not in the picture: New session / Clear history are in the pane's "..." menu, the caret's rows left the "+" menu. */
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-context-control),
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-hep-caret) { display: none; }
+/* The words under the pill: plain, no border or fill; a quiet fill only while hovered or open. */
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar .chat-input-chip),
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar [data-one-composer-trigger]) {
+  border: 0 !important; background: transparent !important; box-shadow: none !important; height: 26px !important; padding: 0 8px !important; border-radius: 7px !important;
+  font-size: 12.5px !important; font-weight: 500 !important; color: var(--ink-soft) !important; gap: 4px !important;
+}
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar .chat-input-chip:hover),
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar .chat-input-chip[aria-expanded="true"]),
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar [data-one-composer-trigger]:hover),
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar [data-one-composer-trigger][aria-expanded="true"]) { background: var(--paper-3) !important; color: var(--ink) !important; }
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar .chat-input-chip svg),
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-toolbar [data-one-composer-trigger] svg) { display: none; }
+/* active modes (Plan, Goal): the person can still see and clear what is on - drawn at the left of the words row. */
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-active-modes) { order: -1; margin-right: auto; }
+
+/* ---- F-D6: the New chat start screen drawn over a full Space (the covered pane stays mounted underneath). ---- */
+.cover { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; background: var(--paper, #fcfcfb); }
+.coverBar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; min-height: 40px; padding: 0 10px 0 14px; border-bottom: 1px solid var(--rd-hair, #e8e8e5); color: var(--rd-ink, #111); font-size: 13.5px; font-weight: 650; }

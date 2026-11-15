@@ -39,7 +39,7 @@ import {
   withAgentMailExecutionScope,
 } from "./client";
 import { saveAgentMailAttachment } from "./attachments";
-import { agentMailDelegate, agentMailSyncNow } from "./sync";
+import { agentMailDelegate, agentMailSyncNow, agentMailUserAttention } from "./sync";
 
 // Renderer → Main agent mail calls. Main holds the session; the renderer never
 // sees the cookie. Everything sent from here is the owner's own action, so the
@@ -63,7 +63,7 @@ export function registerAgentMailIpc(owner: Pick<IpcMain, "handle">): void {
   const ipc: Pick<IpcMain, "handle"> = { handle(channel, listener) {
     owner.handle(channel, (event, ...args) => withAgentMailExecutionScope({ kind: "personal" }, () => listener(event, ...args)));
   } };
-  ipc.handle(CH.status, () => agentMailStatus());
+  ipc.handle(CH.status, () => { agentMailUserAttention(); return agentMailStatus(); });
   ipc.handle(CH.joinWaitlist, () => agentMailJoinWaitlist());
   ipc.handle(CH.issue, async (_e, input: unknown) => afterChange(await agentMailIssue(obj<{ displayName?: string; localPart?: string }>(input))));
   ipc.handle(CH.updateMailbox, (_e, patch: unknown) => {
@@ -98,12 +98,12 @@ export function registerAgentMailIpc(owner: Pick<IpcMain, "handle">): void {
     return afterChange(await agentMailSetDomainAddress({ id: String(id ?? ""), localPart: String(localPart ?? ""), ...(typeof displayName === "string" ? { displayName } : {}) }));
   });
   ipc.handle(CH.removeDomain, async (_e, id: unknown) => afterChange(await agentMailRemoveDomain(String(id ?? ""))));
-  ipc.handle(CH.list, (_e, input: unknown) => agentMailList(obj<Parameters<typeof agentMailList>[0]>(input)));
-  ipc.handle(CH.get, (_e, id: unknown) => agentMailGet(String(id ?? "")));
+  ipc.handle(CH.list, (_e, input: unknown) => { agentMailUserAttention(); return agentMailList(obj<Parameters<typeof agentMailList>[0]>(input)); });
+  ipc.handle(CH.get, (_e, id: unknown) => { agentMailUserAttention(); return agentMailGet(String(id ?? "")); });
   ipc.handle(CH.send, async (_e, input: unknown) => afterChange(await agentMailSend(obj<AgentMailSendInput>(input), { origin: "owner" })));
   ipc.handle(CH.remove, async (_e, id: unknown) => afterChange(await agentMailRemove(String(id ?? ""))));
-  ipc.handle(CH.threads, (_e, input: unknown) => agentMailThreads(obj<AgentMailThreadsInput>(input)));
-  ipc.handle(CH.thread, (_e, id: unknown) => agentMailThread(String(id ?? "")));
+  ipc.handle(CH.threads, (_e, input: unknown) => { agentMailUserAttention(); return agentMailThreads(obj<AgentMailThreadsInput>(input)); });
+  ipc.handle(CH.thread, (_e, id: unknown) => { agentMailUserAttention(); return agentMailThread(String(id ?? "")); });
   ipc.handle(CH.markRead, async (_e, input: unknown) => {
     const { threadId, read } = obj<{ threadId?: string; read?: boolean }>(input);
     return afterChange(await agentMailMarkThreadRead(String(threadId ?? ""), read !== false));
@@ -114,10 +114,11 @@ export function registerAgentMailIpc(owner: Pick<IpcMain, "handle">): void {
   });
   ipc.handle(CH.removeThread, async (_e, id: unknown) => afterChange(await agentMailRemoveThread(String(id ?? ""))));
   ipc.handle(CH.unread, async () => {
+    agentMailUserAttention();
     const res = await agentMailUnread();
     return res.ok ? { ok: true, unread: res.unread } : res;
   });
-  ipc.handle(CH.drafts, (_e, input: unknown) => agentMailDrafts(obj<{ threadId?: string; cursor?: string | null }>(input)));
+  ipc.handle(CH.drafts, (_e, input: unknown) => { agentMailUserAttention(); return agentMailDrafts(obj<{ threadId?: string; cursor?: string | null }>(input)); });
   ipc.handle(CH.saveDraft, (_e, input: unknown) => {
     const value = obj<{ id?: string | null; expectedVersion?: number; fields?: AgentMailDraftInput }>(input);
     return agentMailSaveDraft({ id: value.id ?? null, expectedVersion: value.expectedVersion, fields: obj<AgentMailDraftInput>(value.fields) }, { origin: "owner" });

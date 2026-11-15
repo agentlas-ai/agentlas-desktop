@@ -330,7 +330,8 @@ export function getBrowserPermission(
   site: string,
   actionType: string,
 ): BrowserPermissionDecision | null {
-  const approvalCacheForbidden = actionType === "payment" || actionType === "unsafe-code";
+  // Money is asked every time; browser code is an ordinary "always allow" (decision addendum was forbidden with payments).
+  const approvalCacheForbidden = actionType === "payment";
   const norm = normalizeSite(site);
   if (!norm) return null;
   const row = getDb()
@@ -352,7 +353,7 @@ export function setBrowserPermission(
   decision: BrowserPermissionDecision,
 ): void {
   if (decision === "once") return;
-  if ((actionType === "payment" || actionType === "unsafe-code") && decision !== "deny") return;
+  if (actionType === "payment" && decision !== "deny") return;
   const norm = normalizeSite(site);
   if (!norm) return;
   getDb()

@@ -71,7 +71,28 @@ export async function renameWithRetry(from: string, to: string, options: RetryOp
   }
 }
 
-/** rmSync with Node's own retry for EBUSY/EPERM/ENOTEMPTY (maxRetries applies to recursive removal). */
-export function rmSyncWithRetry(target: string, options: RetryOptions = {}): void {
-  (options.fsImpl ?? fs).rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+/**
+ * rmSync of a file or folder tree, retried while the path is transiently locked.
+ *
+ * macOS / Linux: the single call with Node's own retry, as it always was.
+ * Windows: Node's own retry gives up after 1.5 s on a held file and does not retry at all when a process stands inside the folder (its working folder
+ * answers EBUSY at once) — win-vm-3 `p3-rmx2.log`: a 3 s hold left the plaintext export folder behind, a child's working folder held 0 retries. So each
+ * attempt is one plain call and the same backoff as the renames above (12 tries, 25 ms doubling to 400 ms, about 3.2 s at most) waits while the answer is
+ * a lock code (EPERM/EBUSY/EACCES) or a folder that is still not empty (ENOTEMPTY). Any other error is thrown at once; the last lock error is thrown after the last try.
+ */
+export function rmSyncWithRetry(target: string, options: RetryOptions & { platform?: NodeJS.Platform } = {}): void {
+  const impl = options.fsImpl ?? fs;
+  if ((options.platform ?? process.platform) !== "win32") {
+    impl.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    return;
+  }
+  const attempts = Math.max(1, options.attempts ?? DEFAULTS.attempts);
+  for (let attempt = 0; ; attempt += 1) {
+    try { impl.rmSync(target, { recursive: true, force: true }); return; }
+    catch (error) {
+      const retryable = isTransientLock(error) || (error as NodeJS.ErrnoException | undefined)?.code === "ENOTEMPTY";
+      if (!retryable || attempt >= attempts - 1) throw error;
+      (options.sleepSync ?? blockingSleep)(backoff(attempt, options));
+    }
+  }
 }

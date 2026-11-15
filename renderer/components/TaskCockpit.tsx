@@ -9,6 +9,7 @@ import { createTrailingDebounce } from "@/lib/store-change-policy";
 import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { useWorkStartHandoff, useWorkStartRecovery, type WorkStartRecoveryTarget } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
+import { chatBelongsToOne } from "@shared/chat-surface";
 import { selectionForRuntime } from "@shared/runtime-selection";
 import { chipRuntimeFor } from "@/lib/one-runtime-chip";
 import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
@@ -257,6 +258,7 @@ import { stripMultimodalSetup } from "@/lib/multimodal-setup";
 import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
 import { completePromptStartIntent } from "@/lib/prompt-actions";
 import { ChatInput, ComposerGoalBar } from "@/components/ChatInput";
+import { usePaneActions } from "@/components/space/pane-context";
 import { goalNextWakeOf } from "@shared/goal-wake";
 import { WorkbenchPanel, type SurfaceActionHandler, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
 import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel";
@@ -298,7 +300,7 @@ import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputVi
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { currentWorkSidebarWidth, WORK_SIDEBAR_WIDTH_EVENT } from "@/lib/work-sidebar-width";
-import { AgiDefectChip, AgiIncidentReportButton } from "./agi/AgiBugReport";
+import { DefectReportButton } from "./support/DefectReport";
 import {
   appendChatFileMarker,
   chatFileItem,
@@ -2343,14 +2345,24 @@ export interface WorkChatSurfaceProps {
   chatId: string;
   embedded?: boolean;
   onNewSession?: () => void | Promise<void>;
+  /**
+   * Space shows several Work chats at once; the detached screen follows ONE of them (module singleton `bindAgentScreenScope`).
+   * Only the focused pane passes true. Everything else (default true) is the single-chat screen it always was.
+   */
+  scopeActive?: boolean;
+  /**
+   * The first message of a Work session started from the New chat start screen (F-D6). Sent once, as a typed message would be, when the new chat has
+   * loaded and has no messages; nothing is sent for a chat that already has any.
+   */
+  startPrompt?: string | null;
 }
 
 /** The same Work harness, admission, history and composer with an explicit owning chat. */
-export function WorkChatSurface({ chatId, embedded = false, onNewSession }: WorkChatSurfaceProps) {
-  return <Suspense fallback={null}><ChatPage key={chatId} externalChatId={chatId} embedded={embedded} onNewSession={onNewSession}/></Suspense>;
+export function WorkChatSurface({ chatId, embedded = false, onNewSession, scopeActive = true, startPrompt = null }: WorkChatSurfaceProps) {
+  return <Suspense fallback={null}><ChatPage key={chatId} externalChatId={chatId} embedded={embedded} onNewSession={onNewSession} scopeActive={scopeActive} startPrompt={startPrompt}/></Suspense>;
 }
 
-function ChatPage({ externalChatId, embedded = false, onNewSession }: { externalChatId?: string; embedded?: boolean; onNewSession?: () => void | Promise<void> } = {}) {
+function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive = true, startPrompt = null }: { externalChatId?: string; embedded?: boolean; onNewSession?: () => void | Promise<void>; scopeActive?: boolean; startPrompt?: string | null } = {}) {
   const routeSearchParams = useSearchParams();
   // An embedded surface owns its identity. Finance URL parameters cannot start or retarget a Work turn.
   const searchParams = useMemo(() => externalChatId === undefined ? routeSearchParams : new URLSearchParams(), [externalChatId, routeSearchParams]);
@@ -2369,7 +2381,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       : null
     : "";
   const chatId = requestedTaskId ? (validatedTaskChatId ?? "") : queryChatId;
-  useLayoutEffect(() => bindAgentScreenScope(chatId || null), [chatId]);
+  useLayoutEffect(() => (scopeActive ? bindAgentScreenScope(chatId || null) : undefined), [chatId, scopeActive]);
   const surfaceParam = searchParams.get("surface") ?? "";
   // 홈 composer가 ?prompt=...로 첫 메시지를 실어서 보내면 자동 전송 (한 번만)
   const seedPrompt = searchParams.get("prompt") ?? "";
@@ -4143,6 +4155,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       // 입력창의 Esc 핸들러(자동완성/메뉴 닫기, Cmd/Ctrl+Esc 실행 정지)가 이미 처리했으면 중복 동작 안 함.
       if (e.defaultPrevented) return;
       if (e.key !== "Escape" || !rightPanelOpen) return;
+      // One Esc closes one panel: in Space only the pane that holds the focus answers (every pane registers this listener).
+      if (embedded && !scopeActive) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName.toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) return;
@@ -4151,7 +4165,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [closeRightPanel, rightPanelOpen]);
+  }, [closeRightPanel, rightPanelOpen, embedded, scopeActive]);
 
   // 뷰 상태 미러 — 채팅 전환 effect가 이전 채팅의 마지막 렌더 상태를 스냅샷할 수 있게
   // 매 렌더마다 갱신한다(전환 시점에 messages state는 아직 이전 채팅 것이다).
@@ -4349,7 +4363,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         if (!c) { if (embedded) setEmbeddedLoadFailed(true); else router.replace("/"); }
         return;
       }
-      if (c.originSurface === "one" && !c.projectId) {
+      if (chatBelongsToOne(c)) {
         const oneTask = await api.tasks.findForChat(c.id).catch(() => null);
         router.replace(oneTask
           ? `/one?task=${encodeURIComponent(oneTask.id)}`
@@ -6518,6 +6532,14 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     [busy, chat, locale, router, externalChatId, onNewSession, isCurrentChat],
   );
 
+  // In a Workspace pane the pane's head is the only head (F-D5): it asks this surface for New session / Clear history and for the panel buttons of the
+  // old head. Outside a pane (Finance, the Work page) this registers nothing.
+  usePaneActions({
+    session: handleSessionAction,
+    busy,
+    viewer: { toggle: () => (rightPanelOpen && rightPanelTab === "panel" ? closeRightPanel() : openPanelTab("panel")), enabled: hasViewablePanelContent, open: rightPanelOpen && rightPanelTab === "panel" },
+  });
+
   // A linked prompt may prefill or start a task, but product actions never ride in chat text.
   useEffect(() => {
     const seedPrompt = searchParams.get("prompt") ?? "";
@@ -6561,6 +6583,16 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
       })();
     }
   }, [chat, agent, chatId, locale, messages.length, send, router, searchParams, isCurrentChat]);
+
+  // F-D6: the first message of a Work session that the New chat start screen made. It goes through the same `send` a typed message goes through,
+  // once, for a chat that has no messages yet; a reload of a chat that already has messages never sends it.
+  const startPromptSentRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!startPrompt || !chat || !agent || startPromptSentRef.current === chatId) return;
+    if (messages.length > 0) return;
+    startPromptSentRef.current = chatId;
+    void send(startPrompt, { permissions: "write" });
+  }, [startPrompt, chat, agent, chatId, messages.length, send]);
 
   useEffect(
     () =>
@@ -6740,9 +6772,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
     setBrowserDraftRequest({ id: `ui:${crypto.randomUUID()}`, chatId, text: prompt });
     return true;
   }, [chatId, busy, cancelPending, agent]);
+  // The reply focuses the composer of THIS conversation. With several Work panes in Space a document-wide query found the first
+  // pane's composer, whichever pane the reply was pressed in.
+  const inputWrapRef = useRef<HTMLDivElement | null>(null);
   const handleMessageReply = useCallback((reply: MessageReply) => {
     setMessageReply(reply);
-    document.querySelector<HTMLTextAreaElement>('[data-tour-id="workspace.input"] textarea')?.focus();
+    inputWrapRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
   }, []);
   const pickerAgents = useMemo(() => visibleAgents(allAgents, { includeTeams: true }), [allAgents]);
   const boundTeamMember = useMemo(
@@ -7411,10 +7446,10 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           type="button"
           className="project-detail-back titlebar-nodrag"
           data-work-dashboard-return="task-header"
-          onClick={() => router.push(project ? `/project/detail?id=${project.id}` : "/dashboard")}
-          aria-label={project ? (locale === "ko" ? "프로젝트 열기" : "Open project") : (locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard")}
+          onClick={() => router.push(project ? `/project/detail?id=${project.id}` : "/workspace")}
+          aria-label={project ? (locale === "ko" ? "프로젝트 열기" : "Open project") : (locale === "ko" ? "홈으로 돌아가기" : "Back to Home")}
           // The label is hidden in this header (icon only, beside the Files panel's folder icon), so say on hover where it goes.
-          title={project ? (locale === "ko" ? `프로젝트 열기: ${project.name}` : `Open project: ${project.name}`) : (locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard")}
+          title={project ? (locale === "ko" ? `프로젝트 열기: ${project.name}` : `Open project: ${project.name}`) : (locale === "ko" ? "홈으로 돌아가기" : "Back to Home")}
         >
           <IconFolder size={16} />
           <span>{project?.name || (locale === "ko" ? "대시보드" : "Dashboard")}</span>
@@ -7533,14 +7568,14 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
         >
           <IconPanelRight size={16} />
         </button>
-        {isPersonalAgentRoom(chat) && <PersonalAgentRoomMenu chatId={chat.id} locale={locale === "ko" ? "ko" : "en"}
+        {isPersonalAgentRoom(chat) && <span data-pane-keep="true" style={{ display: "contents" }}><PersonalAgentRoomMenu chatId={chat.id} locale={locale === "ko" ? "ko" : "en"}
           className="task-cockpit-header-action"
           onReleased={() => {
             // The room is ordinary now: read Main's chat again so the composer comes back.
             const api = ipc();
             void api?.chats?.get(chat.id).then((next) => { if (next && next.id === chat.id) setChat(next); else setChat({ ...chat, supervisedByPersonalAgent: undefined }); })
               .catch(() => setChat({ ...chat, supervisedByPersonalAgent: undefined }));
-          }} />}
+          }} /></span>}
         <button
           onClick={() => void removeChat()}
           className="task-cockpit-header-action task-cockpit-header-danger"
@@ -7734,10 +7769,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
             onEndGoal={handleToggleGoal} nextWake={goalNextWakeOf(goalContext)}
             details={<ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} embedded />} />
         : <ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />}
-      {/* Its own row: the stack stretches its children, which made the chip a full-width grey bar. */}
-      <div style={{ display: "flex" }}><AgiDefectChip chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} /></div>
       {latestWorkActivityMessage?.failure && latestWorkActivityMessage.failure.code !== "cancelled" && (
-        <AgiIncidentReportButton key={latestWorkActivityMessage.runId ?? latestWorkActivityMessage.id}
+        <DefectReportButton key={latestWorkActivityMessage.runId ?? latestWorkActivityMessage.id}
           locale={locale === "ko" ? "ko" : "en"} draft={{
             chatId, runId: latestWorkActivityMessage.runId ?? latestWorkActivityMessage.recoveryForRunId ?? latestWorkActivityMessage.id,
             failureCode: latestWorkActivityMessage.failure.code, category: "other",
@@ -7841,7 +7874,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
           )}
         </div>
       )}
-      <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
+      <div ref={inputWrapRef} data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
         {isPersonalAgentRoom(chat) ? (
           // Owner 2026-10-27: a room the personal agent opened is read here and spoken to through the personal agent.
           <PersonalAgentRoomNotice locale={locale === "ko" ? "ko" : "en"} width={`min(calc(100% - 32px), ${WORK_COMPOSER_WIDTH_PX}px)`}
@@ -7934,6 +7967,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession }: { external
                 }}
                 screenChatId={chat.id}
         browserScopeKey={chatId || undefined}
+        environment={project ? { name: project.name, folder: project.folderPath ?? null } : null}
         browserHistoryUrl={workBrowserHistoryUrl}
         browserPreviewUrl={mediaPreview?.viewerKind === "browser" ? mediaPreview.browserUrl : undefined}
         result={(

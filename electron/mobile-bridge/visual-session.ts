@@ -14,6 +14,7 @@ import {
   type MobileBridgeVisualSourceDto,
 } from "../../shared/mobile-bridge";
 import type { MobileBridgeConnectionContext } from "./server";
+import { noteScreenControl } from "../one/screen-control";
 
 const VISUAL_SESSION_TTL_MS = 5 * 60_000;
 const VISUAL_INPUT_LEASE_MS = 15_000;
@@ -154,6 +155,7 @@ export class MobileVisualSessionManager {
       return refusal("visual_unavailable", "The Agentlas window is not available for a visual session.");
     }
     this.enforceBounds(context.deviceId);
+    noteScreenControl("phone-visual"); // O-M3a: a phone can see and click Agentlas's own window from here on (one/screen-control.ts)
     const now = Date.now();
     const session: VisualSessionState = {
       visualSessionId: `visual_${randomUUID()}`,
@@ -220,6 +222,7 @@ export class MobileVisualSessionManager {
     this.assertOpen();
     const session = this.resolve(input.visualSessionId, input.sessionEpoch, context);
     if (!("deviceId" in session)) return session;
+    noteScreenControl("phone-visual");
     if (!this.control) return refusal("visual_unavailable", "Visual capture is unavailable.", session);
     const frame = await this.control.capture({
       maxWidth: input.maxWidth ?? 1_280,
@@ -320,6 +323,7 @@ export class MobileVisualSessionManager {
     this.assertOpen();
     const session = this.resolve(input.visualSessionId, input.sessionEpoch, context);
     if (!("deviceId" in session)) return session;
+    noteScreenControl("phone-visual");
     const stale = this.validateObservation(session, input);
     if (stale) return stale;
     if (this.leaseExpired(session)) {

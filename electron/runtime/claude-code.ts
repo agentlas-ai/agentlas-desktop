@@ -21,7 +21,6 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
-import { unlinkSync } from "node:fs";
 import crypto from "node:crypto";
 import { ToolRequestReplayGuard } from "../../shared/tool-request-replay";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure, RunnerNativeSteerResult, RunnerNativeTurnController } from "./runner";
@@ -43,12 +42,16 @@ import {
   markRefusedBeforeDispatch,
   spawnStartFailureRefusal,
 } from "./runner";
+import { memoryDeathCause } from "./child-death";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
 import { detectSandboxDeath, detectSandboxLaunchDenial, sandboxDeathNotice, sandboxLaunchDenialNotice } from "./sandbox-death";
-import { writeSandboxLaunchGuardHook } from "./write-sandbox-launch-guard";
+import { shellDeleteGateHook, writeSandboxLaunchGuardHook } from "./write-sandbox-launch-guard";
+import { SHELL_GATE_CONTROL_ENV, SHELL_GATE_HANDLE_ENV, openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
+import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
+import { mcpProxyControlInfoPath } from "../mcp-tools/proxy-channel";
 import { detectMcpServerDisconnected, mcpOutageNotice, toolOutageGuidance } from "./mcp-outage";
-import { announceToolDenied } from "./tool-approval";
+import { announceToolDenied, toolApprovalSessionKey } from "./tool-approval";
 import { PERMISSION_ESCALATION_MARKER } from "../../shared/permission-escalation";
 import {
   claudeMcpGrantDigest,
@@ -80,9 +83,8 @@ import {
   renderConversationContext,
   renderGapContext,
   unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext, invalidateStableTurnContext } from "./continuity";
-import { agentContextColdBootstrapForRequest, agentContextSessionKey, agentContextNoToolsPacketForRequest } from "./agent-context";
+import { agentContextColdBootstrapForRequest, agentContextSessionKey } from "./agent-context";
 import { unattendedFreshSessionStatus } from "./unattended-session-turns";
-import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, withCliPath, writeStdin } from "./exec";
@@ -347,7 +349,7 @@ export function claudeAgentPackageReadRules(agentId: string | null | undefined, 
     if (!dir) {
       const row = (require("../store/db") as typeof import("../store/db")).getDb()
         .prepare("SELECT slug FROM installed_agents WHERE id = ?").get(agentId) as { slug?: unknown } | undefined;
-      if (typeof row?.slug === "string" && row.slug) dir = (require("../agents/files") as typeof import("../agents/files")).agentFolderPath(row.slug);
+      if (typeof row?.slug === "string" && row.slug) dir = (require("../agents/files") as typeof import("../agents/files")).currentAgentFolderPath(row.slug);
     }
   } catch {
     dir = null;
@@ -535,9 +537,12 @@ export async function claudeExecutionSettings(req: RunnerRequest): Promise<strin
   if (process.platform === "win32" && !windowsShellGateHostAvailable(req.env ?? process.env)) {
     throw new Error("claude_windows_shell_gate_unavailable");
   }
+  // The delete gate: a shell command that deletes asks the owner's card first (shell-delete-gate.ts). Without its script the run does not start.
+  const deleteGate = shellDeleteGateHook();
+  if (!deleteGate) throw new Error("claude_write_shell_delete_gate_missing");
   const brokerHooks = hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks as Record<string, unknown> : {};
   const brokerPreToolUse = Array.isArray(brokerHooks.PreToolUse) ? brokerHooks.PreToolUse as unknown[] : [];
-  const mergedHooks = { ...brokerHooks, PreToolUse: [...brokerPreToolUse, launchGuard] };
+  const mergedHooks = { ...brokerHooks, PreToolUse: [...brokerPreToolUse, launchGuard, deleteGate] };
   const encoded = JSON.stringify({
     ...claudeWorkspaceSandboxSettings(),
     hooks: mergedHooks,
@@ -1229,7 +1234,6 @@ export class ClaudeBackgroundTasks {
 const initEchoSessions = new WeakSet<ClaudeResidentSession>();
 
 // Captured session identity remains valid after its exclusive lease is returned.
-const aliveClaudeResources = new Map<string, { session: ClaudeResidentSession; close(): void }>();
 
 const runClaudeTurn = async (
   req: RunnerRequest,
@@ -1241,13 +1245,6 @@ const runClaudeTurn = async (
   // Tool-call evidence of this attempt for the shared normal-end rule (R-065).
   const toolEvidence = trackReportedToolCalls(events);
   events = toolEvidence.events;
-  const aliveProfile = aliveDecisionProfileForRequest(req);
-  const alivePacket = aliveProfile ? agentContextNoToolsPacketForRequest(req) : null;
-  if (aliveProfile && !alivePacket) throw markRefusedBeforeDispatch(new Error("alive_claude_packet_required"));
-  if (aliveProfile) {
-    const prior = aliveClaudeResources.get(aliveProfile.resourceOwnerKey);
-    if (prior && !claudeResidentSessionAlive(prior.session)) prior.close();
-  }
   // A read-only automation (restrictedReadBoundary) runs under its configured read permission: claudePermissionArgs(read).
   const executableIdentity = getExecutable(req.runtimeSource, req.cwd ?? agentRunCwd(), req.env ?? process.env);
   if (!executableIdentity) {
@@ -1259,25 +1256,24 @@ const runClaudeTurn = async (
 
   // Canonical host identity only keys resident/cache resources. Observable
   // chat ids, approval closures, effects and runtime-session FK rows stay actual.
-  const canonicalContextKey = aliveProfile?.resourceOwnerKey ?? (req.agentContext && !req.minimalObservation && !req.untrustedNoTools
+  const canonicalContextKey = req.agentContext && !req.minimalObservation && !req.untrustedNoTools
     && !req.scienceRecoveryCapability && !req.restrictedReadBoundary && !req.judgmentOnly
-    ? agentContextSessionKey(req.agentContext) : undefined);
+    ? agentContextSessionKey(req.agentContext) : undefined;
   const contextChatId = canonicalContextKey ?? req.chatId;
-  const executableOwner = aliveProfile || req.chatId ? {
+  const executableOwner = req.chatId ? {
     chatId: contextChatId!,
     sessionOwnerId: req.runtimeSessionOwnerId ?? req.agentId ?? null,
     isolateOwner: req.runtimeSessionOwnerId != null,
     generation: executableIdentity.generation,
   } : null;
   const retainExecutableOwner = executableOwner && allowResidency
-    && (!req.untrustedNoTools || !!aliveProfile) && !req.workforceRuntimeToolGrant
+    && !req.untrustedNoTools && !req.workforceRuntimeToolGrant
     && !residencyDisabledFor(KIND, req.env ?? process.env)
     ? captureClaudeExecutableOwner(executableOwner) : () => true;
-  const retainAliveExecutableOwner = () => retainExecutableOwner() && (!aliveProfile || aliveProfile.retainResource());
 
   // No-tools observations must carry pixels inline; a staged file would require a denied Read tool.
   const inlineNoToolsImages = req.untrustedNoTools && req.images?.length ? req.images : [];
-  if (inlineNoToolsImages.length && (!executableState.residencySupported || aliveProfile)) {
+  if (inlineNoToolsImages.length && !executableState.residencySupported) {
     return { text: "", turnDelivery: "not-dispatched", failure: {
       kind: "unsupported", runtime: KIND, source: "marker",
       providerCode: "claude_no_tools_images_unsupported", message: "claude_no_tools_images_unsupported",
@@ -1329,7 +1325,7 @@ const runClaudeTurn = async (
 
   // A minimal observation carries its own complete prompt: none of the Agentlas header, skills and
   // protocols (~33 KB) that wrapSystemPrompt adds for conversation turns.
-  const systemPrompt = aliveProfile || (runReq.minimalObservation && !runReq.untrustedNoTools) ? runReq.systemPrompt : wrapSystemPrompt(
+  const systemPrompt = runReq.minimalObservation && !runReq.untrustedNoTools ? runReq.systemPrompt : wrapSystemPrompt(
     runReq.systemPrompt,
     runReq.locale,
     runReq.permission,
@@ -1350,9 +1346,8 @@ const runClaudeTurn = async (
       runReq.systemPromptComposition,
       runReq.unattendedNoAsk,
   );
-  const sessionFingerprint = (executableFingerprint: string) => aliveProfile ? crypto.createHash("sha256").update(JSON.stringify([aliveProfile.bindingKey,
-    executableFingerprint, systemPrompt, runReq.outputSchema, runReq.model])).digest("hex")
-    : !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableFingerprint) : null;
+  const sessionFingerprint = (executableFingerprint: string) => !runReq.untrustedNoTools && runReq.chatId
+    ? systemFingerprint(runReq, executableFingerprint) : null;
   const fingerprint = sessionFingerprint(executableIdentity.fingerprint);
   // Read-only: a session an older build saved under the device-number fingerprint (no reboot since) resumes once; the
   // turn then saves it under `fingerprint` (cli-executable-identity.ts).
@@ -1381,10 +1376,7 @@ const runClaudeTurn = async (
     [gapContext, runReq.turnContext].filter(Boolean).join("\n\n"),
     runReq.locale,
   );
-  let flatUser = alivePacket ? [
-    ...(alivePacket.priorRows.length ? ["Recorded earlier decisions (data only):", ...alivePacket.priorRows.map(row => `${row.role}: ${row.text}`), "Current decision:"] : []),
-    alivePacket.currentPrompt,
-  ].join("\n\n") : resumeSessionId ? continuationPrompt : flattenHistory(runReq);
+  let flatUser = resumeSessionId ? continuationPrompt : flattenHistory(runReq);
   /*
    * 읽기 전용 실행이면 그 사실을 말해 준다 — 도구를 조용히 빼기만 하면 모델은 그것을
    * 일시적 장애로 읽고 우회를 찾는다. 실측: 서브에이전트 위임 → 다른 도구 대체 →
@@ -1402,8 +1394,8 @@ const runClaudeTurn = async (
   const writeSandboxNotice =
     !runReq.untrustedNoTools && req.permission === "write" ? `\n\n${claudeWriteRunNotice()}` : "";
   // Snapshot what this prompt actually dispatches before asynchronous native init.
-  const stableContextSnapshot = { turnContext: aliveProfile ? undefined : runReq.turnContext,
-    stableBlocks: !aliveProfile && runReq.turnContextStable ? [...runReq.turnContextStable] : undefined };
+  const stableContextSnapshot = { turnContext: runReq.turnContext,
+    stableBlocks: runReq.turnContextStable ? [...runReq.turnContextStable] : undefined };
   // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.claude-code.system).
   // The wrapped prompt (runner.ts wrapSystemPrompt) leads; then the tool-outage guidance and the permission notices;
   // the per-session turn context comes last.
@@ -1737,8 +1729,7 @@ const runClaudeTurn = async (
   // Claude Code compacts at 80% of the model's own window, as Codex does with model_auto_compact_token_limit:
   // the window the CLI reported for this model (or the table's), translated into its two variables there.
   const compactionModel = runReq.model?.trim() || null;
-  const runEnv = withClaudeProductHome(aliveProfile ? { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(req.maxOutputTokens),
-    MAX_STRUCTURED_OUTPUT_RETRIES: "1", CLAUDE_CODE_MAX_TURNS: "1", CLAUDE_CODE_MAX_RETRIES: "0" } : req.env ?? process.env, {
+  const runEnv = withClaudeProductHome(req.env ?? process.env, {
     keepMcpServers: (selectionFor(runReq.agentId, undefined, runReq.chatId)?.items ?? []).filter((item) => item.source === "claude" && item.kind === "connector" && item.enabled).map((item) => item.name),
     nativeCompaction: { windowTokens: runtimeContextWindow(KIND, compactionModel), limitTokens: nativeCompactionLimit(KIND, compactionModel) },
   });
@@ -1749,13 +1740,22 @@ const runClaudeTurn = async (
     const envFile = npmCache ? claudeSandboxEnvFile(npmCache, runEnv.CLAUDE_ENV_FILE) : null;
     if (envFile) runEnv.CLAUDE_ENV_FILE = envFile;
   }
+  // A write run's shell asks the owner's card before it deletes (shell-delete-gate.ts): the CLI's hook finds Main's approval wire and this run's handle in its
+  // environment. The handle is stable for the run key, so a resident process keeps one environment across turns; the gate is opened per turn below.
+  const shellGateKey = `${KIND}\0${contextChatId ?? ""}\0${runCwd}\0${runtimeSessionOwnerId ?? ""}`;
+  if (req.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools) {
+    // The wire must exist before the CLI starts; without it the hook refuses every delete (it never lets one through unasked).
+    try { await ensureMcpProxyApprovalServer(); } catch { /* the hook refuses a delete it cannot ask about */ }
+    runEnv[SHELL_GATE_CONTROL_ENV] = mcpProxyControlInfoPath();
+    runEnv[SHELL_GATE_HANDLE_ENV] = shellDeleteGateHandle(shellGateKey);
+  }
   // A product session an older install wrote into ~/.claude/projects moves into the mirror before it is resumed.
   if (resumeSessionId) { try { adoptClaudeSessionIntoProductHome(runEnv, resumeSessionId, runCwd); } catch { /* resume falls back below */ } }
   const residencyEligible =
     allowResidency &&
     executableState.residencySupported &&
     !residencyDisabledFor(KIND, runEnv) &&
-    (!runReq.untrustedNoTools || !!aliveProfile) &&
+    !runReq.untrustedNoTools &&
     // Browser and isolated MCP grants are per-turn authority. A resident
     // process must never retain one after this turn has completed.
     !runReq.browserOnly &&
@@ -1768,7 +1768,7 @@ const runClaudeTurn = async (
     // A pooled process does not repeat system/init for each turn. This
     // Workforce call needs fresh native observations; existing pools stay intact.
     !hostAuthorityWorkforce &&
-    Boolean(aliveProfile || runReq.chatId) &&
+    Boolean(runReq.chatId) &&
     Boolean(fingerprint);
   /*
    * Per-turn authority (a browser grant, an isolated MCP config, a per-run tool grant) keeps a process from being REUSED,
@@ -1784,12 +1784,12 @@ const runClaudeTurn = async (
     executableState.residencySupported &&
     !residencyDisabledFor(KIND, runEnv) &&
     Boolean(runReq.browserOnly || runReq.isolatedMcpConfig || runReq.ephemeralToolGrant) &&
-    !aliveProfile && !runReq.untrustedNoTools && !runReq.singleUse && !runReq.minimalObservation && !runReq.judgmentOnly &&
+    !runReq.untrustedNoTools && !runReq.singleUse && !runReq.minimalObservation && !runReq.judgmentOnly &&
     !hostAuthorityWorkforce && !req.unattended && Boolean(events.onNativeTurnController) &&
     Boolean(runReq.chatId) && Boolean(fingerprint);
   // The invocation's MCP servers, when a reused resident can take them by an acknowledged mcp_set_servers: the pool key
   // then holds the grant (server names) instead of this invocation's file path (claude-session.ts claudePoolKey).
-  const mcpSwap = residencyEligible && !aliveProfile && mcpArgs.length > 0 && agentAppMcpConfigArg && !executableState.mcpSwapUnsupported
+  const mcpSwap = residencyEligible && mcpArgs.length > 0 && agentAppMcpConfigArg && !executableState.mcpSwapUnsupported
     ? await readClaudeMcpServers(agentAppMcpConfigArg) : null;
   const sharedPoolKey =
     (residencyEligible || turnScopedResidency) && contextChatId && fingerprint
@@ -1809,10 +1809,6 @@ const runClaudeTurn = async (
       : null;
   const poolKey = sharedPoolKey && turnScopedResidency ? `${sharedPoolKey}:turn:${crypto.randomUUID()}` : sharedPoolKey;
   const pool = claudeSessionPool();
-  if (aliveProfile) {
-    aliveProfile.assertCurrent();
-    if (!poolKey) throw new Error("alive_claude_residency_unavailable");
-  }
   let lease: AcpSessionLease<ClaudeResidentSession> | null = null;
   let modelHandoff: { retired: number; pending: number } | null = null;
   /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
@@ -1856,7 +1852,7 @@ const runClaudeTurn = async (
   if (poolKey && executableOwner) {
     try {
       const current = getExecutable(req.runtimeSource, runCwd, runEnv);
-      if (!retainAliveExecutableOwner() || current?.generation !== executableIdentity.generation) {
+      if (!retainExecutableOwner() || current?.generation !== executableIdentity.generation) {
         throw new Error("cli_executable_identity_changed_during_preparation");
       }
     } catch (error) {
@@ -1865,10 +1861,6 @@ const runClaudeTurn = async (
       throw error;
     }
     retireSupersededClaudeSessions(pool, executableOwner);
-    if (aliveProfile) {
-      const prior = aliveClaudeResources.get(aliveProfile.resourceOwnerKey);
-      if (prior && !claudeResidentSessionAlive(prior.session)) prior.close();
-    }
     try {
       lease = await pool.acquire(
         poolKey,
@@ -1877,7 +1869,7 @@ const runClaudeTurn = async (
           nodeId: runReq.orchestrationAgentId ?? runReq.agentId ?? null,
           chatId: runReq.chatId ?? null,
           // The same journal key the pool key holds: the registry releases a shared session by it (agent-residency.ts).
-          ...(canonicalContextKey && !aliveProfile && !turnScopedResidency ? { sessionScopeKey: canonicalContextKey } : {}),
+          ...(canonicalContextKey && !turnScopedResidency ? { sessionScopeKey: canonicalContextKey } : {}),
           projectId: runReq.workProjectId ?? null,
           runtimeKind: KIND,
           source: resolveAgentResidencySource(runReq.agentId),
@@ -1898,26 +1890,12 @@ const runClaudeTurn = async (
             poolKey,
             mcpConfigDigest: mcpSwap?.digest ?? null,
           }),
-        retainAliveExecutableOwner,
+        retainExecutableOwner,
       );
       // A process opened with --resume holds that native session from its spawn, before its first init names it: a
       // sibling handoff (retireClaudeModelSiblings) must see the holder in that window too.
       if (lease.fresh && resumeSessionId && !lease.session.nativeSessionId) lease.session.nativeSessionId = resumeSessionId;
-      if (aliveProfile && lease.fresh) {
-        const captured = lease.session;
-        let detach = () => {};
-        const close = () => {
-          pool.retireMatching(session => session === captured);
-          detach();
-          if (aliveClaudeResources.get(aliveProfile.resourceOwnerKey)?.session === captured) aliveClaudeResources.delete(aliveProfile.resourceOwnerKey);
-          try { unlinkSync(sysPromptFile); } catch { /* already retired */ }
-        };
-        try { detach = aliveProfile.registerResource(`claude:${poolKey}`, close); }
-        catch (error) { pool.discard(lease); lease = null; throw error; }
-        aliveClaudeResources.set(aliveProfile.resourceOwnerKey, { session: captured, close });
-      }
     } catch (error) {
-      if (aliveProfile) { cleanupSysFile(); cleanupAgentAppMcpConfig(); throw error; }
       // A turn-scoped process only adds steering to a turn that ran one-shot before: a busy project residency keeps it one-shot.
       if (!turnScopedResidency && error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
         throw error;
@@ -1939,7 +1917,6 @@ const runClaudeTurn = async (
     }
   }
   if (lease && !lease.fresh && lease.session.model !== (runReq.model?.trim() ?? "")) {
-    if (aliveProfile) { pool.discard(lease); throw new Error("alive_claude_model_changed"); }
     // The installed CLI accepts an idle stream-json control_request(set_model).
     // Only an acknowledged switch may receive the user turn; an old CLI or a
     // failed hook falls back to a fresh one-shot --resume with the requested model.
@@ -2008,7 +1985,7 @@ const runClaudeTurn = async (
     sessionId: contextSessionId, contextFingerprint, ...stableContextSnapshot,
     ...(session ? { retention: "native-compaction" as const } : {}) }) : undefined;
   let stableContextAcknowledged = false;
-  if (resumeContext && !aliveProfile) {
+  if (resumeContext) {
     continuationPrompt = composeResumeTurnPrompt(runReq.userPrompt,
       [gapContext, resumeContext.text].filter(Boolean).join("\n\n"), runReq.locale);
     if (resumeSessionId) flatUser = continuationPrompt;
@@ -2033,6 +2010,13 @@ const runClaudeTurn = async (
   let lingeringChild: ChildProcess | null = null;
   /** Background tasks this turn's process still runs (AD-3): visible at the root result, ended with the process. */
   const backgroundTasks = new ClaudeBackgroundTasks();
+  const shellGate = req.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools
+    ? openShellDeleteGate(shellGateKey, {
+      runtime: KIND, sessionKey: toolApprovalSessionKey(KIND, runReq.chatId, runCwd),
+      ...((req.approvalChatId ?? runReq.chatId) ? { chatId: (req.approvalChatId ?? runReq.chatId)! } : {}),
+      ...(runReq.agentId ? { agentId: runReq.agentId } : {}), cwd: runCwd,
+      ...(req.unattended ? { unattended: true } : {}), ...(req.signal ? { signal: req.signal } : {}),
+    }) : null;
   try {
     return await new Promise<RunnerResult>((resolve, reject) => {
     const rejectRuntime = (error: unknown) => {
@@ -2250,7 +2234,6 @@ const runClaudeTurn = async (
     let lastEmit = 0;
     let sessionId: string | undefined;
     let terminalSessionId = contextSessionId ?? null;
-    let aliveInventoryVerified = Boolean(aliveProfile && session?.nativeSessionId && !lease?.fresh);
     let accCapped = false;
     // 런어웨이 출력(예: 장기 실행 GUI/서버 로그가 끝없이 스트리밍되는 명령)으로부터
     // 메모리를 보호한다. acc를 무제한 누적 + 매 partial마다 전체를 렌더러로 보내면
@@ -2618,32 +2601,6 @@ const runClaudeTurn = async (
           return;
         }
       }
-      if (aliveProfile) {
-        try { aliveProfile.assertCurrent(); }
-        catch (error) {
-          broken = true; structuredRuntimeError = error instanceof Error ? error : new Error(String(error));
-          // A late terminal still settles measured cost; it never ACKs context
-          // or publishes an answer after the original wake authority expires.
-          if (ev.type !== "result") { killCliTree(child, 250); return; }
-        }
-        try {
-          const raw = ev as unknown as Record<string, unknown>;
-          if (raw.type === "control_request" || raw.parent_tool_use_id || raw.isSidechain === true) throw new Error("alive_claude_tool_denied");
-          if (ev.type === "system" && ev.subtype === "init") {
-            if (!Array.isArray(ev.tools) || ev.tools.some(tool => tool !== "StructuredOutput")
-              || (Array.isArray(ev.mcp_servers) && ev.mcp_servers.length)
-              || typeof ev.session_id !== "string" || !ev.session_id.trim()) throw new Error("alive_claude_inventory_changed");
-            aliveInventoryVerified = true;
-          }
-          if (["assistant", "stream_event", "result"].includes(ev.type ?? "") && !aliveInventoryVerified) throw new Error("alive_claude_inventory_missing");
-          if (contextSessionId && ev.session_id != null && ev.session_id !== contextSessionId) throw new Error("alive_claude_session_changed");
-          const deniedTool = ev.message?.content?.find(block => block.type === "tool_use" && block.name !== "StructuredOutput");
-          if (deniedTool) {
-            events.onTool?.(deniedTool.name ?? "unknown", JSON.stringify(deniedTool.input ?? {}), undefined, deniedTool.id);
-            throw new Error("alive_claude_tool_denied");
-          }
-        } catch (error) { broken = true; structuredRuntimeError = error instanceof Error ? error : new Error(String(error)); killCliTree(child, 250); return; }
-      }
       if (agentAppMcpInitFailed) return;
       const isAgentAppMcpInit = ev.type === "system" && ev.subtype === "init";
       if (isAgentAppMcpInit && !terminalSessionId && !ev.parent_tool_use_id && ev.isSidechain !== true
@@ -2939,7 +2896,7 @@ const runClaudeTurn = async (
           && typeof ev.session_id === "string" && Boolean(ev.session_id.trim())
           && (!terminalSessionId || ev.session_id === terminalSessionId)
           && typeof ev.uuid === "string" && Boolean(ev.uuid.trim())
-          && Number.isSafeInteger(ev.num_turns) && ev.num_turns! > 0 && (!aliveProfile || ev.num_turns === 1) && !req.signal?.aborted;
+          && Number.isSafeInteger(ev.num_turns) && ev.num_turns! > 0 && !req.signal?.aborted;
         const receiptKey = JSON.stringify([contextChatId ?? null, runtimeSessionOwnerId ?? null, ev.session_id]);
         const seenResults = terminalResultReceipts.get(receiptKey);
         const freshResult = rootResult && !seenResults?.has(ev.uuid!);
@@ -3175,14 +3132,10 @@ const runClaudeTurn = async (
       if (turnDispatchAttempted && !sawResult) {
         // The failure the stream reported before it ended (sign-in, limit, rate limit) stays the typed cause; the provider's
         // own words lead the message, else the CLI's stderr.
+        // Desktop R part 2: a child the computer's memory shortage ended (a machine fact, runtime/child-death.ts) is the typed cause; any other ending keeps what it had.
+        if (!runnerFailure) runnerFailure = memoryDeathCause(session?.child ?? child, KIND) ?? null;
         rejectRuntime(unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId, cause: runnerFailure ?? undefined,
           providerReason: runnerFailure?.message ?? childExitReason(code, stderr || session?.stderrTail), turnDelivery: turnDeliveryFact() }));
-        return;
-      }
-      if (aliveProfile && (!sawResult || !terminalSucceeded)) {
-        broken = true;
-        rejectRuntime(unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId, cause: runnerFailure ?? undefined,
-          providerReason: runnerFailure?.message, turnDelivery: turnDeliveryFact() }));
         return;
       }
       if (session && !sawResult && !combined() && !finalText) {
@@ -3406,6 +3359,7 @@ const runClaudeTurn = async (
           events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${code}`);
           // A settled failure alone does not prove that earlier tool effects
           // were absent. The typed zero-turn result above is the safe exception.
+          if (!runnerFailure) runnerFailure = memoryDeathCause(session?.child ?? child, KIND) ?? null;
           rejectRuntime(unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId, cause: runnerFailure ?? undefined,
             turnDelivery: turnDeliveryFact() }));
           return;
@@ -3465,7 +3419,7 @@ const runClaudeTurn = async (
      * attended resident turn the CLI confirmed by echoing this turn's uuid, on a CLI that reports message lifecycle.
      */
     const nativeSteerEligible = Boolean(session && turnUuid && events.onNativeTurnController && runReq.chatId
-      && !req.unattended && !aliveProfile && !runReq.judgmentOnly && !runReq.untrustedNoTools && !runReq.minimalObservation);
+      && !req.unattended && !runReq.judgmentOnly && !runReq.untrustedNoTools && !runReq.minimalObservation);
     const steerUuidFor = (requestId: string): string => {
       const h = crypto.createHash("sha256").update(`claude-steer-v1\0${turnUuid}\0${requestId}`).digest("hex");
       return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16]!, 16) & 3) | 8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
@@ -3583,7 +3537,6 @@ const runClaudeTurn = async (
       if (!claudeResidentSessionAlive(session)) {
         settle(null);
       } else {
-        try { aliveProfile?.assertCurrent(); } catch (error) { broken = true; pool.discard(lease!); rejectRuntime(error); return; }
         turnDispatchAttempted = true;
         // A live resident process keeps its system prompt, history and tools; a freshly opened one was seeded at spawn.
         reportModelPayload(() => ledgerFromCliSent({ mode: lease && !lease.fresh ? "resume" : resumeSessionId ? "reopen" : "fresh", sentText: turnText, req: runReq,
@@ -3598,6 +3551,7 @@ const runClaudeTurn = async (
     }
     });
   } finally {
+    shellGate?.close();
     if (contextSessionId && (broken || req.signal?.aborted || (resumeContext?.delivery && !stableContextAcknowledged))) {
       invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId });
     }
@@ -3608,7 +3562,6 @@ const runClaudeTurn = async (
       if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse || turnScopedResidency || backgroundTasks.count > 0) {
         lingeringChild = lease.session.child;
         pool.discard(lease);
-        if (aliveProfile) aliveClaudeResources.get(aliveProfile.resourceOwnerKey)?.close();
       }
       else pool.release(lease);
     }

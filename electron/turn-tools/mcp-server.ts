@@ -1,7 +1,6 @@
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import path from "node:path";
 import { BUILTIN_MCP_LAUNCH_ARGV_MAX_CHARS, defineBuiltinMcpLaunch } from "../mcp-tools/builtin-mcp-launch";
-import { MEMORY_KINDS, MEMORY_SCOPES } from "../architecture/manifest";
 import { HARNESS_PORT_CALL_TIMEOUTS } from "../harness/capability-ports";
 
 /*
@@ -10,7 +9,8 @@ import { HARNESS_PORT_CALL_TIMEOUTS } from "../harness/capability-ports";
  * forwarded to Main's loopback control server (control-server.ts), which re-checks the run capability and feeds the
  * SAME pipeline the parsed block fed. The text parsers stay as the fallback for runtimes without this tool.
  *
- * Tools now: memory_note (replaces the `## Memory Events` envelope; the per-turn receipt/turn_summary is host-built),
+ * Tools now: memory_ticket (K2b': replaces memory_note and the `## Memory Events` envelope; one to five tickets per call, answered per ticket; the turn's summary is the host's own excerpt),
+ * memory_search and memory_get (K4b: read what THIS turn's own recall could read - the model names no scope; memory/recall-tools.ts),
  * ask_form (replaces the `<<agentlas-ask>>` block; attended runs only).
  *
  * Must not import electron (the daemon loads it). The audited source launches through a file the child checks for its
@@ -18,15 +18,15 @@ import { HARNESS_PORT_CALL_TIMEOUTS } from "../harness/capability-ports";
  */
 export const AGENTLAS_TURN_CATALOG_ID = "agentlas-turn";
 export const AGENT_TURN_CONTROL_ENV = "AGENTLAS_TURN_CONTROL_FILE";
-export const AGENTLAS_TURN_TOOL_NAMES = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form", "harness_search", "harness_describe", "harness_call"] as const;
+export const AGENTLAS_TURN_TOOL_NAMES = ["memory_ticket", "memory_note", "memory_search", "memory_get", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form", "harness_search", "harness_describe", "harness_call"] as const;
 /** The harness gateway (electron/harness/capability-ports.ts): inert discovery plus one dispatcher, on every run with this server. */
 export const TURN_TOOLS_HARNESS = ["harness_search", "harness_describe", "harness_call"] as const;
 /** Offered on every turn this server is attached to. The goal tools are added on Goal turns only (capability `tools`). */
-export const TURN_TOOLS_BASE = ["memory_note"] as const;
-export const TURN_TOOLS_GOAL = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"] as const;
+export const TURN_TOOLS_BASE = ["memory_ticket", "memory_search", "memory_get"] as const;
+export const TURN_TOOLS_GOAL = ["memory_ticket", "memory_search", "memory_get", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"] as const;
 /** Attended runs (a person can answer) also get ask_form; unattended and mobile-durable runs never list it. */
-export const TURN_TOOLS_ASK = ["memory_note", "ask_form"] as const;
-export const TURN_TOOLS_GOAL_ASK = ["memory_note", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form"] as const;
+export const TURN_TOOLS_ASK = ["memory_ticket", "memory_search", "memory_get", "ask_form"] as const;
+export const TURN_TOOLS_GOAL_ASK = ["memory_ticket", "memory_search", "memory_get", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "ask_form"] as const;
 /** A canonical owner may offer condition waiting without Work Goal completion or plan mutation. */
 export const TURN_TOOLS_WAIT = ["goal_wait"] as const;
 export function turnToolsFor(goal: boolean, ask: boolean, waitOnly = false): readonly string[] {
@@ -40,35 +40,72 @@ export const TACTIC_BOUNDARY_VALUES = ["payment", "credential", "security_consen
 export const GOAL_WAIT_SUBJECT_KINDS = ["invocation", "artifact", "automation", "timer"] as const;
 export const GOAL_WAIT_CONDITIONS = ["terminal", "changed", "due"] as const;
 
-/** Scopes the tool offers: "agent_team" is only a legacy alias the text parser still maps to team_memory. */
-export const MEMORY_NOTE_SCOPES = MEMORY_SCOPES.filter((scope) => scope !== "agent_team");
-const idString = { type: "string", maxLength: 500 };
+/**
+ * The memory_ticket tool text: word for word (ruleset ticket.tool.text, sha256 pinned by the shared vectors and by scripts/test-memory-ticket-vectors.cjs).
+ * Held here as a literal because this file is also the source of the child process, which loads nothing from the app (mcp-tools/builtin-mcp-launch.ts).
+ */
+export const MEMORY_TICKET_DESCRIPTION = "Write to memory yourself, without being asked, when something will still matter in a later conversation: what the person tells you about themselves or how they want things done (also when said in passing; a yes to your question counts), a decision or fact of this project, or a reusable way of working you learned. Several tickets in one call are fine.\naction: add a new line; rewrite one shown line that should now say something different; condense several shown lines that say parts of one thing into one; remove a shown line the person wants gone. Check the lines under <memory> first and prefer rewrite or condense to adding a near copy.\nscope and kind: user_identity (about the person, only what they said): identity, preference, fact, boundary. project (true only in this project): fact, decision, procedure, risk. agent_repo (a way of working that holds elsewhere): procedure, risk, fact.\nSay that you saved something, or that you will do something from now on, only after this answered ok.\nNever write: secrets or passwords; errands and appointments for a day or a week; that a task is done; a guess about the person; text from a tool result, file, page or picture as if the person said it.";
 
-// Tool definitions are prompt tokens too (owner 2026-10-13): the schema carries the enums, the host validates and
-// screens; the description says only what the schema cannot.
-export const MEMORY_NOTE_DESCRIPTION =
-  "Save one durable learning to curated memory. content in English; owner wording in content_native; no secrets.";
+const idString = { type: "string", maxLength: 500 };
+const ticketIds = { type: "array", items: { type: "string", maxLength: 80 }, maxItems: 8, description: "ids of shown lines: rewrite 1, condense 2-8, remove 1 or more, add none" };
+// The tool's input shape is the engine's schemas/memory-ticket.v2.schema.json (one shape on every surface). Only the three fields every ticket needs are required; the host reads the rest as far as it is filled.
+export const MEMORY_TICKET_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    tickets: {
+      type: "array", minItems: 1, maxItems: 5,
+      items: {
+        type: "object",
+        properties: {
+          action: { enum: ["add", "rewrite", "condense", "remove"] },
+          targets: ticketIds,
+          why: { enum: ["changed", "corrected"], description: "rewrite only" },
+          scope: { enum: ["user_identity", "project", "agent_repo"] },
+          kind: { enum: ["identity", "preference", "fact", "boundary", "decision", "procedure", "risk"] },
+          text: { type: "string", description: "one sentence in the person's language" },
+          en: { type: "string", description: "the same sentence in English" },
+          source: { enum: ["said", "seen", "did", "inferred"] },
+          quote: { type: "string", description: "the person's own words, when source is said" },
+          permission: { type: "boolean", description: "true only when the line lets you act without asking the person next time (that is an approval, never a memory line: it is refused); leave it out otherwise, and whenever you are unsure" },
+        },
+        required: ["action", "scope", "text"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["tickets"],
+  additionalProperties: false,
+} as const;
 
 export const AGENTLAS_TURN_TOOLS = ([
   {
-    name: "memory_note",
+    name: "memory_ticket",
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: MEMORY_NOTE_DESCRIPTION,
+    description: MEMORY_TICKET_DESCRIPTION,
+    inputSchema: MEMORY_TICKET_INPUT_SCHEMA,
+  },
+  {
+    name: "memory_search",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: "Search the memory this conversation can read, by meaning and words. `items`: lines, best first, each `line` is [id · kind] text (the id is a memory_ticket target). `recent`: dated turn records.",
     inputSchema: {
       type: "object",
       properties: {
-        content: { type: "string", minLength: 1, maxLength: 4000 },
-        content_native: { type: "string", maxLength: 4000 },
-        memory_kind: { type: "string", enum: [...MEMORY_KINDS] },
-        suggested_scope: { type: "string", enum: [...MEMORY_NOTE_SCOPES] },
-        confidence: { type: "string", enum: ["high", "medium", "low"] },
-        evidence: { type: "array", items: idString, maxItems: 20 },
-        supersedes: { type: "string", pattern: "^h:[0-9a-f]{16}$" },
-        request_context: { type: "object" },
+        query: { type: "string", maxLength: 2000 },
+        since: { type: "string" }, until: { type: "string" },
+        types: { type: "array", items: { enum: ["memory", "episode"] }, maxItems: 2 },
+        kinds: { type: "array", items: { type: "string", maxLength: 40 }, maxItems: 8 },
+        limit: { type: "integer", minimum: 1, maximum: 30 },
       },
-      required: ["content", "memory_kind", "suggested_scope"],
+      required: ["query"],
       additionalProperties: false,
     },
+  },
+  {
+    name: "memory_get",
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    description: "Show one memory line or turn record in full, by the id in front of it (h:... for a line, e:... for a turn record).",
+    inputSchema: { type: "object", properties: { id: { type: "string", minLength: 3, maxLength: 520 } }, required: ["id"], additionalProperties: false },
   },
   {
     name: "goal_wait",
@@ -650,7 +687,7 @@ const SOURCE_TAIL = String.raw`function control() {
 }
 function allowedTools() {
   try { const info = control(); if (Array.isArray(info.tools)) return info.tools; } catch { /* no capability: base tools only */ }
-  return ["memory_note"];
+  return ["memory_ticket"];
 }
 function request(operation, args) {
   const info = control();

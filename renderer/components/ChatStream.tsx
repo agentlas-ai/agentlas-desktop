@@ -22,6 +22,7 @@ import type { HubAgentBookmark, InstalledAgent, InstalledFirm, InstalledMcpServe
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, MarkdownSegment, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
+import { AnswerCardsForTurns } from "./AnswerCards";
 import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { isOneArtifactPreviewCapabilityV1, type OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
@@ -44,6 +45,11 @@ import { ChatFileCards } from "./ChatFileExperience";
 import { MessageAttachments } from "./media/MessageAttachments";
 import { IconAlertTriangle, IconChevronDown, IconClose } from "./Icon";
 import { InlineUiInstances } from "./UiInstances";
+import { ApprovalRecordLines } from "./one/OneApprovalRecords";
+import { OneTurnFiles } from "./one/OneTurnFiles";
+import { turnFilesOfActivity } from "@/lib/turn-files";
+import { approvalClosedRowIds, placeApprovalRecords } from "@/lib/approval-record-lines";
+import { useSettledApprovals } from "@/lib/use-settled-approvals";
 import type { ChatFileItem } from "@/lib/chat-files";
 import { OneTurnWork } from "./one/OneTurnWork";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
@@ -452,6 +458,16 @@ export function ChatStream({
   const historyStart = firstIndex >= 0 && lastIndex >= firstIndex ? firstIndex : Math.max(0, messages.length - CHAT_HISTORY_PAGE_SIZE);
   const historyEnd = firstIndex >= 0 && lastIndex >= firstIndex ? lastIndex + 1 : messages.length;
   const visibleMessages = useMemo(() => messages.slice(historyStart, historyEnd), [messages, historyStart, historyEnd]);
+  // AL: the answered or closed approval cards of this conversation, one quiet line each where the card stood (stored ledger rows; none when there are none).
+  const settledApprovals = useSettledApprovals(artifactChatId ? [artifactChatId] : []);
+  const approvalClosedIds = useMemo(() => approvalClosedRowIds(settledApprovals), [settledApprovals]);
+  const approvalSlots = useMemo(() => placeApprovalRecords(
+    messages.filter((m) => !approvalClosedIds.has(m.id))
+      .map((m) => ({ id: m.id, createdAt: m.createdAt ?? (m.startedAt ? new Date(m.startedAt).toISOString() : undefined) })), settledApprovals), [messages, settledApprovals, approvalClosedIds]);
+  const approvalCtx = useMemo(() => ({
+    lang: (locale === "ko" ? "ko" : "en") as "ko" | "en", now: Date.now(),
+    agentName: (id: string) => (agentId && id === agentId ? agentName : undefined),
+  }), [locale, agentId, agentName, settledApprovals]);
   const hasLaterHistory = historyEnd < messages.length;
   const historyAnchorRef = useRef<{ id: string; top: number } | null>(null);
   const pendingJumpRef = useRef<string | null>(null);
@@ -740,7 +756,9 @@ export function ChatStream({
         {scopedWindow && <button type="button" data-chat-history="collapse" onClick={scrollToLatest}>
           {locale === "ko" ? "이전 대화 접기 · 최신 보기" : "Hide earlier messages · Latest"}
         </button>}
-        {visibleMessages.map((m, index) => (
+        {historyStart === 0 && <ApprovalRecordLines records={approvalSlots.before} ctx={approvalCtx} />}
+        {visibleMessages.map((m, index) => approvalClosedIds.has(m.id) ? null : (
+          <Fragment key={m.continuation ? m.id : m.intellectUiMessageId ?? m.id}>
           <MessageActions key={m.continuation ? m.id : m.intellectUiMessageId ?? m.id} messageId={m.continuationSourceMessageId ?? m.id} author={m.role === "user" ? (locale === "ko" ? "나" : "You") : agentName} text={displayMessageReply(m.role === "user" ? m.text : userFacingAssistantMessageText(m), locale)} locale={locale} onReply={onReply}>
           <div
             id={messageDomId(m.id)}
@@ -769,6 +787,8 @@ export function ChatStream({
             />
           </div>
           </MessageActions>
+          <ApprovalRecordLines records={approvalSlots.after.get(m.id) ?? []} ctx={approvalCtx} />
+          </Fragment>
         ))}
         {hasLaterHistory && <button type="button" data-chat-history="later" onClick={() => revealHistory("later")}>
           {locale === "ko" ? `다음 ${messages.length - historyEnd}개 · ${Math.min(CHAT_HISTORY_PAGE_SIZE, messages.length - historyEnd)}개 더 보기` : `${messages.length - historyEnd} later · Show ${Math.min(CHAT_HISTORY_PAGE_SIZE, messages.length - historyEnd)} more`}
@@ -1105,7 +1125,7 @@ function EmptyChatState({
     ];
 
     return [
-      { id: "context", title: locale === "ko" ? "책임자와 선호 팀" : "Controller and preferences", items: mentions },
+      { id: "context", title: locale === "ko" ? "참여 에이전트" : "Participating agents", items: mentions },
     ].filter((section) => section.items.length > 0);
   }, [directory, locale, t]);
 
@@ -1118,8 +1138,8 @@ function EmptyChatState({
       {!isProjectTask && directory && sections.length > 0 && (
         <div className="agentlas-chat-empty-directory">
           <div className="agentlas-chat-empty-directory-intro">
-            <strong>{locale === "ko" ? "자동 오케스트레이션 기준" : "Automatic orchestration"}</strong>
-            <span>{locale === "ko" ? "아래 명단은 우선순위이며 매번 전부 투입되지 않습니다. @ 지정은 필요한 경우의 1회성 수동 개입입니다." : "This roster is a preference, not a forced run list. @ is an optional one-turn override."}</span>
+            <strong>{locale === "ko" ? "참여 에이전트" : "Participating agents"}</strong>
+            <span>{locale === "ko" ? "필요한 에이전트가 자동으로 참여하고, @로 직접 지정할 수 있어요." : "The agents you need join automatically, and you can name one with @."}</span>
           </div>
           <div className="agentlas-chat-empty-grid">
               {sections.map((section) => (
@@ -1128,7 +1148,6 @@ function EmptyChatState({
                   className="agentlas-chat-empty-group"
                   aria-label={section.title}
                 >
-                  <h3>{section.title}</h3>
                   <ul className="agentlas-chat-empty-list">
                     {section.items.map((item) => (
                       <li key={item.id} className="agentlas-chat-empty-item" title={`${item.token} — ${item.label}`}>
@@ -1215,6 +1234,10 @@ const Bubble = memo(function Bubble({
     return runs.map(({ runId, state }) => ({ runId, state: { ...state, items: state.items.filter((item) =>
       item.kind !== "notice" || !ladderCards.has(item.message ?? "")) } }));
   }, [message.activityRuns, message.id, message.notices, message.runId, workActivity]);
+  // AK: the files this answer made or changed (typed write / edit calls of its run), once it has finished.
+  const turnFiles = useMemo(() => (message.role === "agent" && !message.busy && !message.streaming
+    ? turnFilesOfActivity(workActivities.map(({ state }) => state), locale === "ko" ? "ko" : "en", workspaceRootForRun) : []),
+  [message.role, message.busy, message.streaming, workActivities, locale, workspaceRootForRun]);
   // Activity notices belong under the work heading. Keep a separate plain
   // row only for an actionable sign-in, a context boundary, or a notice that
   // is absent from the canonical activity projection.
@@ -1360,8 +1383,9 @@ const Bubble = memo(function Bubble({
         {/* A Finance result card's line (what was matched or read) heads the answer; the card itself follows the text below. */}
         {message.continuationOwnsMetadata !== false && <InlineUiInstances part="lead" chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"}
           turnIds={[message.runId, ...(message.activityRuns ?? []).map((run) => run.runId)].filter((id): id is string => Boolean(id))} />}
+        <AnswerCardsForTurns chatId={artifactChatId} turnIds={[message.runId, ...(message.activityRuns ?? []).map((run) => run.runId)].filter((id): id is string => Boolean(id))}>
         <GoalResultReport result={message.goalResult} locale={locale}>
-        {hasInlineUi && <StreamingMarkdown text={displayText} messageId={message.continuation ? message.id : message.intellectUiMessageId ?? message.id}
+        {hasInlineUi && <StreamingMarkdown text={displayText} messageId={message.continuation ? message.id : message.intellectUiMessageId ?? message.id} growing={Boolean(message.streaming)}
           onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia}
           onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} />}
         {showWorkActivity && displayText && message.busy && !hasInlineUi && (
@@ -1406,6 +1430,8 @@ const Bubble = memo(function Bubble({
           />
         )}
         </GoalResultReport>
+        </AnswerCardsForTurns>
+        {message.continuationOwnsMetadata !== false && <OneTurnFiles files={turnFiles} chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"} onPreview={onOpenLinkedFile} />}
         <GeneratedMessageVideos chatId={artifactChatId} messageId={message.durableMessageId ?? message.id} busy={Boolean(message.busy)} />
         {message.continuationOwnsMetadata !== false && <InlineUiInstances chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"}
           turnIds={[message.runId, ...(message.activityRuns ?? []).map((run) => run.runId)].filter((id): id is string => Boolean(id))} />}
@@ -1782,7 +1808,7 @@ function SingleRunBody({
       ))}
       {tail.trim() && (
         <div style={{ minWidth: 0 }}>
-          <StreamingMarkdown text={tail} messageId={`${message.id}:t${cursor}`} {...markdownProps} />
+          <StreamingMarkdown text={tail} messageId={`${message.id}:t${cursor}`} growing={Boolean(message.streaming)} {...markdownProps} />
           {message.streaming && <BlinkingCursor />}
         </div>
       )}

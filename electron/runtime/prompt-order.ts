@@ -12,7 +12,11 @@ export type PromptChangeTrigger =
   | "plugin-inventory" | "connector-inventory" | "agent-instructions" | "skill-package"
   | "project-instructions" | "owner-profile" | "goal-revision" | "plan-revision"
   | "tool-grant" | "managed-local" | "task" | "attachments" | "retrieval" | "checkpoint" | "owner-input"
-  | "goal-runtime" | "lease" | "output-schema" | "validation-result" | "model-output" | "child-result" | "memory-ticket";
+  | "goal-runtime" | "lease" | "output-schema" | "validation-result" | "model-output" | "child-result" | "memory-ticket"
+  // The shared curator ruleset file (system-agents/curator-ruleset.json): its text blocks change only when that file does (module memory.classification).
+  | "curator-ruleset"
+  // The owner's Workspace rules file (module workspace.rules, Agentlas 2.0 P3a): its text changes only when the owner edits that file.
+  | "workspace-rules";
 
 export interface PromptOrderingMetadata {
   id: string;

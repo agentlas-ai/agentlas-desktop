@@ -17,7 +17,8 @@ const CODEX_USAGE_URLS = [
   "https://chatgpt.com/api/codex/usage",
 ];
 
-function codexAuthFile(): string {
+/** The file that names the signed-in Codex account. The account watch follows this exact path. */
+export function codexAuthFile(): string {
   return path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "auth.json");
 }
 

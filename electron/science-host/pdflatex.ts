@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { userDataPath } from "../runtime-paths";
 import { analyzeLatexCompileLog, type LatexPdfInput, type ManuscriptPdfResult } from "./render-pdf";
 
@@ -97,8 +98,11 @@ function execute(executable: string, args: string[], work: string, env: NodeJS.P
     let output = "", done = false;
     const finish = (code: number): void => { if (done) return; done = true; clearTimeout(timer); resolve({ code, output }); };
     const timer = setTimeout(() => child.kill("SIGKILL"), timeout);
-    const collect = (bytes: Buffer): void => { output += bytes.toString("utf8"); if (output.length > 2_000_000) { output = output.slice(-2_000_000); child.kill("SIGKILL"); } };
-    child.stdout.on("data", collect); child.stderr.on("data", collect);
+    const collector = (): ((bytes: Buffer) => void) => {
+      const decoder = new StringDecoder("utf8");
+      return (bytes: Buffer): void => { output += decoder.write(bytes); if (output.length > 2_000_000) { output = output.slice(-2_000_000); child.kill("SIGKILL"); } };
+    };
+    child.stdout.on("data", collector()); child.stderr.on("data", collector());
     child.once("error", () => finish(-1)); child.once("close", code => finish(code ?? -1));
   });
 }

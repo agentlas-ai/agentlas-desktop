@@ -60,7 +60,7 @@ export async function resolveOnePackIntents(input: {
         (input.images?.length ? `The request includes ${input.images.length} image attachment(s). ` : "") +
         "Judge the user's intent in any language. An empty selection is the correct answer for ordinary requests.",
       signal: input.signal,
-      timeoutMs: input.timeoutMs ?? 8_000,
+      timeoutMs: input.timeoutMs,
     });
   } catch {
     // 판정 실패 = 중립. 단어장 후보는 힌트였을 뿐 선택으로 승격되지 않는다.

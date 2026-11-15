@@ -123,8 +123,8 @@
 
 .small {
   flex: 0 0 auto;
-  min-height: 26px;
-  padding: 0 11px;
+  min-height: 28px; /* the button rule: at least 28px high (audit 65) */
+  padding: 0 12px;
   border: 0;
   border-radius: 99px;
   background: var(--paper-3);

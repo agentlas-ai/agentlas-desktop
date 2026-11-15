@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { detachedSpawnOpts } from "../runtime/exec";
+import { detachedSpawnOpts, nodeCommandToStart } from "../runtime/exec";
 import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -905,7 +905,7 @@ export async function launchProviderBrowserSession(
     // Quit ends it (disposeAppFactoryLaunches), so it needs no life of its own on Windows: detachedSpawnOpts keeps
     // the POSIX process group and gives Windows a hidden console its browser children inherit. `detached` there was
     // DETACHED_PROCESS — no console, so each console child got a visible window (2026-10-24).
-    const child = spawn(nodeExecPath(), [launcherPath], {
+    const child = spawn(nodeCommandToStart(nodeExecPath()), [launcherPath], {
       cwd: rootPath,
       stdio: "ignore",
       ...detachedSpawnOpts(),
@@ -4636,7 +4636,7 @@ function execNode(
   timeoutMs: number,
 ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(nodeExecPath(), args, { cwd, timeout: timeoutMs, windowsHide: true }, (error, stdout, stderr) => {
+    execFile(nodeCommandToStart(nodeExecPath()), args, { cwd, timeout: timeoutMs, windowsHide: true }, (error, stdout, stderr) => {
       const errorCode = (error as (Error & { code?: unknown }) | null)?.code;
       const exitCode = typeof errorCode === "number" ? errorCode : error ? 1 : 0;
       resolve({ exitCode, stdout, stderr });

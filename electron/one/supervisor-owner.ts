@@ -14,6 +14,22 @@ export interface SupervisorOwnerOptions {
   leaseMs?: number;
   /** Only a conclusive false admits takeover. Unknown/EPERM is not death. */
   ownerAlive?: (pid: number) => boolean | null;
+  /** Monotonic milliseconds (does not run during sleep). Injected by the gate. */
+  monotonic?: () => number;
+}
+
+/** A pid that lives proves nothing alone: a copied profile names another app's pid, and after a reboot the number belongs to
+ * some other program (Windows reuses pids fast). A live owner moves its lease (the work executor asserts every second and a
+ * lease with less than half left is renewed), so a lease that is past its end and does not move for this long, seen by two
+ * looks of one contender on a clock that stops during sleep, has no owner behind it. Fencing (assertToken) already refuses
+ * the old identity once the row changes, so a frozen-but-alive owner cannot dispatch after the takeover. */
+export const OWNER_STALE_OBSERVATION_MS = 10_000;
+/** The daemon-holds-the-domain reading (Main's start): a lease past its end by more than the longest lease is not "held". */
+export const OWNER_HELD_GRACE_MS = 120_000;
+/** True when a row names a live holder: pid alive and the lease renewed within the longest lease plus the grace. */
+export function ownerRowHeld(row: { owner_pid: number; lease_until: number; phase: string }, now: number, alive: (pid: number) => boolean | null): boolean {
+  if (row.phase === "released" || alive(row.owner_pid) === false) return false;
+  return row.lease_until > now - OWNER_HELD_GRACE_MS;
 }
 
 /** One scheduler per local store. Account switches fence the previous identity;
@@ -23,10 +39,14 @@ export class OneSupervisorOwner {
   private readonly pid: number;
   private readonly leaseMs: number;
   private readonly ownerAlive: (pid: number) => boolean | null;
+  private readonly monotonic: () => number;
+  /** The one expired lease this contender has looked at, and when (in memory only: nothing is stored). */
+  private staleLook: { key: string; at: number } | null = null;
   constructor(private readonly db: Database.Database, private readonly options: SupervisorOwnerOptions) {
     this.now = options.now ?? Date.now;
     this.pid = options.pid ?? process.pid;
     this.leaseMs = options.leaseMs ?? 60_000;
+    this.monotonic = options.monotonic ?? (() => Number(process.hrtime.bigint() / 1_000_000n));
     this.ownerAlive = options.ownerAlive ?? (pid => {
       try { process.kill(pid, 0); return true; }
       catch (error) { return (error as NodeJS.ErrnoException)?.code === "ESRCH" ? false : null; }
@@ -68,7 +88,12 @@ export class OneSupervisorOwner {
           WHERE slot='personal' AND owner_epoch=? AND generation=?`)
           .run(oneId,row.one_id===oneId?0:1,now+this.leaseMs,this.options.ownerEpoch,row.generation);
       } else {
-        if (row && row.phase !== "released" && this.ownerAlive(row.owner_pid) !== false) throw supervisorError('supervisor_owner_unconfirmed');
+        if (row && row.phase !== "released" && this.ownerAlive(row.owner_pid) !== false) {
+          const settled = this.staleOwnerSettled(row, now);
+          if (!settled) throw Object.assign(supervisorError('supervisor_owner_unconfirmed'), { ownerKind: row.owner_kind, leaseExpired: row.lease_until <= now,
+            retryAfterMs: row.lease_until <= now ? OWNER_STALE_OBSERVATION_MS : Math.max(1000, row.lease_until - now) });
+          console.info("[one-supervisor] owner takeover", { reason: "stale_lease_unchanged", ownerKind: row.owner_kind, observedMs: settled });
+        }
         this.db.prepare(`INSERT INTO one_supervisor_runtime_owner(slot,one_id,owner_epoch,owner_kind,owner_pid,generation,lease_until,phase)
           VALUES('personal',?,?,?,?,?,?,'active') ON CONFLICT(slot) DO UPDATE SET one_id=excluded.one_id,
           owner_epoch=excluded.owner_epoch,owner_kind=excluded.owner_kind,owner_pid=excluded.owner_pid,
@@ -77,6 +102,14 @@ export class OneSupervisorOwner {
       }
       return this.project(this.row()!);
     }).immediate();
+  }
+  /** The observed milliseconds when the row's lease is past its end and has not moved for the whole observation; else 0. */
+  private staleOwnerSettled(row: OwnerRow, now: number): number {
+    if (row.lease_until > now) { this.staleLook = null; return 0; }
+    const key = `${row.owner_epoch}|${row.generation}|${row.lease_until}|${row.owner_pid}`, at = this.monotonic();
+    if (this.staleLook?.key !== key) { this.staleLook = { key, at }; return 0; }
+    const seen = at - this.staleLook.at;
+    return seen >= OWNER_STALE_OBSERVATION_MS ? Math.max(1, seen) : 0;
   }
   assertToken(token: SupervisorRuntimeOwner, control = false): void {
     const row=this.row();

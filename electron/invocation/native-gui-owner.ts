@@ -290,7 +290,9 @@ export function createNativeGuiOwnerClient(ports: {
       if (request[key] !== undefined) fail("native_gui_text_input_requires_new_preparation");
     }
     const base: Partial<McpInvocationRequest> = { ...r.originalRequest }, next: Partial<McpInvocationRequest> = { ...request };
-    for (const value of [base, next]) { delete value.runId; delete value.userPrompt; delete value.steeringMode; }
+    // `ownerSpoke` is a Main-only marker of WHO wrote the text (invocation/owner-spoke.ts), not an execution choice: the turn a composer started carries it and a
+    // direction that joins it may not (#2: differing_keys=ownerSpoke refused every added direction).
+    for (const value of [base, next]) { delete value.runId; delete value.userPrompt; delete value.steeringMode; delete (value as { ownerSpoke?: unknown }).ownerSpoke; }
     for (const key of ["images", "fileGroupId", "oneMemoryUseOnceRef", "oneBriefingActionRef", "oneTeamPreflightRef", "oneAttachmentRef", "oneRecurrenceSelection", "preflightSubmissionId"] as const) delete base[key];
     if (canonicalInvocationRequestJson(base as McpInvocationRequest) !== canonicalInvocationRequestJson(next as McpInvocationRequest)) {
       // Which top-level choices differ (names only, never values): the refusal used to say nothing about its cause.

@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { effortLabel, effortOptions } from "@/lib/effort-label";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
@@ -21,8 +21,10 @@ import { runtimeIdentityKey, runtimeMatchesSelection as sharedRuntimeMatchesSele
 import { describeRoleWriteFailure } from "@/lib/runtime-role-failure";
 import type { LocalModelHubSnapshot, LocalModelInstallationReceipt } from "@shared/local-model-hub";
 import { Select } from "@/components/Select";
+import { IconClose, IconImage, IconNetwork, IconPlus, IconUsers, IconWand } from "@/components/Icon";
+import { COPY, pick } from "./dashboard-copy";
+import s from "./Dashboard.module.css";
 import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
-import connectStyles from "@/components/connect/ConnectChips.module.css";
 import { discoverySignInRequired } from "@shared/model-discovery";
 
 // resolvedId: 별칭이 실제로 어느 모델로 풀렸는지(실행이 알려준 값). 없으면 모르는 것.
@@ -163,8 +165,8 @@ export function modelDiscoveryNotes(runtimes: RuntimeStatus[], ko: boolean): Dis
         signIn: true,
         ...(connect ? { connect } : {}),
         text: connect
-          ? (ko ? `${label}: 로그인이 필요합니다.` : `${label}: sign in required.`)
-          : (ko ? `${label}: 로그인이 필요합니다. 이 에이전트의 로그인 명령으로 로그인한 뒤 다시 확인하세요.`
+          ? (ko ? `${label}: 로그인이 필요해요.` : `${label}: sign in required.`)
+          : (ko ? `${label}: 로그인이 필요해요. 이 에이전트의 로그인 명령으로 로그인한 뒤 다시 확인해 주세요.`
             : `${label}: sign in required. Sign in with this agent's own login command, then check again.`),
       });
       continue;
@@ -176,10 +178,10 @@ export function modelDiscoveryNotes(runtimes: RuntimeStatus[], ko: boolean): Dis
       key,
       text: noCodexCache
         ? ko
-          ? `${label}: 최신 모델 목록을 확인하지 못했습니다. 터미널에서 codex login을 마친 뒤 다시 확인하세요.`
+          ? `${label}: 최신 모델 목록을 확인하지 못했어요. 터미널에서 codex login을 마친 뒤 다시 확인해 주세요.`
           : `${label}: could not check the current model list. Finish codex login in a terminal, then check again.`
         : ko
-          ? `${label}: 모델 목록을 읽지 못했습니다. 연결 상태와 모델 사용 권한을 확인하세요.`
+          ? `${label}: 모델 목록을 불러오지 못했어요. 연결 상태와 모델 사용 권한을 확인해 주세요.`
           : `${label}: could not read the model list. Check the connection and model access permissions.`,
     });
   }
@@ -261,12 +263,6 @@ export function RuntimeControl() {
   const [pool, setPool] = useState<RuntimeRolePoolState | null>(() => (
     readViewData<RuntimeRolePoolState>("dashboard.runtime-role-pool")?.value ?? null
   ));
-  const [dragState, setDragState] = useState<{
-    role: RuntimeRole;
-    from: number;
-    over: number;
-  } | null>(null);
-  const pointerDragRef = useRef<{ role: RuntimeRole; from: number; startX: number; startY: number } | null>(null);
   const discoveryNotes = useMemo(() => modelDiscoveryNotes(runtimes, ko), [runtimes, ko]);
   const [connectSpec, setConnectSpec] = useState<RuntimeChipSpec | null>(null);
   const multimodalRuntimes = useMemo(
@@ -362,7 +358,7 @@ export function RuntimeControl() {
       // 조용히 낡은 목록을 보여주면 사용자는 그것을 '지금'으로 읽는다.
       setMessage(
         ko
-          ? "런타임을 새로 확인하지 못했습니다. 아래 목록은 마지막으로 확인된 상태입니다 — 새로고침으로 다시 시도하세요."
+          ? "모델 연결 상태를 새로 확인하지 못해 마지막 확인 결과를 보여 줘요. 새로고침으로 다시 시도해 주세요."
           : "Runtimes could not be re-checked. The list below is the last verified state -- refresh to try again.",
       );
       setMessageTone("error");
@@ -409,14 +405,14 @@ export function RuntimeControl() {
       const selectedModelIsResident = Boolean(installation && before.resident?.installationId === installation.installationId);
       if (selectedModelIsResident && before.resident) {
         await api.localModelHub.unload({ processEpoch: before.resident.processEpoch, cancelActiveRuns: false });
-        say(ko ? "로컬 모델을 껐습니다. GPU와 메모리를 해제했습니다." : "Local model turned off. GPU and memory were released.");
+        say(ko ? "로컬 모델을 껐어요. GPU와 메모리를 해제했어요." : "Local model turned off. GPU and memory were released.");
       } else {
         if (!installation) {
           throw new Error("local_model_selection_unavailable");
         }
         const receipt = await api.localModelHub.loadModel({ installationId: installation.installationId, contextTokens: 0, operationId: crypto.randomUUID() });
         if (receipt.state !== "resident") throw new Error(receipt.reasonCode ?? "model_load_failed");
-        say(ko ? `${installation.fileName} 모델을 켰습니다.` : `${installation.fileName} is on.`);
+        say(ko ? `${installation.fileName} 모델을 켰어요.` : `${installation.fileName} is on.`);
       }
       const [snapshot, detected, nextPool] = await Promise.all([
         api.localModelHub.snapshot(),
@@ -434,10 +430,10 @@ export function RuntimeControl() {
       const code = error instanceof Error ? error.message : String(error);
       say(
         code === "local_model_runs_active"
-          ? (ko ? "로컬 모델이 작업 중이라 끄지 않았습니다. 실행이 끝난 뒤 다시 꺼 주세요." : "The local model is working, so it stayed on. Turn it off after the run finishes.")
+          ? (ko ? "로컬 모델이 작업 중이라 끄지 못했어요. 작업이 끝난 뒤 다시 꺼 주세요." : "The local model is working, so it stayed on. Turn it off after the run finishes.")
           : code === "local_model_selection_unavailable"
-            ? (ko ? "이 후보와 일치하는 설치 모델을 찾지 못했습니다. 로컬 모델 화면에서 다시 선택해 주세요." : "No installed model matches this candidate. Choose it again on the Local Models screen.")
-              : (ko ? `로컬 모델을 전환하지 못했습니다 (${code}).` : `Could not switch the local model (${code}).`),
+            ? (ko ? "이 후보와 일치하는 설치된 모델이 없어요. 로컬 모델 화면에서 다시 선택해 주세요." : "No installed model matches this candidate. Choose it again on the Local Models screen.")
+              : (ko ? `로컬 모델을 전환하지 못했어요.` : `Could not switch the local model.`),
         "error",
       );
       await loadLocalModelSnapshot();
@@ -572,7 +568,7 @@ export function RuntimeControl() {
   async function writePool(
     role: RuntimeRole,
     selections: RuntimeSelection[],
-    success = ko ? "후보 풀을 저장했습니다." : "Candidate pool saved.",
+    success = ko ? "후보 목록을 저장했어요." : "Candidate pool saved.",
   ): Promise<boolean> {
     const api = ipc();
     if (!api?.runtime.setRoleMembers || busy) return false;
@@ -735,7 +731,7 @@ export function RuntimeControl() {
       setRuntimes(detected);
       say(
         ko
-          ? "연결된 런타임과 현재 역할을 기준으로 우선순위를 자동 설정했습니다."
+          ? "연결된 모델과 현재 역할에 맞춰 우선순위를 자동 설정했어요."
           : "Priority tables were configured from connected runtimes and current roles.",
       );
     } catch (error) {
@@ -767,41 +763,12 @@ export function RuntimeControl() {
     await writePool(
       role,
       next,
-      ko ? "우선순위를 변경했습니다." : "Priority updated.",
+      ko ? "우선순위를 변경했어요." : "Priority updated.",
     );
   }
 
   async function moveMember(role: RuntimeRole, index: number, delta: number) {
     await reorderMember(role, index, index + delta);
-  }
-
-  function beginPointerReorder(event: ReactPointerEvent<HTMLElement>, role: RuntimeRole, from: number) {
-    if (busy) return;
-    pointerDragRef.current = { role, from, startX: event.clientX, startY: event.clientY };
-    setDragState({ role, from, over: from });
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function updatePointerReorder(event: ReactPointerEvent<HTMLElement>) {
-    const drag = pointerDragRef.current;
-    if (!drag) return;
-    const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
-    const row = target?.closest<HTMLElement>("[data-runtime-pool-row]");
-    if (row?.dataset.runtimePoolRole !== drag.role) return;
-    const over = Number(row.dataset.runtimePoolIndex);
-    if (Number.isInteger(over) && dragState?.over !== over) setDragState({ role: drag.role, from: drag.from, over });
-  }
-
-  function finishPointerReorder(event: ReactPointerEvent<HTMLElement>) {
-    const drag = pointerDragRef.current;
-    pointerDragRef.current = null;
-    setDragState(null);
-    if (!drag || busy || Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) <= 4) return;
-    const target = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
-    const row = target?.closest<HTMLElement>("[data-runtime-pool-row]");
-    if (row?.dataset.runtimePoolRole !== drag.role) return;
-    const to = Number(row.dataset.runtimePoolIndex);
-    if (Number.isInteger(to)) void reorderMember(drag.role, drag.from, to);
   }
 
   async function removeMember(role: RuntimeRole, index: number) {
@@ -836,7 +803,7 @@ export function RuntimeControl() {
     const added = await writePool(
       role,
       [...selections, candidate],
-      ko ? "후보 행을 추가했습니다." : "Candidate row added.",
+      ko ? "후보를 추가했어요." : "Candidate row added.",
     );
     if (added) {
       requestAnimationFrame(() => {
@@ -851,363 +818,211 @@ export function RuntimeControl() {
     }
   }
 
-  function memberBadge(role: RuntimeRole, position: number): {
-    label: string;
-    tone: "active" | "skip" | "idle";
-  } {
-    const pick = pool?.picks[role];
-    if (pick?.position === position && !pick.inherited) {
-      /*
-       * ★영어가 자리에 안 들어갔다 (실측 2026-09-08, 창 1180px: 98px 자리에 111px).
-       *   한국어("기본 선택")는 들어가는데 영어만 잘렸다 — 한 언어만 재면 이런 것을
-       *   원리적으로 못 본다. 뜻을 잃지 않는 선에서 줄인다("이 역할의 기본 선택"이
-       *   이 배지가 붙은 자리에서 이미 자명하다).
-       */
-      return { label: ko ? "기본 선택" : "Default", tone: "active" };
-    }
-    const skip = pick?.skipped.find((entry) => entry.position === position);
-    if (skip) {
-      const label =
-        skip.reason === "quota-exceeded"
-          ? ko
-            ? "쿼터 초과 · 건너뜀"
-            : "Quota exceeded · skipped"
-          : skip.reason === "model-unavailable"
-            ? ko
-              ? "이 엔진에 없는 모델 · 건너뜀"
-              : "Model not in this engine · skipped"
-            : ko
-              ? "미설치 · 건너뜀"
-              : "Not installed · skipped";
-      return { label, tone: "skip" };
-    }
-    return { label: ko ? "예비 후보" : "Fallback", tone: "idle" };
+  /** Why a line is not the one in use, in words (no colour: a muted line under the row). The default line says nothing. */
+  function lineNote(role: RuntimeRole, position: number, duplicate: boolean): string | null {
+    if (duplicate) return pick(ko, COPY.duplicate);
+    const skip = pool?.picks[role]?.skipped.find((entry) => entry.position === position);
+    if (!skip) return null;
+    return pick(ko, skip.reason === "quota-exceeded" ? COPY.skippedQuota : skip.reason === "model-unavailable" ? COPY.skippedModel : COPY.skippedMissing);
   }
 
-  function renderPool(role: RuntimeRole) {
+  // F-D2b A: a line is dragged by its handle (only a role with two or more lines has handles). The order is the priority and a drop saves at once
+  // through reorderMember -> writePool -> runtime.setRoleMembers, the same write Alt+Up / Alt+Down makes.
+  const [drag, setDrag] = useState<{ role: RuntimeRole; from: number } | null>(null);
+  const [dropAt, setDropAt] = useState<{ role: RuntimeRole; index: number; edge: "before" | "after" } | null>(null);
+  function endDrag() { setDrag(null); setDropAt(null); }
+  function dropTarget(role: RuntimeRole, from: number, hover: { index: number; edge: "before" | "after" }): number {
+    const slot = hover.edge === "before" ? hover.index : hover.index + 1;
+    return slot > from ? slot - 1 : slot;
+  }
+
+  function renderLines(role: RuntimeRole) {
     const members = pool?.members[role] ?? [];
     const runtimeOptions = runtimeOptionsForRole(role);
-    const sectionRoleLabel = role === "orchestrator"
-      ? (ko ? "오케스트레이터" : "orchestrator")
-      : role === "multimodal"
-        ? (ko ? "이미지 생성" : "image generation")
-        : (ko ? "워커" : "worker");
+    const roleName = pick(ko, role === "orchestrator" ? COPY.orchestrator : role === "multimodal" ? COPY.multimodal : COPY.worker);
+    if (members.length === 0) {
+      return (
+        <>
+          <button
+            type="button"
+            className={s.chooseBtn}
+            data-testid={`models-choose-${role}`}
+            // The pool unread (null) is unknown, not empty: a write now could replace lines this screen has not seen.
+            disabled={busy || pool === null || runtimeOptions.length === 0}
+            aria-label={`${roleName}: ${pick(ko, COPY.chooseModel)}`}
+            onClick={() => void addMember(role)}
+          >
+            {pick(ko, COPY.chooseModel)}
+          </button>
+          {role === "multimodal" && runtimeOptions.length === 0 && <p className={s.mnote}>{pick(ko, COPY.noMultimodalCli)}</p>}
+          {role === "worker" && <p className={s.mnote}>{pick(ko, COPY.workerEmpty)}</p>}
+        </>
+      );
+    }
     return (
-      <div className="dashboard-runtime-pool">
-        {members.length === 0 ? (
-          <div className="dashboard-runtime-pool-empty">
-            {role === "worker"
-              ? ko
-                ? "비어 있음 — 오케스트레이터 풀을 따릅니다."
-                : "Empty — follows the orchestrator pool."
-              : role === "multimodal" && runtimeOptions.length === 0
-                ? ko
-                  ? "연결된 이미지 생성 CLI가 없습니다 — Codex 또는 Antigravity를 연결하세요."
-                  : "No image-generation CLI is connected — connect Codex or Antigravity."
-              : ko
-                ? "비어 있음 — 후보 행을 추가하세요."
-                : "Empty — add a candidate row."}
-          </div>
-        ) : (
-          <>
-            <div className="dashboard-runtime-pool-columns" aria-hidden="true">
-              <span>{ko ? "순위" : "Priority"}</span>
-              <span>{ko ? "모델 · 공급자" : "Model · provider"}</span>
-              <span>{ko ? "작업량" : "Effort"}</span>
-              <span>{ko ? "선택" : "Selection"}</span>
-              <span>{ko ? "관리" : "Manage"}</span>
-            </div>
-            <ol className="dashboard-runtime-pool-list">
-              {members.map((member, index) => {
-              const badge = memberBadge(role, member.position);
-              const selection = member.selection;
-              const runtime = runtimeForSelection(selection);
-              const installedLocalModel = selection.kind === "agentlas-local" && localModelSnapshot?.modelInstallations.some((item) => item.fileName === selection.model);
-              const localInstallation = localModelSnapshot
-                ? localInstallationForSelection(localModelSnapshot, selection)
-                : null;
-              const localModelOn = Boolean(localInstallation && localModelSnapshot?.resident?.installationId === localInstallation.installationId);
-              const modelOptions = modelOptionsForRole(role, selection);
-              const modelValue = runtime
-                ? modelOptionKey(runtime, selection.model)
-                : `unavailable\u0000${selectionKey(selection)}`;
-              const efforts = effortsFor(runtime, selection.model);
-              const effortValue = effortIsSupported(runtime, selection.model, selection.effort)
-                ? selection.effort ?? ""
-                : "";
-              const duplicate =
-                members.filter(
-                  (candidate) =>
-                    selectionKey(candidate.selection) === selectionKey(selection),
-                ).length > 1;
-              const roleLabel = role === "orchestrator"
-                ? ko ? "오케스트레이터" : "Orchestrator"
-                : role === "multimodal"
-                  ? ko ? "이미지 생성" : "Image generation"
-                  : ko ? "워커" : "Worker";
-              const rowLabel = `${roleLabel} ${ko ? "후보" : "candidate"} ${index + 1}`;
-              return (
-                <li
-                  data-runtime-pool-row
-                  data-runtime-pool-role={role}
-                  data-runtime-pool-index={index}
-                  key={`${member.position}:${selectionKey(selection)}`}
-                  data-pool-position={member.position}
-                  /*
-                   * ★행은 5칸짜리 격자인데, 못 지우는 이유 문구가 붙으면 항목이 6개가 된다
-                   *   (fieldset 이 display:contents 라 그 안의 label 두 개가 각각 한 칸이다).
-                   *   그래서 문구가 42px 짜리 마지막 칸으로 밀리고 × 는 격자 밖으로 나갔다.
-                   *   문구가 있는 행만 칸을 하나 더 연다.
-                   */
-                  data-has-note={role === "orchestrator" && members.length === 1 ? "true" : undefined}
-                  data-primary={index === 0 ? "true" : "false"}
-                  data-dragging={
-                    dragState?.role === role && dragState.from === index
-                      ? "true"
-                      : "false"
-                  }
-                  data-drop-target={
-                    dragState?.role === role && dragState.over === index
-                      ? "true"
-                      : "false"
-                  }
-                  onDragOver={(event) => {
-                    if (busy || dragState?.role !== role) return;
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                    if (dragState.over !== index) {
-                      setDragState({ ...dragState, over: index });
-                    }
+      <>
+        {members.map((member, index) => {
+          const selection = member.selection;
+          const runtime = runtimeForSelection(selection);
+          const installedLocalModel = selection.kind === "agentlas-local" && localModelSnapshot?.modelInstallations.some((item) => item.fileName === selection.model);
+          const localInstallation = localModelSnapshot ? localInstallationForSelection(localModelSnapshot, selection) : null;
+          const localModelOn = Boolean(localInstallation && localModelSnapshot?.resident?.installationId === localInstallation.installationId);
+          const modelOptions = modelOptionsForRole(role, selection);
+          const modelValue = runtime ? modelOptionKey(runtime, selection.model) : `unavailable\u0000${selectionKey(selection)}`;
+          const efforts = effortsFor(runtime, selection.model);
+          const effortValue = effortIsSupported(runtime, selection.model, selection.effort) ? selection.effort ?? "" : "";
+          const duplicate = members.filter((candidate) => selectionKey(candidate.selection) === selectionKey(selection)).length > 1;
+          const rowLabel = `${roleName} ${index + 1}`;
+          const note = lineNote(role, member.position, duplicate);
+          const isLocal = selection.kind === "agentlas-local";
+          return (
+            <div
+              className={s.mline}
+              data-runtime-pool-row
+              data-runtime-pool-role={role}
+              data-runtime-pool-index={index}
+              key={`${member.position}:${selectionKey(selection)}`}
+              data-pool-position={member.position}
+              data-with-switch={isLocal ? "true" : undefined}
+              data-handle={members.length > 1 ? "true" : undefined}
+              data-dragging={drag?.role === role && drag.from === index ? "true" : undefined}
+              data-drop={dropAt?.role === role && dropAt.index === index && drag && dropTarget(role, drag.from, dropAt) !== drag.from ? dropAt.edge : undefined}
+              data-line-count={members.length}
+              onDragOver={(event) => {
+                if (!drag || drag.role !== role) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                const box = event.currentTarget.getBoundingClientRect();
+                const edge = event.clientY < box.top + box.height / 2 ? "before" : "after";
+                if (dropAt?.role !== role || dropAt.index !== index || dropAt.edge !== edge) setDropAt({ role, index, edge });
+              }}
+              onDrop={(event) => {
+                if (!drag || drag.role !== role) return;
+                event.preventDefault();
+                const box = event.currentTarget.getBoundingClientRect();
+                const edge = event.clientY < box.top + box.height / 2 ? "before" : "after";
+                const from = drag.from;
+                endDrag();
+                void reorderMember(role, from, dropTarget(role, from, { index, edge }));
+              }}
+              // The order is the priority. The picture shows no number and no handle, so a line moves with Alt + the up / down arrow while focus is in it.
+              onKeyDown={(event) => {
+                if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+                event.preventDefault();
+                void moveMember(role, index, event.key === "ArrowUp" ? -1 : 1);
+              }}
+              title={pick(ko, COPY.reorderHint)}
+            >
+              {members.length > 1 && (
+                <span
+                  className={s.grip}
+                  data-testid="model-line-handle"
+                  draggable={!busy}
+                  aria-hidden="true"
+                  title={pick(ko, COPY.reorderHint)}
+                  onDragStart={(event) => {
+                    if (busy) { event.preventDefault(); return; }
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", `${role}:${index}`);
+                    const rowEl = event.currentTarget.closest<HTMLElement>("[data-runtime-pool-row]");
+                    if (rowEl) event.dataTransfer.setDragImage(rowEl, 16, 20);
+                    setDrag({ role, from: index });
                   }}
-                  onDrop={(event) => {
-                    if (busy || dragState?.role !== role) return;
-                    event.preventDefault();
-                    const from = dragState.from;
-                    setDragState(null);
-                    void reorderMember(role, from, index);
-                  }}
+                  onDragEnd={endDrag}
                 >
-                  <button
-                    type="button"
-                    className="dashboard-runtime-pool-order"
-                    draggable={false}
+                  <svg width="12" height="16" viewBox="0 0 12 16" fill="currentColor"><circle cx="3.5" cy="3" r="1.3" /><circle cx="8.5" cy="3" r="1.3" /><circle cx="3.5" cy="8" r="1.3" /><circle cx="8.5" cy="8" r="1.3" /><circle cx="3.5" cy="13" r="1.3" /><circle cx="8.5" cy="13" r="1.3" /></svg>
+                </span>
+              )}
+              <RuntimeModelPicker
+                ariaLabel={`${rowLabel} ${pick(ko, COPY.model)}`}
+                value={modelValue}
+                options={modelOptions}
+                locale={locale}
+                disabled={busy}
+                dashboardLook
+                onSelect={(option) => void updateMemberModelSelection(role, index, option)}
+              />
+              <div className={s.eff} data-x={index > 0 ? "true" : "false"}>
+                {efforts.length > 0 || selection.effort ? (
+                  <Select
+                    className={s.effortSelect}
+                    aria-label={`${rowLabel} ${pick(ko, COPY.effort)}`}
+                    value={effortValue}
+                    aria-invalid={selection.effort && effortValue === "" ? "true" : undefined}
+                    onChange={(event) => void updateMemberEffort(role, index, event.target.value)}
                     disabled={busy}
-                    aria-label={
-                      ko
-                        ? `${rowLabel} 순위 ${index + 1}. 드래그하거나 방향키로 순위 변경`
-                        : `${rowLabel}, priority ${index + 1}. Drag or use arrow keys to reorder`
-                    }
-                    title={
-                      ko
-                        ? "드래그해서 순위 변경"
-                        : "Drag to change priority"
-                    }
-                    onPointerDown={(event) => beginPointerReorder(event, role, index)}
-                    onPointerMove={updatePointerReorder}
-                    onPointerUp={finishPointerReorder}
-                    onPointerCancel={() => { pointerDragRef.current = null; setDragState(null); }}
-                    onDragStart={(event) => {
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData(
-                        "text/plain",
-                        `${role}:${index}`,
-                      );
-                      setDragState({ role, from: index, over: index });
-                    }}
-                    onDragEnd={() => setDragState(null)}
-                    onKeyDown={(event) => {
-                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
-                        return;
-                      }
-                      event.preventDefault();
-                      const delta = event.key === "ArrowUp" ? -1 : 1;
-                      void moveMember(role, index, delta);
-                    }}
                   >
-                    {index + 1}
+                    <option value="">{ko ? "기본" : "Default"}</option>
+                    {efforts.map((effort) => <option key={effort.id} value={effort.id}>{effort.label}</option>)}
+                  </Select>
+                ) : (
+                  <span className={s.effort}>{ko ? "기본" : "Default"}</span>
+                )}
+                {index > 0 && (
+                  <button type="button" className={s.xBtn} onClick={() => void removeMember(role, index)} disabled={busy}
+                    aria-label={`${pick(ko, COPY.remove)}: ${rowLabel}`} title={pick(ko, COPY.remove)}>
+                    <IconClose size={14} />
                   </button>
-                  <fieldset className="dashboard-runtime-pool-fields">
-                    <legend className="sr-only">{rowLabel}</legend>
-                    <label>
-                      <span>{ko ? "모델 · 공급자" : "Model · provider"}</span>
-                      <RuntimeModelPicker
-                        ariaLabel={`${rowLabel} ${ko ? "모델" : "model"}`}
-                        value={modelValue}
-                        options={modelOptions}
-                        locale={locale}
-                        disabled={busy}
-                        onSelect={(option) => void updateMemberModelSelection(role, index, option)}
-                      />
-                    </label>
-                    <label>
-                      <span>{ko ? "작업량" : "Effort"}</span>
-                      {efforts.length > 0 || selection.effort ? (
-                        <Select
-                          aria-label={`${rowLabel} ${ko ? "작업량" : "effort"}`}
-                          value={effortValue}
-                          aria-invalid={selection.effort && effortValue === "" ? "true" : undefined}
-                          onChange={(event) =>
-                            void updateMemberEffort(role, index, event.target.value)
-                          }
-                          disabled={busy}
-                          >
-                            <option value="">{ko ? "기본" : "Default"}</option>
-                          {efforts.map((effort) => (
-                            <option key={effort.id} value={effort.id}>
-                              {effort.label}
-                            </option>
-                          ))}
-                        </Select>
-                      ) : (
-                        <span className="dashboard-runtime-field-value">
-                          {ko ? "기본" : "Default"}
-                        </span>
-                      )}
-                    </label>
-                  </fieldset>
-                  {selection.kind === "agentlas-local" ? (
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={localModelOn}
-                      aria-label={`${rowLabel} ${ko ? "로컬 모델" : "local model"}`}
-                      aria-busy={localModelBusy ? "true" : undefined}
-                      className="dashboard-runtime-row-switch"
-                      disabled={localModelBusy || !installedLocalModel || !localInstallation || Boolean(localModelSnapshot?.unavailableReason)}
-                      onClick={() => void toggleLocalModel(selection)}
-                      title={ko ? "이 로컬 모델의 GPU 상주 프로세스를 켜거나 끕니다." : "Turns this local model's GPU resident process on or off."}
-                    >
-                      <span className="dashboard-runtime-row-switch-track" aria-hidden="true"><span /></span>
-                      <span>{localModelOn ? "ON" : "OFF"}</span>
-                    </button>
-                  ) : (
-                    <span
-                      className="dashboard-runtime-pool-badge"
-                      data-tone={duplicate ? "skip" : badge.tone}
-                    >
-                      {duplicate
-                        ? ko
-                          ? "중복 후보"
-                          : "Duplicate"
-                        : badge.label}
-                    </span>
-                  )}
-                  {role === "orchestrator" && members.length === 1 && (
-                    /*
-                     * ★못 지우는 이유는 화면에 있어야 한다 (QA 실측 2026-09-08).
-                     * 마지막 오케스트레이터 후보는 지울 수 없는 것이 맞다 — 하나는 남아야
-                     * 한다. 그런데 그 이유가 비활성 단추의 title 에만 있었다. 비활성 단추는
-                     * 포커스를 못 받아 툴팁도 스크린리더도 거기 닿지 않는다. QA 는 다섯 번
-                     * 누르고도 아무 설명을 못 봤다 — 화면이 "고장"과 구별되지 않았다.
-                     */
-                    <span
-                      className="dashboard-runtime-pool-note"
-                      title={ko
-                        ? "오케스트레이터 후보는 최소 하나가 있어야 합니다. 다른 후보를 먼저 추가한 뒤 이 행을 지우세요."
-                        : "At least one orchestrator candidate must remain. Add another candidate first, then remove this row."}
-                    >
-                      {ko ? "마지막 후보라 지울 수 없음" : "Last candidate — cannot remove"}
-                    </span>
-                  )}
-                  <span className="dashboard-runtime-pool-actions">
-                    <button
-                      type="button"
-                      onClick={() => void removeMember(role, index)}
-                      disabled={
-                        busy || (role === "orchestrator" && members.length === 1)
-                      }
-                      aria-label={
-                        ko
-                          ? `${rowLabel} 제거`
-                          : `Remove ${rowLabel.toLowerCase()}`
-                      }
-                      title={
-                        role === "orchestrator" && members.length === 1
-                          ? ko
-                            ? "오케스트레이터 후보는 최소 1개가 필요합니다."
-                            : "At least one orchestrator candidate is required."
-                          : undefined
-                      }
-                    >
-                      ×
-                    </button>
-                  </span>
-                </li>
-              );
-              })}
-            </ol>
-          </>
-        )}
+                )}
+              </div>
+              {isLocal && (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={localModelOn}
+                  aria-label={`${rowLabel} ${pick(ko, COPY.localSwitch)}`}
+                  aria-busy={localModelBusy ? "true" : undefined}
+                  className="dashboard-runtime-row-switch"
+                  disabled={localModelBusy || !installedLocalModel || !localInstallation || Boolean(localModelSnapshot?.unavailableReason)}
+                  onClick={() => void toggleLocalModel(selection)}
+                  title={ko ? "이 로컬 모델의 GPU 사용을 켜거나 꺼요." : "Turns this local model's GPU resident process on or off."}
+                >
+                  <span className="dashboard-runtime-row-switch-track" aria-hidden="true"><span /></span>
+                  <span>{localModelOn ? "ON" : "OFF"}</span>
+                </button>
+              )}
+              {note && <p className={s.mnote}>{note}</p>}
+            </div>
+          );
+        })}
         <button
           type="button"
-          className="dashboard-runtime-pool-add"
+          className={s.moreBtn}
           onClick={() => void addMember(role)}
-          disabled={busy || runtimeOptions.length === 0}
-          // 역할마다 같은 이름의 단추가 있어 어느 역할의 것인지 헷갈렸다(페르소나 루프 라운드 1, 2026-09-13) — 역할 이름을 붙인다.
-          aria-label={ko ? `${sectionRoleLabel} 후보 행 추가` : `Add ${sectionRoleLabel} candidate row`}
+          disabled={busy || pool === null || runtimeOptions.length === 0}
+          // The same button on every role: the role name tells them apart.
+          aria-label={`${roleName}: ${pick(ko, COPY.addFallback)}`}
+          title={pick(ko, COPY.addFallback)}
         >
-          {ko ? `+ ${sectionRoleLabel} 후보 추가` : `+ Add ${sectionRoleLabel} candidate`}
+          <IconPlus size={14} />
         </button>
-      </div>
+        {members.length > 1 && (
+          <p className={s.orderHint} data-testid="model-order-hint">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 13V3M2.5 5.5L5 3l2.5 2.5M11 3v10M8.5 10.5L11 13l2.5-2.5" /></svg>
+            {pick(ko, COPY.orderHint)}
+          </p>
+        )}
+      </>
     );
   }
 
   function renderRole(role: RuntimeRole) {
     const view = views[role];
     const active = view.runtime;
-    // ★멀티모달만 번역돼 있었다 — 같은 묶음의 나머지 둘이 영어로 남아 한국어 화면에
-    //   "Orchestrator"/"Worker" 가 그대로 떴다(한국어 화면 훑기 2026-09-08).
-    //   어휘는 이 파일이 이미 쓰는 것과 맞춘다(아래 후보 행 라벨과 같은 말).
-    const title =
-      role === "orchestrator"
-        ? ko ? "오케스트레이터" : "Orchestrator"
-        : role === "multimodal"
-          ? ko
-            ? "멀티모달 생성 (이미지)"
-            : "Multimodal generation (image)"
-          : ko ? "워커" : "Worker";
+    const checking = active?.localObservation?.state === "pending";
+    const connected = Boolean(active) && !checking;
+    const RoleIcon = role === "orchestrator" ? IconNetwork : role === "multimodal" ? IconImage : IconUsers;
+    const roleName = pick(ko, role === "orchestrator" ? COPY.orchestrator : role === "multimodal" ? COPY.multimodal : COPY.worker);
     return (
-      <section
-        className="dashboard-runtime-role"
-        data-role={role}
-        data-tour-id={
-          role === "worker" ? "dashboard.worker-model" : undefined
-        }
-        key={role}
-      >
-        <div className="dashboard-runtime-role-head">
-          <div>
-            <strong>{title}</strong>
-            <span className="dashboard-runtime-role-kicker">
-              {role === "orchestrator"
-                ? ko
-                  ? "1개 컨트롤러가 의사결정 · 위임 · 결과 통합 — 행은 모델 예비 순서"
-                  : "One controller decides, delegates, and synthesizes — rows are model fallbacks"
-                : role === "multimodal"
-                  ? ko
-                    ? "이미지 생성 CLI 우선순위 — 영상·API 공급자는 설정 > 멀티모달에서 관리"
-                    : "Image-generation CLI priority — manage video and API providers in Settings > Multimodal"
-                : ko
-                  ? "N개 워커 실행이 공유하는 모델 우선순위 — 행 수는 워커 수가 아님"
-                  : "Shared model priority for N worker executions — rows are not worker count"}
-            </span>
-          </div>
-          <span
-            className="dashboard-runtime-pool-badge"
-            data-tone={active && active.localObservation?.state !== "pending" ? "active" : "idle"}
-          >
-            {active?.localObservation?.state === "pending"
-              ? ko ? "준비 확인 중" : "Checking readiness"
-              : active
-              ? ko
-                ? "연결됨"
-                : "Connected"
-              : ko
-                ? "연결 대기"
-                : "Waiting"}
-          </span>
-        </div>
-        {renderPool(role)}
+      <section className={s.role} data-role={role} key={role}>
+        <h3 className={s.roleHead}>
+          <RoleIcon size={17} />
+          {roleName}
+          <i className={s.statusDot} data-tone={connected ? "ok" : "idle"} role="img"
+            aria-label={checking ? pick(ko, COPY.checkingReadiness) : connected ? pick(ko, COPY.connected) : pick(ko, COPY.waiting)}
+            title={checking ? pick(ko, COPY.checkingReadiness) : connected ? pick(ko, COPY.connected) : pick(ko, COPY.waiting)} />
+        </h3>
+        {renderLines(role)}
       </section>
     );
   }
@@ -1216,63 +1031,56 @@ export function RuntimeControl() {
   const localPending = runtimes.some((runtime) => runtime.localObservation?.state === "pending");
   const localInstalled = (localModelSnapshot?.modelInstallations.length ?? 0) > 0;
   return (
-    <div
-      id="runtime-roles"
-      className="dashboard-module dashboard-runtime-control"
-      data-busy={busy ? "true" : "false"}
-    >
-      <div className="dashboard-module-head dashboard-runtime-module-head">
-        <span>{ko ? "역할별 기본 모델" : "Role model defaults"}</span>
-        <small>
-          {ko
-            ? "오케스트레이터 1 : 워커 N · 행은 역할별 모델 우선순위"
-            : "1 Orchestrator : N Workers · rows are role model priorities"}
-        </small>
+    <section id="runtime-roles" className={s.card} data-tour-id="dashboard.worker-model" data-busy={busy ? "true" : "false"} aria-labelledby="dashboard-models-title">
+      <div className={s.cardHead}>
+        <h2 className={s.h} id="dashboard-models-title">{pick(ko, COPY.models)}</h2>
         <button
           type="button"
-          className="dashboard-runtime-auto"
-          aria-label={ko ? "연결된 모델로 역할 우선순위 자동 설정" : "Automatically set role priorities from connected models"}
+          className={s.iconBtn}
+          aria-label={pick(ko, COPY.autoSet)}
+          title={pick(ko, COPY.autoSet)}
           onClick={() => void autoConfigureRoles()}
           disabled={busy || runtimes.length === 0}
-          title={
-            ko
-              ? "현재 역할 모델을 1순위로 두고 연결된 런타임을 후순위에 배치합니다."
-            : "Keeps current role models first and adds connected runtimes in order."
-          }
         >
-          {busy ? (ko ? "설정 중…" : "Setting…") : (ko ? "자동 설정" : "Auto set")}
+          <IconWand size={16} />
         </button>
       </div>
       {loading ? (
-        <div className="dashboard-module-empty">
-          {ko ? "런타임 확인 중…" : "Checking runtimes…"}
-        </div>
+        <p className={s.emptyBody}>{pick(ko, COPY.checkingRuntimes)}</p>
       ) : !anyActive && !localInstalled && !localPending ? (
-        <div className="dashboard-module-empty">
-          {ko ? "연결된 런타임이 없습니다." : "No runtime connected."}
-        </div>
+        // A failed read of the connections is not "nothing is connected": it says so, with its retry.
+        messageTone === "error" && message ? (
+          <p className={s.note} data-tone="error" role="alert">
+            {message}
+            <button type="button" className={`${s.btn} ${s.inlineBtn}`} onClick={() => { invalidateViewData("dashboard.runtimes"); void load(); void loadPool(); }}>{pick(ko, COPY.retry)}</button>
+          </p>
+        ) : (
+          <p className={s.emptyBody}>{pick(ko, COPY.noRuntime)}</p>
+        )
       ) : (
         <>
           {localPending && (
-            <div className="dashboard-runtime-message" role="status" aria-live="polite">
-              {ko ? "로컬 모델의 준비 상태를 확인하고 있습니다." : "Checking local model readiness."}
-            </div>
+            <p className={s.note} role="status" aria-live="polite">
+              {ko ? "로컬 모델 준비 상태 확인 중" : "Checking local model readiness."}
+            </p>
           )}
           {discoveryNotes.length > 0 && (
-            <ul className="dashboard-runtime-discovery-notes" role="status">
-              {discoveryNotes.map((note) => (
-                <li key={note.key} data-sign-in-required={note.signIn ? "true" : undefined}>
-                  {note.text}
-                  {note.connect && (
-                    <button type="button" className={connectStyles.small}
-                      aria-label={`${note.connect.name} — ${connectCopy(ko).connect}`}
-                      onClick={() => setConnectSpec(note.connect ?? null)}>
-                      {connectCopy(ko).connect}
-                    </button>
-                  )}
-                </li>
-              ))}
-            </ul>
+            <div className={s.note} role="status">
+              <ul>
+                {discoveryNotes.map((note) => (
+                  <li key={note.key} data-sign-in-required={note.signIn ? "true" : undefined}>
+                    {note.text}
+                    {note.connect && (
+                      <button type="button" className={s.btn}
+                        aria-label={`${note.connect.name} — ${connectCopy(ko).connect}`}
+                        onClick={() => setConnectSpec(note.connect ?? null)}>
+                        {connectCopy(ko).connect}
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           {connectSpec && (
             <RuntimeConnectPopup
@@ -1288,23 +1096,16 @@ export function RuntimeControl() {
               }}
             />
           )}
-          <div className="dashboard-runtime-library">
-            {renderRole("orchestrator")}
-            {renderRole("worker")}
-            {renderRole("multimodal")}
-          </div>
+          {renderRole("orchestrator")}
+          {renderRole("worker")}
+          {renderRole("multimodal")}
           {message && (
-            <div
-              className="dashboard-runtime-message"
-              data-tone={messageTone}
-              role="status"
-              aria-live="polite"
-            >
+            <p className={s.note} data-tone={messageTone} role="status" aria-live="polite">
               {message}
-            </div>
+            </p>
           )}
         </>
       )}
-    </div>
+    </section>
   );
 }

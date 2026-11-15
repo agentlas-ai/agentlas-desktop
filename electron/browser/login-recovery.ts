@@ -305,6 +305,36 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
   const lastImportAt = new Map<string, number>();
   const pendingCards = new Map<string, { card: OwnerLoginCard; stop: () => void; resumers: Set<(prerequisite?: LoginPrerequisiteRef) => void> }>();
   const inFlight = new Map<string, Promise<LoginRecoveryOutcome>>();
+  // One sign-in request per site: runs that wall on the same site (same surface, slot, profile and consent generation) share the owner card, the notification,
+  // the sign-in window and the cookie subscription. Each run keeps its own scope (verification, prerequisite, resumer), so every run continues when the session returns.
+  const siteCards = new Map<string, { card: OwnerLoginCard; scopeKeys: Set<string> }>();
+  const siteWatches = new Map<string, { stop: () => void; handlers: Map<string, () => void> }>();
+  const siteKeyOf = (ctx: LoginRecoveryContext, site: string) => JSON.stringify([ctx.surface, ctx.slotId ?? "default", ctx.profileId ?? "default", site, ctx.consentGeneration ?? "legacy"]);
+  const dropPending = (scopeKey: string) => {
+    pendingCards.delete(scopeKey);
+    for (const [siteKey, entry] of siteCards) {
+      entry.scopeKeys.delete(scopeKey);
+      if (entry.scopeKeys.size === 0) siteCards.delete(siteKey);
+    }
+  };
+  const watchSite = (siteKey: string, scopeKey: string, input: Parameters<LoginRecoveryDeps["watchSession"]>[0]): (() => void) => {
+    let shared = siteWatches.get(siteKey);
+    if (!shared) {
+      const handlers = new Map<string, () => void>();
+      shared = { handlers, stop: () => {} };
+      shared.stop = deps.watchSession({ ...input, onRestored: () => { for (const handler of [...handlers.values()]) handler(); } });
+      siteWatches.set(siteKey, shared);
+    }
+    const owner = shared;
+    owner.handlers.set(scopeKey, input.onRestored);
+    return () => {
+      if (owner.handlers.get(scopeKey) === input.onRestored) owner.handlers.delete(scopeKey);
+      if (owner.handlers.size === 0 && siteWatches.get(siteKey) === owner) {
+        siteWatches.delete(siteKey);
+        try { owner.stop(); } catch { /* cleanup must remain unconditional */ }
+      }
+    };
+  };
   type Scope = { key: string; base: string; ctx: LoginRecoveryContext; createdAt: number;
     verification?: ReturnType<NonNullable<LoginRecoveryContext["retainVerification"]>>; prerequisite?: LoginPrerequisiteRef; signature?: string; pending: boolean; releasePending?: () => void; closed: boolean; stopAbort: () => void; stopExpiration: () => void };
   const scopes = new Map<string, Scope>();
@@ -320,7 +350,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     scope.verification = undefined;
     if (scopes.get(scope.key) !== scope) return;
     try { pendingCards.get(scope.key)?.stop(); } catch { /* cleanup must remain unconditional */ }
-    pendingCards.delete(scope.key);
+    dropPending(scope.key);
     inFlight.delete(scope.key);
     scopes.delete(scope.key);
     if (scope.pending) {
@@ -568,7 +598,11 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
       event(ctx, "owner-card", wall, { reason: "card-already-open" });
       return { state: "awaiting-owner", site: wall.site, card: existing.card, newCard: false, ...(ctx.recoveryScope.prerequisite ? { prerequisite: ctx.recoveryScope.prerequisite } : {}) };
     }
-    const card = ownerLoginCardFor({ site: wall.site, surface: ctx.surface, reason, returnUrl: ctx.returnUrl });
+    const siteKey = siteKeyOf(ctx, wall.site);
+    const openForSite = siteCards.get(siteKey);
+    const sharedCard = openForSite !== undefined && openForSite.scopeKeys.size > 0;
+    const card = sharedCard ? openForSite.card : ownerLoginCardFor({ site: wall.site, surface: ctx.surface, reason, returnUrl: ctx.returnUrl });
+    if (sharedCard) openForSite.scopeKeys.add(key); else siteCards.set(siteKey, { card, scopeKeys: new Set([key]) });
     const resumers = new Set<(prerequisite?: LoginPrerequisiteRef) => void>();
     if (ctx.resume) resumers.add(ctx.resume);
     const since = deps.now();
@@ -599,7 +633,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
             if (!cleared) return;
             done = true;
             entry.stop();
-            if (pendingCards.get(key) === entry) pendingCards.delete(key);
+            if (pendingCards.get(key) === entry) dropPending(key);
             event({ ...ctx, isCurrent: () => pendingCurrent(ctx) }, "session-restored", wall,
               { counts: { resumers: entry.resumers.size } });
             const prerequisite = ctx.recoveryScope.prerequisite;
@@ -616,7 +650,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
             if (!done && pendingCurrent(ctx)) arm();
           });
       };
-      stops.push(deps.watchSession({ surface: ctx.surface, domains: wall.targetDomains, since, onRestored }));
+      stops.push(watchSite(siteKey, key, { surface: ctx.surface, domains: wall.targetDomains, since, onRestored }));
       if (ctx.recoveryScope.verification?.watchNavigation) {
         stops.push(ctx.recoveryScope.verification.watchNavigation(onRestored));
       }
@@ -625,16 +659,16 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     arm();
     if (done) entry.stop();
     if (!current(ctx)) return { state: "not-a-wall" };
-    event(ctx, "owner-card", wall, { reason });
-    try { ctx.notify?.(card); } catch { /* 알림 실패가 카드를 없애지 않는다 */ }
+    event(ctx, "owner-card", wall, { reason: sharedCard ? "card-already-open" : reason });
+    if (!sharedCard) try { ctx.notify?.(card); } catch { /* 알림 실패가 카드를 없애지 않는다 */ }
     // The remaining step (a device approval, a code) is on the page the saved login reached: re-opening the sign-in address there would
     // reload the tab back to the form and lose it.
-    if (reason !== "destination-protected" && reason !== "destination-unreadable" && reason !== "site-auth-unverified"
+    if (!sharedCard && reason !== "destination-protected" && reason !== "destination-unreadable" && reason !== "site-auth-unverified"
       && reason !== "sign-in-approval-required" && reason !== "second-factor-required") {
       try { await (ctx.openSignIn ?? deps.openSignIn)(card); } catch { /* 창 열기 실패 — 카드는 남는다 */ }
     }
     return done || !pendingCurrent(ctx) ? { state: "not-a-wall" }
-      : { state: "awaiting-owner", site: wall.site, card, newCard: true, ...(ctx.recoveryScope.prerequisite ? { prerequisite: ctx.recoveryScope.prerequisite } : {}) };
+      : { state: "awaiting-owner", site: wall.site, card, newCard: !sharedCard, ...(ctx.recoveryScope.prerequisite ? { prerequisite: ctx.recoveryScope.prerequisite } : {}) };
   };
 
   return {
@@ -693,7 +727,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
       inFlight.set(scope.key, next);
       return next;
     },
-    openCards: () => [...pendingCards.values()].map((entry) => entry.card),
+    openCards: () => [...new Set([...pendingCards.values()].map((entry) => entry.card))],
     releaseScope: (input) => {
       for (const scope of scopes.values()) if (scope.ctx.runId === input.runId
         && (input.nodeId === undefined || scope.ctx.nodeId === input.nodeId)) closeScope(scope);

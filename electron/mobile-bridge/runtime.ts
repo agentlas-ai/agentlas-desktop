@@ -45,6 +45,8 @@ import {
   type DesktopMobileTerminalControl,
 } from "./terminal-control";
 import type { MobileVisualSessionControl } from "./visual-session";
+import { setOneHomePairingProvider } from "../one/home";
+import type { MobileBridgePairingOrigin } from "./pairing";
 
 export interface MobileBridgeRuntimeOptions {
   /** Native host authority; omitted by Desktop, exclusive when supplied by a service. */
@@ -145,6 +147,7 @@ let networkWatchTimer: NodeJS.Timeout | null = null;
 let lifecycleTail: Promise<void> = Promise.resolve();
 export type MobileBridgeStateChangeReason =
   | MobileBridgePairingChangeReason
+  | "device-ready"
   | "runtime-started"
   | "runtime-stopped"
   | "runtime-rebinding"
@@ -304,7 +307,10 @@ async function startBridgeInternal(
       if (reason === "device-revoked") {
         try {
           for (const device of pairing.listDevices()) {
-            if (device.revokedAt !== null) releaseTerminalLeasesOfDevice(authority, device.deviceId);
+            if (device.revokedAt !== null) {
+              authority.revokePhoneToolsForDevice(device.deviceId);
+              releaseTerminalLeasesOfDevice(authority, device.deviceId);
+            }
           }
         } catch { console.warn("[mobile-bridge] terminal lease hand-back after a revocation could not read the device store"); }
       }
@@ -365,6 +371,7 @@ async function startBridgeInternal(
     ...(push ? { mobilePush: push } : {}),
     goalControl: options.hostAuthority?.goalControl === false ? undefined : desktopGoalControlServices(),
     domainAccountAdmission,
+    companionAccountBinding: deviceId => pairing.deviceAccountBinding(deviceId),
     hostIdentity: identity,
     displayName,
     appVersion: options.appVersion,
@@ -408,6 +415,7 @@ async function startBridgeInternal(
       port: configuredPort(overrides.port),
       tls: tls.serverOptions,
       relayPairingInfo: () => relay?.pairingInfo() ?? null,
+      onPairedDeviceReady: () => emitMobileBridgeStateChange("device-ready"),
       onError: (error) => console.error("[mobile-bridge]", error.message),
     });
     const address = await server.start();
@@ -556,6 +564,9 @@ export function retryAgentlasMobileBridge(): Promise<MobileBridgeRuntimeStatus> 
   return rebindAgentlasMobileBridge("runtime-retried");
 }
 
+// O-M3a: one/home.ts reads the pairing records (pairedVia, which phone may be vouched for) of whatever bridge is running now.
+setOneHomePairingProvider(() => running?.pairing ?? null);
+
 export function mobileBridgeRelayReady(): boolean { return running?.relay.ready() ?? false; }
 export function refreshMobileBridgeRelayAuthentication(): void { running?.relay.refreshAuthentication(); }
 
@@ -572,7 +583,12 @@ export function mobileBridgeRuntimeStatus(): MobileBridgeRuntimeStatus {
   };
 }
 
-export async function issueMobileBridgePairing(): Promise<MobileBridgePairingPayload> {
+/**
+ * O-M3a: every issuer of a pairing says where it comes from — the settings screen ("screen") or a cloud computer's host ("managed").
+ * The origin and "was something operating the window" are passed to issueChallenge, which makes the stamp in the same synchronous step as the
+ * challenge; they decide the record's `pairedVia` (pairing.ts).
+ */
+export async function issueMobileBridgePairing(origin: MobileBridgePairingOrigin): Promise<MobileBridgePairingPayload> {
   const state = running;
   if (!state) throw new Error("Agentlas Mobile Bridge is not running");
   const pairingAttemptId = `pair_${randomBytes(24).toString("base64url")}`;
@@ -583,7 +599,7 @@ export async function issueMobileBridgePairing(): Promise<MobileBridgePairingPay
   // A network rebind replaces the server/manifest. Never attach a proof minted
   // for the outgoing host instance to the replacement pairing endpoint.
   if (running !== state) throw new Error("Agentlas Mobile Bridge changed while preparing the pairing proof");
-  const challenge = state.pairing.issueChallenge(accountProof);
+  const challenge = state.pairing.issueChallenge(accountProof, origin);
   return createMobileBridgePairingPayload(challenge, state.manifest);
 }
 

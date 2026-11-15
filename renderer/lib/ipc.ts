@@ -11,7 +11,6 @@ import type {
   FsPathGrant,
 } from "./types";
 import type { SiteActivityEvent } from "@shared/site-studio";
-import type { AliveChangedEvent } from "@shared/alive";
 import type { ProductExtensionStatus, ProductExtensionViewStatus, ScienceSuiteInstallProgress } from "@shared/product-extension";
 import {
   connectIpcCacheToStoreEvents,
@@ -50,8 +49,6 @@ interface AgentlasEvents {
   ) => () => void;
   /** 실행 중 chatId 목록 방송 구독 — 사이드바 "실행 중" 인디케이터. unsubscribe 반환. */
   onActiveChats: (handler: (chatIds: string[]) => void) => () => void;
-  /** Alive (AGI toggle) state changed for a surface/scope; re-read alive.getState. Absent on older preloads. */
-  onAliveChanged?: (handler: (event: AliveChangedEvent) => void) => () => void;
   /** Agent mail changed (ids + unread count). Absent on older preloads. */
   onAgentMailChanged?: (handler: (event: import("@shared/agent-mail").AgentMailChangedEvent) => void) => () => void;
   /** New-mail notification was clicked: open this thread in One's mailbox. */

@@ -1,0 +1,45 @@
+/*
+ * The files one answer made or changed (pictures desktop-impl-gaps-8 AK-1..AK-4): a line of chips right under the answer (8 below it, same left edge), opening in place
+ * to a list. Existing tokens only; the icons carry no colour. A deleted file is grey with a line through its name and does not press.
+ */
+.wrap { display: flex; flex-direction: column; gap: 8px; min-width: 0; margin-top: 8px; }
+.chips { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.chip { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-height: 36px; box-sizing: border-box; padding: 0 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); color: var(--ink); font: inherit; font-size: 13.5px; line-height: 1.3; cursor: pointer; transition: background 0.12s ease; }
+.chip:hover, .chip:focus-visible { background: var(--fill-1); outline: none; }
+.chip[data-deleted="true"] { background: var(--paper-2); border-color: transparent; color: var(--muted-deep, var(--ink-soft)); cursor: default; }
+.chip[data-deleted="true"]:hover { background: var(--paper-2); }
+.glyph { display: grid; place-items: center; flex: none; color: var(--ink-soft); }
+.chip[data-deleted="true"] .glyph { color: var(--muted-deep, var(--ink-soft)); }
+.name { min-width: 0; max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: var(--ink); }
+.chip[data-deleted="true"] .name { text-decoration: line-through; font-weight: 600; color: var(--muted-deep, var(--ink-soft)); }
+.op { flex: none; font-size: 12.5px; color: var(--muted-deep, var(--ink-soft)); white-space: nowrap; }
+.moreChip { gap: 6px; font-weight: 700; }
+.moreChip .chev { display: grid; place-items: center; color: var(--ink-soft); }
+
+.list { border: 1px solid var(--paper-edge); border-radius: 12px; background: var(--paper); overflow: hidden; max-width: 720px; }
+.head { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-bottom: 1px solid var(--paper-edge); font-size: 13px; color: var(--muted-deep, var(--ink-soft)); }
+.headTitle { font-size: 14px; font-weight: 700; color: var(--ink); white-space: nowrap; }
+.headCount { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.collapse { display: grid; place-items: center; width: 28px; height: 28px; margin-left: auto; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--ink-soft); cursor: pointer; }
+.collapse:hover, .collapse:focus-visible { background: var(--fill-1); color: var(--ink); outline: none; }
+.rows { max-height: calc(8 * 50px); overflow-y: auto; }
+.row { position: relative; display: grid; grid-template-columns: 20px minmax(0, auto) minmax(0, 1fr) auto auto; align-items: center; column-gap: 12px; width: 100%; min-height: 50px; box-sizing: border-box; padding: 0 14px; border: 0; border-bottom: 1px solid var(--paper-edge); background: transparent; color: var(--ink); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.row:last-child { border-bottom: 0; }
+.row:hover, .row:focus-visible { background: var(--fill-1); outline: none; }
+.row[data-deleted="true"] { cursor: default; color: var(--muted-deep, var(--ink-soft)); }
+.row[data-deleted="true"]:hover { background: transparent; }
+.row[data-deleted="true"] .rowName { text-decoration: line-through; font-weight: 600; color: var(--muted-deep, var(--ink-soft)); }
+.rowName { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+.rowDir { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-deep, var(--ink-soft)); font-size: 13px; }
+.rowOp { white-space: nowrap; font-size: 13px; color: var(--muted-deep, var(--ink-soft)); text-align: right; }
+.reveal { display: none; place-items: center; width: 30px; height: 30px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); color: var(--ink-soft); cursor: pointer; padding: 0; }
+.row:hover .reveal, .row:focus-within .reveal { display: grid; }
+.reveal:hover, .reveal:focus-visible { background: var(--fill-1); color: var(--ink); outline: none; }
+.foot { display: flex; justify-content: center; align-items: center; width: 100%; min-height: 40px; border: 0; border-top: 1px solid var(--paper-edge); background: transparent; color: var(--muted-deep, var(--ink-soft)); font: inherit; font-size: 13.5px; cursor: pointer; }
+.foot:hover, .foot:focus-visible { color: var(--ink); outline: none; }
+
+.menu { position: fixed; z-index: 70; min-width: 200px; padding: 6px; border: 1px solid var(--paper-edge); border-radius: 12px; background: var(--paper); box-shadow: 0 10px 30px rgba(15, 18, 20, 0.14); }
+.menuItem { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; box-sizing: border-box; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-size: 14px; text-align: left; cursor: pointer; white-space: nowrap; }
+.menuItem:hover, .menuItem:focus-visible { background: var(--fill-1); outline: none; }
+.menuItem[disabled] { color: var(--muted-deep, var(--ink-soft)); cursor: default; }
+.menuItem[disabled]:hover { background: transparent; }

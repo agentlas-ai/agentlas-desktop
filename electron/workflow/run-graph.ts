@@ -20,6 +20,7 @@ import { withAutomationNodeAccounting, withAutomationRunAccounting } from "../lo
 import { isHostPreflightTool, couldHaveChangedTheOutsideWorld } from "../../shared/tool-activity";
 import { isAgentlasBrowserToolName, isReadOnlyGraphBrowserObservation } from "../../shared/graph-browser-observation";
 import { findGraphContradictions } from "../../shared/graph-contradictions";
+import { parseGraphCondition } from "../../shared/graph-condition";
 import { getDb } from "../store/db";
 import type {
   Automation,
@@ -1626,6 +1627,9 @@ const REPLAY_SAFE_PRE_DISPATCH_ERROR_CODES = new Set([
   "agentlas-browser-host-unavailable",
   // mcp/client.ts: the node's agent is archived; refused before the runner is called (earlyResult), also on the event as not-dispatched.
   "agent_archived",
+  // Agentlas 2.0 D6: the node's agent is not registered here, never had a folder, or its seat is archived; the gate in mcp/client.ts refuses before any model is called,
+  // so this node ends with a closed "did not run" and the rest of the automation is not killed by it.
+  "needs_registration", "agent_no_folder", "seat_archived",
 ]);
 
 function isTypedReplaySafeWorkforceError(code: string): boolean {
@@ -1964,39 +1968,17 @@ type ConditionOutcome =
 function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): ConditionOutcome {
   const cfg = node.config;
   const label = node.label || node.id;
-  let varName = str(cfg, "var");
-  let op = str(cfg, "op") ?? "truthy";
-  let right = cfg.value;
-  /*
-   * Older graph authors stored the condition as a small template expression
-   * (`{{verdict}} == 'pass'`).  The typed kernel later moved to var/op/value,
-   * but existing automations were never migrated.  Treating an expression-only
-   * node as `truthy(undefined)` silently forced the false branch and could burn
-   * through a retry loop even when the verifier had returned `pass`.
-   *
-   * Keep this compatibility parser deliberately tiny: it recognizes only one
-   * variable and literal equality/inequality (or a bare variable).  It never
-   * evaluates JavaScript or interpolates arbitrary source text.
-   */
-  if (!varName) {
-    const expression = str(cfg, "expression")?.trim();
-    const comparison = expression?.match(
-      /^\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}\s*(===|!==|==|!=)\s*(["'])(.*?)\3$/,
-    );
-    const bare = expression?.match(/^\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}$/);
-    if (comparison) {
-      varName = comparison[1];
-      op = comparison[2] === "===" || comparison[2] === "==" ? "eq" : "ne";
-      right = comparison[4];
-    } else if (bare) {
-      varName = bare[1];
-      op = "truthy";
-    }
-  }
   const unresolved = (reason: string, nextAction: string): ConditionOutcome => ({
     ok: false,
     failure: { code: "EDGE_CONDITION_UNRESOLVED", reason, nextAction },
   });
+
+  const parsed = parseGraphCondition(cfg);
+  if (!parsed.ok) return unresolved(
+    L(`조건 노드 "${label}"의 변수, 연산자 또는 식을 해석할 수 없습니다.`, `Condition node "${label}" has no variable or has an unsupported operator or expression.`),
+    L("조건 노드에서 변수와 지원되는 연산자를 선택하세요.", "Choose a variable and a supported operator in the condition node."),
+  );
+  const { variable: varName, op, value: right } = parsed;
 
   if (varName && !(varName in vars)) {
     return unresolved(
@@ -2011,16 +1993,6 @@ function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): Condi
     );
   }
   const left = varName ? vars[varName] : undefined;
-  if (!varName && op !== "truthy" && op !== "falsy") {
-    return unresolved(
-      L(
-        `조건 노드 "${label}"에 비교할 변수가 지정되지 않았습니다(연산자 "${op}").`,
-        `Condition node "${label}" has no variable specified to compare (operator "${op}").`,
-      ),
-      L("조건 노드를 열어 비교할 변수를 선택하세요.", "Open the condition node and select a variable to compare."),
-    );
-  }
-
   switch (op) {
     case "truthy":
       return { ok: true, value: Boolean(left) };
@@ -2031,7 +2003,9 @@ function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): Condi
     case "ne":
       return { ok: true, value: left !== right };
     case "gt":
-    case "lt": {
+    case "gte":
+    case "lt":
+    case "lte": {
       const l = Number(left);
       const r = Number(right);
       if (!Number.isFinite(l) || !Number.isFinite(r)) {
@@ -2046,7 +2020,7 @@ function evalCondition(node: WorkflowNode, vars: Record<string, unknown>): Condi
           ),
         );
       }
-      return { ok: true, value: op === "gt" ? l > r : l < r };
+      return { ok: true, value: op === "gt" ? l > r : op === "gte" ? l >= r : op === "lt" ? l < r : l <= r };
     }
     case "contains": {
       if (typeof left !== "string" || typeof right !== "string") {
@@ -2689,19 +2663,33 @@ export async function runGraph(
     const revisedRequestVars = new Set(changedNames);
     requestInputsChanged = changedNames.length > 0;
     /*
-     * A completed step that never produced the value it declares did not finish: every step that reads the value
-     * fails with NODE_INPUT_MISSING on each resume. Production 2026-10-05 (a Threads verification Toolchain):
-     * desktop 1.2.57's background effect look settled as completed, with no output, a read step whose model had
-     * been refused ("at capacity"); three resumes then failed at the next step within a second each. A read or pure
-     * step runs again and its readers with it (below). A mutation step stays completed, since running it again
-     * could repeat an outward effect; its reader still says which value is missing.
+     * A step recorded as completed that never produced the value it declares did not finish: every step that reads the
+     * value fails with NODE_INPUT_MISSING on each resume. Production (a Threads verification Toolchain):
+     * desktop 1.2.57's background effect look settled as completed, with no output, a read step whose model had been
+     * refused ("at capacity"); three resumes then failed at the next step within a second each. Such a step runs again
+     * and its readers with it (below), whatever its effect kind. decision (OWNER-DECISIONS): an
+     * unknown outcome never stops to ask, a duplicate is accepted, and the repeat is bounded and closes by itself.
+     * 28c49a340 removed the exception for a mutation step on purpose; do not bring it back, a guard here stops the
+     * reader on every resume. Where the bound is: the scheduler's attempt cap of the occurrence (automation-scheduler.ts,
+     * MAX_SCHEDULE_OCCURRENCE_ATTEMPTS = store/unconfirmed-occurrence.ts, 3) and the trigger outbox's delivery cap for an
+     * unconfirmed one. What softens the duplicate: an agent/action step that may have acted outside is given the host's
+     * one-line unknown-effect observation (uncertainEffectNotes, the module an interrupted step already gets), and the
+     * host's per-item effect record (store/automation-effect-items.ts) still refuses an item published twice.
      */
+    let unproducedLineage: readonly string[] | null = null;
     for (const node of graph.nodes) {
       const produced = str(node.config ?? {}, "produces");
       if (!produced || !completed.has(node.id) || Object.hasOwn(vars, produced)) continue;
       completed.delete(node.id);
       delete outputs[node.id];
       changedNames.push(produced);
+      if (!["agent", "action"].includes(node.type) || Object.hasOwn(node.config ?? {}, "mcpCall")) continue;
+      unproducedLineage ??= latestFailed ? graphRunLineage(automation.id, latestFailed.runId) : [];
+      if (graphStepEffectRisk(node, checkpoint, effectNodeIds, unproducedLineage) === null) continue;
+      uncertainEffectNotes.set(node.id, {
+        code: "MUTATION_UNVERIFIED", reason: L("지난 시도가 결과 값 없이 끝나, 바깥에 무언가를 반영했는지 확인되지 않았어요.", "The previous attempt ended without its value, so it is unconfirmed whether it changed anything outside."),
+        nextAction: L("이 단계는 이어서 다시 실행돼요. AI 단계는 지난 시도가 반영됐는지 먼저 확인해요.", "This step runs again; an AI step first checks whether the last attempt took effect."),
+      });
     }
     if (changedNames.length > 0) {
       /*
@@ -6241,7 +6229,7 @@ export async function runGraph(
            * existing uncertain-effect note: the prompt already tells it to check the current state first (latest posts, sent
            * folder), do nothing twice, and leave the step pending when it cannot confirm. The per-item record (effect_item_check /
            * effect_item_record) refuses an item this occurrence already published. Only a step a model runs can read that note
-           * (agent and action, not a direct tool call or code). What stays a plain external failure: the owner's stop, a deadline,
+           * (agent, action and output - an output node sends its content through the model - not a direct tool call or code). What stays a plain external failure: the owner's stop, a deadline,
            * and a provider that answered with its own typed refusal (usage limit, rate limit, login, unsupported): those wait for
            * the provider's cooldown on the next run instead of asking again at once.
            */
@@ -6249,7 +6237,7 @@ export async function runGraph(
             || (seenRuntimeFailure?.kind !== undefined
               && ["quota", "rate_limit", "auth", "refused", "unsupported"].includes(seenRuntimeFailure.kind));
           const unknownOutcomeRetry = ambiguous && externalEffectsUncertain && !dryRun && !opts.immutableImplementation
-            && ["agent", "action"].includes(node.type) && !nativeMcpCall && !Object.hasOwn(node.config ?? {}, "mcpCall")
+            && ["agent", "action", "output"].includes(node.type) && !nativeMcpCall && !Object.hasOwn(node.config ?? {}, "mcpCall")
             && !providerAnsweredForItself && !nodeTimedOut && !runSignal.aborted && checkpointPersistenceError === null
             // The previous worker must have ended: two live workers on one step are not a duplicate post, they are a race.
             && !(graphWorkerReceipt && graphWorkerReceipt.runtimeQuiesced === false)

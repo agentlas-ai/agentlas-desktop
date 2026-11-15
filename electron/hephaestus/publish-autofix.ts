@@ -1,4 +1,4 @@
-import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { registerApprovalLineageIfLive } from "../runtime/linked-abort";
 import { runnerFailureFromError } from "../runtime/runner";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
@@ -23,6 +23,7 @@ import { pickRunner } from "../runtime/selection";
 import { detectRuntimes } from "../runtime/detect";
 import { securityScan } from "./commands";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
+import { isAgentLocalStatePath } from "../../shared/agent-local-state";
 
 // Deterministic safety backstop — a secret/artifact match here is ALWAYS
 // excluded, even if the model omitted it. This is the never-publish-a-secret
@@ -101,6 +102,8 @@ function relDirParts(rel: string): string[] {
 }
 
 export function isNeverPublish(rel: string): boolean {
+  // 이 컴퓨터에만 있는 에이전트 상태는 정리 사본으로 복사하지도 않는다(기억 DB 를 임시 폴더에 또 만들지 않는다).
+  if (isAgentLocalStatePath(rel)) return true;
   if (relDirParts(rel).some((part) => NEVER_PUBLISH_DIRS.has(part))) return true;
   const name = rel.split("/").pop() ?? rel;
   // `credentials/` and `signing/` match the secret-name patterns as FOLDERS, so
@@ -124,6 +127,8 @@ function walkFiles(base: string): string[] {
     for (const entry of entries) {
       const abs = path.join(dir, entry.name);
       const rel = path.relative(base, abs).split(path.sep).join("/");
+      // 로컬 상태는 링크든 폴더든 목록에 올리지 않는다(링크 검사보다 먼저).
+      if (isAgentLocalStatePath(rel)) continue;
       if (entry.isSymbolicLink()) {
         out.push(`@symlink:${rel}`);
         continue;
@@ -259,7 +264,7 @@ async function runModelReview(
     locale,
   } as RunnerRequest;
   try {
-    const result = await runObservedRunner(runner, req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
+    const result = await runObservedRunnerAs("judgment", "publish-model-review", runner, req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
     if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     if (timeout.signal.aborted) return { exclude: [], localized: null, acknowledgeWarns: [] };
     return safeModelJson(result.text ?? "");
@@ -293,7 +298,7 @@ function copyClean(src: string, dest: string, extraExclude: Set<string>): string
       // even though the product writes that README precisely to be read by
       // whoever installs the package.
       const neverPublishHere = entry.isDirectory()
-        ? relDirParts(`${rel}/x`).some((part) => NEVER_PUBLISH_DIRS.has(part))
+        ? relDirParts(`${rel}/x`).some((part) => NEVER_PUBLISH_DIRS.has(part)) || isAgentLocalStatePath(rel)
         : isNeverPublish(rel);
       if (neverPublishHere || extraExclude.has(rel)) {
         excluded.push(rel);
@@ -542,7 +547,7 @@ async function llmFixFile(
     locale,
   } as RunnerRequest;
   try {
-    const result = await runObservedRunner(runner, req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
+    const result = await runObservedRunnerAs("repair", "publish-autofix", runner, req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
     if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     if (timeout.signal.aborted) return { action: "keep", reason: "model unavailable" };
     return safeFixJson(result.text ?? "");

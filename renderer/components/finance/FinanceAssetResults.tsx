@@ -46,10 +46,10 @@ function AssetRow({ asset, identity, ko, selected, added, disabled, onSelect, on
       </Identity>
       <div className={styles.actions}>
         {onWatchlist && <button type="button" className={styles.action} onClick={onWatchlist} disabled={disabled || added}
-          aria-label={`${added ? l("관심 자산에 추가됨", "Already in watchlist") : l("관심 자산 추가", "Add to watchlist")}: ${label}`} title={`${added ? l("추가됨", "Added") : l("관심 자산 추가", "Add to watchlist")}: ${label}`}>{added ? <IconCheck size={16}/> : <IconPlus size={16}/>}</button>}
+          aria-label={`${added ? l("관심 목록에 있음", "In watchlist") : l("관심 추가", "Add to watchlist")}: ${label}`} title={`${added ? l("추가됨", "Added") : l("관심 자산 추가", "Add to watchlist")}: ${label}`}>{added ? <IconCheck size={16}/> : <IconPlus size={16}/>}<span>{added ? l("관심 목록에 있음", "In watchlist") : l("관심 추가", "Add to watchlist")}</span></button>}
         {onResearch && <button type="button" className={styles.action} onClick={onResearch} disabled={disabled}
-          aria-label={`${l("이 자산으로 질문 작성", "Draft a question about this asset")}: ${label}`} title={`${l("이 자산으로 질문 작성", "Draft a question about this asset")}: ${label}`}><IconSearch size={16}/></button>}
-        <button type="button" className={styles.action} aria-controls={detailId} aria-expanded={expanded} onClick={() => setExpanded(value => !value)}
+          aria-label={`${l("질문하기", "Ask")}: ${label}`} title={`${l("이 자산으로 질문 작성", "Draft a question about this asset")}: ${label}`}><IconSearch size={16}/><span>{l("질문하기", "Ask")}</span></button>}
+        <button type="button" className={`${styles.action} ${styles.iconOnly}`} aria-controls={detailId} aria-expanded={expanded} onClick={() => setExpanded(value => !value)}
           aria-label={`${expanded ? l("자산 상세 접기", "Collapse asset details") : l("자산 상세 펼치기", "Expand asset details")}: ${label}`} title={`${expanded ? l("상세 접기", "Collapse details") : l("상세 보기", "View details")}: ${label}`}>{expanded ? <IconChevronDown size={16}/> : <IconChevronRight size={16}/>}</button>
       </div>
     </div>

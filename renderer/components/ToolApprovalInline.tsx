@@ -15,6 +15,7 @@
  * 여러 건이면 한 장씩 "1/3 · 다음". 선택지의 뜻과 저장·전송은 그대로다.
  */
 import { redactSecrets } from "@shared/secret-patterns";
+import { approvalIsMoney } from "@shared/approval-card";
 import { useEffect, useState } from "react";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { IconShield, IconFolder } from "./Icon";
@@ -22,6 +23,7 @@ import { ApprovalPrompt, type ApprovalPromptDeck, type ApprovalPromptOption } fr
 import { useT } from "@/lib/i18n";
 import type { ToolApprovalRequestEvent } from "@/lib/types";
 import {
+  approvalUnitOfChat,
   decideToolApproval,
   dismissToolApproval,
   markChatVisible,
@@ -116,7 +118,35 @@ export function ToolApprovalCard({
    * 늘어서서, 무엇을 허락하는지 읽기 전에 버튼부터 보였다.
    * 규격은 docs/DESIGN-ASK-CARD.md.
    */
-  const askTitle = escalation
+  /*
+   * 한 규칙(electron/runtime/approval-rule.ts): 카드는 돈·삭제·외부 전송에만 뜬다. 돈은 매번 묻고 "항상 허용"·"이 작업 동안"이 없다.
+   * 삭제·전송의 "항상 허용"은 그 도구를 계정 단위로 다시 묻지 않는다. 모든 표면(방·1:1·Work·개인 에이전트·Space 칸·폰)이 이 부품 하나다.
+   */
+  const moneyCard = request.capability === "money";
+  const deleteCard = request.capability === "delete";
+  const sendCard = request.capability === "send";
+  // What one "always allow" covers: the project of this conversation, or the conversation itself when it has no project.
+  // Read for a delete / send card only; until it is known the note names no unit.
+  const [alwaysUnit, setAlwaysUnit] = useState<"project" | "chat" | null>(null);
+  const asksUnit = deleteCard || sendCard;
+  useEffect(() => {
+    if (!asksUnit || !request.chatId) return;
+    let cancelled = false;
+    void approvalUnitOfChat(request.chatId).then((unit) => { if (!cancelled) setAlwaysUnit(unit); });
+    return () => { cancelled = true; };
+  }, [asksUnit, request.chatId]);
+  const alwaysNote = alwaysUnit === "project"
+    ? (ko ? "이 프로젝트에서는 이 도구를 더 묻지 않아요. 설정에서 끌 수 있어요." : "This tool is not asked again in this project. You can turn it off in Settings.")
+    : alwaysUnit === "chat"
+      ? (ko ? "이 대화에서는 이 도구를 더 묻지 않아요. 설정에서 끌 수 있어요." : "This tool is not asked again in this conversation. You can turn it off in Settings.")
+      : (ko ? "이 도구를 더 묻지 않아요. 설정에서 끌 수 있어요." : "This tool is not asked again. You can turn it off in Settings.");
+  const askTitle = moneyCard
+    ? (ko ? `결제·송금을 허용할까요? · ${toolDisplayName(request.tool)}` : `Allow this payment or transfer? · ${toolDisplayName(request.tool)}`)
+    : deleteCard
+      ? (ko ? `${toolDisplayName(request.tool)}로 삭제할까요?` : `Allow deleting with ${toolDisplayName(request.tool)}?`)
+      : sendCard
+        ? (ko ? `${toolDisplayName(request.tool)}로 밖으로 보낼까요?` : `Allow sending out with ${toolDisplayName(request.tool)}?`)
+        : escalation
     ? (ko ? "전체 액세스로 진행할까요?" : "Continue with full access?")
     : folderAccess
       ? folderWrite
@@ -131,17 +161,17 @@ export function ToolApprovalCard({
    * 영구 규칙은 사용자·작업 폴더·요청한 에이전트·정확한 대상(credentialResourceIdentity)·권한 수준에 묶인
    * consentBinding 한 건이다(electron/runtime/tool-approval.ts persistAlwaysGrant) — 도구 이름이나 명령 패턴 전체가 아니다.
    */
-  const askOptions: (AskCardOption & Pick<ApprovalPromptOption, "role" | "showNote">)[] = [
+  const allAskOptions: (AskCardOption & Pick<ApprovalPromptOption, "role" | "showNote">)[] = [
     {
       id: "allow_once",
       title: ko ? "예" : "Yes",
       note: escalation
-        ? (ko ? "이번 이어가기 실행에만 전체 액세스를 줍니다." : "Full access for this resumed run only.")
+        ? (ko ? "이번 실행에만 전체 액세스를 허용해요." : "Full access for this resumed run only.")
         // No "<runtime> 가": the particle does not fit every name. Folder notes say what happens to the
         // folder; mobile agentlas_screen.dart _inlineToolApprovalCard uses the same notes.
         : folderAccess
-          ? (ko ? "지금 이 요청에만 허용합니다." : "This request only.")
-          : (ko ? "이번 호출에만 씁니다." : "For this call only."),
+          ? (ko ? "지금 이 요청에만 허용해요." : "This request only.")
+          : (ko ? "이번 호출에만 허용해요." : "For this call only."),
       active: true,
       role: "primary",
       showNote: escalation,
@@ -151,8 +181,8 @@ export function ToolApprovalCard({
       id: "allow_session",
       title: ko ? "예, 이 작업 동안 다시 묻지 않기" : "Yes, and don't ask again during this task",
       note: escalation
-        ? (ko ? "이 대화에서는 승격을 다시 묻지 않습니다." : "No more escalation questions in this conversation.")
-        : (ko ? "이 작업이 끝날 때까지 다시 묻지 않습니다." : "No more questions until this task ends."),
+        ? (ko ? "이 대화에서는 다시 묻지 않아요." : "No more escalation questions in this conversation.")
+        : (ko ? "이 작업이 끝날 때까지 다시 묻지 않아요." : "No more questions until this task ends."),
       showNote: escalation,
       disabled: locked,
     },
@@ -160,12 +190,14 @@ export function ToolApprovalCard({
       id: "allow_always",
       title: ko ? "예, 항상 허용" : "Yes, always allow",
       note: escalation
-        ? (ko ? "권한이 모자랄 때 항상 전체 액세스로 진행합니다." : "Always continue with full access when permission falls short.")
+        ? (ko ? "권한이 모자라면 항상 전체 액세스로 진행해요." : "Always continue with full access when permission falls short.")
         : folderAccess
           ? folderWrite
-            ? (ko ? "이 폴더의 파일 생성과 수정을 다시 묻지 않습니다." : "Never ask again about editing files here.")
-            : (ko ? "이 폴더 읽기를 다시 묻지 않습니다." : "Never ask again about reading this folder.")
-          : (ko ? "이 폴더에서 이 에이전트의 똑같은 호출만 다시 묻지 않습니다." : "Only this exact call, by this agent, in this folder is not asked again."),
+            ? (ko ? "이 폴더의 파일 생성과 수정은 다시 묻지 않아요." : "Never ask again about editing files here.")
+            : (ko ? "이 폴더 읽기는 다시 묻지 않아요." : "Never ask again about reading this folder.")
+          : asksUnit
+            ? alwaysNote
+              : (ko ? "이 폴더에서 이 에이전트의 같은 호출은 다시 묻지 않아요." : "Only this exact call, by this agent, in this folder is not asked again."),
       showNote: true,
       disabled: locked,
     },
@@ -173,17 +205,19 @@ export function ToolApprovalCard({
       id: "deny",
       title: ko ? "아니오" : "No",
       note: escalation
-        ? (ko ? "읽기 전용을 유지합니다 — 요청된 변경은 실행되지 않습니다." : "Stay read-only — the requested change is not executed.")
+        ? (ko ? "읽기 전용을 유지하고, 요청한 변경은 실행하지 않아요." : "Stay read-only — the requested change is not executed.")
         : folderAccess
           ? folderWrite
-            ? (ko ? "이 폴더에 파일을 만들거나 수정하지 않고 계속합니다." : "Continues without editing files in this folder.")
-            : (ko ? "이 폴더를 읽지 않고 계속합니다." : "Continues without reading this folder.")
-          : (ko ? "이 호출만 거절하고 계속합니다." : "Refuses this call; the run continues."),
+            ? (ko ? "이 폴더에 파일을 만들거나 수정하지 않고 계속 진행해요." : "Continues without editing files in this folder.")
+            : (ko ? "이 폴더를 읽지 않고 계속 진행해요." : "Continues without reading this folder.")
+          : (ko ? "이 호출만 거절하고 계속 진행해요." : "Refuses this call; the run continues."),
       role: "deny",
       showNote: escalation || folderAccess,
       disabled: locked,
     },
   ];
+  // Money is asked every time: the card offers only "yes, once" and "no".
+  const askOptions = moneyCard ? allAskOptions.filter((option) => option.id === "allow_once" || option.id === "deny") : allAskOptions;
 
   // "아니오, 그리고 대신 이렇게 하세요" (오너 2026-10-27): 거절에 한 줄을 실어 보낸다. 줄은 이 요청이 붙어 있던 방(request.chatId)의 오너
   // 메시지로 한 번 간다 — 개인 에이전트 대화에 그려진 감독 방 카드도 그 방으로 간다. 방이 없는 요청에는 보낼 곳이 없어 입력을 열지 않는다.
@@ -204,24 +238,24 @@ export function ToolApprovalCard({
   const noteFailure = action?.noteFailure;
   const feedback = noteFailure
     ? (ko
-      ? "거절은 적용됐지만 지시를 방에 보내지 못했습니다. 아래 글을 방 입력창에 직접 보내 주세요."
+      ? "거절은 적용됐지만 지시를 방에 보내지 못했으니, 아래 글을 방 입력창에 직접 보내 주세요."
       : "The refusal was applied, but the instruction could not be sent to the room. Send the text below in the room yourself.")
     : action?.phase === "submitting"
-    ? (ko ? "결정을 전달하고 실제 실행 상태를 확인하는 중입니다." : "Sending the decision and verifying the actual runtime state.")
+    ? (ko ? "결정을 전달하고 실행 상태를 확인하고 있어요." : "Sending the decision and verifying the actual runtime state.")
     : action?.phase === "retryable"
-      ? (ko ? "결정이 적용되지 않았습니다. 승인 카드는 그대로 유지됐습니다. 다시 선택해 주세요." : "The decision was not applied. This approval is still waiting; choose again.")
+      ? (ko ? "결정이 적용되지 않아 승인 카드가 그대로 남아 있어요." : "The decision was not applied. This approval is still waiting; choose again.")
       : action?.phase === "unknown"
-        ? (ko ? "결정 요청 뒤 실제 상태를 확인하지 못했습니다. 같은 선택을 다시 보내지 말고 상태를 다시 확인하세요." : "The decision outcome could not be verified. Check status before sending the choice again.")
+        ? (ko ? "상태를 확인하지 못했으니 같은 선택을 다시 보내기 전에 상태부터 확인해 주세요." : "The decision outcome could not be verified. Check status before sending the choice again.")
         : action?.phase === "terminal" && action.terminalStatus === "expired"
-          ? (ko ? "승인 요청 시간이 만료되어 이 호출은 실행되지 않았습니다." : "This approval expired, so the call was not run.")
+          ? (ko ? "승인 요청 시간이 만료돼 이 호출은 실행되지 않았어요." : "This approval expired, so the call was not run.")
           : action?.phase === "terminal"
             ? (ko
-              ? `이 요청은${decisionLabel ? ` '${decisionLabel}' 선택으로` : ""} 이미 처리되었습니다.`
+              ? `이 요청은${decisionLabel ? ` '${decisionLabel}' 선택으로` : ""} 이미 처리됐어요.`
               : `This request was already resolved${decisionLabel ? ` as '${decisionLabel}'` : ""}.`)
             : null;
   const durableNotice = action?.durableConsent && action.durableConsent.status !== "persisted"
     ? (ko
-      ? "이번 호출은 선택대로 처리됐지만 ‘항상 허용’ 저장에 실패했습니다. 이 세션이 끝나면 다시 확인이 필요합니다."
+      ? "이번 호출은 선택대로 처리됐지만 ‘항상 허용’을 저장하지 못해 다음 세션에서 다시 물어요."
       : "This call followed your choice, but the Always allow rule was not saved. A later session will ask again.")
     : null;
 
@@ -299,7 +333,7 @@ export function ToolApprovalCard({
         <strong style={{ display: "block", lineHeight: 1.45 }}>{askTitle}</strong>
         <div data-testid="tool-approval-outcome" style={{ marginTop: 7, fontSize: 12, lineHeight: 1.45 }}>
           {ko
-            ? "승인 요청 시간이 만료되어 이 호출은 실행되지 않았습니다."
+            ? "승인 요청 시간이 만료돼 이 호출은 실행되지 않았어요."
             : "This approval expired, so the call was not run."}
           {action?.phase === "terminal" && (
             <button
@@ -324,7 +358,8 @@ export function ToolApprovalCard({
       ? (ko ? "지금은 읽기 전용 — 허용하면 이 요청을 이어서 합니다" : "Read-only now — allowing continues this request")
       : runtimeName;
   if (compact && chip) {
-    const folder = request.cwd
+    // The app's own work folder is not the owner's (Main says so: cwdIsAppFolder): no folder is named for it.
+    const folder = request.cwd && !request.cwdIsAppFolder
       ? redactSecrets(request.cwd).replace(/[\x00-\x1f\x7f]/g, "").split(/[\\/]+/).filter(Boolean).slice(-2).join("/")
       : "";
     return (
@@ -333,7 +368,7 @@ export function ToolApprovalCard({
         code={detailText || null}
         codeLabel={ko ? "실행될 명령 또는 대상" : "Command or target to run"}
         meta={(
-          <span title={[runtimeName, request.cwd ? redactSecrets(request.cwd) : ""].filter(Boolean).join(" · ")}>
+          <span title={[runtimeName, request.cwd && !request.cwdIsAppFolder ? redactSecrets(request.cwd) : ""].filter(Boolean).join(" · ")}>
             {detailText
               ? <>{runtimeName}{folder ? ` · ${folder}` : ""}</>
               : <small title={chipDetail}>{chipDetail}</small>}
@@ -370,7 +405,7 @@ export function ToolApprovalCard({
         } : {})}
         data-testid="tool-approval-card"
       >
-        {request.cwd && <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 8, color: "var(--muted-deep)", fontSize: 12, overflowWrap: "anywhere"}}>
+        {request.cwd && !request.cwdIsAppFolder && <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 8, color: "var(--muted-deep)", fontSize: 12, overflowWrap: "anywhere"}}>
           <IconFolder size={15} /><span>{redactSecrets(request.cwd)}</span>
         </div>}
       </AskCard>
@@ -410,15 +445,21 @@ export function ToolApprovalInline({
 }) {
   const { queue } = useToolApprovals();
   useEffect(() => markChatVisible(chatId), [chatId]);
-  const mine = chatId ? queue.filter((item) => item.chatId === chatId) : [];
+  const all = chatId ? queue.filter((item) => item.chatId === chatId) : [];
+  // Full access asks money only: it settles the cards left over from before the switch, delete / send cards
+  // included, and draws nothing for them. A payment / transfer card is never settled for the owner (shared/approval-card.ts): it is
+  // drawn in full access too. Before, full access answered every card "allow" and drew nothing, so a new install (full access by
+  // default) ran a teammate's transfer with no card (real app rows 14-15).
+  const mine = permission === "full" ? all.filter((item) => approvalIsMoney(item)) : all;
+  const stale = permission === "full" ? all.filter((item) => !approvalIsMoney(item)) : [];
   const deck = useApprovalDeck(mine);
   const shown = deck.current;
+  const staleKey = stale.map((item) => item.id).join(",");
   useEffect(() => {
-    if (permission !== "full" || mine.length === 0) return;
-    for (const request of mine) void decideToolApproval(request.id, "allow_session");
-  }, [mine, permission]);
+    if (!staleKey) return;
+    for (const id of staleKey.split(",")) void decideToolApproval(id, "allow_session");
+  }, [staleKey]);
   if (!chatId) return null;
-  if (permission === "full") return null;
   if (mine.length === 0) return null;
   return (
     <div

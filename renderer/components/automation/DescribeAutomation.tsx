@@ -701,7 +701,7 @@ export function DescribeAutomation({
                 onClick={() => void applyRecovery(option.actionId)}
                 style={{
                   borderRadius: 999,
-                  border: "1px solid var(--line)",
+                  border: "1px solid var(--paper-edge)",
                   padding: "7px 13px",
                   fontSize: 12.5,
                   background: "var(--paper)",

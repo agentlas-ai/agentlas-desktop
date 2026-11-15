@@ -14,6 +14,7 @@ import type { ChildProcess } from "node:child_process";
 import { onJsonLines } from "./json-lines";
 import { NativeTransportDiagnostics, NativeProtocolDiagnostics, nativeRequestMethod, nativeSpawnErrorCode, type NativeTransportSnapshot, type NativeProtocolCounters, type NativeFailureEvidence } from "./native-runtime-diagnostics";
 import { types } from "node:util";
+import { StringDecoder } from "node:string_decoder";
 export { createNativeRuntimeDiagnostic, NativeProtocolDiagnostics, NativeTransportDiagnostics, nativeProcessErrorCode } from "./native-runtime-diagnostics";
 
 const acpFailures=new WeakMap<object,NativeFailureEvidence>();
@@ -86,9 +87,11 @@ export class AcpConnection {
     if (!child.stdout || !child.stdin) throw new Error("ACP agent must be spawned with piped stdio");
     // Split on "\n" only: readline also breaks at U+2028/U+2029, which JSON carries inside strings (./json-lines).
     onJsonLines(child.stdout, (line) => this.onLine(line));
+    // One decoder per stream: a character split between two chunks must not become U+FFFD in the error text.
+    const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (buf: Buffer) => {
       try{this.transportDiagnostics.addStderr(buf);}catch{/* Preserve legacy stderr handling if observation fails. */}
-      this.stderrTail = (this.stderrTail + buf.toString("utf8")).slice(-4000);
+      this.stderrTail = (this.stderrTail + stderrDecoder.write(buf)).slice(-4000);
     });
     const finish = (code: number | null) => {
       if (this.closed) return;

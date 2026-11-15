@@ -8,6 +8,7 @@
 //   · 아니면 → 인터뷰 질문/추가 입력 대기(awaitingReply). 사용자가 답하면 history에 쌓아 다음 턴 실행.
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { currentLocale } from "@/lib/i18n";
+import { buildRestartResumeAllowed } from "@/lib/build-restart-resume";
 import { extractQuestions } from "@/lib/ask-question";
 import {
   buildScanDisposition,
@@ -15,14 +16,13 @@ import {
   buildScanSeverityBucket,
 } from "@/lib/build-scan";
 import { announceAgentRosterChange } from "@/lib/agent-roster-events";
-import { isCompletedBuildTurn } from "@shared/build-turn";
+import { isCompletedBuildTurn, openCrabQuestionOf, questionHistorySuffix, restoredBuildHistory, restoredBuildTurn } from "@shared/build-turn";
 import type { ChatQuestion } from "@/components/ChatStream";
 import type {
   FsPathGrant,
   FsReadScope,
   HephaestusBuildEvent,
   HephaestusBuildResult,
-  HephaestusBuildSupplementalQuestion,
   McpBuildAttachmentReceipt,
   McpBuildPlan,
   BuildAllocationPreview,
@@ -152,37 +152,9 @@ export interface BuildState {
 export const STAGE_COUNT = 6;
 
 const WS_KEY = "agentlas.build.workspace";
-const OPENCRAB_QUESTION_ID = "opencrab-ontology";
 
 function mainOwnedOpenCrabQuestion(value: unknown): ChatQuestion | null {
-  if (!value || typeof value !== "object") return null;
-  const candidate = value as Partial<HephaestusBuildSupplementalQuestion>;
-  if (
-    candidate.kind !== OPENCRAB_QUESTION_ID ||
-    typeof candidate.question !== "string" ||
-    !candidate.question.trim() ||
-    !Array.isArray(candidate.options) ||
-    candidate.options.length !== 2
-  ) return null;
-  const options = candidate.options.map((option) => ({
-    label: typeof option?.label === "string" ? option.label.trim() : "",
-    description: typeof option?.description === "string" ? option.description.trim() : undefined,
-  }));
-  if (options.some((option) => !option.label)) return null;
-  return {
-    id: OPENCRAB_QUESTION_ID,
-    question: candidate.question.trim(),
-    header: "OpenCrab",
-    multiSelect: false,
-    options,
-  };
-}
-
-function questionHistorySuffix(question: ChatQuestion | null): string {
-  if (!question) return "";
-  return `\n\n[Agentlas supplemental question]\n${question.question}\n${question.options
-    .map((option, index) => `${index + 1}. ${option.label}`)
-    .join("\n")}`;
+  return openCrabQuestionOf(value);
 }
 
 function mainOwnedBuildBriefQuestions(mode: Mode | "", ko: boolean): ChatQuestion[] {
@@ -340,6 +312,8 @@ let runtimeEscalationAccepted: boolean | undefined;
 // answer locally until the user has also reviewed the exact runtime-bound MCP
 // plan, then use it as the first real builder turn.
 let pendingBuildBriefReply: string | null = null;
+/** The pending brief is the host's own continuation line, not the owner's words (receipts and briefs must not count it as an answer). */
+let pendingBuildBriefHostAuthored = false;
 // 런타임이 sessionId를 반환하지 않는 BYOK/Ollama도 첨부는 한 빌드에서 정확히 한 번만 보낸다.
 let attachmentsSentForBuild = false;
 // Per-build, explicit OpenCrab consent. It is set only from the conditional
@@ -516,14 +490,7 @@ async function restoreStoredConversation(): Promise<boolean> {
   runtimeSessionId = saved.runtimeSessionId;
   restoredRuntimeUnverified = Boolean((saved.runtimeSessionId && (!saved.runtimePinned || !saved.runtime))
     || (saved.conversationTurn === null && saved.supplementalQuestion != null));
-  history = saved.history.map((message) => ({ ...message }));
-  if (saved.terminalText !== null) {
-    const supplemental = saved.conversationTurn === 0 ? mainOwnedOpenCrabQuestion(saved.supplementalQuestion) : null;
-    if (!saved.hostAuthoredContinuation) history.push({ role: "user", text: saved.request });
-    history.push({ role: "assistant", text: saved.terminalText + questionHistorySuffix(supplemental) });
-  } else if (!saved.hostAuthoredContinuation) {
-    history.push({ role: "user", text: saved.request });
-  }
+  history = restoredBuildHistory(saved);
   for (const message of history) pushLog("log", message.text);
   const parsed = saved.terminalText === null ? null : extractQuestions(saved.terminalText, "reattach");
   const supplemental = saved.conversationTurn === 0 ? mainOwnedOpenCrabQuestion(saved.supplementalQuestion) : null;
@@ -532,9 +499,16 @@ async function restoreStoredConversation(): Promise<boolean> {
   state.registeredEntity = null;
   state.result = null;
   state.runId = null;
-  state.turn = saved.conversationTurn === null ? 1 : saved.conversationTurn + (saved.status === "completed" ? 0 : 1);
+  state.turn = restoredBuildTurn(saved);
   state.mcpPlan = null;
   const restoredInterview = saved.status === "waiting-user" && saved.conversationTurn === 0 && questions.length > 0;
+  /*
+   * A run the process died under (status "unknown", never a question waiting for the owner) goes on by itself after a restart, with the
+   * host's resume line, up to the owner's own consent steps (runtime approval, MCP review). Before, it stood as "Review the previous run.
+   * It will not be replayed automatically." until the owner typed something. Only with the same folder's durable grant restored; and a
+   * resumed run that was cut again (its record starts with this very host line) is not resumed again: it keeps that card.
+   */
+  const restartResume = buildRestartResumeAllowed(saved, state.workspaceGrant?.path, interruptedBuildResumeLine());
   restoredConversationStatus = saved.status === "waiting-user" && !restoredInterview
     ? "unknown"
     : saved.status === "completed" || saved.status === "stopped" || saved.status === "unknown" ? saved.status : null;
@@ -550,12 +524,18 @@ async function restoreStoredConversation(): Promise<boolean> {
     state.recoverable = false;
     state.error = {
       kind: "build-failed",
-      message: saved.status === "completed"
+      message: restartResume
+        ? (currentLocale() === "ko" ? "앱이 다시 시작되어 끊긴 빌드를 이어 갑니다." : "The app restarted; the interrupted build continues.")
+        : saved.status === "completed"
         ? (currentLocale() === "ko" ? "이전 완료 내용은 복원했지만 패키지 등록 상태는 다시 확인해야 합니다." : "The previous completion was restored; package registration still needs verification.")
         : (currentLocale() === "ko" ? "이전 실행의 결과를 확인해 주세요. 자동으로 다시 실행하지 않습니다." : "Review the previous run. It will not be replayed automatically."),
     };
   }
   commit();
+  if (restartResume && !restoredInterview) {
+    pushLog("log", state.error?.message ?? "");
+    void continueCompletedBuild(interruptedBuildResumeLine(), true);
+  }
   return true;
 }
 
@@ -567,7 +547,7 @@ export function restoredCompletionNeedsReview(): boolean {
   return state.phase === "error" && restoredConversationStatus === "completed";
 }
 
-export async function continueCompletedBuild(input: string): Promise<void> {
+export async function continueCompletedBuild(input: string, hostAuthored = false): Promise<void> {
   if (!input.trim() || !canContinueCompletedBuild()) return;
   if (runtimeBindingPending || (restoredRuntimeUnverified && restoredConversationStatus !== "stopped" && restoredConversationStatus !== "unknown")) {
     pushLog("error", currentLocale() === "ko" ? "이전 실행기 연결을 확인할 수 없어 이어서 실행하지 않았습니다." : "The previous runtime connection could not be verified; the request was not started.");
@@ -589,11 +569,12 @@ export async function continueCompletedBuild(input: string): Promise<void> {
   state.recoverable = false;
   if (!state.mcpPlan) {
     pendingBuildBriefReply = input.trim();
+    pendingBuildBriefHostAuthored = hostAuthored;
     state.phase = "running";
     commit();
     await prepareBuildRuntimeAndMcp(generation);
   } else {
-    await runTurn(input.trim(), generation);
+    await runTurn(input.trim(), generation, hostAuthored);
   }
 }
 
@@ -694,6 +675,8 @@ export function reauthorizeRestoredBuildWorkspace(grant: FsPathGrant): boolean {
 export function prepareBuildHandoff(input: {
   workspace: FsPathGrant;
   request: string;
+  /** Edit of an installed agent (the saved Build window, F-D10) hands over with "package"; the others leave it unset (engine classifies). */
+  mode?: Mode;
 }): { ok: true } | { ok: false; phase: "running" | "mcp-review" | "runtime-approval" | "interview" } {
   if (
     state.phase === "running"
@@ -707,7 +690,7 @@ export function prepareBuildHandoff(input: {
   resetBuild();
   state.request = input.request;
   state.attachments = [];
-  state.mode = "";
+  state.mode = input.mode ?? "";
   state.workspace = input.workspace.path;
   state.workspaceGrant = input.workspace;
   try {
@@ -1131,13 +1114,15 @@ async function handBackBlockers(
         ? `미충족 ${open.length}건에서 ${MAX_STALLED_ROUNDS}라운드 연속 진전이 없어 멈춥니다`
         : `Stopping: ${MAX_STALLED_ROUNDS} rounds in a row closed nothing, still ${open.length} blocker(s)`,
     );
-    stopForPackageContract(
+    // what is left is advice, not a reason to withhold the agent. Register it.
+    await finalizeWithAdvisories(
       pkgRoot,
       { status: "unverified", reason: "the build stopped before a security scan ran" },
       readScope,
       open,
+      null,
+      generation,
     );
-    commit();
     return;
   }
   lastBlockerCount = open.length > 0 ? open.length : lastBlockerCount;
@@ -1194,16 +1179,42 @@ async function verifyRepairOrFinalize(
     await handBackBlockers(pkgRoot, contractBlockers, readScope, generation);
     return;
   }
-  if (contractBlockers === null || contractBlockers.length > 0) {
-    stopForPackageContract(pkgRoot, scan, readScope, contractBlockers, wroteNothing(packageContract));
+  // Only a build that wrote nothing stops here. Blockers left after the repair rounds, or a contract report that
+  // could not be read, no longer withhold the agent ("만들었는데 안 보인다" was this stop).
+  if (wroteNothing(packageContract)) {
+    stopForPackageContract(pkgRoot, scan, readScope, contractBlockers, true);
     return;
   }
+  await finalizeWithAdvisories(pkgRoot, scan, readScope, contractBlockers, note, generation);
+}
+
+/**
+ * Register the package and say plainly what could still be improved. The contract list is the builder's to-do
+ * list, not an eligibility test; the same folder can be prepared again to work through what is left.
+ */
+async function finalizeWithAdvisories(
+  pkgRoot: string,
+  scan: unknown,
+  readScope: FsReadScope,
+  blockers: string[] | null,
+  note: string | null,
+  generation: number,
+): Promise<void> {
+  const ko = currentLocale() === "ko";
+  const advice = blockers === null
+    ? (ko
+      ? "패키지 점검 결과를 읽지 못했습니다. 에이전트는 등록했고, 점검은 다음에 다시 준비할 때 이어서 합니다."
+      : "The package check could not be read. The agent is registered; the check continues the next time you prepare it.")
+    : blockers.length > 0
+      ? (ko
+        ? `더 다듬을 수 있는 항목 ${blockers.length}건이 남았지만 에이전트는 등록했습니다. 같은 폴더에서 다시 준비하면 남은 항목만 고칩니다.\n${blockers.slice(0, 12).map((blocker) => `- ${blocker}`).join("\n")}`
+        : `${blockers.length} item(s) could still be improved, but the agent is registered. Prepare again in the same folder to work through only those.\n${blockers.slice(0, 12).map((blocker) => `- ${blocker}`).join("\n")}`)
+      : null;
   const verifiedScan = buildScanDisposition(scan) === "unverified"
     ? await scanGeneratedPackage(pkgRoot, readScope)
     : scan;
   if (!isCurrentBuild(generation)) return;
-
-  finalizeBuild(pkgRoot, verifiedScan, readScope, note, generation);
+  finalizeBuild(pkgRoot, verifiedScan, readScope, [note, advice].filter(Boolean).join("\n") || null, generation);
 }
 
 async function resolveTurnWithoutSignal(
@@ -1635,6 +1646,7 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   resolvedBuildRuntimePinned = state.runtime !== null;
   runtimeEscalationAccepted = undefined;
   pendingBuildBriefReply = null;
+  pendingBuildBriefHostAuthored = false;
   state.pendingAllocation = null;
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
@@ -1674,6 +1686,7 @@ export async function startBuild(activeRuntime?: RuntimeSelection): Promise<void
   // 되돌려 보내고(builder.ts의 인터뷰 계약 게이트), 그래도 안 물으면 아래 turn===1
   // 폴백이 최후에만 뜬다.
   pendingBuildBriefReply = state.request.trim();
+  pendingBuildBriefHostAuthored = false;
   state.phase = "running";
   state.reached = Math.max(state.reached, 1);
   history.push({ role: "user", text: state.request.trim() });
@@ -1790,8 +1803,9 @@ export async function approveBuildMcpPlan(selectedCandidateIds: string[]): Promi
   pushLog("stage", ko ? "MCP 선택 승인 — 에이전트 제작 시작" : "MCP selection approved — starting agent creation");
   pushLog("log", ko ? "확인한 요구사항과 연결 범위로 실제 AI 엔진을 시작합니다." : "Starting the AI engine with the confirmed brief and connection scope.");
   commit();
-  await runTurn(briefReply, buildGeneration);
+  await runTurn(briefReply, buildGeneration, pendingBuildBriefHostAuthored);
   pendingBuildBriefReply = null;
+  pendingBuildBriefHostAuthored = false;
 }
 
 async function previewBuildAllocation(): Promise<BuildAllocationPreview | null> {
@@ -1878,6 +1892,7 @@ export async function answerBuild(
   pushLog("log", ko ? "인터뷰 답변을 확인했습니다." : "Interview answers confirmed.");
   if (!state.mcpPlan && state.turn <= 1 && pendingBuildBriefReply === null) {
     pendingBuildBriefReply = normalizedReply;
+    pendingBuildBriefHostAuthored = false;
     state.awaitingReply = false;
     state.pendingQuestions = [];
     state.phase = "running";
@@ -1930,6 +1945,7 @@ export function cancelBuild() {
   state.runId = null;
   runtimeSessionId = null;
   pendingBuildBriefReply = null;
+  pendingBuildBriefHostAuthored = false;
   if (!cancelledRunId) {
     resolvedBuildRuntime = null;
     resolvedBuildRuntimePinned = false;
@@ -1952,6 +1968,13 @@ export function cancelBuild() {
   commit();
 }
 
+/** The host's line for a build whose run was cut (a Stop, a crash, an app restart): check the folder, keep what is done, finish the rest. */
+function interruptedBuildResumeLine(): string {
+  return currentLocale() === "ko"
+    ? "이전 실행이 중단되었습니다. 현재 작업 폴더의 파일을 먼저 검사하고, 이미 완성된 작업은 덮어쓰지 말고 미완성 단계만 이어서 패키지를 완성하세요. 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요."
+    : "The previous run was stopped. Inspect the current workspace first, preserve completed work, resume only the unfinished steps, and finish the package. End with 'BUILD_COMPLETE: <package folder name>'.";
+}
+
 export async function resumeBuild(): Promise<void> {
   if (
     !state.recoverable
@@ -1972,14 +1995,7 @@ export async function resumeBuild(): Promise<void> {
   );
   commit();
   const neverStarted = history.length === 0;
-  await runTurn(
-    neverStarted
-      ? state.request.trim()
-      : currentLocale() === "ko"
-        ? "이전 실행이 중단되었습니다. 현재 작업 폴더의 파일을 먼저 검사하고, 이미 완성된 작업은 덮어쓰지 말고 미완성 단계만 이어서 패키지를 완성하세요. 마지막 줄에 'BUILD_COMPLETE: <패키지 폴더명>'을 출력하세요."
-        : "The previous run was stopped. Inspect the current workspace first, preserve completed work, resume only the unfinished steps, and finish the package. End with 'BUILD_COMPLETE: <package folder name>'.",
-    buildGeneration,
-  );
+  await runTurn(neverStarted ? state.request.trim() : interruptedBuildResumeLine(), buildGeneration);
 }
 
 export function resetBuild() {
@@ -2012,6 +2028,7 @@ export function resetBuild() {
   resolvedBuildRuntimePinned = false;
   runtimeEscalationAccepted = undefined;
   pendingBuildBriefReply = null;
+  pendingBuildBriefHostAuthored = false;
   attachmentsSentForBuild = false;
   openCrabOntologyChoice = undefined;
   autoContinues = 0;

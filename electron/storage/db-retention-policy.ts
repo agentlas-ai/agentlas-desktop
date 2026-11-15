@@ -71,6 +71,8 @@ const DAY = 1;
 
 /** Checkpoints kept per namespace: the head and the one it replaced. Shared by the writer and the job. */
 export const SESSION_CHECKPOINTS_KEPT = 2;
+/** Rows of the session store (`session.sqlite`, desktop checkpoints) older than this go (memory/session-store.ts pruneSessionFile). The terminal engine applies the same 90 days to its root rows. */
+export const SESSION_FILE_ROW_DAYS = 90;
 
 export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
   {
@@ -80,7 +82,7 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     observedMb: 275 + 14,
     action: { type: "delete-settled", days: 3 * DAY, abandonedDays: 30 * DAY },
     writer: "store/run-events.ts recordRunEvent (kind mcp_tool-use / mcp_notice / mcp_reasoning), one row per tool call and per notice",
-    readers: "live run view and Goal facts while the run is open (agi/goal-facts.ts, active/blocked Goal chats are excluded); "
+    readers: "live run view and Goal facts while the run is open (active/blocked Goal chats are excluded); "
       + "revision comparison reads the per-run toolSummary that run-detail-summary.ts keeps on agent_revision_run_finished BEFORE the rows go",
     evidence: "storage/run-detail-retention.ts already deletes these after 3 days, but only walks terminal markers forward from a saved "
       + "watermark: 164,376 rows of settled runs older than 3 days were still in the owner store (the watermark had passed them) and a run "
@@ -103,13 +105,15 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     table: "run_events",
     kinds: ["one_domain_event"],
     observedMb: 196 + 120,
-    action: { type: "keep-newest-per-key", keepRows: 500, days: 7 * DAY },
-    writer: "invocation/service.ts recordObservableRunStep -> one/domain-events.ts recordOneDomainEvent, 243,653 rows (one per tool step and status)",
+    action: { type: "delete-all" },
+    writer: "none any more: the step projector (one row per tool step and status, canned summaries) had no reader that needed it and was removed; this rule removes every row already written",
     readers: "listOneDomainEvents(entity, <=500) newest first, read by workspace-projection, task-projection, value-closure, "
       + "completion-suggestion-producer, accepted-result-value-closure, artifact-preview; none of them reads a step older than the newest 500 events of its entity",
     evidence: "Every reader caps at 500 rows by seq DESC (one/domain-events.ts:132). The step flood pushed the real events (run.started, "
       + "task.state_changed, receipt.recorded) OUT of that window for the 6 entities with 6k-77k events (one task: 77,474 events, 62.8 MB). "
-      + "Deleting step rows outside the newest 500 only widens what a reader sees. All other event types (about 14 MB) are receipts and stay.",
+      + "Deleting step rows only widens what a reader sees; every reader but the workspace activity file looks for one named type, and that file "
+      + "stops listing steps for new tasks anyway. With no writer, keeping the newest 500 or the last week kept rows nothing reads or adds to. "
+      + "All other event types are receipts and stay.",
   },
   {
     id: "run_events.one_domain_event.other",
@@ -127,14 +131,14 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     kinds: [
       "runtime_effect_boundary", "runtime_adapter_effect_started", "runtime_adapter_effect_completed",
       "model_call_ledger", "invoke_started", "invoke_result", "invoke_completed", "invoke_failed", "mcp_final", "mcp_error",
-      "agent_revision_run_finished", "runtime_usage_started", "runtime_usage_recorded", "workflow_node_state", "goal_result_presentation",
+      "agent_revision_run_finished", "runtime_usage_started", "runtime_usage_recorded", "workflow_node_state", "goal_result_presentation", "answer_start",
     ],
     observedMb: 35 + 35 + 21 + 22 + 25,
     action: { type: "keep-forever" },
     writer: "automation-scheduler.ts, effect-boundary-reader.ts, runtime adapters, model-call ledger",
-    readers: "terminal receipts, effect ledger (outward-effect), accounting, resume, phone sync, Goal evidence",
+    readers: "terminal receipts, effect ledger (outward-effect), accounting, resume, phone sync, Goal evidence; answer_start (store/chats.ts) is read by the phone history, final event and notification body",
     evidence: "runtime_effect_boundary lists every outward effect of a run (operations[].outcome) and is cited by receipts. "
-      + "The remaining kinds are each under 8 MB.",
+      + "The remaining kinds are each under 8 MB. answer_start is one ~120-byte row per answered turn that used a tool (message id, start offset, text length, hash): it is kept with the answer it describes, so an old message reads the same as a new one.",
   },
   {
     id: "run_events.automation-terminal-output",
@@ -278,7 +282,7 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
     action: { type: "keep-forever" },
     writer: "store/long-runs.ts",
     readers: "Goal ledger, resume, phone sync",
-    evidence: "run.task_checkpoint 13.9 MB, run.usage_recorded 8 MB, the rest under 5 MB each: Goal evidence.",
+    evidence: "run.task_checkpoint 13.9 MB, run.usage_recorded 8 MB, the rest under 5 MB each: Goal evidence. A run that ended more than 90 days ago is the one exception: long_run_events.closed-goals below.",
   },
   {
     id: "pending_chat_sends.closed",
@@ -396,6 +400,94 @@ export const DB_RETENTION_POLICY: readonly DbRetentionRule[] = [
       + "The newest event per One is kept so MAX(cursor) never moves back. The start-up backfill now runs only when the table is created, otherwise it re-inserted every trimmed row.",
   },
   {
+    id: "long_run_events.closed-goals",
+    table: "long_run_events",
+    kinds: [],
+    observedMb: 61,
+    action: { type: "delete-closed", spec: {
+      days: 90 * DAY, timeUnit: "iso",
+      closedWhen: "EXISTS (SELECT 1 FROM long_runs r WHERE r.id = t.run_id AND r.surface <> 'science' AND r.status IN ('completed','failed','cancelled') AND COALESCE(r.completed_at, r.updated_at) < @cutoff)",
+      timeColumns: ["occurred_at"], requires: ["run_id", "occurred_at"],
+    } },
+    writer: "store/long-runs.ts appendEventInDb (every status change, task, verification, usage and checkpoint line of a Goal run)",
+    readers: "A live Goal reads its own ledger (resume, wait subscriptions, owner hold, next-look, phone sync): all of them stop at a run that ended. A closed run's history "
+      + "is read only by the Goal panel's past-goal view, which shows the run row (status, cost, cycles), not the lines",
+    evidence: "Agentlas 2.0 N4 (audit 39 section 11): the event lines of a Goal closed more than 90 days ago are deleted, in 500-row batches of this pass; the run row, its "
+      + "contract and its plan nodes stay. A Science run is a projection and is never trimmed here. The conversation's deletion deletes the whole run (store/goal-close.ts).",
+  },
+  {
+    id: "goal_plan_decisions.closed-goals",
+    table: "goal_plan_decisions",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 90 * DAY, timeUnit: "iso",
+      closedWhen: "EXISTS (SELECT 1 FROM long_runs r WHERE r.goal_id = t.goal_id AND r.surface <> 'science' AND r.status IN ('completed','failed','cancelled') AND COALESCE(r.completed_at, r.updated_at) < @cutoff)",
+      timeColumns: ["created_at"], requires: ["goal_id", "created_at"],
+    } },
+    writer: "store/goal-plans.ts: one receipt per plan decision (what the Goal decided and why)",
+    readers: "long-run/goal-shaping.ts and episode-disposition.ts while the Goal runs (the latest decision of a plan revision); the plan nodes, which show what was done, are kept",
+    evidence: "Agentlas 2.0 N4: a decision receipt is read only by the live Goal's next plan step; 90 days after the Goal closed no step exists. The nodes stay.",
+  },
+  {
+    id: "goal_kpi_samples.closed-goals",
+    table: "goal_kpi_samples",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 90 * DAY, timeUnit: "iso",
+      closedWhen: "EXISTS (SELECT 1 FROM long_runs r WHERE r.goal_id = t.goal_id AND r.surface <> 'science' AND r.status IN ('completed','failed','cancelled') AND COALESCE(r.completed_at, r.updated_at) < @cutoff)",
+      timeColumns: ["recorded_at"], requires: ["goal_id", "recorded_at"],
+    } },
+    writer: "store/agent-strategy.ts insertKpiSample (one row per observation of a Goal's KPI)",
+    readers: "store/agent-strategy.ts listKpiSamples / countGoalKpiSamples for the KPI pace state of a live Goal",
+    evidence: "Agentlas 2.0 N4: the pace state of a KPI is computed for a Goal that runs; 90 days after the Goal closed the samples have no reader. The KPI definition and state rows stay.",
+  },
+  {
+    id: "invocation_steers.closed",
+    table: "invocation_steers",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 14 * DAY, timeUnit: "iso", stateColumn: "status",
+      closedStates: ["started", "cancelled", "failed"],
+      timeColumns: ["updated_at"], requires: ["id", "status", "updated_at"],
+    } },
+    writer: "store/invocation-steers.ts persistQueuedSteer / settleQueuedSteer: one row per owner direction queued behind a running turn (the request JSON and prompt text stay in it)",
+    readers: "queued and draining rows only (the drain, recovery, the team-report ledger); a started row is read by the run that drained it (carried-owner-followups.ts, within the turn)",
+    evidence: "Agentlas 2.0 N4: nothing deleted the rows (measured: the table grows with every queued direction). A started, cancelled or failed row has no reader 14 days after its last update; "
+      + "a conversation's deletion deletes all its rows at once (store/goal-close.ts).",
+  },
+  {
+    id: "long_runs.orphaned-closed",
+    table: "long_runs",
+    kinds: [],
+    observedMb: 0,
+    action: { type: "delete-closed", spec: {
+      days: 90 * DAY, timeUnit: "iso", stateColumn: "status", closedStates: ["completed", "failed", "cancelled"],
+      closedWhen: "(t.root_chat_id IS NULL AND t.surface <> 'science')",
+      keepWhen: [
+        { table: "chat_goal_contracts", sql: "EXISTS (SELECT 1 FROM chat_goal_contracts c WHERE c.goal_id = t.goal_id)" },
+        { table: "chats", sql: "EXISTS (SELECT 1 FROM chats h WHERE h.goal_id = t.goal_id)" },
+        { table: "automations", sql: "EXISTS (SELECT 1 FROM automations a WHERE a.goal_id = t.goal_id)" },
+      ],
+      timeColumns: ["updated_at", "completed_at"],
+      children: [
+        { table: "goal_plan_nodes", column: "goal_id", parentColumn: "goal_id" },
+        { table: "goal_plan_decisions", column: "goal_id", parentColumn: "goal_id" },
+        { table: "goal_plan_mutations", column: "goal_id", parentColumn: "goal_id" },
+        { table: "goal_kpi_samples", column: "goal_id", parentColumn: "goal_id" },
+        { table: "goal_kpi_state", column: "goal_id", parentColumn: "goal_id" },
+        { table: "goal_kpis", column: "goal_id", parentColumn: "goal_id" },
+      ],
+      requires: ["goal_id", "status", "root_chat_id", "surface", "updated_at", "completed_at"],
+    } },
+    writer: "store/long-runs.ts (a Goal run); an older build left the run of a deleted conversation behind (root_chat_id is ON DELETE SET NULL)",
+    readers: "none: no conversation, contract or automation names the Goal, and the Goal panel is per conversation",
+    evidence: "Agentlas 2.0 N4: a conversation's deletion now deletes its Goals' records with it (store/goal-close.ts). This rule retires what builds before that left: a closed run no "
+      + "conversation, contract or automation names, 90 days after it ended, with its plan tree and KPIs (its ledger, tasks and workers go by cascade). Science runs are projections and stay.",
+  },
+  {
     id: "store.vacuum",
     table: "*",
     kinds: [],
@@ -415,8 +507,6 @@ export const DB_RETENTION_LIMITS = {
   sliceMs: 40,
   /** Longest one 30-minute pass works on retention in total. */
   passMs: 15_000,
-  /** The newest rows per entity that the domain-event readers can reach (one/domain-events.ts bounds every read at 500). */
-  domainEventReadWindow: 500,
   /** Compacted tool/arguments text keeps this many characters (the replay shows 160). */
   toolArgumentChars: 2048,
   /** Rows one delete-closed batch removes (and the most it looks at when it picks them). */

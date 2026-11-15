@@ -109,7 +109,14 @@ const HOST_NOT_READY_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
  * opened (runtime/runner.ts spawnStartFailureRefusal). Refused before dispatch like the others, but nothing the app does by itself changes
  * them, so the queue neither retries them as the app's own state nor gives them the one legacy start-again, and no line promises that it will.
  */
-const OWNER_FIXABLE_RUN_FAILURE_CODES: ReadonlySet<string> = new Set(["project_folder_missing", "project_folder_not_directory", "project_folder_unreadable"]);
+export const OWNER_FIXABLE_RUN_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "project_folder_missing", "project_folder_not_directory", "project_folder_unreadable",
+  // The owner's own state, refused before dispatch with a sentence of its own (mcp/client.ts): the agent is archived (Settings restores it), the agent
+  // or the chat is gone, or no runtime was chosen for an Alive turn. The same call fails the same way a moment later, so nothing retries it (fix-desktop-3 T2).
+  "agent_archived", "no-agent", "no-chat", "alive-runtime-selection-required",
+  // Agentlas 2.0 D6: the agent is not registered here / never had a folder / its seat is archived. Registering, reconnecting or restoring is the owner's step; asking again changes nothing.
+  "needs_registration", "agent_no_folder", "seat_archived",
+]);
 export function isOwnerFixableRunFailureCode(code: string | null | undefined): boolean {
   return !!code && OWNER_FIXABLE_RUN_FAILURE_CODES.has(code);
 }

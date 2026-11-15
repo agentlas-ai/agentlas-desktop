@@ -10,7 +10,13 @@
  * two minutes while another runtime could answer. Once work started (a tool ran, a later turn), the server going away for a
  * moment (a model server restarting, a laptop changing networks) is waited out for at most RECONNECT_MAX_MS, then the last
  * error is thrown unchanged, which is the behaviour before this wrapper. Stop ends the wait at once.
+ *
+ * Every attempt, the first included, also runs under the API silence window (api-silence-fetch.ts): a server that is connected but
+ * sends nothing for the CLIs' window ends the attempt with runtime_silent_timeout. Silence is not "never connected", so it is never
+ * waited out here; reconnecting and silence are two different failures with two different words.
  */
+
+import { silenceGuardedFetch, type SilenceGuardOptions } from "./api-silence-fetch";
 
 /** Socket-level codes that prove the request never reached the server (no TCP connection, no name). Typed, not prose. */
 const NOT_CONNECTED_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
@@ -33,6 +39,8 @@ export interface ReconnectOptions {
   /** True once the run did work a refusal would otherwise throw away (a later turn, a tool call). False: fail at once. */
   workStarted: () => boolean;
   signal?: AbortSignal | null;
+  /** Test seam for the silence window (default: the CLIs' own). */
+  silence?: SilenceGuardOptions;
   /** Called before each wait with the time spent reconnecting so far (the owner's status line). */
   onWait?: (waitedMs: number) => void;
   /** Test seams. */
@@ -65,7 +73,7 @@ export async function fetchWithReconnect(
   let step = 0;
   for (;;) {
     try {
-      return await fetchImpl(input, init);
+      return await silenceGuardedFetch(fetchImpl, input, init, options.silence);
     } catch (error) {
       if (options.signal?.aborted || !fetchNeverConnected(error) || !options.workStarted() || !replayableBody(init?.body)) throw error;
       const current = now();

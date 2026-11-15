@@ -10,7 +10,7 @@ import { HARNESS_EFFECT_FREE_READ_OPERATIONS } from "../harness/capability-ports
  * 2026-10-23: a World Bank fetch timed out and the same fetch could never run again; H8-f).
  *
  * This is NOT an approval input. Approval keeps mcpToolIsMutating (proxy-server.ts), which on purpose lets effectful controls run
- * under read permission (work_session_delegate/steer/cancel, finance.monitor.pause, ask_form, memory_note): reusing that set here
+ * under read permission (work_session_delegate/steer/cancel, finance.monitor.pause, ask_form, memory_ticket): reusing that set here
  * would run a delegation or a pause again after a timeout. This list is closed and exact, keyed by Main's dispatcher identity (a
  * static first-party catalog id, an app-bundled plugin release verified by its digest, or a host tool server's own declaration that
  * Main registered for this run's config: Science's tools, PLAN S5), never by a tool's own claims or by words in its name. Anything

@@ -8,6 +8,7 @@ import { getDb, openedStoreMigrationRole } from "../store/db";
 import { readRunTurnPlacement } from "../invocation/turn-placement";
 import { latestInvocationBrowserLoginWait } from "../invocation/browser-login-wait";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
+import { peekAuthenticatedSessionBinding } from "../auth";
 import { oneFrontRuntimeSelection } from "./front";
 import { createChat, createProjectWorkChat, getChat, appendChatMessage, moveHostPromptMessage, listChatMessages, normalizeChatRuntimeSelection, getChatWorkingFolder, setChatWorkingFolder } from "../store/chats";
 import { ensurePersonalOneWorkspace, exportPersonalSession } from "./personal-workspace";
@@ -24,6 +25,13 @@ import { currentUiLocale } from "../ui-locale";
 import { OneSupervisorStore, supervisorHash, personalSupervisorConversationInDb, supervisorStoppedGoalForTask, type SupervisorRequestRow } from "./supervisor-store";
 import { ownerStoppedChatSince } from "../invocation/earlier-attempt";
 import { OneSupervisorService, SupervisorStartDeferred, type SupervisorRuntime } from "./supervisor-service";
+import { createCompanionWorkDeliveryRuntime } from "./companion-work-delivery-runtime";
+import { retireCompanionUnstarted } from "./companion-work-receipt";
+import { createCompanionDirectIntakeRuntime } from "./companion-direct-intake-runtime";
+import { guiLeaseRoadOn } from "./companion-take-roads";
+import { unservedStartEnd } from "./companion-computer-gate";
+import { narrowStartPermission } from "./companion-permission-cap";
+import { createCompanionDaemonLeaseRuntime } from "./companion-daemon-lease-runtime";
 import { SupervisorScienceAdapter } from "./supervisor-science";
 import { supervisorExactResult, supervisorQuietRun, supervisorReplyTurns } from "./supervisor-presentation";
 import { onAskUserLifecycle } from "../confirm/ask-user";
@@ -34,8 +42,8 @@ import { OneSupervisorLegacyMigration } from './supervisor-migration';
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { SupervisorTask, SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorWorkQueue } from "./supervisor-work-queue";
-import { OneSupervisorWorkExecutor } from "./supervisor-work-executor";
-import { OneSupervisorOwner } from "./supervisor-owner";
+import { OneSupervisorWorkExecutor, signInCarrier } from "./supervisor-work-executor";
+import { OneSupervisorOwner, ownerRowHeld } from "./supervisor-owner";
 import {OneBudgetStore} from "./budget-store";
 import {OneBudgetRuntime} from "./budget-runtime";
 import { createSupervisorNativeRuntime, oneSupervisorNativeRuntime, startSupervisorPreparedInvocation } from "./supervisor-native-runtime";
@@ -43,13 +51,15 @@ import { dispatchedByDesktopSupervisor } from "./supervisor-command-binding";
 import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId, registerAppRuntimeParticipant } from "../long-run/app-runtime-coordinator";
 import { assertOnePersonalDataInvocationCurrent, collectOnePersonalDataResult, recoverOnePersonalDataResults } from './personal-data-runtime';
-import { assertOneHistoryCommandCurrent, wakeOnePersonalIntegrationsFromExistingCheckin, closeOnePersonalIntegrations } from './personal-integrations-runtime';
+import { externalWritersPossible, onExternalWritersChange } from '../store/external-writer-presence';
+import { assertOneHistoryCommandCurrent, wakeOnePersonalIntegrationsFromExistingCheckin, closeOnePersonalIntegrations, onePersonalOwnerWakeActive, onOnePersonalOwnerWakeChange } from './personal-integrations-runtime';
 
 interface SupervisorHostOptions { executor?:"desktop-local"|"agentlas-cloud"; ownerKind:'desktop-main'|'work-daemon';ownerEpoch:string;assertAuthority():void }
 let hostOptions:SupervisorHostOptions|undefined;
 let hostOwner:OneSupervisorOwner|null=null;
 let stopProactiveHost:(()=>void)|undefined;
 let stopBudgetHost:(()=>void)|undefined;
+let stopWorkDeliveryHost:(()=>void)|undefined;
 let supervisor:OneSupervisorService|null=null;
 /** Set once this process handed the One domain to the daemon; Desktop keeps no personal-domain owner afterwards. */
 let domainHandedToDaemon=false;
@@ -59,7 +69,7 @@ export function configureOneSupervisorDaemonHost(options:SupervisorHostOptions):
 }
 export function closeOneSupervisorHostAdmission():void {
   closeOnePersonalIntegrations();
-  hostOwner?.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();supervisor?.close();nativeRuntime?.close();
+  hostOwner?.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();stopWorkDeliveryHost?.();supervisor?.close();nativeRuntime?.close();
 }
 /**
  * True while the background daemon holds the personal One domain, whether this Main handed it over or lost the race
@@ -72,10 +82,13 @@ export function personalDomainHeldByDaemon():boolean {
   if(domainHandedToDaemon)return true;
   if(supervisor||hostOptions)return false;
   try {
-    const row=getDb().prepare("SELECT owner_kind,owner_pid,phase FROM one_supervisor_runtime_owner WHERE slot='personal'").get() as {owner_kind:string;owner_pid:number;phase:string}|undefined;
+    const row=getDb().prepare("SELECT owner_kind,owner_pid,phase,lease_until FROM one_supervisor_runtime_owner WHERE slot='personal'").get() as {owner_kind:string;owner_pid:number;phase:string;lease_until:number}|undefined;
     if(!row||row.owner_kind!=='work-daemon'||row.phase==='released'||row.owner_pid===process.pid)return false;
-    try { process.kill(row.owner_pid,0); return true; }
-    catch(error){ return (error as NodeJS.ErrnoException)?.code!=='ESRCH'; }
+    // A live pid alone is not a holder (a copied profile names another app's pid; a reboot reuses numbers): the lease must also have been renewed lately.
+    return ownerRowHeld(row as {owner_pid:number;lease_until:number;phase:string},Date.now(),pid=>{
+      try { process.kill(pid,0); return true; }
+      catch(error){ return (error as NodeJS.ErrnoException)?.code==='ESRCH' ? false : null; }
+    });
   } catch { return false; }
 }
 export function supervisorRunsInDaemon():boolean { return hostOptions?.ownerKind==='work-daemon'; }
@@ -83,7 +96,7 @@ export function prepareOneSupervisorDaemonHandoff():{oneId:string;ownerEpoch:str
   if(!supervisor || !hostOwner)return null;
   if(hostOptions || invocationService.activeChatIds().length || nativeRuntime?.pendingCount || oneSupervisorNativeRuntime()?.owner.retainedCount)return null;
   const token=hostOwner.current();if(!token || token.phase!=='active')return null;
-  hostOwner.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();supervisor.close();nativeRuntime?.close();hostOwner.release();
+  hostOwner.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();stopWorkDeliveryHost?.();supervisor.close();nativeRuntime?.close();hostOwner.release();
   closeOnePersonalIntegrations();
   domainHandedToDaemon=true;
   return {oneId:token.oneId,ownerEpoch:token.ownerEpoch,generation:token.generation};
@@ -223,7 +236,8 @@ export function oneSupervisor():OneSupervisorService {
   };
   const budget=new OneBudgetStore(getDb(),assertBudgetOwner);
   nativeBudget=budget;
-  const budgetRuntime=new OneBudgetRuntime({budget,store,oneId:()=>getOneProfile().oneId,assertOwner:()=>assertBudgetOwner(getOneProfile().oneId),receipt});
+  let keepBudgetTimer:()=>void=()=>undefined;
+  const budgetRuntime=new OneBudgetRuntime({budget,store,oneId:()=>getOneProfile().oneId,assertOwner:()=>assertBudgetOwner(getOneProfile().oneId),receipt,afterAdmit:()=>keepBudgetTimer()});
   const startNative = async (req: Parameters<typeof invocationService.start>[0], hostNoticePurpose?: SupervisorHostNoticePurpose) => {
     if (hostOptions?.executor === "agentlas-cloud" && (req.goalMode || getChat(req.chatId)?.goalId)) throw supervisorError("managed_one_goal_unavailable");
     if (getDb().inTransaction) throw supervisorError('supervisor_native_uncommitted_request');
@@ -251,6 +265,12 @@ export function oneSupervisor():OneSupervisorService {
       if(command && store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_personal_data_native_bindings'").get()
         && store.db.prepare('SELECT 1 FROM one_personal_data_native_bindings WHERE command_id=?').get(command.command_id)) {
         req={...req,oneMode:true,onePermissionMode:'read'};
+      }
+      // TR-desktop (trust-root.md section 5): a Work the server handed over (it has a handoff row) never runs wider than THIS computer's own setting, whatever
+      // `permissions` the server sent (it sends "full"). The one spot every runtime reads from (subscription CLIs, API lanes, local models all take `req.permissions`).
+      if(command && req.permissions) {
+        const narrowed=await narrowStartPermission(store.db,command.command_id,req.permissions);   // reads the owner window's chip right now (no window: the last copy)
+        if(narrowed!==req.permissions)req={...req,permissions:narrowed};
       }
     }
     if (req.runtimeSelection) req={...req,runtimeSelection:normalizeChatRuntimeSelection(req.runtimeSelection) ?? undefined};
@@ -350,15 +370,28 @@ export function oneSupervisor():OneSupervisorService {
   if(personalChat)bindPersonalFolder(personalChat);
   const stopBudgetEvents=onSettled(event=>{observeBudget(event.runId,event.receipt);
     if(event.chatId===store.conversation(getOneProfile().oneId))queueMicrotask(()=>{try{exportPersonalSession(getOneProfile().oneId,event.chatId);}catch(error){console.warn("[one-supervisor] personal session export deferred",error instanceof Error?error.message:"unknown");}});if(event.receipt.status==='completed')queueMicrotask(()=>{try{collectOnePersonalDataResult(event.runId);}catch{/* A denied/stale result stays a proposal blocker; never retries inference. */}});});
-  const budgetTimer=setInterval(()=>observeBudget(),30_000);budgetTimer.unref?.();
+  // The 30 s reconcile exists only while a reservation can still change (budget.pending: a run with no terminal receipt yet, or one not yet expired);
+  // with none there is no timer. A reservation is made in one place (budgetRuntime.dispatch -> afterAdmit), and a pass that cannot read keeps the timer.
+  let budgetTimer:NodeJS.Timeout|null=null;
+  const budgetOpen=():boolean=>{try{return budget.pending(getOneProfile().oneId).length>0;}catch{return true;}};
+  keepBudgetTimer=()=>{
+    if(!budgetOpen()){if(budgetTimer){clearInterval(budgetTimer);budgetTimer=null;}return;}
+    if(budgetTimer)return;
+    budgetTimer=setInterval(()=>{observeBudget();keepBudgetTimer();},30_000);budgetTimer.unref?.();
+  };
   // A started Science turn that ends while nobody asks is closed and reported within the minute (no pending turn: no call).
   const scienceSettleTimer=setInterval(()=>{void supervisor?.settleScienceTurns();},30_000);scienceSettleTimer.unref?.();
-  stopBudgetHost=()=>{clearInterval(budgetTimer);clearInterval(scienceSettleTimer);stopBudgetEvents();};
-  observeBudget();
+  stopBudgetHost=()=>{if(budgetTimer)clearInterval(budgetTimer);budgetTimer=null;clearInterval(scienceSettleTimer);stopBudgetEvents();};
+  observeBudget();keepBudgetTimer();
   supervisor.recover();
   if (hostsWork) {
+    let intake: ReturnType<typeof createCompanionDirectIntakeRuntime> | null = null;
+    const daemonLease = hostOptions && hostOptions.executor !== "agentlas-cloud" && guiLeaseRoadOn(process.env)
+      ? createCompanionDaemonLeaseRuntime({db:getDb(),oneId:()=>getOneProfile().oneId,bootId:hostOptions.ownerEpoch,
+        assertOwner:()=>{hostOptions!.assertAuthority();owner.assert(getOneProfile().oneId);},noStartProof}) : null;
     workExecutor = new OneSupervisorWorkExecutor({store,queue:workQueue,
     ownerEpoch:hostOptions?.ownerEpoch ?? desktopAppInstanceId(),ownerKind:hostOptions?.ownerKind ?? "desktop-main",locale:currentUiLocale,
+    companionLifecycle:(purpose,binding,runId)=>daemonLease?.lifecycle(purpose,binding,runId) ?? intake?.lifecycle(purpose,binding,runId) ?? Promise.resolve(unservedStartEnd(getDb(),purpose,binding.commandId)),
     assertOwner:()=>{if(hostOptions)hostOptions.assertAuthority();else assertDesktopLongRunAdmissionOpen();owner.assert(getOneProfile().oneId);workQueue.setActiveIdentity(getOneProfile().oneId);},
     assertBinding:job=>{
       assertOnePersonalDataInvocationCurrent(job.command_id);
@@ -379,7 +412,34 @@ export function oneSupervisor():OneSupervisorService {
     const heldCheckins=await (await import('./checkin-admission')).heldCheckinIds();
     supervisor?.fireDueCheckins(Date.now(),heldCheckins);recoverOnePersonalDataResults();wakeOnePersonalIntegrationsFromExistingCheckin();
   }catch(error){console.warn("[one-supervisor] check-ins deferred",error instanceof Error ? error.message : "unknown");}finally{checkinBusy=false;}};
-  const checkinTimer=setInterval(fireCheckins,30_000);checkinTimer.unref?.();
+  // The check-in timer is aimed (P5-7): at the next active check-in's due time, at most CHECKIN_AIM_MAX_MS ahead (a timer set before the machine
+  // slept fires late by the sleep, so a long wait is cut short), and every 30 s only while the beat has other work: another process that may write (the
+  // review of results it queued rides this beat), a request or a review still open, an intake that listens (Gmail intake rides it). With none of those
+  // there is no timer. What moves the aim: a check-in turned on, a request or notice written (store.onActivity), the intake appearing or going, the
+  // service appearing or proven gone (store/external-writer-presence.ts), and every fire. The first fire is 30 s after start, as the interval's first one was; it also recovers a personal-data
+  // result that was not collected.
+  const CHECKIN_AIM_MAX_MS=5*60_000,CHECKIN_REPEAT_MS=30_000;
+  let checkinHandle:NodeJS.Timeout|null=null,checkinHandleAt=0;
+  const arm=(delay:number)=>{
+    if(checkinHandle)clearTimeout(checkinHandle);
+    checkinHandleAt=Date.now()+delay;
+    checkinHandle=setTimeout(()=>{checkinHandle=null;void fireCheckins().finally(aimCheckins);},delay);checkinHandle.unref?.();
+  };
+  const aimCheckins=():void=>{
+    let target:number|null;
+    try{
+      target=store.nextCheckinDueAt(getOneProfile().oneId);
+      // The beat also reads what is not a check-in: the review of results another process queued, hand-offs still open, an intake that listens.
+      if(externalWritersPossible()||onePersonalOwnerWakeActive()||(supervisor?.beatNeeded()??true))target=Math.min(target??Infinity,Date.now()+CHECKIN_REPEAT_MS);
+    }catch{target=Date.now()+CHECKIN_REPEAT_MS;} // unreadable: look again soon, never silently never
+    if(target===null||!Number.isFinite(target)){if(checkinHandle)clearTimeout(checkinHandle);checkinHandle=null;return;}
+    // A due time that is already past (a check-in held by its admission gate stays due): the next look is one beat away, never a spin.
+    const delay=target<=Date.now()?CHECKIN_REPEAT_MS:Math.max(1_000,Math.min(CHECKIN_AIM_MAX_MS,target-Date.now()));
+    if(checkinHandle&&checkinHandleAt<=Date.now()+delay)return;
+    arm(delay);
+  };
+  arm(CHECKIN_REPEAT_MS);
+  const stopCheckinAims=[store.onCheckinActivated(aimCheckins),store.onActivity(aimCheckins),onOnePersonalOwnerWakeChange(aimCheckins),onExternalWritersChange(aimCheckins)];
   const stopQuestions=onAskUserLifecycle(event=>{
     if (event.chatId && event.expiresAt > Date.now()) {
       try {
@@ -396,13 +456,39 @@ export function oneSupervisor():OneSupervisorService {
   // A graph that answers this conversation (or a Work session One delegated) is queued for review by the scheduler's
   // delivery; in this process the review starts now (native-harness notyet NH16). Elsewhere the tick above picks it up.
   const stopGraphResults=registerOneGraphResultWake(()=>{try{supervisor?.reviewQueuedResults();}catch(error){console.warn("[one-supervisor] graph result review deferred",error instanceof Error ? error.message : "unknown");}});
-  const stopProactive=()=>{clearInterval(checkinTimer);stopQuestions();stopHostAlerts();stopTeamResults();stopGraphResults();};stopProactiveHost=stopProactive;
+  const stopProactive=()=>{if(checkinHandle)clearTimeout(checkinHandle);checkinHandle=null;for(const stop of stopCheckinAims.splice(0))stop();stopQuestions();stopHostAlerts();stopTeamResults();stopGraphResults();stopWorkDeliveryHost?.();};stopProactiveHost=stopProactive;
   registerAppRuntimeParticipant("one-supervisor-work-queue", {
     closeAdmission:()=>{owner.closeAdmission();workExecutor?.close();stopProactive();},
     interrupt:()=>{owner.closeAdmission();workExecutor?.close();stopProactive();},
     isSettled:()=>{if(invocationService.activeChatIds().length)return false;stopBudgetHost?.();owner.release();supervisor?.close();nativeRuntime?.close();return true;},
   });
   workExecutor.start();
+  // Phone-to-Desktop Work (intake every 5 s, delivery every 30 s, a delivery-origin GET per paired device) only runs with
+  // the same switch as its phone bridge handlers (mobile-bridge/authority.ts). Ungated it polled the live server, which
+  // has no such route yet, every 5 seconds on every Desktop.
+  if (!daemonLease && process.env.AGENTLAS_COMPANION_WORK_V2 === "enabled") try {
+    const retirementToken=owner.assert(getOneProfile().oneId), retirementActor=peekAuthenticatedSessionBinding();
+    let retirementScope=retirementActor ? {userId:retirementActor.userId,workspaceId:retirementActor.workspaceId,oneId:retirementToken.oneId} : null;
+    const delivery = createCompanionWorkDeliveryRuntime({ db: getDb(), tasks: desktopTasks, oneId: () => getOneProfile().oneId, noStartProof, nativeReceipt: receipt,
+      carrierRunId:(runId,chatId)=>{const carrier=signInCarrier({receipt,successorRun:signInSuccessorRun},runId);
+        return carrier.receipt?.runId===carrier.runId && carrier.receipt.chatId===chatId ? carrier.runId : null;},
+      retireUnstarted: commandId => retireCompanionUnstarted({store,queue:workQueue,commandId,noStartProof,nativeReceipt:receipt}),
+      retirementScope:()=>{
+        if(!retirementScope){const actor=peekAuthenticatedSessionBinding();if(actor && getOneProfile().oneId===retirementToken.oneId)
+          retirementScope={userId:actor.userId,workspaceId:actor.workspaceId,oneId:retirementToken.oneId};}
+        return retirementScope;
+      },assertRetirementOwner:()=>owner.assertToken(retirementToken,true),
+      assertOwner: () => { hostOptions?.assertAuthority(); owner.assert(getOneProfile().oneId); } });
+    try {
+      intake = createCompanionDirectIntakeRuntime({ oneId: () => getOneProfile().oneId,
+        assertOwner: () => { hostOptions?.assertAuthority(); owner.assert(getOneProfile().oneId); },
+        receive: capability => supervisor!.receiveCompanionWork(capability) });
+    } catch (error) { console.warn("[one-supervisor] Companion intake deferred", error instanceof Error ? error.message : "unknown"); }
+    const stopWake = onSettled(() => { const wake = setTimeout(() => { void delivery.sweep().catch(() => undefined); }, 500); wake.unref?.(); });
+    stopWorkDeliveryHost = () => { stopWake(); void delivery.stop(); void intake?.stop(); stopWorkDeliveryHost = undefined; };
+    delivery.start();
+    intake?.start();
+  } catch (error) { console.warn("[one-supervisor] Companion delivery deferred", error instanceof Error ? error.message : "unknown"); }
   fireCheckins(); // a check-in due while the app was closed runs once now
   }
   return supervisor;

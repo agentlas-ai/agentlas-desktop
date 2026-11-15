@@ -15,6 +15,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { printHtmlInChromiumHelper } from "./chromium-print-client";
 import { chromiumPrintFailureReason, type ChromiumPdfOptions, type ChromiumPrintReceipt } from "./chromium-print-protocol";
 
@@ -118,7 +119,8 @@ function runProcess(bin: string, args: string[], cwd: string, timeoutMs: number)
     let stderr = "";
     const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* gone */ } }, timeoutMs);
     timer.unref?.();
-    child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); if (stderr.length > 200_000) stderr = stderr.slice(-100_000); });
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stderr?.on("data", (chunk: Buffer) => { stderr += stderrDecoder.write(chunk); if (stderr.length > 200_000) stderr = stderr.slice(-100_000); });
     child.on("error", (error) => { clearTimeout(timer); resolve({ code: -1, stderr: error.message }); });
     child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stderr }); });
   });

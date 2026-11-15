@@ -19,6 +19,7 @@ import { hostname } from "node:os";
 import { emitDesktopStoreChange, desktopStoreTransaction } from "./change-bus";
 import { restoreAgentForUse } from "../archive/auto-archive";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
+import { purgeOrphanChatMarks } from "../runtime/session-scope";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
@@ -757,6 +758,7 @@ export function removeAutomation(id: string): void {
     db.prepare(
       "DELETE FROM chats WHERE kind = 'division' AND (title = ? OR title LIKE ? ESCAPE '!')",
     ).run(chatMarker, `${escapedChatMarker}::%`);
+    purgeOrphanChatMarks(db);
     db.prepare("DELETE FROM automation_runs WHERE automation_id = ?").run(id);
     db.prepare("DELETE FROM run_history WHERE automation_id = ?").run(id);
     db.prepare("DELETE FROM automations WHERE id = ?").run(id);

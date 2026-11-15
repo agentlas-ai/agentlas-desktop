@@ -12,8 +12,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { IconArrowUp, IconCheck, IconEdit, IconPlus, IconTrash } from "@/components/Icon";
-import { AgiUnblockLimits } from "@/components/agi/AgiUnblockLimits";
-import type { GoalPanelEdit, GoalPanelEditResult, GoalPanelNode, GoalPanelSuggestion, GoalPanelText, GoalPanelView } from "@shared/goal-panel";
+import type { GoalPanelEdit, GoalPanelEditResult, GoalPanelNode, GoalPanelText, GoalPanelView } from "@shared/goal-panel";
 import styles from "./GoalPanel.module.css";
 
 type Locale = "ko" | "en";
@@ -96,45 +95,32 @@ function nodeStateLabel(node: GoalPanelNode, locale: Locale): string {
 }
 
 const ERROR_TEXT: Record<string, [string, string]> = {
-  goal_panel_last_open_node: ["마지막으로 진행 중인 항목이라 멈추거나 지울 수 없어요. 목표 전체를 멈추려면 목표 칩의 일시정지를 쓰세요.", "This is the last item still in progress, so it cannot be paused or removed here. Pause the whole goal from its chip instead."],
-  goal_panel_plan_changed: ["그사이 계획이 바뀌었어요. 최신 계획으로 다시 해 주세요.", "The plan changed in the meantime. Try again on the latest plan."],
-  goal_panel_plan_behind_revision: ["목표가 바뀌어 다음 실행 전에 계획을 다시 나눠요. 그 뒤에 편집할 수 있어요.", "The goal changed; the plan is re-divided before the next run. Edit it after that."],
+  goal_panel_last_open_node: ["마지막으로 진행 중인 항목은 중지하거나 삭제할 수 없어요.", "The last item in progress cannot be paused or removed here."],
+  goal_panel_plan_changed: ["계획이 변경됐어요. 최신 계획으로 다시 시도해 주세요.", "The plan changed. Try again on the latest plan."],
+  goal_panel_plan_behind_revision: ["계획을 다시 나눈 뒤에 편집할 수 있어요.", "Edit the plan after it is divided again."],
   goal_panel_goal_ended: ["끝난 목표는 바꿀 수 없어요.", "An ended goal cannot be changed."],
-  goal_panel_no_revision: ["이 목표는 아직 기록된 계약이 없어 여기서 문장을 바꿀 수 없어요. 대화로 알려 주세요.", "This goal has no recorded contract yet, so its text cannot be changed here. Tell it in the conversation."],
+  goal_panel_no_revision: ["이 목표는 여기서 변경할 수 없어요. 대화로 알려 주세요.", "This goal's text cannot be changed here. Tell it in the conversation."],
   goal_panel_no_plan: ["아직 나눈 계획이 없어요. 먼저 나누기를 눌러 주세요.", "There is no plan yet. Press Divide first."],
   goal_panel_node_done: ["끝난 항목은 멈출 수 없어요.", "A finished item cannot be paused."],
   goal_panel_edit_invalid: ["내용을 확인해 주세요.", "Check the text and try again."],
   goal_control_binding_changed: ["이 대화의 목표가 바뀌었어요. 다시 열어 주세요.", "This conversation's goal changed. Reopen the panel."],
   // Codes Main already returned that fell through to "try again" (goal-tree audit 2026-10-25): each says what to do.
-  goal_panel_node_not_found: ["그 항목은 이미 바뀌었거나 없어졌어요. 위 계획이 지금 계획이에요.", "That item was changed or removed already. The plan above is the current one."],
-  goal_plan_node_missing: ["그 항목은 이미 바뀌었거나 없어졌어요. 위 계획이 지금 계획이에요.", "That item was changed or removed already. The plan above is the current one."],
-  goal_panel_suggestion_not_found: ["그 제안은 이미 처리됐어요.", "That suggestion was already handled."],
-  goal_panel_strategy_required: ["하위 목표는 전략 아래에만 넣을 수 있어요. 먼저 전략을 고르세요.", "A sub-goal goes under a strategy. Pick a strategy first."],
-  goal_panel_not_a_tree: ["이 계획은 단계 목록이라 전략 아래에 넣을 수 없어요. 항목으로 추가해 주세요.", "This plan is a flat list, so nothing goes under a strategy. Add it as an item."],
-  prerequisites_invalid: ["선행 항목 연결이 맞지 않아요(없는 항목이거나 순환). 연결을 고쳐 주세요.", "The prerequisites do not line up (a missing item or a loop). Fix the links."],
-  goal_panel_amendment_not_recorded: ["목표 문장 변경이 기록되지 않았어요. 위 문장이 지금 목표예요.", "The goal text change was not recorded. The text above is the current goal."],
-  goal_panel_shape_unavailable: ["이 목표는 이 앱의 목표 실행기가 맡고 있지 않아 여기서 계획을 나눌 수 없어요. 목표를 맡은 화면에서 나눠 주세요.", "This app's goal runner does not run this goal, so its plan cannot be divided here. Divide it where the goal runs."],
-  goal_panel_edit_failed: ["저장하지 못했어요. 위에 보이는 계획이 지금 저장된 계획이에요.", "It was not saved. The plan shown above is what is saved now."],
+  goal_panel_node_not_found: ["항목이 변경됐거나 삭제됐어요.", "That item was changed or removed."],
+  goal_plan_node_missing: ["항목이 변경됐거나 삭제됐어요.", "That item was changed or removed."],
+  goal_panel_strategy_required: ["하위 목표는 전략 아래에만 추가할 수 있어요.", "A sub-goal can only go under a strategy."],
+  goal_panel_not_a_tree: ["이 계획에는 항목으로만 추가할 수 있어요.", "This plan only takes items."],
+  prerequisites_invalid: ["선행 항목 연결이 올바르지 않아요.", "The prerequisite links are not valid."],
+  goal_panel_amendment_not_recorded: ["목표 문장 변경을 저장하지 못했어요.", "The goal text change was not saved."],
+  goal_panel_shape_unavailable: ["여기서는 계획을 나눌 수 없어요. 목표를 맡은 화면에서 나눠 주세요.", "The plan cannot be divided here. Divide it where the goal runs."],
+  goal_panel_edit_failed: ["저장하지 못했어요.", "It was not saved."],
 };
 
 function errorText(code: string, locale: Locale): string {
   const known = ERROR_TEXT[code];
   if (known) return known[locale === "ko" ? 0 : 1];
   // The machine code is not part of the sentence; it stays on the line's hover title (support reads it there).
-  return locale === "ko" ? "바꾸지 못했어요. 위에 보이는 것이 지금 저장된 상태예요."
+  return locale === "ko" ? "변경하지 못했어요."
     : "That change did not go through. What is shown above is what is saved now.";
-}
-
-function relative(at: string, nowMs: number, locale: Locale): string {
-  const ms = nowMs - Date.parse(at);
-  if (!Number.isFinite(ms)) return "";
-  const minutes = Math.max(0, Math.round(ms / 60_000));
-  const ko = locale === "ko";
-  if (minutes < 1) return ko ? "방금" : "just now";
-  if (minutes < 60) return ko ? `${minutes}분 전` : `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return ko ? `${hours}시간 전` : `${hours}h ago`;
-  return ko ? `${Math.round(hours / 24)}일 전` : `${Math.round(hours / 24)}d ago`;
 }
 
 function Mark({ state, current }: { state: GoalPanelNode["state"] | "none"; current?: boolean }) {
@@ -176,22 +162,6 @@ function Editor({ fields, onSave, onCancel, locale, busy }: {
   </form>;
 }
 
-function Suggestions({ items, onDecide, locale, busy }: { items: GoalPanelSuggestion[]; onDecide: (id: string, accept: boolean) => void; locale: Locale; busy: boolean }) {
-  if (!items.length) return null;
-  const ko = locale === "ko";
-  const fieldLabel = (field: GoalPanelSuggestion["field"]) => field === "objective" ? (ko ? "최종목표" : "final goal")
-    : field === "done_when" ? (ko ? "완료 조건" : "done when") : (ko ? "목적" : "purpose");
-  return <ul className={styles.suggestions}>
-    {items.map((item) => <li key={item.id} data-goal-suggestion={item.id}>
-      <span className={styles.suggestionText}>{ko ? `AGI 제안 · ${fieldLabel(item.field)} 바꾸기` : `AGI suggests changing the ${fieldLabel(item.field)}`}: “{item.text}”</span>
-      <span className={styles.suggestionActions}>
-        <button type="button" disabled={busy} onClick={() => onDecide(item.id, true)} data-goal-suggestion-accept="true">{ko ? "수락" : "Accept"}</button>
-        <button type="button" disabled={busy} onClick={() => onDecide(item.id, false)}>{ko ? "무시" : "Dismiss"}</button>
-      </span>
-    </li>)}
-  </ul>;
-}
-
 export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
   view: GoalPanelView | null; locale: Locale; onView: (view: GoalPanelView | null) => void; nowMs?: number;
 }) {
@@ -202,7 +172,8 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
   const [notice, setNotice] = useState<{ kind: "error" | "ok"; text: string; code?: string } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [limitsOpen, setLimitsOpen] = useState(false);
+  // "Keep it paused" on the stuck card: a local dismissal for this goal revision (the goal is already stopped; no host call exists or is needed).
+  const [keptStopped, setKeptStopped] = useState<string | null>(null);
   const nowMs = fixedNow ?? Date.now();
   useEffect(() => { if (!confirmRemove) return; const timer = setTimeout(() => setConfirmRemove(null), 4000); return () => clearTimeout(timer); }, [confirmRemove]);
   if (!view) return <p className={styles.empty}>{ko ? "이 대화에는 목표가 없어요" : "This conversation has no goal"}</p>;
@@ -224,7 +195,6 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
       return false;
     } finally { setBusy(false); }
   };
-  const decide = (id: string, accept: boolean) => { void send(accept ? { op: "accept_suggestion", suggestionId: id } : { op: "dismiss_suggestion", suggestionId: id }); };
   const shape = async () => {
     const api = ipc()?.goalPanel;
     if (!api || busy) return;
@@ -238,6 +208,25 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
       setNotice({ kind: "error", text: errorText("", locale) });
     } finally { setBusy(false); }
   };
+
+  // [Start again]: the same resume the goal bar makes, from the goal's current version. A goal that needs a review first (automation link) is not resumed here:
+  // the person is sent to the goal bar's Resume, which owns that review.
+  const startAgain = async () => {
+    const chats = ipc()?.chats;
+    if (!chats || busy) return;
+    setBusy(true); setNotice(null);
+    try {
+      const context = await chats.getGoalContext(view.chatId);
+      if (!context?.version) throw new Error("goal_context_missing");
+      const review = await chats.getGoalResumeReview(view.chatId, context.version, context.goalId);
+      if (review) { setNotice({ kind: "error", text: ko ? "이어가기 전에 확인할 항목이 있어요. 목표 줄의 [재개]로 확인해 주세요." : "There is something to review first. Use Resume in the goal bar." }); return; }
+      await chats.resumeGoal(view.chatId, context.version, context.goalId);
+      setNotice(null);
+    } catch {
+      setNotice({ kind: "error", text: ko ? "다시 시작하지 못했어요. 목표 줄의 [재개]로 다시 해 보세요." : "Couldn't start again. Try Resume in the goal bar." });
+    } finally { setBusy(false); }
+  };
+  const stuckKey = `${view.goalId}:${view.revision ?? 0}`;
 
   const deadline = view.deadlineAt ? (() => {
     const at = new Date(view.deadlineAt);
@@ -260,7 +249,7 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
       <button type="button" aria-label={ko ? "위로" : "Move up"} title={ko ? "위로" : "Move up"} disabled={index <= 0 || busy} onClick={() => { void send({ op: "move_node", nodeId: node.id, direction: "up" }); }}><IconArrowUp size={12} /></button>
       <button type="button" className={styles.down} aria-label={ko ? "아래로" : "Move down"} title={ko ? "아래로" : "Move down"} disabled={index >= siblings.length - 1 || busy} onClick={() => { void send({ op: "move_node", nodeId: node.id, direction: "down" }); }}><IconArrowUp size={12} /></button>
       {node.state !== "done" && (node.ownerPaused
-        ? <button type="button" data-goal-resume={node.id} aria-label={ko ? "다시 진행" : "Resume"} title={ko ? "다시 진행" : "Resume"} disabled={busy} onClick={() => { void send({ op: "resume_node", nodeId: node.id }); }}>▶</button>
+        ? <button type="button" data-goal-resume={node.id} aria-label={ko ? "재개" : "Resume"} title={ko ? "재개" : "Resume"} disabled={busy} onClick={() => { void send({ op: "resume_node", nodeId: node.id }); }}>▶</button>
         : <button type="button" data-goal-pause={node.id} aria-label={ko ? "일시정지" : "Pause"} title={ko ? "이 가지만 일시정지" : "Pause this branch"} disabled={busy} onClick={() => { void send({ op: "pause_node", nodeId: node.id }); }}>‖</button>)}
       {node.state !== "done" && <button type="button" data-goal-done={node.id} aria-label={ko ? "완료로 표시" : "Mark done"} title={ko ? "완료로 표시" : "Mark done"} disabled={busy} onClick={() => { void send({ op: "mark_done", nodeId: node.id }); }}><IconCheck size={12} /></button>}
       <button type="button" data-goal-remove={node.id} data-confirm={confirmRemove === node.id ? "true" : "false"}
@@ -304,10 +293,8 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
               {detail(ko ? "방법" : "Method", t(node.method, locale), "method")}
               {node.kind === "tactic" && detail(ko ? "완료 조건" : "Done when", node.doneWhen, "done-when")}
               {node.state === "blocked" && detail(ko ? "막힌 이유" : "Blocked", t(node.stateReason, locale), "blocked")}
-              {node.agi && detail("AGI", <>{t(node.agi.text, locale)} <time dateTime={node.agi.at}>{relative(node.agi.at, nowMs, locale)}</time></>, "agi")}
             </dl>
           : null}
-      <Suggestions items={node.suggestions} onDecide={decide} locale={locale} busy={busy} />
       {node.kind === "strategy" && <ol className={styles.children}>
         {node.children.map((child) => renderNode(child, node.children))}
         {!planLocked && (adding === node.id
@@ -326,22 +313,32 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
       <strong data-goal-panel-state={view.state}>{stateLabel(view, locale)}</strong>
       {view.stateReason && view.state !== "terminal" && <span className={styles.headerReason}>{t(view.stateReason, locale)}</span>}
       <span className={styles.headerMeta}>
-        {view.revision !== null && <span data-goal-revision={view.revision}>{ko ? `개정 ${view.revision}` : `Rev ${view.revision}`}</span>}
+        {view.revision !== null && <span data-goal-revision={view.revision}>{ko ? `버전 ${view.revision}` : `Version ${view.revision}`}</span>}
         {view.lifecycle === "ongoing" && <span>{ko ? "지속" : "Ongoing"}</span>}
       </span>
     </header>
+
+    {view.state === "blocked" && keptStopped !== stuckKey && <section className={styles.stuck} data-goal-stuck="true" aria-label={ko ? "막힌 목표" : "Stuck goal"}>
+      <p className={styles.stuckKicker}>{ko ? "막힘 · 일시정지" : "Stuck · paused"}</p>
+      <h3>{view.root.intent}</h3>
+      {view.stateReason && <p className={styles.stuckReason}>{t(view.stateReason, locale)}</p>}
+      <div className={styles.stuckActions}>
+        <button type="button" className={styles.stuckButton} disabled={busy} data-goal-keep-paused="true" onClick={() => setKeptStopped(stuckKey)}>{ko ? "일시정지 유지" : "Keep it paused"}</button>
+        <button type="button" className={`${styles.stuckButton} ${styles.stuckPrimary}`} disabled={busy} data-goal-start-again="true" onClick={() => { void startAgain(); }}>{ko ? "다시 시작" : "Start again"}</button>
+      </div>
+    </section>}
 
     <section className={styles.root} data-goal-root="true">
       <p className={styles.label}>{ko ? "최종목표" : "Final goal"}</p>
       {editing === "root"
         ? <Editor locale={locale} busy={busy} onCancel={() => setEditing(null)}
-            fields={[{ key: "text", label: ko ? "목표 (새 개정으로 기록돼요)" : "Goal (recorded as a new revision)", value: view.root.intent, multiline: true, max: 12000 }]}
+            fields={[{ key: "text", label: ko ? "목표 (새 버전으로 저장돼요)" : "Goal (saved as a new version)", value: view.root.intent, multiline: true, max: 12000 }]}
             onSave={(values) => {
               const text = values.text.trim();
               if (!text || text === view.root.intent) { setEditing(null); return; }
               void send({ op: "amend_objective", text }, (result) => result.outcome === "revised"
-                ? (ko ? "새 개정으로 기록했어요. 다음 실행 전에 계획을 다시 나눠요." : "Recorded as a new revision. The plan is re-divided before the next run.")
-                : (ko ? "기록했어요. 지금 실행이 끝나면 새 개정으로 반영돼요." : "Recorded. It becomes a new revision when the current run ends."))
+                ? (ko ? "새 버전으로 저장했어요." : "Saved as a new version.")
+                : (ko ? "저장했어요. 지금 실행이 끝나면 반영돼요." : "Saved. It applies when the current run ends."))
                 .then((ok) => { if (ok) setEditing(null); });
             }} />
         : <div className={styles.rootIntentRow}>
@@ -359,27 +356,21 @@ export function GoalRailPanel({ view, locale, onView, nowMs: fixedNow }: {
           ? view.root.doneWhen.join(" · ")
           : view.nodes.length ? (ko ? "아래 하위목표가 모두 끝나면" : "When every sub-goal below is done") : "", "done-when")}
         {view.root.progress && detail(ko ? "진행" : "Progress", <Progress progress={view.root.progress} locale={locale} />, "progress")}
-        {view.root.agi && detail("AGI", <>{t(view.root.agi.text, locale)} <time dateTime={view.root.agi.at}>{relative(view.root.agi.at, nowMs, locale)}</time></>, "agi")}
       </dl>
       <p className={styles.facts} data-goal-facts="true">
         <span data-goal-deadline={view.deadlineAt ?? "none"}>{deadline}</span>
         <span aria-hidden="true">·</span>
         <span data-goal-budget="true">{budget}</span>
-        <span aria-hidden="true">·</span>
-        <button type="button" className={styles.link} aria-expanded={limitsOpen} data-goal-agi-limits="true" onClick={() => setLimitsOpen((v) => !v)}>{ko ? "AGI 한도" : "AGI limits"}</button>
       </p>
-      {limitsOpen && <div className={styles.limits}><AgiUnblockLimits locale={locale} /></div>}
-      {view.agiWorking && <p className={styles.note} data-goal-agi-working="true">{ko ? `AGI가 막힌 곳을 살펴보는 중 · 시도 ${view.agiWorking.attempts}회` : `AGI is looking into the blocker · ${view.agiWorking.attempts} attempt(s)`}</p>}
-      {view.pendingAmendments > 0 && <p className={styles.note} data-goal-pending-amendment={view.pendingAmendments}>{ko ? `목표 수정 ${view.pendingAmendments}건이 지금 실행이 끝나면 새 개정이 돼요.` : `${view.pendingAmendments} goal change(s) become a new revision when the current run ends.`}</p>}
-      {view.planBehindRevision && <p className={styles.note} data-goal-plan-behind="true">{ko ? "목표가 바뀌어 다음 실행 전에 계획을 다시 나눠요. 아래는 이전 계획이에요." : "The goal changed; the plan is re-divided before the next run. Below is the previous plan."}</p>}
-      <Suggestions items={view.root.suggestions} onDecide={decide} locale={locale} busy={busy} />
+      {view.pendingAmendments > 0 && <p className={styles.note} data-goal-pending-amendment={view.pendingAmendments}>{ko ? `목표 수정 ${view.pendingAmendments}건은 지금 실행이 끝나면 반영돼요.` : `${view.pendingAmendments} goal change(s) apply when the current run ends.`}</p>}
+      {view.planBehindRevision && <p className={styles.note} data-goal-plan-behind="true">{ko ? "아래는 이전 계획이에요." : "Below is the previous plan."}</p>}
     </section>
 
     {(view.canShape || view.shaping) && view.state !== "terminal" && <div className={styles.shape} data-goal-shape-cta="true">
       <p>{view.shaping ? (ko ? "계획을 나누는 중이에요…" : "Dividing the plan…")
         : view.shapeFailed ? (ko ? "나누지 못했어요. 다시 눌러 주세요." : "It could not be divided. Try again.")
-        : view.provisional ? (ko ? "임시 계획이에요. 최종목표를 전략목표와 하위목표로 나눌 수 있어요." : "This plan is provisional. Divide the final goal into strategic goals and sub-goals.")
-        : (ko ? "아직 한 덩어리 목표예요. 전략목표와 하위목표로 나눌 수 있어요." : "This goal is still one piece. Divide it into strategic goals and sub-goals.")}</p>
+        : view.provisional ? (ko ? "임시 계획이에요." : "This plan is provisional.")
+        : (ko ? "나누지 않은 목표예요." : "This goal is not divided yet.")}</p>
       <button type="button" className={styles.primary} disabled={busy || view.shaping} data-goal-shape="true" onClick={() => { void shape(); }}>{ko ? "나누기" : "Divide"}</button>
     </div>}
 

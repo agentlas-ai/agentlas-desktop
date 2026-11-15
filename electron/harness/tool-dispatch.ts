@@ -8,6 +8,7 @@ import { redactSecrets } from "../../shared/secret-patterns";
 import { redactToolJson, redactToolText } from "./tool-result-store";
 import { didYouMean } from "../../shared/did-you-mean";
 import { waitForAbort } from "../runtime/abortable-wait";
+import { approvalToolAnnotations, type ApprovalToolAnnotations } from "../runtime/approval-rule";
 
 /*
  * Harness tool dispatch ports (docs/2026-10-13-native-harness/15 §7-8):
@@ -21,8 +22,13 @@ import { waitForAbort } from "../runtime/abortable-wait";
  *     parts as sibling files) and is never auto-deleted;
  *   - in-flight calls can be cancelled (AbortController) and settle honestly.
  *
- * Personal mode is always-allow with no per-action approval (contract policy); the gate is "installed + enabled +
- * current schema + credentials present". No electron import at top level: the daemon loads this module.
+ * The gate is "installed + enabled + current schema + credentials present", then the approval rule of the owner (/ a payment, a delete,
+ * an outward send asks; "always allow" is remembered for the project; full access asks money only) through the same arbiter the app's own
+ * server path uses (harness/app-call-approval.ts approveConnectorToolCall). The older line here said "Personal mode is always-allow with no per-action
+ * approval": that was docs/-native-harness/15 section 6 ("the personal agent is always allow, payment included"), which the owner replaced on
+ * (money, delete and send ask; only money is never remembered). The port was left on the old sentence. The owner's own screen
+ * (chat "ui") still runs with no card; a change to a connected app that lives on
+ the server asks at its own bridge (one/server-apps-host.ts, approveHostServerCall). No electron import at top level: the daemon loads this module.
  */
 
 type PortOutcome =
@@ -288,7 +294,7 @@ async function hostServerBinding(providerRef: string, ctx?: Pick<HarnessCallCont
 
 /** Current tools/list of one installed connector, with the digest tool.call must carry. */
 export async function describeConnectorTools(providerRef: string, ctx?: Pick<HarnessCallContext, "mcpConfigPath" | "signal">): Promise<
-  | { ok: true; server: InstalledMcpServer; prepared?: PreparedMcpBinding; tools: Array<{ name: string; description: string; schemaDigest: string; inputSchema: unknown }> }
+  | { ok: true; server: InstalledMcpServer; prepared?: PreparedMcpBinding; tools: Array<{ name: string; description: string; schemaDigest: string; inputSchema: unknown; annotations?: ApprovalToolAnnotations }> }
   | { ok: false; code: string; next?: string }
 > {
   ctx?.signal?.throwIfAborted();
@@ -319,6 +325,8 @@ export async function describeConnectorTools(providerRef: string, ctx?: Pick<Har
       description: typeof tool.description === "string" ? tool.description.slice(0, 280) : "",
       schemaDigest: mcpToolSchemaDigest(tool),
       inputSchema: tool.inputSchema ?? null,
+      // What the tool says about itself: read by the approval rule alone (harness/app-call-approval.ts approveConnectorToolCall), never shown.
+      ...((marks) => marks ? { annotations: marks } : {})(approvalToolAnnotations(tool.annotations)),
     })),
   };
 }
@@ -377,7 +385,8 @@ async function run(call: LiveCall, server: InstalledMcpServer, args: Args, prepa
       retainFullResult: true,
       signal: controller.signal,
       ...(onDispatch ? { onDispatch } : {}),
-      timeoutMs: 45_000,
+      // A connected app on the server may take its 60 s plus 5 (contracts/desktop-server-tools.md section 7); every other connector keeps 45 s.
+      timeoutMs: server.id === "agentlas-server-apps" ? 70_000 : 45_000,
     });
     if (!result) { await settle(call, "failed", { code: "auth-required", message: "the connector is missing credentials" }); return; }
     const received = (result.rawResult ?? { content: [{ type: "text", text: result.text }], ...(result.isError ? { isError: true } : {}) }) as Record<string, unknown>;
@@ -440,6 +449,22 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
   }
   if (tool.schemaDigest !== schemaDigest) return refused("stale-schema", `current schemaDigest is ${tool.schemaDigest}; re-read the schema before calling`);
   if (ctx.signal?.aborted) return stoppedBeforeSend();
+
+  // The approval rule (money, delete, send: runtime/approval-rule.ts) is applied here as it is when the same tool is called straight through
+  // its own server - one decision for both ways in. A connected app on the server asks at its own bridge; the owner's screen is the owner's click.
+  if (ctx.chatId !== "ui" && inventory.server.id !== "agentlas-server-apps") {
+    const { approveConnectorToolCall } = await import("./app-call-approval");
+    const { mcpConfigKey } = await import("../mcp-tools/mcp-config");
+    let consentTarget = `server:${inventory.server.id}`;
+    if (inventory.prepared) { try { consentTarget = (await import("../mcp-tools/prepared-transport")).preparedMcpConsentResource(inventory.prepared, inventory.server); } catch { /* the server id stands */ } }
+    const asked = await approveConnectorToolCall({
+      serverKey: inventory.prepared?.configKey ?? mcpConfigKey(inventory.server), catalogId: inventory.server.catalogId ?? null, tool: toolName, schemaDigest, consentTarget,
+      arguments: callArgs, chatId: ctx.chatId, permission: ctx.permission ?? "read", unattended: ctx.unattended === true,
+      annotations: tool.annotations ?? null, ...(ctx.signal ? { signal: ctx.signal } : {}),
+    });
+    if (!asked.ok) return refused(asked.reason, asked.text);
+    if (ctx.signal?.aborted) return stoppedBeforeSend();
+  }
 
   const callId = `tc_${randomUUID()}`;
   const controller = new AbortController();

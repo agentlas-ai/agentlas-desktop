@@ -1,6 +1,6 @@
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { runnerFailureFromError } from "../runtime/runner";
-import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { app } from "electron";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,6 +11,7 @@ import {
   UPLOAD_AGENT_DEFINITION_FILES,
   UPLOAD_SKIP_DIRECTORIES,
 } from "../../shared/upload-scan-catalog.generated";
+import { isAgentLocalStatePath } from "../../shared/agent-local-state";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { detectRuntimeLabelsFromPaths } from "../agents/runtime-labels";
 import { detectRuntimes } from "../runtime/detect";
@@ -49,6 +50,7 @@ import {
   PACKAGE_MAX_FILES,
 } from "../../shared/upload-scan-catalog.generated";
 import { sameFileIdentity } from "../../shared/file-identity";
+import { CLOUD_REGISTER_REQUEST_MAX_MS } from "../mobile-bridge/long-ops";
 
 // 상한은 정본 하나(upload-scan-catalog.json)에서 생성돼 내려온다. 여기서 다시
 // 적으면 서버·엔진·터미널과 어긋나고, 어긋난 쪽은 파일 이름도 없는 코드로 거절한다.
@@ -405,7 +407,7 @@ function collectReferencedFileNames(root: string): Set<string> {
     for (const entry of entries) {
       const absolute = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) pending.push(absolute);
+        if (!SKIP_DIRS.has(entry.name) && !isAgentLocalStatePath(path.relative(root, absolute))) pending.push(absolute);
         continue;
       }
       if (!entry.isFile()) continue;
@@ -634,7 +636,7 @@ function declaredKnowledgeIds(scanRoot: string): string[] {
       if (entry.name.startsWith(".") && entry.name !== ".agentlas") continue;
       const absolute = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) pending.push(absolute);
+        if (!SKIP_DIRS.has(entry.name) && !isAgentLocalStatePath(normalizeRelative(scanRoot, absolute))) pending.push(absolute);
         continue;
       }
       visited += 1;
@@ -798,6 +800,25 @@ function ensureRoutingCard(
 /** Scaffold the minimal agent definition when none of the accepted files exist.
  * Content comes only from what the package already declares about itself
  * (agent-card / agentlas.json name+tagline) — nothing is invented. */
+/** Instruction text outside the root definition names: root Markdown, member Markdown under agents/, a SKILL.md under skills/. */
+function hasInstructionText(scanRoot: string): boolean {
+  const isMarkdown = (name: string) => /\.md$/i.test(name);
+  const list = (dir: string): fs.Dirent[] => {
+    try { return fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
+  };
+  if (list(scanRoot).some((entry) => entry.isFile() && isMarkdown(entry.name) && !/^(license|changelog|contributing)\.md$/i.test(entry.name))) return true;
+  for (const container of ["agents", ".agents", ".claude/agents"]) {
+    for (const entry of list(path.join(scanRoot, container))) {
+      if (entry.isFile() && isMarkdown(entry.name)) return true;
+      if (entry.isDirectory() && list(path.join(scanRoot, container, entry.name)).some((child) => child.isFile() && isMarkdown(child.name))) return true;
+    }
+  }
+  const skillIn = (dir: string, depth: number): boolean => list(dir).some((entry) =>
+    (entry.isFile() && /^skill\.md$/i.test(entry.name))
+    || (entry.isDirectory() && depth > 0 && !SKIP_DIRS.has(entry.name) && skillIn(path.join(dir, entry.name), depth - 1)));
+  return ["skills", ".claude/skills", ".agents/skills"].some((dir) => skillIn(path.join(scanRoot, dir), 3));
+}
+
 function ensureAgentDefinitionFile(scanRoot: string): boolean {
   const hasDefinition = [...AGENT_DEF_FILES].some((name) => {
     try {
@@ -807,6 +828,10 @@ function ensureAgentDefinitionFile(scanRoot: string): boolean {
     }
   });
   if (hasDefinition) return false;
+  // keeps one refusal: a package with no instructions at all. Write the root entry only when the package
+  // already has instruction text elsewhere (a skill, team member files, a persona/prompt Markdown); an empty or
+  // data-only folder keeps its "no agent definition" blocker instead of passing as a one-line stub.
+  if (!hasInstructionText(scanRoot)) return false;
   let name = path.basename(scanRoot);
   let tagline = "";
   for (const rel of [".agentlas/agent-card.json", "agentlas.json"]) {
@@ -891,31 +916,10 @@ export async function packageAndReviewCloudAgent(
   const visibility = input.visibility ?? "private-link";
   const isPublicHubPublish = visibility === "marketplace";
 
-  // ★ AN INSTALLED COPY IS NEVER PUBLISHED FROM HERE. Owner decision 2026-08-17.
-  //
-  //   The server refuses a fork two ways — declared lineage, and identical
-  //   bytes already listed by another account — and a local round trip defeats
-  //   both: restore the copy, edit one line, and the hash no longer matches
-  //   anything while the folder carries no lineage of its own. The restore
-  //   marker is what survives that round trip, so the refusal belongs here,
-  //   before a minute of scanning and packaging is spent on an upload the
-  //   server will reject anyway.
-  //
-  //   Only the HUB upload is blocked. A private re-upload of your own copy is
-  //   ordinary use and stays allowed, which is rule 3 — but it carries the
-  //   lineage with it (see `forkLineage` below). Allowing the save while
-  //   dropping the parent is what turned this refusal into a speed bump: save
-  //   the copy privately, restore THAT into a fresh folder with no marker, and
-  //   publish it as original work without ever breaking a rule.
+  // An installed copy MAY be published to the Hub (decision (나), replacing). The
+  // restore marker's lineage travels with every upload (`forkLineage` below), so the listing names the original;
+  // identical bytes already listed by another account are still refused by the server.
   const forkLineage = readCloudAgentRestoreMarker(rootPath)?.fork;
-  {
-    if (isPublicHubPublish && forkLineage) {
-      throw new Error(
-        `This folder is an installed copy of ${forkLineage.originSlug}. ` +
-          "It can be run, edited, and staffed into work orders, but the Hub listing belongs to the original creator.",
-      );
-    }
-  }
   const publicCareerPrepareFindings = isPublicHubPublish
     ? await preparePublicCareerGraphCard(rootPath)
     : [];
@@ -974,6 +978,8 @@ export async function packageAndReviewCloudAgent(
         //   `node_modules` on purpose and listing it is noise. What the person
         //   actually placed in the folder gets named.
         for (const droppedPath of autofix.excluded) {
+          // 이 컴퓨터에만 있는 상태가 정리 사본에 안 들어간 것은 소식이 아니다.
+          if (isAgentLocalStatePath(droppedPath)) continue;
           const dirParts = droppedPath.split("/").slice(0, -1);
           if (dirParts.some((part) => AUTOFIX_SILENT_DROP_DIRS.has(part))) continue;
           if (AUTOFIX_SILENT_DROP_DIRS.has(droppedPath)) continue;
@@ -1066,14 +1072,22 @@ export async function packageAndReviewCloudAgent(
   if (isPublicHubPublish) {
     const problems = localizedListingProblems(localized);
     if (problems.length > 0) {
+      // decision (가): an agent written in one language is published anyway. The translation above
+      // did not complete, so the original text fills the other language and the upload continues with a note.
+      localized = {
+        titleEn: localized?.titleEn || localized?.titleKo || name,
+        titleKo: localized?.titleKo || localized?.titleEn || name,
+        descriptionEn: localized?.descriptionEn || localized?.descriptionKo || tagline,
+        descriptionKo: localized?.descriptionKo || localized?.descriptionEn || tagline,
+      };
       scan.findings.push({
-        id: "localized-metadata-required",
-        severity: "blocker",
+        id: "localized-metadata-untranslated",
+        severity: "info",
         category: "structure",
         file: ".agentlas/agent-card.json",
-        message: `Public Hub metadata needs verified English and Korean fields: ${problems.join(", ")}.`,
+        message: "The Hub title and description could not be translated with your connected model, so the original text is shown in both languages. Nothing was blocked.",
         remediation:
-          "Add localized.titleEn, titleKo, descriptionEn, and descriptionKo to .agentlas/agent-card.json, or use local-runtime review so Agentlas can translate them with your connected model.",
+          "Optional: add localized.titleEn, titleKo, descriptionEn and descriptionKo to .agentlas/agent-card.json, or connect a model and upload again.",
       });
     }
   }
@@ -1379,6 +1393,8 @@ function scanAgentFolder(rootPath: string, restoredExecutablePaths: ReadonlySet<
       if (entry.name.startsWith("._")) continue;
       const abs = path.join(dir, entry.name);
       const rel = normalizeRelative(rootPath, abs);
+      // 업로드 제외 목록의 정본 하나(이름 + 경로): 이 컴퓨터에만 있는 상태는 패키지에 들어가지 않고, 링크여도 막다른 길(blocker)을 만들지 않는다.
+      if (isAgentLocalStatePath(rel)) continue;
       if (entry.isSymbolicLink()) {
         findings.push({
           id: findingId("symlink", rel),
@@ -2399,7 +2415,7 @@ async function runSubmitterRuntimeReview(
     JSON.stringify({ manifest, staticFindings }, null, 2),
   ].join("\n");
 
-  const result = await runObservedRunner(picked.runner,
+  const result = await runObservedRunnerAs("judgment", "submitter-runtime-review", picked.runner,
     {
       systemPrompt,
       history: [],
@@ -2552,7 +2568,20 @@ function retryableCommitCode(body: string): string | null {
   }
 }
 
-async function registerCloudAgent(input: {
+/**
+ * The registration request to Agent Cloud did not answer within CLOUD_REGISTER_REQUEST_MAX_MS (mobile-bridge/long-ops.ts: 300 s, a set value - no ground, until now
+ * there was no bound at all). The server may or may not have committed the package, so this is neither "failed" nor "done": the phone's bridge answers
+ * `outcome_unknown` and the owner (or the phone) reads the agent's Cloud state to see which. `code` is the machine marker; the message is never read.
+ */
+export class CloudRegistrationTimedOut extends Error {
+  readonly code = "register_request_timeout";
+  constructor() {
+    super("Agent Cloud did not answer the registration request in time; check the agent's Cloud state before uploading again.");
+    this.name = "CloudRegistrationTimedOut";
+  }
+}
+
+export type RegisterCloudAgentInput = {
   manifest: CloudAgentPackageManifest;
   bundlePath: string;
   review: CloudAgentReviewResult;
@@ -2566,7 +2595,23 @@ async function registerCloudAgent(input: {
   retried?: boolean;
   /** The compressed attempt was refused; this call is the uncompressed resend. */
   retriedUncompressed?: boolean;
-}): Promise<CloudAgentRegistrationResult> {
+  /** One deadline for the whole registration (the first request and every resend share it), set by the first call. */
+  registerDeadlineAtMs?: number;
+};
+
+/** Exported for the L1 evidence test (a stalled fake server); the packaging pipeline is its only caller. */
+export async function registerCloudAgent(input: RegisterCloudAgentInput): Promise<CloudAgentRegistrationResult> {
+  const registerDeadlineAtMs = input.registerDeadlineAtMs ?? Date.now() + CLOUD_REGISTER_REQUEST_MAX_MS;
+  try {
+    return await registerCloudAgentAttempt({ ...input, registerDeadlineAtMs });
+  } catch (error) {
+    // AbortSignal.timeout ends the request (and the reading of its answer) with a TimeoutError; nothing else here carries that name.
+    if ((error as { name?: unknown } | null)?.name === "TimeoutError") throw new CloudRegistrationTimedOut();
+    throw error;
+  }
+}
+
+async function registerCloudAgentAttempt(input: RegisterCloudAgentInput & { registerDeadlineAtMs: number }): Promise<CloudAgentRegistrationResult> {
   const cookie = getSessionCookieHeader();
   if (!cookie) throw new Error("Sign in to agentlas.cloud before publishing a cloud agent.");
   const base = (process.env.AGENTLAS_WEB_BASE_URL || "https://agentlas.cloud").replace(/\/$/, "");
@@ -2607,6 +2652,7 @@ async function registerCloudAgent(input: {
     : cloudRegistrationPreconditionHeaders(input.baseRegistration);
   const response = await fetch(`${base}/api/cloud-agents/v1/register`, {
     method: "POST",
+    signal: AbortSignal.timeout(Math.max(1, input.registerDeadlineAtMs - Date.now())),
     headers: {
       "content-type": "application/json",
       cookie,
@@ -2942,7 +2988,35 @@ function cloudRegistrationError(status: number, body: string, sentAsCreate = fal
       { retryable: false, actionState: "not-committed" },
     );
   }
+  if (code === "no_instruction_file") {
+    return new OwnerCloudActionError(
+      "no_instruction_file",
+      "This folder has no instructions to run: add AGENTS.md (or agent.md, CLAUDE.md, README.md, or a "
+      + "skills/<name>/SKILL.md) and upload again. Nothing was uploaded.",
+      { retryable: false, actionState: "not-committed" },
+    );
+  }
+  // Any other refusal: the server's own sentence, never the raw JSON body (— say what happened in words).
+  const serverSentence = serverRefusalSentence(body);
+  if (serverSentence) {
+    return new OwnerCloudActionError(code || `http_${status}`, `Agentlas Cloud did not save this upload (${status}): ${serverSentence}`, {
+      retryable: status >= 500 || status === 429,
+      actionState: "not-committed",
+    });
+  }
   return new Error(`Agentlas Cloud register failed (${status}): ${body.slice(0, 300)}`);
+}
+
+/** The human sentence a register refusal carries (`message` or `error`), if the body is JSON with one. */
+function serverRefusalSentence(body: string): string | null {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (!isRecord(parsed)) return null;
+    const sentence = [parsed.message, parsed.error, parsed.detail].find((value) => typeof value === "string" && value.trim().length > 3);
+    return typeof sentence === "string" ? sentence.trim().slice(0, 400) : null;
+  } catch {
+    return null;
+  }
 }
 
 function readName(snapshot: PackageSnapshot, fallbackName: string): string {
@@ -3056,7 +3130,7 @@ async function generateLocalizedListingWithRunner(
   tagline: string,
 ): Promise<CloudAgentLocalizedListing | undefined> {
   try {
-    const result = await runObservedRunner(picked.runner,
+    const result = await runObservedRunnerAs("build", "listing-localization", picked.runner,
       {
         systemPrompt: [
           "task: translate public Hub listing metadata; only the supplied name and description; invent no features, claims, prices, setup",
@@ -3105,7 +3179,7 @@ async function normalizePurposeAnswerWithSubmitterRuntime(
     const { pickActiveRunner } = await import("../mcp/client");
     const picked = await pickActiveRunner();
     if (!picked) return deterministic;
-    const result = await runObservedRunner(picked.runner,
+    const result = await runObservedRunnerAs("build", "purpose-normalization", picked.runner,
       {
         systemPrompt: [
           "task: convert one answer into routing metadata; keep its meaning; invent no tools, permissions, runtimes, languages, modalities, claims",

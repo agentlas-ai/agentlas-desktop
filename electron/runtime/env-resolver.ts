@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { app } from "electron";
 import type { InstalledAgent } from "../../shared/types";
-import { agentFolderPath } from "../agents/files";
+import { currentAgentFolderPath } from "../agents/files";
 import { listEnvKeys, readEnvVar } from "../secrets/vault";
 import { userDataPath } from "../runtime-paths";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
@@ -244,7 +244,7 @@ export async function buildRunnerEnv(
   apply(readDotEnvFile(path.join(os.homedir(), ".agentlas", "credentials.env")), false);
   if (cwd) apply(readDotEnvFiles(cwd), true);
 
-  const agentDir = agent ? agent.localPath || agentFolderPath(agent.slug) : null;
+  const agentDir = agent ? agent.localPath || currentAgentFolderPath(agent.slug) : null;
   if (agentDir) apply(readDotEnvFiles(agentDir), true);
 
   const vaultKeys = new Set<string>();

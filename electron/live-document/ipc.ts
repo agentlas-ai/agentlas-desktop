@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createWatchGuard } from "../fs-watch-guard";
 import { BrowserWindow, dialog, shell, type IpcMain, type IpcMainInvokeEvent } from "electron";
 import { LIVE_DOCUMENT_FORMATS } from "../../shared/live-document";
 import {
@@ -32,7 +33,9 @@ async function startWatching(): Promise<void> {
   const root = await liveDocumentRoot();
   fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   try {
+    const guard = createWatchGuard({ root, close: () => { try { watcher?.close(); } catch { /* already closed */ } watcher = null; } });
     watcher = fs.watch(root, { recursive: true }, (_type, file) => {
+      if (guard.event()) return;
       const sessionId = String(file ?? "").split(/[\\/]/)[0];
       if (!/^ld_[0-9a-f-]{36}$/.test(sessionId) || pending.has(sessionId)) return;
       // Coalesce bursts (journal append + meta rewrite) into one push.
@@ -46,11 +49,20 @@ async function startWatching(): Promise<void> {
         broadcast({ sessionId, chatId });
       }, 40));
     });
-    watcher.on("error", () => { watcher?.close(); watcher = null; });
-  } catch {
-    watcher = null; // The renderer also polls while the tab is open.
+    // A watcher that failed (the folder was removed and made again, a handle limit, a volume problem) is dropped here and made again by the next READ of a session
+    // (`ensureWatching`): the Document tab reads at least once a minute and on every owner action, so the live push comes back without a timer of its own
+    // (desktop 3, signal B2). The read that finds it dead returns the current entries itself, so nothing written meanwhile is missed.
+    watcher.on("error", () => { try { watcher?.close(); } catch { /* already closed */ } watcher = null; });
+  } catch (error) {
+    watcher = null; // The reads below make it again; the renderer also reads while the tab is open.
+    // A platform that cannot watch a folder tree at all (an older Node on Linux) will not start on the next read either: stop asking; the tab's own reads remain.
+    if ((error as { code?: unknown } | null)?.code === "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM") watchUnsupported = true;
   }
 }
+let watchUnsupported = false;
+/** A read of the Document tab: the watcher is made again when it is gone (never while one runs; a failed start is tried again by the next read). */
+function ensureWatching(): void { if (!watcher && !starting && !watchUnsupported) { starting = true; void startWatching().catch(() => undefined).finally(() => { starting = false; }); } }
+let starting = false;
 
 /**
  * liveDocument:render is a read that has to work without an owner window: a background or unattended review (window closed,
@@ -67,9 +79,10 @@ export function registerLiveDocumentRenderIpc(input: { ipc: Pick<IpcMain, "handl
 
 export function registerLiveDocumentIpc(input: { ipc: Pick<IpcMain, "handle">; assertTrustedSender(event: IpcMainInvokeEvent): void }): void {
   const { ipc, assertTrustedSender } = input;
-  void startWatching();
+  ensureWatching();
   ipc.handle("liveDocument:list", async (event, chatId: unknown) => {
     assertTrustedSender(event);
+    ensureWatching();
     return listLiveDocuments(id(chatId));
   });
   ipc.handle("liveDocument:pickAndOpen", async (event, chatId: unknown) => {
@@ -91,10 +104,12 @@ export function registerLiveDocumentIpc(input: { ipc: Pick<IpcMain, "handle">; a
   registerLiveDocumentRenderIpc({ ipc, assertTrustedSender });
   ipc.handle("liveDocument:snapshot", async (event, sessionId: unknown) => {
     assertTrustedSender(event);
+    ensureWatching();
     try { return await liveDocumentSnapshot(id(sessionId)); } catch (error) { if (error instanceof LiveDocumentError) return null; throw error; }
   });
   ipc.handle("liveDocument:entries", async (event, sessionId: unknown, since: unknown) => {
     assertTrustedSender(event);
+    ensureWatching();
     try { return await liveDocumentDelta(id(sessionId), Number(since)); } catch (error) { if (error instanceof LiveDocumentError) return null; throw error; }
   });
   ipc.handle("liveDocument:apply", async (event, value: unknown) => {

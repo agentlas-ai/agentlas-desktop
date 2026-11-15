@@ -44,9 +44,10 @@ import {
   type BrowserActionLogRow,
   type BrowserPermissionDecision,
 } from "../store/browser-vault";
-import { isChatAlwaysApproved } from "../store/capability-grants";
+import { isChatAlwaysApproved, isChatAlwaysApprovedByOwner } from "../store/capability-grants";
 import { currentUiLocale } from "../ui-locale";
 import type { BrowserApprovalRequestEvent } from "../../shared/types";
+import { waitingForPerson } from "../runtime/run-slot-lease";
 
 export type {
   BrowserSiteRow,
@@ -484,11 +485,11 @@ function emitToRenderer(channel: string, payload: unknown): void {
  * 시작할 때 굳지만 이 허락은 대화의 **지금** 사실이라, 승인 시점마다 DB 에서 다시 읽는다 —
  * 목표 루프처럼 오래 도는 실행 도중에 켠 허락도 바로 적용된다.
  */
-function chatAlwaysApproved(owner: BrowserApprovalOptions["owner"]): boolean {
+function chatAlwaysApproved(owner: BrowserApprovalOptions["owner"], ownerAnswerOnly = false): boolean {
   const chatId = owner?.chatId;
   if (typeof chatId !== "string" || !chatId) return false;
   try {
-    return isChatAlwaysApproved(chatId);
+    return ownerAnswerOnly ? isChatAlwaysApprovedByOwner(chatId) : isChatAlwaysApproved(chatId);
   } catch {
     return false; // 원장을 못 읽으면 허락이 없는 것으로 본다(묻는 쪽으로 닫힘).
   }
@@ -542,11 +543,16 @@ export async function browserRequestApproval(
   }
   // Full access skips the sheet too, except for a payment: a paid action always stops and asks
   // (owner 2026-09-29), and so does a site the owner denied (above).
-  if (options.permission === "full" && !askOverDeny && req.actionType !== "payment") {
+  // The one approval rule (runtime/approval-rule.ts): a browser delete / publish / send is asked the first time and remembered on
+  // "always allow" in read and write runs; full access asks money only, and a run nobody can answer (an
+  // automation) keeps its approval from creation.
+  const cardFirst = (req.actionType === "send" || req.actionType === "publish" || req.actionType === "delete")
+    && options.unattended !== true && options.permission !== "full";
+  if (options.permission === "full" && !askOverDeny && req.actionType !== "payment" && !cardFirst) {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "run-full-access" });
     return "approved";
   }
-  if (!askOverDeny && req.actionType !== "payment" && chatAlwaysApproved(options.owner)) {
+  if (!askOverDeny && req.actionType !== "payment" && chatAlwaysApproved(options.owner, cardFirst)) {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "chat-always" });
     return "approved";
   }
@@ -556,7 +562,7 @@ export async function browserRequestApproval(
   // dead-ends waiting on an approval sheet that may not even be on screen. Only
   // genuinely irreversible external actions — a payment, or browser-run unsafe
   // code — still ask for an explicit nod.
-  if (!askOverDeny && req.actionType !== "payment" && req.actionType !== "unsafe-code") {
+  if (!askOverDeny && req.actionType !== "payment" && req.actionType !== "unsafe-code" && !cardFirst) {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "user-driven" });
     return "approved";
   }
@@ -572,7 +578,7 @@ export async function browserRequestApproval(
   const requestId = randomUUID();
   const timeoutMs = approvalTimeoutMs();
   let abortListener: (() => void) | null = null;
-  const decision = await new Promise<BrowserPermissionDecision | "timeout" | "cancelled">((resolve) => {
+  const decision = await waitingForPerson(new Promise<BrowserPermissionDecision | "timeout" | "cancelled">((resolve) => {
     const createdAt = Date.now();
     const request: BrowserApprovalLifecycleRequest = {
       requestId,
@@ -583,11 +589,12 @@ export async function browserRequestApproval(
       target: req.target ?? null,
       createdAt,
       expiresAt: createdAt + timeoutMs,
-      // 위 자동승인 가드를 통과해 여기 오는 건 payment/unsafe-code 뿐이다. 그래서 예전의
+      // 위 자동승인 가드를 통과해 여기 오는 건 payment/unsafe-code(와 삭제·게시·전송의 첫 확인)뿐이다. 그래서 예전의
       // `actionType !== "payment" && !== "unsafe-code"` 식은 항상 false인 죽은 조건이었다.
       // 이 둘은 승인을 기억해선 안 되므로(결제는 매번 확인) "항상 승인"을 제공하지 않는다 —
       // 시트에는 [한 번만]/[거부]만 뜬다. 거부는 store에 남아 다음부터 존중된다.
-      allowAlways: false,
+      // Browser code is remembered like any other action (addendum); only a payment is asked every time.
+      allowAlways: req.actionType !== "payment",
     };
     const cancel = () => {
       const pending = pendingApprovals.get(requestId);
@@ -612,7 +619,7 @@ export async function browserRequestApproval(
     abortListener = cancel;
     options.signal?.addEventListener("abort", cancel, { once: true });
     if (options.signal?.aborted) cancel();
-  });
+  }), options.signal);
   if (abortListener) options.signal?.removeEventListener("abort", abortListener);
 
   if (decision === "timeout") {

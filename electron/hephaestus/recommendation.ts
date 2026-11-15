@@ -1,7 +1,6 @@
 // 추천 바텀시트 백엔드 — routeOnly(실행 없음) 결정 JSON 을 렌더러용 Recommendation 으로 정규화.
 //
-// 엔진 결정 스키마는 느슨하다 — stormbreaker-supervisor.ts:summarizeRoute 와 동일하게
-// 다중 폴백으로 방어적으로 읽는다.
+// 엔진 결정 스키마는 느슨하다 — 다중 폴백으로 방어적으로 읽는다.
 //
 // Hub invocation fees were retired. Provider token usage remains with the
 // user's selected model provider; agent routing itself has no credit price.

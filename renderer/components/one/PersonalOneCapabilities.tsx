@@ -139,7 +139,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
           <p>{ko ? item.description : item.descriptionEn || item.description}</p>
           {install !== item.id ? <button type="button" onClick={() => setInstall(item.id)}>{copy("연결 조건 보기", "Review setup")}</button>
             : <div className={styles.confirm}>
-              <p>{item.transport === "stdio" ? copy("이 컴퓨터에서 아래 프로그램을 실행하는 도구입니다.", "This tool runs the following program on this computer.") : copy("아래 외부 서비스에 연결합니다.", "This tool connects to the following external service.")}</p>
+              <p>{item.transport === "stdio" ? copy("이 데스크탑에서 아래 프로그램을 실행하는 도구입니다.", "This tool runs the following program on this computer.") : copy("아래 외부 서비스에 연결합니다.", "This tool connects to the following external service.")}</p>
               <code>{item.transport === "stdio" ? [item.command, ...(item.args ?? [])].join(" ") : item.url}</code>
               {item.envRequirements.length > 0 && <p>{copy("필요한 키", "Required keys")}: {item.envRequirements.map(key => key.key).join(", ")}</p>}
               <div className={styles.actions}><button type="button" disabled={!!busy} onClick={() => void perform(item.id, async (current) => {await ipc()!.mcpTools.install(item.id); if (current()) setInstall(null);})}>{copy("이 도구 연결", "Connect this tool")}</button><button type="button" onClick={() => setInstall(null)}>{copy("취소", "Cancel")}</button></div>

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { assertManagedOneTeamAvailable } from "../managed-one/auth";
-import { bindOneTaskforceSessionScope } from "../runtime/session-scope";
+import { bindOneTaskforceSessionScope, markLeadRoom } from "../runtime/session-scope";
 import type {
   CreateOneTaskforceInput,
   OneTaskforce,
@@ -11,7 +11,10 @@ import type {
 import { createChat, renameChat } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getDb } from "../store/db";
-import { ensureOneGroupLocalStaff } from "./org";
+import { getProject } from "../store/projects";
+import { isPersonalAgentId } from "./personal-agent-id";
+import { currentUiLocale } from "../ui-locale";
+import { ensureOneGroupLocalStaff, ensureOneOrgSeat } from "./org";
 import {
   applySeatSnapshotToChats,
   dissolveSeat,
@@ -71,7 +74,9 @@ function normalizeMemberIds(value: unknown, options: { allowUnavailable: boolean
   if (!Array.isArray(value) || value.length > MAX_MEMBERS) {
     throw new Error(`A Taskforce may include up to ${MAX_MEMBERS} staff members.`);
   }
-  const ids = [...new Set(value.map((id) => assertId(id, "memberAgentId")))];
+  // The personal agent is never a room member: it is left out here, quietly, wherever a member list is read or
+  // written. A caller that wants to tell the owner reads it first with withoutPersonalAgents (agent-chat.ts).
+  const ids = [...new Set(value.map((id) => assertId(id, "memberAgentId")))].filter((id) => !isPersonalAgentId(id));
   if (!options.allowUnavailable && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(",");
     const rows = getDb().prepare(
@@ -154,12 +159,33 @@ export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce
   const title = normalizeTitle(input?.title);
   const description = normalizeDescription(input?.description);
   const memberAgentIds = normalizeMemberIds(input?.memberAgentIds, { allowUnavailable: false });
+  return insertTaskforce({ title, description, memberAgentIds, projectId: null, autoSeat: false });
+}
+
+/**
+ * A new group Agent Chat: always a new chat and a new group seat, optionally inside a project, and every
+ * member is seated first (idempotently — ensureOneOrgSeat) in the same transaction, so picking agents that are not on the org
+ * chart yet needs no earlier step. Members keep the order they were picked in; nothing else about the room differs from
+ * createOneTaskforce (same chat, seat, session scope).
+ */
+export function createAgentGroupRoom(input: { title: string; memberAgentIds: string[]; projectId?: string | null }): OneTaskforce {
+  assertManagedOneTeamAvailable();
+  const title = normalizeTitle(input?.title);
+  const memberAgentIds = normalizeMemberIds(input?.memberAgentIds, { allowUnavailable: true });
+  if (memberAgentIds.length < 2) throw new Error("one-team-group-invalid-members");
+  const projectId = typeof input.projectId === "string" && input.projectId.trim() && getProject(input.projectId.trim()) ? input.projectId.trim() : null;
+  return insertTaskforce({ title, description: "", memberAgentIds, projectId, autoSeat: true, leadRoom: true });
+}
+
+function insertTaskforce(input: { title: string; description: string; memberAgentIds: string[]; projectId: string | null; autoSeat: boolean; leadRoom?: boolean }): OneTaskforce {
+  const { title, description, memberAgentIds, projectId } = input;
   const id = randomUUID();
   const now = new Date().toISOString();
   getDb().transaction(() => {
+    if (input.autoSeat) for (const agentId of memberAgentIds) ensureOneOrgSeat(agentId);
     assertMembersAvailable(memberAgentIds);
     ensureOneGroupLocalStaff(memberAgentIds, false, { allowPriorTaskFailure: true });
-    const chat = createChat({ title, originSurface: "one", taskMode: "conversation" });
+    const chat = createChat({ title, originSurface: "one", taskMode: "conversation", ...(projectId ? { projectId } : {}) });
     getDb().prepare(
       `INSERT INTO one_taskforces
        (id, chat_id, title, description, member_agent_ids_json, created_at, updated_at, revision)
@@ -167,10 +193,11 @@ export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce
     ).run(id, chat.id, title, description, JSON.stringify(memberAgentIds), now, now);
     // 단톡의 좌석은 group 좌석이다(스펙 §3 ①-5). createChat 이 붙인 solo 좌석(One 루트)을
     // 이 단톡의 좌석으로 바로잡고, 멤버를 점유로 앉힌 뒤 스냅샷을 같은 트랜잭션에서 남긴다(I9).
-    const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: now });
+    const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: now, projectId });
     getDb().prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chat.id);
     applySeatSnapshotToChats(seatId);
     bindOneTaskforceSessionScope(getDb(),chat.id);
+    if (input.leadRoom) markLeadRoom(getDb(), chat.id);
   }).immediate();
   emitTaskforceChanged(id);
   return toTaskforce(rowFor(id));
@@ -278,8 +305,8 @@ function ensureOneTaskforceForChat(input: { chatId: string; memberAgentIds: stri
   if (!db.inTransaction) throw new Error("one_group_transaction_required");
   const chatId = assertId(input.chatId, "chatId");
   assertGroupRoomAvailable(db, chatId);
-  const chat = db.prepare("SELECT title, origin_surface, archived_at, seat_id FROM chats WHERE id = ?").get(chatId) as
-    { title: string; origin_surface: string; archived_at: string | null; seat_id: string | null } | undefined;
+  const chat = db.prepare("SELECT title, origin_surface, archived_at, seat_id, project_id FROM chats WHERE id = ?").get(chatId) as
+    { title: string; origin_surface: string; archived_at: string | null; seat_id: string | null; project_id: string | null } | undefined;
   if (!chat || chat.origin_surface !== "one" || chat.archived_at) throw new Error("one_group_chat_unavailable");
   if (chat.seat_id && db.prepare("SELECT 1 FROM one_seats WHERE id = ? AND dissolved_at IS NOT NULL").get(chat.seat_id)) throw new Error("one_group_chat_unavailable");
   const existing = db.prepare("SELECT * FROM one_taskforces WHERE chat_id = ?").get(chatId) as Row | undefined;
@@ -293,10 +320,11 @@ function ensureOneTaskforceForChat(input: { chatId: string; memberAgentIds: stri
   ensureOneGroupLocalStaff(memberAgentIds, true, { allowPriorTaskFailure });
   const id = randomUUID();
   const now = new Date().toISOString();
-  const title = normalizeTitle(Array.from(chat.title.trim() || "One Team").slice(0, 80).join(""));
+  const title = normalizeTitle(Array.from(chat.title.trim() || (currentUiLocale() === "ko" ? "그룹 대화" : "Group chat")).slice(0, 80).join(""));
   db.prepare(`INSERT INTO one_taskforces (id, chat_id, title, description, member_agent_ids_json, created_at, updated_at, revision)
     VALUES (?, ?, ?, '', ?, ?, ?, 1)`).run(id, chatId, title, JSON.stringify(memberAgentIds), now, now);
-  const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: now });
+  // A one-to-one room inside a project that grows into a group stays in that project.
+  const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: now, projectId: chat.project_id });
   db.prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chatId);
   applySeatSnapshotToChats(seatId);
   return { id, chatId, revision: 1, memberAgentIds };
@@ -308,7 +336,11 @@ export function notifyOneTaskforceFromPreflight(receipt: OneTaskforceReceipt): v
 }
 
 /** Additive composition of the caller's canonical room; no new chat or run. */
-export function composeOneTaskforceForChat(input: { chatId: string; memberAgentIds: string[] }): {
+export function composeOneTaskforceForChat(input: {
+  chatId: string; memberAgentIds: string[];
+  /** Runs inside the membership transaction with the ids that were added (agent-chat.ts writes the newcomers' cursor here). */
+  withinTransaction?: (addedMemberAgentIds: string[]) => void;
+}): {
   group: OneTaskforceReceipt; created: boolean; addedMemberAgentIds: string[];
 } {
   assertManagedOneTeamAvailable();
@@ -343,7 +375,9 @@ export function composeOneTaskforceForChat(input: { chatId: string; memberAgentI
     if (prior.length + additions.length > MAX_MEMBERS) throw new Error("one-team-group-over-limit");
     const members = normalizeMemberIds([...prior, ...additions], { allowUnavailable: true });
     if (!existing) {
-      return { group: ensureOneTaskforceForChat({ chatId, memberAgentIds: members }, true), created: true, addedMemberAgentIds: additions };
+      const group = ensureOneTaskforceForChat({ chatId, memberAgentIds: members }, true);
+      input.withinTransaction?.(additions);
+      return { group, created: true, addedMemberAgentIds: additions };
     }
     if (!additions.length) return { group: { id: existing.id, chatId, revision: existing.revision, memberAgentIds: prior }, created: false, addedMemberAgentIds: [] };
     const now = new Date().toISOString();
@@ -352,6 +386,7 @@ export function composeOneTaskforceForChat(input: { chatId: string; memberAgentI
     const seatId = ensureGroupSeatForTaskforce({ taskforceId: existing.id, title: existing.title, memberAgentIds: members, createdAt: existing.created_at });
     db.prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chatId);
     applySeatSnapshotToChats(seatId);
+    input.withinTransaction?.(additions);
     return { group: { id: existing.id, chatId, revision: existing.revision + 1, memberAgentIds: members }, created: false, addedMemberAgentIds: additions };
   }).immediate();
   if (result.created || result.addedMemberAgentIds.length) {

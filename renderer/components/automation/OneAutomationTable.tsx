@@ -120,7 +120,7 @@ export function OneAutomationTable({
                 </td>
                 <td style={cell}>
                   {chatId
-                    ? <Link href={`/one?chat=${encodeURIComponent(chatId)}`} className="titlebar-nodrag" style={{ color: "var(--accent)", textDecoration: "none" }}>
+                    ? <Link href={`/workspace?open=${encodeURIComponent(chatId)}`} className="titlebar-nodrag" style={{ color: "var(--accent)", textDecoration: "none" }}>
                         {chatTitles[chatId] ?? (ko ? "대화 열기" : "Open chat")} ↗
                       </Link>
                     : "—"}

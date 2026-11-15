@@ -18,8 +18,8 @@ export default function LocalModelsPage() {
   return <div className={styles.page} data-local-models-page>
     <header className={styles.header}>
       <div><h1>{ko ? "로컬 모델" : "Local Models"}</h1>
-        <p>{ko ? "Hugging Face에서 모델을 찾아 이 컴퓨터에서 실행하세요." : "Find models on Hugging Face and run them on this computer."}</p></div>
-      <span className={styles.localBadge}>{ko ? "내 컴퓨터에서 실행" : "Runs on your computer"}</span>
+        <p>{ko ? "Hugging Face에서 모델을 찾아 이 데스크탑에서 실행해요." : "Find models on Hugging Face and run them on this computer."}</p></div>
+      <span className={styles.localBadge}>{ko ? "내 데스크탑에서 실행" : "Runs on your computer"}</span>
     </header>
     <nav className={styles.tabs} aria-label={ko ? "로컬 모델 보기" : "Local model views"}>
       <button type="button" aria-pressed={view === "browse"} onClick={() => setView("browse")}>{ko ? "탐색" : "Explore"}</button>

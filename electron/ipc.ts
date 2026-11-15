@@ -1,4 +1,7 @@
-import { withoutArchivedAgents } from "./archive/auto-archive";
+import { attachChatToProject, attachProjectPending, newChatOptions, ownerSendToConversation, productionAttachDeps } from "./chat/chat-moves";
+import { personalWriteRefusal as oneWriteRefusal } from "./one/write-gate";
+import { readAgentModelOrderView, setAgentModelFollow, setAgentOwnModelOrder } from "./agents/agent-model-order";
+import { isAgentArchived, withoutArchivedAgents } from "./archive/auto-archive";
 import { portableFileName } from "../shared/portable-file-name";
 import { configuredNativeGuiControls } from "./invocation/native-gui-controls";
 import { ownerTurnStartsOnDesktop } from "./invocation/goal-owner-route";
@@ -10,10 +13,12 @@ import { createNativeMainAuthCallbackAdapter } from "./invocation/native-main-au
 import { createNativeMainPreparationRouter, type NativeMainPreparationRouterPorts } from "./invocation/native-main-preparation-router";
 import { createInvocationRunOwnerStore } from "./store/invocation-owner-core";
 import { appControlInvocationPermission, isAppControlEvent } from "./app-control/ipc-registry";
+import { markOwnerSpoke } from "./invocation/owner-spoke";
 import { createRendererInvocationPreparation } from "./invocation/renderer-preparation";
 import { answerOneDispatchQuestion } from "./one/team-dispatch";
 import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
 import { assertOwnerMayWriteRoom } from "./one/personal-agent-rooms";
+import { recoverInterruptedLeadRooms, routeLeadRoomOwnerMessage } from "./one/room-lead-runtime";
 import { registerOneHarnessIpc } from "./one/harness-ipc";
 import { registerLiveDocumentIpc } from "./live-document/ipc";
 import { registerFinanceIpc } from "./finance/ipc";
@@ -29,6 +34,8 @@ import { registerAgentWorkspaceIpc } from "./agents/workspace-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { goalActiveChatIds } from "./store/goal-active-chats";
 import { registerAutomationChatActivityIpc } from "./automation-chat-activity-ipc";
+import { registerHomeTreeIpc } from "./home/home-tree-ipc";
+import { registerAgentRootIpc } from "./agents/root-ipc";
 import { registerGoalPanelIpc } from "./goal-panel-ipc";
 import { appendLongRunEvent, getLongRunByGoalId, bindCurrentGoalRevisionToLongRun, longRunBudgetExhaustion, longRunOwnerHold, LONG_RUN_BUDGET_EXHAUSTED_CODE } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
@@ -149,6 +156,7 @@ import {
   createOneTeamAgent,
   getOneOrgState,
   markOneOrgMemberRead,
+  oneMemberUnavailableSentence,
   reorderOneOrgMembers,
   renameOneOrgMember,
   replaceOneOrgMember,
@@ -164,6 +172,7 @@ import {
   removeOneTaskforce,
   updateOneTaskforce,
 } from "./one/taskforces";
+import { addAgentChatParticipants, agentChatState, createAgentChatRoom, removeAgentChatParticipant, setAgentChatLead } from "./one/agent-chat";
 import {
   clearComputerHistory,
   getComputerHistoryState,
@@ -237,6 +246,7 @@ import {
 import { getRoute } from "./agents/routes";
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
+import { registerAgentSurfaceIpc } from "./agents/agent-surface";
 import { createFreshReservationFrontier } from "./runtime/fresh-reservation-frontier";
 import { AutomationWorkspaceError, automationWorkspaceView, withOwnerAutomationWorkspaceIntent } from "./automation-workspace";
 import {
@@ -311,11 +321,13 @@ import { confirmUpload, PathGuardError, resolveFolderArg } from "./hephaestus/pa
 import { getEngineToggles, isSupervisorEnabled, setEngineToggle, setSupervisorEnabled } from "./hephaestus/supervisor";
 import { previewBuildAllocation, runHephaestusBuild } from "./hephaestus/builder";
 import { resolveHephaestusBuildRequest, resolveHephaestusBuildRequestForRun } from "./hephaestus/build-access";
-import { pickLocale } from "./runtime/status-i18n";
+import { pickLocale, tStatus } from "./runtime/status-i18n";
 import { currentUiLocale } from "./ui-locale";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
+/** Audit 59 F-6: the personal agent's own writes (profile, principles, its conversation) are refused while this computer is sealed (`one_sealed`) or away (`one_away`); `home` and `legacy` pass untouched. */
+function guardOneHomeWrite(): void { const refusal = oneWriteRefusal(); if (refusal) throw new Error(refusal); }
 import { agentRemovalPreview, assignSeatOccupant, getSeatForChat, listSeatOccupantHistory } from "./store/seats";
 import { koSubjectParticle, seatEventText } from "../shared/one-seat-events";
 import { SYSTEM_OPTIMIZER_PROMPT_MARKER } from "./system-agents/system-optimizer";
@@ -431,30 +443,13 @@ import {
   failCloseActiveHubBookmarks,
   syncHubBookmarks,
 } from "./hub-bookmark-sync";
-import { claimQuest, getQuestClaimStatus, listQuests } from "./quests";
 import { listMemoryEntriesForAgentUi } from "./memory/store";
 import { importMemoryPreview, importMemoryApply, captureMemoryImportOwner } from "./memory/import";
-import {
-  getExperienceIntakeDiagnostics,
-  getExperienceOntologySummary,
-  listExperienceCandidates,
-  listExperienceExportIntents,
-  listExperiencePacks,
-  listExperiencePromotionReceipts,
-  listLocalTasteDrafts,
-} from "./experience/store";
 import { listAgentUsageSummary, setAgentBookmark } from "./agents/usage";
 import {
   getBorrowedAgentOntologyGraph,
   listBorrowedAgentProfiles,
 } from "./agents/borrowed-profiles";
-import { getExperienceOntologyGraphSnapshot } from "./experience/relation-index";
-import {
-  listTasteChipWorkflows,
-} from "./experience/taste-workflow";
-import {
-  listOperationalPublicProjections,
-} from "./experience/operational-generalization";
 import { getAgentLearningSummary } from "./agents/learning-summary";
 import {
   listExperienceCloudUploads,
@@ -573,7 +568,7 @@ import { registerBrowserAnnotationIpc } from "./browser/annotation-ipc";
 import { registerAutomationStrategyIpc } from "./automation-strategy-ipc";
 import { registerAgentMailIpc } from "./agent-mail/ipc";
 import { registerToolchainIpc } from "./toolchains/ipc";
-import { registerAliveIpc } from "./alive-organisms";
+import { registerDefectReportIpc } from "./support/defect-report-host";
 import { noteOwnerAutomationPinEdit } from "./automation-runtime-provenance";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
 import { prejudgeAutomationComputerUse } from "./system-agents/judged-tool-mode";
@@ -644,6 +639,7 @@ import {
 } from "./one/memory-candidates";
 import { forgetOneDurableMemoryEntry, getOneMemoryMap, listOneDurableMemoryEntries } from "./one/memory-map";
 import { registerDesktopMemoryInspectorIpc } from "./one/memory-inspector";
+import { registerWorkspaceRulesIpc } from "./workspace-rules/ipc";
 import { onAuthSessionOwnershipChanged } from "./auth";
 import { orgSeatStatus } from "./org-seat/org-seat-main";
 import {
@@ -694,6 +690,8 @@ import {
   tryProduceOneImprovementProofForTask,
 } from "./one/improvement-proof-producer";
 import { createOneTaskProjectionRuntime } from "./one/task-projection";
+import { noteScreenControl } from "./one/screen-control";
+import { pullOwnerChip, recordOwnerPermissionChip, setOwnerChipReader } from "./one/companion-permission-cap";
 import { loadOrCreateMobileBridgeHostIdentity } from "./mobile-bridge/pairing";
 import { getAgentConcurrencyInfo, setAgentConcurrency } from "./store/concurrency";
 import { enforceAgentResidencyBudget, releaseIdleAgentResidencyForChat } from "./runtime/agent-residency";
@@ -938,6 +936,7 @@ import type {
   RuntimeBackend,
   RuntimeKind,
   RuntimeSelection,
+  McpBuildAttachmentReceipt,
   SurfaceAssetPackRequest,
   SurfaceAssetPackRootRequest,
   SurfaceApprovalCheckRequest,
@@ -968,10 +967,13 @@ import {
 import {
   getToolApprovalResolution,
   listPendingToolApprovals,
+  listSettledToolApprovals,
   onToolApprovalRequested,
   onToolApprovalResolved,
   resolveToolApproval,
+  noteToolApprovalHandler,
 } from "./runtime/tool-approval";
+import { recordApprovalClosure } from "./runtime/approval-closure-notice";
 import {
   grantChatAlwaysApproval,
   listAlwaysApprovedChatIds,
@@ -982,7 +984,9 @@ import {
 import type { ToolApprovalDecision } from "../shared/types";
 import { installHostToolPermissionPolicy } from "./runtime/host-tool-permission-policy";
 import { readBuilderConversation, readLatestBuilderConversation, writeBuilderConversation, type StoredBuilderConversation } from "./hephaestus/builder-conversation-store";
-import { isCompletedBuildTurn } from "../shared/build-turn";
+import { buildTurnRefusal, registerBuildWorkbenchIpc, startBuildFilesSignal } from "./hephaestus/build-workbench-ipc";
+import type { FirstRunRetryAnswer, FirstRunStatusAnswer } from "../shared/first-run-status";
+import { activeBuilds, buildReadySignals, buildTranscripts, registerTrackedBuildDeps, runTrackedBuildTurn, type TrackedBuildDeps } from "./hephaestus/build-turn-tracked";
 import { newestPartialSnapshot } from "./runtime/partial-snapshot";
 import {
   installApprovalOwnerNoteSender,
@@ -991,8 +995,7 @@ import {
 } from "./runtime/tool-approval-owner-note";
 
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
-// Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
-const activeBuilds = new Map<string, AbortController>();
+// The Build turn registries (activeBuilds, buildTranscripts, buildReadySignals) live with the turn function: hephaestus/build-turn-tracked.ts.
 let builderAuthGeneration = 0;
 function builderOwnerBinding() {
   const account = getAuthenticatedSessionBinding();
@@ -1000,40 +1003,27 @@ function builderOwnerBinding() {
     ? { ...account, scope: "account" as const }
     : { userId: "desktop-installation", workspaceId: "local", sessionId: `local:${builderAuthGeneration}`, scope: "local" as const };
 }
+function sameBuildFolder(a: string, b: string): boolean {
+  try { return fs.realpathSync.native(a) === fs.realpathSync.native(b); } catch { return a === b; }
+}
 function builderWorkspaceIdentity(workspace: string): StoredBuilderConversation["workspaceIdentity"] {
   const realPath = fs.realpathSync(workspace);
   const info = fs.statSync(realPath, { bigint: true });
   if (!info.isDirectory()) throw new Error("BUILD_WORKSPACE_UNAVAILABLE");
   return { realPath, dev: String(info.dev), ino: String(info.ino), birthtimeNs: String(info.birthtimeNs) };
 }
-/**
- * 실행 중(또는 마지막) 빌드의 전사(轉寫).
- *
- * 빌드는 main에서 돌지만 진행 상태는 렌더러 모듈 변수에만 있었다. 그래서 빌드 중에
- * 다른 메뉴를 한 번 누르면 요청·로그·단계가 통째로 사라졌다(2026-08-16 실측:
- * rows 10→0, request 소실, 화면상 "멈춤" — 실제로는 main에서 계속 돌고 있었다).
- * 터미널 hep-build는 프로세스가 살아 있는 한 화면을 잃지 않으므로, 이건 GUI가
- * 만들어 낸 차이다. 여기 전사를 남겨 두면 화면이 돌아왔을 때 그대로 복원된다.
- */
-const buildTranscripts = new Map<string, {
-  runId: string;
-  request: string;
-  workspace: string;
-  startedAt: string;
-  running: boolean;
-  events: HephaestusBuildEvent[];
-  /** Validated turn input, kept in Main and returned only to a trusted app frame. */
-  recoveryRequest?: HephaestusBuildRequest;
-  /** Events dropped from the front by the window below: events[i] is event number firstSeq + i of this build. */
-  firstSeq: number;
-}>();
-/** 한 빌드가 남기는 이벤트 상한 — 긴 빌드가 메모리를 무한히 쓰지 않게. */
-const BUILD_TRANSCRIPT_MAX_EVENTS = 4_000;
-// runId → "렌더러 구독 완료" 신호. 구독 전 발생한 이벤트를 버퍼링하다 이 신호로 flush 한다.
-const buildReadySignals = new Map<string, () => void>();
-// 조기 실패가 렌더러의 invoke 응답보다 먼저 끝나도 terminal event를 잃지 않는다.
-// 렌더러가 사라진 비정상 경로만 유한 시간 뒤 정리한다.
-const BUILD_READY_GRACE_MS = 30_000;
+/** What a Build turn needs from the app (hephaestus/build-turn-tracked.ts): the window's `hephaestus:build` runs it, and so does the phone's Build turn (registered for mobile-bridge/build-turns.ts). */
+const trackedBuildDeps: TrackedBuildDeps = {
+  ownerBinding: builderOwnerBinding,
+  getDb,
+  workspaceIdentity: builderWorkspaceIdentity,
+  resolveRequest: (req) => resolveHephaestusBuildRequest(req) as never,
+  resolveRequestForRun: (req, signal) => resolveHephaestusBuildRequestForRun(req, signal) as never,
+  turnRefusal: buildTurnRefusal,
+  startFilesSignal: (input) => startBuildFilesSignal(input as Parameters<typeof startBuildFilesSignal>[0]),
+  runBuild: (runId, resolved, emit, signal, locale, onRuntimeResolved) => runHephaestusBuild(runId, resolved as never, emit, signal, locale, onRuntimeResolved as (runtime: RuntimeSelection) => void),
+  locale: (req) => pickLocale(req),
+};
 const ONE_IMPROVEMENT_PROOF_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/;
 
 function strictOneImprovementProofTaskId(value: unknown, label: string): string {
@@ -1562,6 +1552,10 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     oneTeamReportTurn: _oneTeamReportTurn,
     // Main-only marker of the host's own recovery turn (invocation/host-recovery.ts): a window can never send it.
     hostRecovery: _hostRecovery,
+    // Main-only: "the owner wrote this turn's message" is minted by Main at the composer's own entry (startRendererInvocation), never read from a window.
+    ownerSpoke: _ownerSpoke,
+    // Main-only: the chain of messages between conversations a turn belongs to (harness/peer-chain.ts) is minted by the host's delivery, never by a window.
+    peerChain: _peerChain,
     ...rendererFields
   } = req as McpInvocationRequest & {
     oneTeamExecutionPolicy?: unknown;
@@ -1569,6 +1563,8 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     oneAttachmentContext?: unknown;
     oneAttachmentRedactions?: unknown;
     hostRecovery?: unknown;
+    ownerSpoke?: unknown;
+    peerChain?: unknown;
   };
   return {
     ...rendererFields,
@@ -1784,7 +1780,32 @@ function goalAutomationSetup(automation: Automation): GoalResumeReview["automati
   return undefined;
 }
 
+/**
+ * TR-desktop (one/companion-permission-cap.ts): Main READS the owner's permission chip from the main frame of a trusted owner window - when a window finishes
+ * loading, when it closes, and (by the callers) just before a server-ordered run starts. Nothing is sent in by a renderer, a phone, an app-control call or
+ * an automation: there is no channel to write it through.
+ */
+export function installOwnerChipReader(): void {
+  setOwnerChipReader(async () => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      try {
+        if (win.isDestroyed()) continue;
+        const frame = win.webContents.mainFrame;
+        if (!isTrustedSiteRendererUrl(frame.url)) continue;
+        const value = await frame.executeJavaScript('window.localStorage.getItem("agentlas.one.permission-mode.v1")', false);
+        return { answered: true, value };
+      } catch { /* the next window */ }
+    }
+    return { answered: false, value: null };
+  });
+  app.on("browser-window-created", (_event, win) => {
+    win.webContents.on("did-finish-load", () => { void pullOwnerChip(); });
+    win.on("close", () => { void pullOwnerChip(); });
+  });
+}
+
 export function registerIpcHandlers(): void {
+  installOwnerChipReader();
   const boundary = developmentIpcBoundary(electronIpcMain);
   const ipcMain: typeof boundary = {
     handle(channel, listener) {
@@ -1816,8 +1837,7 @@ export function registerIpcHandlers(): void {
   registerAutomationStrategyIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   // 에이전트 전용 메일(웹 /api/agent-mail/*). 세션 쿠키는 main 에만 있다.
   registerAgentMailIpc(ipcMain);
-  // One/Work Alive (AGI toggle): Main-owned lives; the renderer only reads state and flips the owner controls.
-  registerAliveIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerDefectReportIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   let oneProjectionHostRef: string | null = null;
   subscribePluginBuilderProgress((event) => {
     for (const window of BrowserWindow.getAllWindows()) {
@@ -2492,6 +2512,7 @@ export function registerIpcHandlers(): void {
       const width = Math.min(Math.ceil(Number(payload?.width ?? 0)), winW - x);
       const height = Math.min(Math.ceil(Number(payload?.height ?? 0)), winH - y);
       if (width < 2 || height < 2) return { ok: false, reason: "empty-rect" };
+      noteScreenControl("capture"); // the renderer reads its own window back: a pairing QR could be read (one/screen-control.ts)
       const image = await e.sender.capturePage({ x, y, width, height });
       return { ok: true, dataUrl: image.toDataURL() };
     } catch (err) {
@@ -3040,7 +3061,7 @@ export function registerIpcHandlers(): void {
   });
 
   // ── AI 사용 잔액 조회. 과거 Hub 수익 전송 IPC는 refusal-only. ─────────
-  registerAppControlDomainIpc(ipcMain, "billing:getCredits", () => getBillingCredits());
+  registerAppControlDomainIpc(ipcMain, "billing:getCredits", (input?: { force?: boolean }) => getBillingCredits(input?.force === true ? { force: true } : { maxAgeMs: 2_000 }));
   registerAppControlDomainIpc(ipcMain, "billing:getPlans", () => getBillingPlans());
   registerAppControlDomainIpc(ipcMain, "billing:checkoutReadiness", (input: { plan?: unknown; cycle?: unknown }) => getBillingCheckoutReadinessForPaywall(input ?? {}));
   registerAppControlDomainIpc(ipcMain, "billing:transferEarnings", (credits: number) => transferEarnings(credits));
@@ -3073,16 +3094,45 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "promptHub:bookmarkAdd", (slug: string) => addHubPromptBookmark(slug));
   registerAppControlDomainIpc(ipcMain, "promptHub:bookmarkRemove", (slug: string) => removeHubPromptBookmark(slug));
 
-  // ── 퀘스트 — 대시보드 신규 유저 튜토리얼(온보딩 대체) ──────────────────────
-  registerAppControlDomainIpc(ipcMain, "quests:list", () => listQuests());
-  registerAppControlDomainIpc(ipcMain, "quests:claim", (input) => claimQuest(input));
-  registerAppControlDomainIpc(ipcMain, "quests:claimStatus", (input) => getQuestClaimStatus(input));
 
   // ── 에이전트 전역 durable 메모리 — 프로젝트 귀속 콘텐츠는 이 표면에서 제외 ──
   registerAppControlDomainIpc(ipcMain, "agentMemory:entries", (agentId: string, limit?: number) =>
     listMemoryEntriesForAgentUi(agentId, Math.min(Math.max(Number(limit) || 100, 1), 300)),
   );
+  // Agentlas 2.0 the stores the union read skipped for this agent/project, as codes (the inspector line "this store could not be read (reason)").
+  ipcMain.handle("agentMemory:skipped-stores", async (_e, scope: unknown) => {
+    const input = (scope && typeof scope === "object" ? scope : {}) as { agentId?: unknown; projectPath?: unknown; projectId?: unknown };
+    const text = (value: unknown): string | null => (typeof value === "string" && value.trim() ? value : null);
+    return (await import("./memory/store")).listSkippedMemoryStores({ agentId: text(input.agentId), projectPath: text(input.projectPath), projectId: text(input.projectId) });
+  });
   registerAppControlDomainIpc(ipcMain, "agentLearning:summary", (agentId: string) => getAgentLearningSummary(agentId));
+
+  // Agentlas 2.0 redesign backend C: the first-run cleanup's open codes and whether it finished. Read-only, renderer-only (outside the app-control catalog, like buildWorkbench:*); a sender that is
+  // not the app window's trusted top frame gets a code. No timer and no push: the screen reads when it opens.
+  ipcMain.handle("firstRun:status", async (event): Promise<FirstRunStatusAnswer> => {
+    try { assertTrustedSitePublishIpcSender(event); } catch { return { ok: false, code: "untrusted_sender" }; }
+    try {
+      const { readFirstRunStatus } = await import("./migration/first-run-status");
+      const { activeMemoryOwnerNamespace } = await import("./memory/database");
+      let ownerNamespace: string | null = null;
+      try { ownerNamespace = activeMemoryOwnerNamespace(); } catch { ownerNamespace = null; }
+      return { ok: true, ...readFirstRunStatus({ db: getDb(), ownerNamespace }) };
+    } catch { return { ok: false, code: "unavailable" }; }
+  });
+
+  // Agentlas 2.0 BB-1a: the line's [Retry] and its change signal. `firstRun:retry` lifts what the cleanup is stopped on (first-run.ts `retryFirstRun`; closed refusal words, never a throw) and
+  // `firstRun:changed` tells every window once per burst that the state `firstRun:status` answers has changed (gate.ts; no timer). Renderer-only, like the status.
+  ipcMain.handle("firstRun:retry", async (event): Promise<FirstRunRetryAnswer> => {
+    try { assertTrustedSitePublishIpcSender(event); } catch { return { ok: false, code: "untrusted_sender" }; }
+    try { return (await import("./migration/first-run")).retryFirstRun(); } catch { return { ok: false, code: "unavailable" }; }
+  });
+  void import("./migration/gate").then(({ onFirstRunStateChange }) => {
+    onFirstRunStateChange(() => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed() && !win.webContents.isDestroyed()) { try { win.webContents.send("firstRun:changed"); } catch { /* renderer may be closing */ } }
+      }
+    });
+  }).catch(() => undefined);
 
   // ── 기존 메모리 가져오기 (Phase 1b) — 레거시 마크다운 폴더 → 멤버/팀/공유 메모리 ──
   //   dry-run 미리보기(어느 멤버·kind로 들어갈지) + 적용. 미리보기는 경로 미지정 시
@@ -3106,31 +3156,24 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "memory:import-apply", (agentId: string, sourcePath: string) =>
     importMemoryApply({ agentId, sourcePath: String(sourcePath ?? "").trim() }));
 
-  // Legacy history remains readable. Retired writes stop before probes or Hub calls.
-  registerAppControlDomainIpc(ipcMain, "experience:listPacks", (input) => listExperiencePacks(input));
-  registerAppControlDomainIpc(ipcMain, "experience:ontologySummary", (agentId: string) => getExperienceOntologySummary(agentId));
-  registerAppControlDomainIpc(ipcMain, "experience:ontologyGraph", (agentId: string) =>
-    getExperienceOntologyGraphSnapshot(agentId));
+  // Agentlas 2.0 the Experience Chip read channels are gone (chips were absorbed into agent memory,; nothing in the renderer, the phone, app control or
+  // automations called them). What stays is the owner's way to take an already uploaded chip back from the cloud: cloudList / cloudReconcile / cloudWithdraw.
+  // The tables keep their rows until 2.1 (docs/Agentlas2.0/DELETION-CANDIDATES.md).
   registerAppControlDomainIpc(ipcMain, "agents:borrowed-profiles", () => listBorrowedAgentProfiles());
+  // Agentlas 2.0 설치하지 않고 둔 로컬 에이전트 후보(구 엔진 큐 항목·카드 스캔). 읽기만 하고, 가져오기는 오너가 고른 폴더 하나씩.
+  ipcMain.handle("agents:held-local", async () => (await import("./agents/hephaestus-sync")).listHeldLocalAgents());
+  ipcMain.handle("agents:import-held-local", async (_e, ref: unknown) =>
+    (await import("./agents/hephaestus-sync")).importHeldLocalAgent(typeof ref === "string" ? ref : ""));
+  // Agentlas 2.0 Dashboard cards / Agents "rooms" tab / pending trace cleanup after an agent is removed (renderer-only reads).
+  registerAgentSurfaceIpc(ipcMain, getDb);
   registerAppControlDomainIpc(ipcMain, "agents:exact-bindings", () => listInstalledAgentHubBindings());
   registerAppControlDomainIpc(ipcMain, "agents:borrowed-ontology-graph", (profileId: string) =>
     getBorrowedAgentOntologyGraph(profileId));
-  registerAppControlDomainIpc(ipcMain, "experience:listCandidates", (packId: string) => listExperienceCandidates(packId));
-  registerAppControlDomainIpc(ipcMain, "experience:listOperationalPublicProjections", (packId: string) =>
-    listOperationalPublicProjections(packId));
-  registerAppControlDomainIpc(ipcMain, "experience:listTasteDrafts", (agentId: string) => listLocalTasteDrafts(agentId));
-  registerAppControlDomainIpc(ipcMain, "experience:listTasteWorkflows", (agentId: string) => listTasteChipWorkflows(agentId));
-  registerAppControlDomainIpc(ipcMain, "experience:intake-diagnostics", (agentId: string) =>
-    getExperienceIntakeDiagnostics(agentId));
-  registerAppControlDomainIpc(ipcMain, "experience:listPromotionReceipts", (packId: string) =>
-    listExperiencePromotionReceipts(packId),
-  );
 
   // ── v74 에이전트 사용 원장 + 북마크 ─────────────────────────────────────────
   registerAppControlDomainIpc(ipcMain, "agents:usage-summary", () => listAgentUsageSummary());
   registerAppControlDomainIpc(ipcMain, "agents:set-bookmark", (agentId: string, bookmarked: boolean) =>
     setAgentBookmark(agentId, bookmarked === true));
-  registerAppControlDomainIpc(ipcMain, "experience:listExportIntents", (packId: string) => listExperienceExportIntents(packId));
   registerAppControlDomainIpc(ipcMain, "experience:cloudList", (packId: string) => listExperienceCloudUploads(packId));
   registerAppControlDomainIpc(ipcMain, "experience:cloudReconcile", (input: ExperienceCloudReconcileInput) =>
     reconcileExperienceCloudUpload(input.localUploadId));
@@ -4157,29 +4200,19 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("firms:uninstall", async (_e, id: string, options?: { removeMembers?: boolean; removeSource?: boolean }) => {
     const firm = getFirm(id);
     if (!firm) return { removed: false, sourceMovedToTrash: false };
-    const sourceRoutes = [...new Set([firm.ceoAgentId, ...firm.orgChart.map((node) => node.agentId)])]
-      .map((agentId) => getRoute(agentId))
-      .filter((route): route is NonNullable<ReturnType<typeof getRoute>> => Boolean(route));
+    const memberIds = [...new Set([firm.ceoAgentId, ...firm.orgChart.map((node) => node.agentId)].filter(Boolean))];
+    // Each member is read BEFORE the rows go, then goes through the same follow-up as a single agent (memory, checkpoints, model
+    // assignment, group rooms, the folder rule) — a team's members are agents like any other.
+    const { captureAgentRemovalContext, finishAgentRemoval } = await import("./harness/settings-agent-ops");
+    const contexts = options?.removeMembers ? await Promise.all(memberIds.map((agentId) => captureAgentRemovalContext(agentId))) : [];
     const result = options?.removeMembers
       ? removeFirmFromRoster(id)
       : (uninstallFirm(id), { removedAgentIds: [], retainedAgentIds: [] });
     let sourceMovedToTrash = false;
-    if (options?.removeSource) {
-      const localPaths = [...new Set(sourceRoutes
-        .filter((route) => route.source === "local-import" && fs.existsSync(route.path))
-        .map((route) => route.path))];
-      let moved = 0;
-      for (const localPath of localPaths) {
-        try {
-          await shell.trashItem(localPath);
-          moved += 1;
-        } catch {
-          // Keep the registry result truthful; a false flag means at least one
-          // source folder could not be moved to Trash.
-        }
-      }
-      sourceMovedToTrash = localPaths.length > 0 && moved === localPaths.length;
-    }
+    const removed = new Set(result.removedAgentIds);
+    const finished = await Promise.all(contexts.filter((ctx): ctx is NonNullable<typeof ctx> => Boolean(ctx) && removed.has(ctx!.id))
+      .map((ctx) => finishAgentRemoval(ctx, { removeSource: Boolean(options?.removeSource) })));
+    sourceMovedToTrash = finished.length > 0 && finished.every((entry) => entry.sourceMovedToTrash);
     return {
       removed: true,
       sourceMovedToTrash,
@@ -4339,13 +4372,14 @@ export function registerIpcHandlers(): void {
     }
   });
   registerAppControlDomainIpc(ipcMain, "daemon:setAutostart", async (enabled: boolean) => {
-    const { setDaemonAutostartEnabled, getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
+    const { getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
     if (typeof enabled !== "boolean") throw new TypeError("daemon_autostart_preference_invalid");
     try {
-      const { reconcileDaemonAutostart, daemonAutostartUnavailableReason } = await import("./daemon/app-launcher");
+      const { daemonAutostartUnavailableReason } = await import("./daemon/app-launcher");
       // main.ts 부팅 경로와 **같은** 커맨드로 정합시킨다(경로가 갈리면 부팅 항목이 둘이 된다).
-      const actual = reconcileDaemonAutostart(enabled, await daemonAutostartCommand());
-      setDaemonAutostartEnabled(enabled);
+      const { setAutostartIntent, reconcileAutostartIntent } = await import("./daemon/autostart-coordinator");
+      setAutostartIntent(enabled);
+      const actual = await reconcileAutostartIntent(await daemonAutostartCommand());
       return { enabled: getDaemonAutostartEnabled(), reconciled: actual.installed === enabled
           && (process.platform === "win32" || actual.loaded === enabled),
         installed: actual.installed, loaded: actual.loaded,
@@ -4379,6 +4413,8 @@ export function registerIpcHandlers(): void {
     return listAlwaysApprovedChatIds();
   });
   registerAppControlDomainIpc(ipcMain, "runtime:listToolApprovals", async () => [...new Map([...listPendingToolApprovals(), ...(configuredNativeGuiControls()?.listAvailableApprovals() ?? [])].map(request => [request.id, request])).values()]);
+  ipcMain.handle("runtime:listSettledToolApprovals", (_e, chatIds: unknown) => listSettledToolApprovals(
+    Array.isArray(chatIds) ? chatIds.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 256).slice(0, 128) : []));
   ipcMain.handle("runtime:getToolApprovalResolution", (_e, id: string) => {
     const native = configuredNativeGuiControls();
     if (native?.hasApproval(id)) return native.approvalReceipt(_e, id);
@@ -4399,6 +4435,8 @@ export function registerIpcHandlers(): void {
       chatId = (listPendingToolApprovals().find((request) => request.id === id)
         ?? native?.listAvailableApprovals().find((request) => request.id === id))?.chatId;
     } catch { chatId = undefined; }
+    // BB-1a: the answer came from this desktop's screen. A request this process holds is marked in the same write as its decision; one the background service holds is named right after it answered.
+    const nativeHeld = native?.hasApproval(id) === true;
     return resolveToolApprovalWithOwnerNote({
       decision, note, chatId, requestId: typeof id === "string" ? id.slice(0, 256) : "", event: _e,
       resolve: () => {
@@ -4407,8 +4445,17 @@ export function registerIpcHandlers(): void {
           typeof id === "string" ? id.slice(0, 256) : "",
           decision,
           typeof actionId === "string" ? actionId.slice(0, 512) : "",
+          "desktop",
         );
       },
+    }).then((receipt) => {
+      if (nativeHeld && receipt.ok && receipt.status === "resolved") noteToolApprovalHandler(receipt.requestId, "desktop");
+      // R3-3: a refusal given HERE is a fact a phone that was away never saw: one quiet line in the conversation, only when a phone is paired.
+      // An allow leaves no line (approval-closure-notice.ts: what was allowed shows by its own result).
+      if (receipt.ok && receipt.status === "resolved" && receipt.resolvedDecision === "deny") {
+        recordApprovalClosure({ requestId: receipt.requestId, chatId, requirePairedPhone: true, reason: "answered_deny" });
+      }
+      return receipt;
     });
   });
   // Main and agentlasd install the same native store-backed consent policy.
@@ -4665,9 +4712,61 @@ export function registerIpcHandlers(): void {
         ? getOrCreateEmptyOneMemberChat(input.agentId, input.title)
         : getOrCreateOneMemberChat(input.agentId, input.title),
   );
+  // Agentlas 2.0 a new Agent Chat is always a NEW room (one agent = 1:1, two or more = group), optionally inside a project.
+  // Added beside openOneMember, which keeps its reuse behaviour for the org chart and the phone.
+  ipcMain.handle("chats:createAgentChat", (_e, input: { agentIds?: unknown; projectId?: unknown; title?: unknown }) => {
+    if (!input || typeof input !== "object" || !Array.isArray(input.agentIds)) throw new TypeError("Invalid Agent Chat request");
+    return createAgentChatRoom({
+      agentIds: input.agentIds.filter((id): id is string => typeof id === "string"),
+      projectId: typeof input.projectId === "string" ? input.projectId : null,
+      title: typeof input.title === "string" ? input.title : undefined,
+    });
+  });
+  ipcMain.handle("chats:addAgentChatParticipants", (_e, input: { chatId?: unknown; agentIds?: unknown }) => {
+    if (!input || typeof input.chatId !== "string" || !Array.isArray(input.agentIds)) throw new TypeError("Invalid participants request");
+    return addAgentChatParticipants({ chatId: input.chatId, agentIds: input.agentIds.filter((id): id is string => typeof id === "string") });
+  });
+  ipcMain.handle("chats:removeAgentChatParticipant", (_e, input: { chatId?: unknown; agentId?: unknown }) => {
+    if (!input || typeof input.chatId !== "string" || typeof input.agentId !== "string") throw new TypeError("Invalid participant request");
+    return removeAgentChatParticipant({ chatId: input.chatId, agentId: input.agentId });
+  });
+  ipcMain.handle("chats:setAgentChatLead", (_e, input: { chatId?: unknown; agentId?: unknown }) => {
+    if (!input || typeof input.chatId !== "string" || typeof input.agentId !== "string") throw new TypeError("Invalid lead request");
+    return setAgentChatLead({ chatId: input.chatId, agentId: input.agentId });
+  });
+  ipcMain.handle("chats:agentChatState", (_e, chatId: unknown) => {
+    if (typeof chatId !== "string") throw new TypeError("Invalid chat id");
+    return agentChatState(chatId);
+  });
+  // Agentlas 2.0 (renderer-only: not in the app-control catalog or the phone bridge). Results carry machine codes; nothing throws for a refusal.
+  ipcMain.handle("chats:attachProject", (_e, input: { chatId?: unknown; projectId?: unknown; folder?: unknown }) => {
+    assertTrustedSitePublishIpcSender(_e);
+    const chatId = typeof input?.chatId === "string" ? input.chatId : "";
+    let folderPath: string | undefined;
+    if (input?.folder !== undefined && input.folder !== null) {
+      // A folder is only ever a native grant Main handed out; the renderer never supplies a path.
+      try { folderPath = pathFromGrant(input.folder as FsPathGrant, "directory"); }
+      catch { return { ok: false, code: "folder_invalid", message: "that folder grant is not valid; pick the folder again" }; }
+    }
+    return attachChatToProject(
+      { chatId, ...((input as { reserve?: unknown })?.reserve === true ? { reserve: true } : {}), ...(typeof input?.projectId === "string" ? { projectId: input.projectId } : {}), ...(folderPath ? { folderPath } : {}) } as never,
+      { ...productionAttachDeps(), onProjectCreated: (project) => { void seedProjectMapInBackground(project.folderPath, project.name); } },
+    );
+  });
+  ipcMain.handle("chats:attachProjectPending", (_e, chatId: unknown) => { assertTrustedSitePublishIpcSender(_e); return attachProjectPending(chatId); });
+  ipcMain.handle("chats:newChatOptions", (_e, currentChatId?: unknown) => { assertTrustedSitePublishIpcSender(_e); return newChatOptions(currentChatId); });
+  ipcMain.handle("chats:sendToConversation", (_e, input: { fromChatId?: unknown; toChatId?: unknown; text?: unknown }) => {
+    assertTrustedSitePublishIpcSender(_e);
+    return ownerSendToConversation({ fromChatId: String(input?.fromChatId ?? ""), toChatId: String(input?.toChatId ?? ""), text: String(input?.text ?? "") });
+  });
+  ipcMain.handle("agentModelOrder:get", (_e, agentId: unknown) => { assertTrustedSitePublishIpcSender(_e); return readAgentModelOrderView(agentId); });
+  ipcMain.handle("agentModelOrder:setFollow", (_e, input: { agentId?: unknown; follow?: unknown }) => { assertTrustedSitePublishIpcSender(_e); return setAgentModelFollow(input?.agentId, input?.follow); });
+  ipcMain.handle("agentModelOrder:setOwn", (_e, input: { agentId?: unknown; lines?: unknown }) => { assertTrustedSitePublishIpcSender(_e); return setAgentOwnModelOrder(input?.agentId, input?.lines); });
   registerAppControlDomainIpc(ipcMain, "chats:appendOneUserMessage", (id: string, rawText: string) => {
     const chat = getChat(id);
     if (!chat || chat.originSurface !== "one") throw new Error("One conversation not found.");
+    // Audit 59 F-6: the personal agent's conversation takes no new line while this computer is sealed or away (same gate as `oneSupervisor.send`). `home` and `legacy`: null.
+    { const homeRefusal = oneWriteRefusal(); if (homeRefusal) throw new Error(homeRefusal); }
     const text = typeof rawText === "string" ? rawText.trim() : "";
     if (!text || text.length > 12_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) {
       throw new Error("One conversation message is invalid.");
@@ -5161,7 +5260,7 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "oneArtifacts:revokeMessageVideo", (input: unknown) => ({revoked:revokeGeneratedMessageVideo(input)}));
   registerAppControlDomainIpc(ipcMain, "oneProfile:get", () => getOneProfile());
   registerAppControlDomainIpc(ipcMain, "oneProfile:origin", () => getOneProfileOrigin());
-  registerAppControlDomainIpc(ipcMain, "oneProfile:update", (input: OneProfileUpdateInput) => updateOneProfile(input));
+  registerAppControlDomainIpc(ipcMain, "oneProfile:update", (input: OneProfileUpdateInput) => { guardOneHomeWrite(); return updateOneProfile(input); });
   /*
    * One 자신의 초상(생성·업로드 이미지). 팀원과 같은 창에서 같은 방식으로 고르므로,
    * 저장하는 길도 있어야 한다 — 없으면 그 창에서 One 만 두 탭이 사라진다.
@@ -5169,16 +5268,17 @@ export function registerIpcHandlers(): void {
    * 저장이 실패했을 때 프로필만 없는 그림을 가리킨다.
    */
   registerAppControlDomainIpc(ipcMain, "oneProfile:setAvatarImage", (input: { dataUrl: string; expectedVersion: number; oneId?: string }) => {
+    guardOneHomeWrite();
     return setOneSelfAvatarImage({ dataUrl: String(input?.dataUrl ?? ""), expectedVersion: Number(input?.expectedVersion), ...(input?.oneId !== undefined ? { oneId: input.oneId } : {}) });
   });
   registerAppControlDomainIpc(ipcMain, "oneProfile:addPrinciple", (input: OneOperatingPrincipleCreateInput) =>
-    addOneOperatingPrinciple(input));
+    { guardOneHomeWrite(); return addOneOperatingPrinciple(input); });
   registerAppControlDomainIpc(ipcMain, "oneProfile:updatePrinciple", (input: OneOperatingPrincipleUpdateInput) =>
-    updateOneOperatingPrinciple(input));
+    { guardOneHomeWrite(); return updateOneOperatingPrinciple(input); });
   registerAppControlDomainIpc(ipcMain, "oneProfile:setPrincipleEnabled", (input: OneOperatingPrincipleEnabledInput) =>
-    setOneOperatingPrincipleEnabled(input));
+    { guardOneHomeWrite(); return setOneOperatingPrincipleEnabled(input); });
   registerAppControlDomainIpc(ipcMain, "oneProfile:deletePrinciple", (input: OneOperatingPrincipleDeleteInput) =>
-    deleteOneOperatingPrinciple(input));
+    { guardOneHomeWrite(); return deleteOneOperatingPrinciple(input); });
   registerAppControlDomainIpc(ipcMain, "oneFeatureIntro:getState", () => getOneFeatureIntroState());
   registerAppControlDomainIpc(ipcMain, "oneFeatureIntro:acknowledge", (input: AcknowledgeOneFeatureIntroInput) =>
     acknowledgeOneFeatureIntro(input));
@@ -5194,10 +5294,12 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "oneActivation:skip", (input) => skipOneActivation(input));
   registerAppControlDomainIpc(ipcMain, "oneActivation:resolveMobile", (input) => resolveOneActivationMobile(input));
   registerDesktopMemoryInspectorIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,onOwnerChanged:onAuthSessionOwnershipChanged});
+  registerWorkspaceRulesIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerAppControlDomainIpc(ipcMain, "oneMemory:getState", () => getOneMemoryState());
   registerAppControlDomainIpc(ipcMain, "oneMemory:getMap", () => getOneMemoryMap());
   registerAppControlDomainIpc(ipcMain, "oneMemory:listEntries", (input?: { limit?: number }) => listOneDurableMemoryEntries(input?.limit));
-  registerAppControlDomainIpc(ipcMain, "oneMemory:forgetEntry", (input: { memoryId: string }) => forgetOneDurableMemoryEntry(input?.memoryId));
+  // The home lock the profile writes pass (guardOneHomeWrite) also stands before forgetting a Personal line: a sealed or away home takes no change.
+  registerAppControlDomainIpc(ipcMain, "oneMemory:forgetEntry", (input: { memoryId: string }) => { guardOneHomeWrite(); return forgetOneDurableMemoryEntry(input?.memoryId); });
   registerAppControlDomainIpc(ipcMain, "oneMemory:propose", (input: ProposeOneMemoryCandidateInput) =>
     proposeOneMemoryCandidate(input));
   registerAppControlDomainIpc(ipcMain, "oneMemory:save", (input: SaveOneMemoryCandidateInput) =>
@@ -5835,7 +5937,7 @@ export function registerIpcHandlers(): void {
           outputSchema: { name: "agentlas_graph_patch_proposal_v1", schema: architect.GRAPH_PATCH_OUTPUT_SCHEMA },
           runtimeSelection: base.runtimeSelection,
           pinFallback: "pin_then_worker_pool",
-          authoring: true, signal:controller.signal,timeoutMs:Math.max(1,deadline-Date.now()),
+          authoring: true, ledger: { role: "planner", phase: "graph-patch-proposal" }, signal:controller.signal,timeoutMs:Math.max(1,deadline-Date.now()),
         }),controller.signal);
         supervision.assertGraphProposalBase(base);
         if (Date.now()>=deadline) {
@@ -5948,7 +6050,7 @@ export function registerIpcHandlers(): void {
           signal: requestOwner.signal,
           // 그래프를 **짓는** 호출이다 — 조회 도구와 이미 동의된 MCP 가 함께 간다.
           // (판정 호출부는 이 깃발을 켜지 않으므로 무도구 잠금이 그대로 유지된다.)
-          authoring: true,
+          authoring: true, ledger: { role: "planner", phase: "graph-interview" },
           onPartial: (chunk) => {
             if (requestOwner.signal.aborted || Date.now() >= interviewDeadline || _e.sender.isDestroyed()) return;
             partialBuf = newestPartialSnapshot(partialBuf, chunk, Number.MAX_SAFE_INTEGER, "tail");
@@ -6468,6 +6570,10 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "automations:latestRun", (id: string) => getLatestGraphRun(id));
   // 대화에 딸린 자동화 — 실행 중 줄·보고 요약·오른쪽 "자동화" 탭. 원장(run_events)만 읽는다.
   registerAutomationChatActivityIpc(ipcMain);
+  // Home's left tree: read-only rows over chats/tasks/taskforces/seats; no phone-visible shape.
+  registerHomeTreeIpc(ipcMain);
+  // Agent folder location and portrait: root move, reconnect, per-agent definition location, portrait. Renderer-only, outside the phone bridge and the app-control catalog.
+  registerAgentRootIpc(ipcMain, { assertTrustedSender: assertTrustedSitePublishIpcSender });
   // 목표 전용 패널(오른쪽 "목표" 탭) — 원장 읽기와 오너의 형식 있는 편집(오너 2026-09-28).
   registerGoalPanelIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   // 승인은 사람의 결정이라 판정 모델 가용성과 무관하게 동작해야 한다. 결정은 가장 최근
@@ -7282,6 +7388,10 @@ export function registerIpcHandlers(): void {
     }
     const request = rendererInvocationRequestForStart(req);
     request.runId ??= randomUUID();
+    // The owner typed this in the composer: the one place a window's request is the owner's own words. A caller that reached this channel as an app-control
+    // agent is not the owner speaking.
+    // TR-desktop (companion-permission-cap.ts): the owner's own permission chip is the ceiling for work the server hands over; Main keeps one copy of it, from this place only.
+    if (!isAppControlEvent(_event)) { markOwnerSpoke(request); recordOwnerPermissionChip(request); }
     const nativeOwner = ownerTurnStarter(configuredOwner, request.chatId);
     const invocationOwnerEpoch = nativeOwner ? nativeOwner.assertCanStart(request.runId).bootId : rendererInvocationProcessEpoch;
     if (preflightSubmissionId) {
@@ -7338,11 +7448,11 @@ export function registerIpcHandlers(): void {
       if (request.chatId) {
         const seat = getSeatForChat(request.chatId);
         if (seat?.dissolvedAt) {
-          throw new Error(
+          throw Object.assign(new Error(
             currentUiLocale() === "ko"
               ? "이 단톡은 해체되어 기록으로만 보존됩니다. 같은 멤버로 새 단톡을 만들어 이어가세요."
               : "This group chat was dissolved and is kept as a read-only archive. Start a new group chat with the same members to continue.",
-          );
+          ), { code: "seat_dissolved" });
         }
         /*
          * ★ 나간 사람은 대답하지 않는다 (UX-D-4).
@@ -7393,12 +7503,33 @@ export function registerIpcHandlers(): void {
               && !seat.occupants.some((occupant) => occupant.agentId === sessionAgentId),
             );
           }
+          /*
+           * A teammate the owner ARCHIVED is not one who "is no longer available": it comes back with a restore, so the refusal says that
+           * (the same sentence and code the invocation's own refusal uses, mcp/client.ts agent_archived), never "start a new session"
+           * (desktop repair 10, F2: trial). Same stop as before - nothing is sent, nothing is retried - only the cause is named.
+           */
+          const archivedOwnerId = getChat(request.chatId)?.agentId;
+          let archivedBy: "storage" | "org" | null = null;
+          try {
+            if (archivedOwnerId) {
+              archivedBy = isAgentArchived(archivedOwnerId) ? "storage"
+                : getOneOrgState().members.find((member) => member.installedAgentId === archivedOwnerId)?.archivedAt ? "org" : null;
+            }
+          } catch { /* an unreadable archive state is no proof: the ordinary reading below */ }
+          if (archivedBy) {
+            // The code travels as `.code`: the single IPC boundary (development-effect-policy) prefixes it across Electron IPC. The storage archive is
+            // restored in Settings (the invocation's own sentence), the org archive in the org chart (the room join's sentence): each names its own way back.
+            const ko = currentUiLocale() === "ko";
+            throw Object.assign(new Error(archivedBy === "storage"
+              ? tStatus(pickLocale({ locale: currentUiLocale() }), "errAgentArchived")
+              : oneMemberUnavailableSentence("seat_archived", ko ? "ko" : "en")), { code: archivedBy === "storage" ? "agent_archived" : "seat_archived" });
+          }
           if (departed || directAgentChanged) {
-            throw new Error(
+            throw Object.assign(new Error(
               currentUiLocale() === "ko"
                 ? "이 세션의 팀원이 더 이상 없습니다. 새 세션을 시작해 주세요."
                 : "This session's teammate is no longer available. Start a new session to continue.",
-            );
+            ), { code: "session_teammate_unavailable" });
           }
         }
       }
@@ -7502,10 +7633,17 @@ export function registerIpcHandlers(): void {
   // Resume persisted owner messages at host startup, including after an update;
   // the queue itself waits for a live trusted page and original account.
   rendererSendQueue();
+  // A lead room whose last line is the owner's own lost its answer with the previous run of the app: one honest line, once.
+  setImmediate(() => { try { recoverInterruptedLeadRooms(); } catch { /* the rooms stay as they are */ } });
+  // Desktop repair 11 (N2): a single turn the app's sudden end cut off (no end row, no host stop cause) gets one plain line, once; nothing is run again by itself.
+  setImmediate(() => { try { invocationService.noteCutOffOwnerTurns(); } catch { /* the next start looks again */ } });
   onAuthSessionRestored(() => rendererSendQueueInstance?.resumeCustodiedInputs(true));
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
     assertOwnerMayWriteRoom(req?.chatId);
+    // A group room under the lead model: the lead (or the member the message names) takes it; the room chat runs nothing.
+    const leadRouted = routeLeadRoomOwnerMessage(req, "owner", !isAppControlEvent(_event));
+    if (leadRouted) return leadRouted;
     return rendererSendQueue().run(_event, req);
   });
   ipcMain.handle("invoke:currentTurn", async (_event, chatId: string) => {
@@ -7667,8 +7805,10 @@ export function registerIpcHandlers(): void {
     // writer") until it exits (production 1.2.93, 2026-10-11 03:50Z). One's outbox sends it as a new message instead.
     if (request.oneMode === true && ownerTurnStarter(owner, request.chatId) && !invocationService.activeChatIds().includes(request.chatId)
       && !getPendingInvocationAdmissionForChat(request.chatId)) throw new Error("invocation_steer_native_turn_required");
+    // The owner typed this direction (invocation/owner-spoke.ts): when it starts a turn of its own or waits to become the chat's next one, that turn is one the owner
+    // spoke into. The checks above ran on the request without the marker, which is not an execution choice. An app-control agent is not the owner speaking.
     return invocationService.steerFromOwner(
-      request, intentId, admitMainInvocation(request.chatId),
+      isAppControlEvent(_event) ? request : markOwnerSpoke({ ...request }), intentId, admitMainInvocation(request.chatId),
     );
   };
   const steerOrQueueOwnerText = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId?: string) => {
@@ -8219,6 +8359,16 @@ export function registerIpcHandlers(): void {
     return readLatestBuilderConversation(getDb(), builderOwnerBinding());
   });
 
+  // Agentlas 2.0 Build window backend (saved builds, Preview, edit session, live files). Renderer-only, outside the app-control catalog.
+  registerBuildWorkbenchIpc(ipcMain, {
+    getDb,
+    ownerBinding: () => { const owner = builderOwnerBinding(); return { userId: owner.userId, workspaceId: owner.workspaceId, scope: owner.scope }; },
+    assertTrustedSender: assertTrustedSitePublishIpcSender,
+    isRunning: (folder) => [...buildTranscripts.values()].some((item) => item.running && item.workspace !== "" && sameBuildFolder(item.workspace, folder)),
+    activeEvents: (folder) => [...buildTranscripts.values()].filter((item) => item.running && item.workspace !== "" && sameBuildFolder(item.workspace, folder)).at(-1)?.events ?? [],
+    anyBuildActive: () => activeBuilds.size > 0,
+  });
+
   onAuthSessionOwnershipChanged(() => {
     builderAuthGeneration += 1;
     for (const controller of activeBuilds.values()) controller.abort();
@@ -8231,196 +8381,10 @@ export function registerIpcHandlers(): void {
     }
   });
 
+  registerTrackedBuildDeps(trackedBuildDeps);
   ipcMain.handle("hephaestus:build", async (event, req: HephaestusBuildRequest) => {
-    const initialBinding = builderOwnerBinding();
-    // Reserve before the first async boundary. A second renderer must not start
-    // another build or replace the transcript while authorization is pending.
-    // New renderers provide an opaque id so Stop can reach this reservation
-    // before invoke() returns; older renderers continue to use a Main id.
-    const requestedId = (req as HephaestusBuildRequest & { clientRunId?: unknown }).clientRunId;
-    if (requestedId !== undefined && (typeof requestedId !== "string"
-      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestedId))) {
-      throw new Error("Invalid build request identifier.");
-    }
-    if (activeBuilds.size > 0) throw new Error("BUILD_ALREADY_ACTIVE");
-    const runId = typeof requestedId === "string" ? requestedId : randomUUID();
-    if (buildTranscripts.has(runId)) throw new Error("Build request identifier was already used.");
-    const channel = `hephaestus:build:${runId}`;
-    const win = BrowserWindow.fromWebContents(event.sender);
-    const controller = new AbortController();
-    activeBuilds.set(runId, controller);
-    buildTranscripts.set(runId, {
-      runId,
-      request: String(req.request ?? ""),
-      workspace: "",
-      startedAt: new Date().toISOString(),
-      running: true,
-      events: [],
-      firstSeq: 0,
-    });
-    // Keep a few finished records; never clear a live record to admit a new one.
-    while (buildTranscripts.size > 10) {
-      const oldestFinished = [...buildTranscripts].find(([, item]) => !item.running)?.[0];
-      if (!oldestFinished) break;
-      buildTranscripts.delete(oldestFinished);
-    }
-    let resolvedRequest: Awaited<ReturnType<typeof resolveHephaestusBuildRequestForRun>>;
-    let savedConversation: StoredBuilderConversation | null = null;
-    let previousConversation: StoredBuilderConversation | null = null;
-    try {
-      const preliminary = resolveHephaestusBuildRequest(req);
-      if (req.runtimeSessionId) {
-        if (!initialBinding) throw new Error("BUILD_SESSION_OWNER_REQUIRED");
-        previousConversation = readLatestBuilderConversation(getDb(), initialBinding);
-        const workspace = preliminary.workspace;
-        if (!previousConversation || previousConversation.runtimeSessionId !== req.runtimeSessionId
-          || previousConversation.workspace !== workspace || !previousConversation.runtime
-          || JSON.stringify(previousConversation.workspaceIdentity) !== JSON.stringify(builderWorkspaceIdentity(workspace))
-          || req.runtimePinned !== true || JSON.stringify(previousConversation.runtime) !== JSON.stringify(req.runtime)
-          || !["waiting-user", "completed"].includes(previousConversation.status)) throw new Error("BUILD_SESSION_RECEIPT_REQUIRED");
-      }
-      if (initialBinding) {
-        const current = builderOwnerBinding();
-        if (current.scope !== initialBinding.scope || current.userId !== initialBinding.userId || current.workspaceId !== initialBinding.workspaceId || current.sessionId !== initialBinding.sessionId) throw new Error("BUILD_OWNER_CHANGED");
-        savedConversation = {
-          schema: 1, revision: 0, buildId: runId, workspace: preliminary.workspace,
-          workspaceIdentity: builderWorkspaceIdentity(preliminary.workspace),
-          request: String(req.request ?? ""), history: structuredClone(req.history ?? []),
-          runtimeSessionId: req.runtimeSessionId ?? null, hostAuthoredContinuation: req.hostAuthoredContinuation === true,
-          conversationTurn: req.conversationTurn ?? null,
-          terminalText: null, supplementalQuestion: null, mode: req.mode ?? null,
-          runtime: null, runtimePinned: false,
-          status: "unknown", updatedAt: new Date().toISOString(),
-        };
-        writeBuilderConversation(getDb(), initialBinding, savedConversation, null);
-      }
-      // Record the pending input before consent application can have effects.
-      resolvedRequest = await resolveHephaestusBuildRequestForRun(req, controller.signal);
-      controller.signal.throwIfAborted();
-      const current = builderOwnerBinding();
-      if (current.scope !== initialBinding.scope || current.userId !== initialBinding.userId || current.workspaceId !== initialBinding.workspaceId || current.sessionId !== initialBinding.sessionId) throw new Error("BUILD_OWNER_CHANGED");
-      if (savedConversation && (resolvedRequest.workspace !== savedConversation.workspace
-        || JSON.stringify(builderWorkspaceIdentity(resolvedRequest.workspace)) !== JSON.stringify(savedConversation.workspaceIdentity))) throw new Error("BUILD_WORKSPACE_CHANGED");
-      const transcript = buildTranscripts.get(runId);
-      if (transcript) {
-        transcript.workspace = resolvedRequest.workspace;
-        transcript.recoveryRequest = structuredClone(req);
-      }
-    } catch (error) {
-      if (savedConversation && controller.signal.aborted) {
-        try { writeBuilderConversation(getDb(), initialBinding, { ...savedConversation, revision: 1, status: "stopped", updatedAt: new Date().toISOString() }, 0); } catch { /* unknown remains */ }
-      }
-      activeBuilds.delete(runId);
-      const transcript = buildTranscripts.get(runId);
-      if (transcript) {
-        transcript.running = false;
-        transcript.events.push({ runId, kind: "error", text: controller.signal.aborted ? "Build cancelled" : "Build preparation failed" });
-      }
-      throw error;
-    }
-    // 렌더러는 build() 응답을 await 한 뒤에야 채널을 구독하므로, 그 사이에 발생한 첫 이벤트
-    // (예: 'build' stage 틱)가 유실될 수 있다. 렌더러가 buildReady 로 구독 완료를 알릴 때까지
-    // 이벤트를 버퍼링했다가 한 번에 flush 한다(첫 stage 틱 손실 방지).
-    const pending: HephaestusBuildEvent[] = [];
-    const terminalEvents: HephaestusBuildEvent[] = [];
-    let ready = false;
-    let readyExpiry: NodeJS.Timeout | null = null;
-    // 창이 닫힌 뒤 send는 throw하므로 destroyed 가드(빌드 종료와 닫기가 겹치는 경우).
-    const sendToWin = (ev: HephaestusBuildEvent) => {
-      if (win && !win.isDestroyed()) {
-        try { win.webContents.send(channel, ev); } catch {}
-      }
-    };
-    const publish = (ev: HephaestusBuildEvent) => {
-      const current = builderOwnerBinding();
-      if (current.scope !== initialBinding.scope || current.userId !== initialBinding.userId || current.workspaceId !== initialBinding.workspaceId || current.sessionId !== initialBinding.sessionId) return;
-      const transcript = buildTranscripts.get(runId);
-      if (transcript) {
-        transcript.events.push(ev);
-        if (transcript.events.length > BUILD_TRANSCRIPT_MAX_EVENTS) {
-          const dropped = transcript.events.length - BUILD_TRANSCRIPT_MAX_EVENTS;
-          transcript.events.splice(0, dropped);
-          transcript.firstSeq += dropped;
-        }
-      }
-      if (ready) {
-        sendToWin(ev);
-      } else {
-        pending.push(ev);
-      }
-    };
-    // A continuation can start as soon as it receives done/error. Deliver those
-    // events only after the preceding runner has released its reservation.
-    const emit = (ev: HephaestusBuildEvent) => {
-      if (ev.kind === "done" || ev.kind === "error") terminalEvents.push(ev);
-      else publish(ev);
-    };
-    buildReadySignals.set(runId, () => {
-      if (ready) return;
-      ready = true;
-      if (readyExpiry) clearTimeout(readyExpiry);
-      for (const ev of pending) sendToWin(ev);
-      pending.length = 0;
-      buildReadySignals.delete(runId);
-    });
-    void runHephaestusBuild(runId, resolvedRequest, emit, controller.signal, pickLocale(req), (runtime) => {
-      controller.signal.throwIfAborted();
-      const current = builderOwnerBinding();
-      if (current.scope !== initialBinding.scope || current.userId !== initialBinding.userId || current.workspaceId !== initialBinding.workspaceId || current.sessionId !== initialBinding.sessionId) throw new Error("BUILD_OWNER_CHANGED");
-      if (savedConversation && JSON.stringify(builderWorkspaceIdentity(resolvedRequest.workspace)) !== JSON.stringify(savedConversation.workspaceIdentity)) throw new Error("BUILD_WORKSPACE_CHANGED");
-      if (previousConversation && JSON.stringify(previousConversation.runtime) !== JSON.stringify(runtime)) throw new Error("BUILD_SESSION_RUNTIME_MISMATCH");
-      if (savedConversation && initialBinding) {
-        savedConversation = { ...savedConversation, revision: 1, runtime, runtimePinned: true, updatedAt: new Date().toISOString() };
-        writeBuilderConversation(getDb(), initialBinding, savedConversation, 0);
-      }
-    }).catch(() => {
-      emit({ runId, kind: "error", text: controller.signal.aborted ? "Build cancelled" : "Build failed" });
-    }).finally(() => {
-      activeBuilds.delete(runId);
-      const finished = buildTranscripts.get(runId);
-      if (finished) finished.running = false;
-      // A cleanup failure after an apparent done must win over that earlier
-      // success; consumers detach after the first terminal event.
-      const terminal = terminalEvents.at(-1) ?? {
-        runId,
-        kind: "error" as const,
-        text: controller.signal.aborted ? "Build cancelled" : "Build ended without a completion receipt",
-      };
-      let conversationSaveFailed = false;
-      if (savedConversation && initialBinding) {
-        const done = [...terminalEvents].reverse().find((item) => item.kind === "done");
-        const result = done?.result as { supplementalQuestion?: unknown } | undefined;
-        const status = controller.signal.aborted ? "stopped" : terminal.kind === "done"
-          ? (isCompletedBuildTurn(terminal.text ?? "") ? "completed" : "waiting-user") : "unknown";
-        try {
-          writeBuilderConversation(getDb(), initialBinding, {
-            ...savedConversation, revision: savedConversation.revision + 1, status,
-            terminalText: done?.text ?? null,
-            supplementalQuestion: result?.supplementalQuestion ?? null,
-            runtimeSessionId: done?.sessionId ?? savedConversation.runtimeSessionId,
-            updatedAt: new Date().toISOString(),
-          }, savedConversation.revision);
-        } catch {
-          // Preserve the earlier unknown record; a failed checkpoint is not completion.
-          conversationSaveFailed = true;
-        }
-      }
-      if (conversationSaveFailed) publish({ runId, kind: "log", text: pickLocale(req) === "ko"
-        ? "대화 복원 기록을 저장하지 못했습니다. 앱을 다시 시작하기 전에 현재 결과를 확인해 주세요."
-        : "The conversation recovery record could not be saved. Review this result before restarting the app." });
-      publish(terminal);
-      // If buildReady already fired, its callback removed the signal. Otherwise
-      // retain the buffered terminal event long enough for invoke() to resolve,
-      // the renderer to subscribe, and buildReady() to flush it.
-      if (!ready) {
-        readyExpiry = setTimeout(() => {
-          buildReadySignals.delete(runId);
-          pending.length = 0;
-        }, BUILD_READY_GRACE_MS);
-        readyExpiry.unref?.();
-      }
-    });
-    return { runId, mcpReceipt: resolvedRequest.mcpAttachment!.receipt };
+    const started = await runTrackedBuildTurn(trackedBuildDeps, req, { window: BrowserWindow.fromWebContents(event.sender) });
+    return { runId: started.runId, mcpReceipt: started.mcpReceipt as McpBuildAttachmentReceipt };
   });
   registerAppControlDomainIpc(ipcMain, "hephaestus:buildReady", (runId: string) => {
     buildReadySignals.get(runId)?.();

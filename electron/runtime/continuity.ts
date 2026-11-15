@@ -51,9 +51,6 @@ export function cliHistoryContextTokens(kind: string, model: string | null | und
   return cliHistoryBudgetForWindow(runtimeContextWindow(kind, model)).admissionTokens;
 }
 
-/** 스웜 워커/신시사이저에 주입하는 대화 컨텍스트 예산 — 워커 수만큼 곱해지므로 보수적으로. */
-export const SWARM_HISTORY_CONTEXT_TOKENS = 8_000;
-
 function continuityNote(_locale?: RuntimeLocale): string {
   return "transcript below = this live conversation; continue as the assistant from its start; never call it a previous session";
 }

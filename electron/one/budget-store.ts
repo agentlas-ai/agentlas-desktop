@@ -140,6 +140,9 @@ export class OneBudgetStore {
   /** Input is read from a host-written source event by budget-runtime only.
    * A changed original receipt conflicts; it cannot overwrite a prior debit. */
   usage(oneId:string,receipt:OneBudgetUsage):void {
+    // A source event already debited with the same content needs no write transaction. reconcile() re-reads the events of
+    // every open reservation, and each call used to take the write lock only to find the row already there.
+    if(this.usageRecorded(oneId,receipt))return;
     this.db.transaction(()=>{
     const reservation=this.forRun(receipt.runId);
     if(!reservation || reservation.one_id!==oneId)throw supervisorError("supervisor_budget_usage_binding_invalid");
@@ -152,7 +155,19 @@ export class OneBudgetStore {
     this.db.prepare("INSERT INTO one_budget_usage VALUES(?,?,?,?,?,?)").run(receipt.sourceId,oneId,receipt.runId,digest,amount,JSON.stringify(normalized));
     }).immediate();
   }
+  /** True when this exact receipt is already debited (same source, same content) for a reservation of this One. */
+  private usageRecorded(oneId:string,receipt:OneBudgetUsage):boolean {
+    const reservation=this.forRun(receipt.runId);
+    if(!reservation || reservation.one_id!==oneId)return false;
+    const amount=receipt.cost.status==="measured" && receipt.cost.sourceRef ? micros(receipt.cost.usd) : null;
+    const normalized={...receipt,cost:amount===null?{status:"unknown" as const,usd:null,sourceRef:null}:{status:"measured" as const,usd:amount/1_000_000,sourceRef:receipt.cost.sourceRef}};
+    const prior=this.db.prepare("SELECT digest FROM one_budget_usage WHERE source_id=?").get(receipt.sourceId) as {digest:string}|undefined;
+    return prior?.digest===hash(normalized);
+  }
   terminal(input:{oneId:string;runId:string;chatId:string;status:string}):void {
+    // The same terminal receipt recorded again changes nothing: no write.
+    const recorded=this.forRun(input.runId);
+    if(recorded && recorded.one_id===input.oneId && recorded.chat_id===input.chatId && recorded.terminal_hash===hash(input)){this.assertOwner(input.oneId);return;}
     this.db.transaction(()=>{
     this.assertOwner(input.oneId);
     const reservation=this.forRun(input.runId);
@@ -163,5 +178,12 @@ export class OneBudgetStore {
     }).immediate();
   }
   expire(oneId:string):void {this.assertOwner(oneId);this.db.prepare("UPDATE one_budget_reservations SET state='reconciling' WHERE one_id=? AND state='attempted' AND expires_at<=?").run(oneId,this.now());}
-  pending(oneId:string):OneBudgetReservation[]{return this.db.prepare("SELECT * FROM one_budget_reservations WHERE one_id=? ORDER BY rowid").all(oneId) as OneBudgetReservation[];}
+  /**
+   * Reservations that may still change: a run with no terminal receipt yet, or one whose reservation has not expired (its
+   * last usage events are written around the terminal receipt). It used to return every reservation ever made, so the 30 s
+   * reconcile re-read the events of all of them and took the write lock per event: 597 reservations and 1,352 usage rows on
+   * a real installation, growing with every run. A settled reservation is read again by nothing; its run's
+   * settle event (budget-runtime reconcileRun) is what reads the final usage.
+   */
+  pending(oneId:string):OneBudgetReservation[]{return this.db.prepare("SELECT * FROM one_budget_reservations WHERE one_id=? AND (terminal_hash IS NULL OR expires_at>?) ORDER BY rowid").all(oneId,this.now()) as OneBudgetReservation[];}
 }

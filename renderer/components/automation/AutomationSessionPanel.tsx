@@ -10,6 +10,7 @@ import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc
 import { extractQuestions } from "@/lib/ask-question";
 import { isCancellationCode } from "@/lib/invocation-failure";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
+import { subscribeStoreChanges } from "@/lib/store-change-bus";
 import { sameMessageList, sameSnapshotIgnoring } from "@/lib/store-change-policy";
 import { IconArrowLeft, IconClose, IconRefresh } from "@/components/Icon";
 import { AutomationStrategyPanel } from "./AutomationStrategyPanel";
@@ -125,6 +126,8 @@ function sendFailureMessage(error: unknown, ko: boolean): string {
   return ko ? "보내지 못했어요. 잠시 뒤 다시 시도해 주세요." : "It could not be sent. Try again shortly.";
 }
 
+/** Net under the store:changed signals (a missed push is read within this). */
+const SESSION_SAFETY_READ_MS = 60_000;
 
 export function AutomationSessionPanel({
   automationId,
@@ -189,10 +192,24 @@ export function AutomationSessionPanel({
     }
   }, [automationId]);
 
+  // The session's lines are its ledger chat's rows: every append announces itself (store:changed chat, the other process's rows
+  // through external-chat-changes.ts) and a session or runtime-selection change as `automation`. The minute below is only the net.
   useVisibleInterval(() => {
     if (busyRef.current) return;
     return load();
-  }, 5_000, { initial: load, enabled: active });
+  }, SESSION_SAFETY_READ_MS, { initial: load, enabled: active });
+  useEffect(() => {
+    if (!active) return;
+    let burst: ReturnType<typeof setTimeout> | null = null;
+    const off = subscribeStoreChanges((change) => {
+      const mine = (change.entity === "chat" && (!change.id || change.id === chatIdRef.current))
+        || (change.entity === "automation" && (!change.id || change.id === automationId));
+      // Streaming is drawn live and read once when the turn ends (the send paths below call load()); a hidden panel reads on show.
+      if (!mine || burst || busyRef.current || document.visibilityState === "hidden") return;
+      burst = setTimeout(() => { burst = null; void load(); }, 250);
+    });
+    return () => { off(); if (burst) clearTimeout(burst); };
+  }, [active, automationId, load]);
 
   // 새 메시지/스트리밍 델타마다 하단 고정.
   useEffect(() => {

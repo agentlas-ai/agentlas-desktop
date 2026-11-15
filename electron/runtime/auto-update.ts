@@ -123,18 +123,27 @@ function loadState(): void {
   }
 }
 
+// What this process last wrote, and where. Every usage read reconciles the records and asks to save them;
+// unchanged records must not rewrite the file each time (rule no write when nothing changed).
+// It starts empty, so the first save of a process always writes (that also upgrades a version 1 file).
+let persisted: { file: string; json: string } | null = null;
+
 function saveState(): void {
   const file = stateFile();
   if (!file) return;
   try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.tmp-${process.pid}`;
     const payload: PersistedVersionState = {
       version: PERSISTED_STATE_VERSION,
       records: Object.fromEntries(records),
     };
-    fs.writeFileSync(temporary, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 });
+    const json = JSON.stringify(payload);
+    if (persisted?.file === file && persisted.json === json) return;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.tmp-${process.pid}`;
+    fs.writeFileSync(temporary, json, { encoding: "utf8", mode: 0o600 });
     fs.renameSync(temporary, file);
+    // Remembered only after the rename: a failed write is tried again on the next call.
+    persisted = { file, json };
   } catch {
     // Runtime update remains valid in memory; persistence is best effort and contains no secret.
   }
@@ -237,7 +246,11 @@ function reconcileRecords(runtimes: readonly RuntimeStatus[], now: number): void
     if (!installedVersion) {
       state = "unverifiable";
       latestVersion = null;
-      checkedAt = now;
+      // Keep the time this was first found unverifiable. Stamping "now" on every reconcile changed the record on
+      // every usage read, so the state file was rewritten each time although nothing was learned.
+      checkedAt = previous?.state === "unverifiable" && !sourceChanged && previous.checkedAt != null
+        ? previous.checkedAt
+        : now;
     } else if (sourceOwned) {
       if (sourceChanged || !previous || sourceOwnedStateStale) {
         state = "checking";

@@ -12,7 +12,7 @@ import { buildReachMap, readAppCapabilities, readReachMap, writeReachScan } from
 import { isAppRunning } from "../reach/macos";
 import { REACH_PROVIDERS } from "../reach/providers";
 import { CapabilityRegistry } from "../reach/registry";
-import { GUI_UNSUPPORTED, ReachService, REACH_FEATURE_VERSION, type ReachServiceOptions, type ReachStamp, type ReachStatus, type Timers } from "../reach/service";
+import { GUI_UNSUPPORTED, ReachService, REACH_FEATURE_VERSION, watchFolders, type ReachServiceOptions, type ReachStamp, type ReachStatus, type Timers } from "../reach/service";
 import { flushUploads, Outbox, type UploadCandidate } from "../reach/upload";
 import type { ReachPlatform } from "../reach/types";
 import { getMeta, setMeta } from "../store/meta";
@@ -105,7 +105,8 @@ function listenToPower(): void {
   powerMonitor.on("lock-screen", () => { locked = true; });
   powerMonitor.on("unlock-screen", () => { locked = false; });
   powerMonitor.on("suspend", () => { service?.notifyExploreChanged(false); });
-  powerMonitor.on("resume", () => { if (getReachExploreEnabled()) service?.notifyExploreChanged(true); });
+  // Timers do not count sleep: after a wake the service looks at its due times again.
+  powerMonitor.on("resume", () => { service?.notifyWake(); if (getReachExploreEnabled()) service?.notifyExploreChanged(true); });
 }
 
 async function uploadCandidates(stateDir: string, registry: CapabilityRegistry, only?: readonly string[]): Promise<UploadCandidate[]> {
@@ -143,6 +144,14 @@ export async function startReach(options: { busy: () => boolean; service?: Reach
     // Tests and E2E runs never map or explore the machine they run on.
     allowed: () => process.env.AGENTLAS_E2E !== "1",
     exploreEnabled: getReachExploreEnabled,
+    // The map is read again when a folder where apps land changes (an app installed or removed), not on a clock.
+    // Null (a folder that cannot be watched) keeps the service on its timer.
+    watchInputs: (onChange, onLost) => {
+      const host = createNodeHost();
+      const folders = [...new Set(REACH_PROVIDERS.filter((provider) => provider.platform === host.platform)
+        .flatMap((provider) => provider.installDirectories?.(host) ?? []))];
+      return watchFolders(folders, onChange, onLost);
+    },
     stamp: {
       get: async () => readStamp(),
       set: async (stamp) => { setMeta(STAMP_KEY, JSON.stringify(stamp)); },

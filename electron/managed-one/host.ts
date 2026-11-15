@@ -222,7 +222,7 @@ export async function startManagedOneHost(raw: unknown, options: ManagedOneHostO
         }
         if (typeof command.requestId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(command.requestId)) return send(400, { error: "managed_one_control_body_invalid" });
         if (!health().supervisorReady || !health().relayReady) return send(503, { error: "managed_one_host_not_ready" });
-        assertOwner(); const payload = await bridge.issueMobileBridgePairing(); assertOwner();
+        assertOwner(); const payload = await bridge.issueMobileBridgePairing("managed"); assertOwner();
         return send(200, { pairingUri: JSON.stringify(payload) });
       }
       send(404, { error: "managed_one_control_method_unknown" });

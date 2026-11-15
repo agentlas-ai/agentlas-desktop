@@ -8,13 +8,16 @@ import inspector from "node:inspector";
  * Local resource evidence for one host process. Nothing here leaves the machine.
  *
  * The app had no memory measurement at all, so a daemon that held about 1.1 GB during sessions and 320 MB after a
- * restart (measured) could not say what it was holding. One line a minute shows the trend. An on-demand
+ * restart (measured) could not say what it was holding. One line a minute while there is work shows the trend; an
+ * idle host writes nothing and holds no timer (see setResourceWork). An on-demand
  * profile answers "which function": CPU time and allocation sites only. A heap snapshot would copy process memory, keys
  * included, to disk, so this module never takes one; a profile report holds function names and numbers, never values.
  *
  * Shared by Main and the daemon, so it must not import electron.
  */
 const SAMPLE_INTERVAL_MS = 60_000;
+/** Work starting or ending writes a line at once, but not more often than this (a burst of short turns is one trend point). */
+const MIN_EVENT_SAMPLE_GAP_MS = 5_000;
 const MAX_LOG_BYTES = 512 * 1024;
 const MAX_PROFILE_REPORTS = 4;
 const TOP_FRAMES = 40;
@@ -27,6 +30,24 @@ const IDLE_COLLECT_MIN_INTERVAL_MS = 10 * 60_000;
 const IDLE_COLLECT_MIN_HEAP_BYTES = 256 * 1024 * 1024;
 const IDLE_COLLECT_MIN_WORK_CPU_MS = 20_000;
 
+/*
+ * "Is there work" is pushed by the modules that own the work, in this process: the agent residency registry (a turn in use
+ * or a resident CLI) and the daemon's background tasks. Each reports its own source name; the host is busy while any source is.
+ * Main and the daemon are separate processes with separate sets. A host may add a source (for example from
+ * invocationService.onActiveChats) so work this module cannot see is covered too.
+ */
+const workSources = new Set<string>();
+const workListeners = new Set<() => void>();
+export function resourceWorkActive(): boolean { return workSources.size > 0; }
+export function setResourceWork(source: string, active: boolean): void {
+  const before = workSources.size > 0;
+  if (active) workSources.add(source); else workSources.delete(source);
+  if ((workSources.size > 0) === before) return;
+  for (const listener of [...workListeners]) {
+    try { listener(); } catch { /* evidence only */ }
+  }
+}
+
 export type ResourceSamplerRole = "main" | "daemon";
 export type ResourceSamplerOptions = {
   role: ResourceSamplerRole;
@@ -35,6 +56,7 @@ export type ResourceSamplerOptions = {
   extra?: () => Record<string, unknown>;
   /** True while no turn runs here, so a full collection cannot stall one. Omitted: never collects. */
   idle?: () => boolean;
+  /** Sampling period while there is work. */
   intervalMs?: number;
 };
 type CallFrame = { functionName?: string; url?: string; lineNumber?: number };
@@ -200,7 +222,7 @@ export function idleCollectionDue(input: { now: number; collectedAt: number; wor
   return input.workedCpuMs >= IDLE_COLLECT_MIN_WORK_CPU_MS || input.heapTotalBytes >= IDLE_COLLECT_MIN_HEAP_BYTES;
 }
 
-/** Never throws into its host. Returns a stop function; the timer never holds a process open. */
+/** Never throws into its host. Returns a stop function; no timer holds a process open, and an idle host has none. */
 export function startResourceSampler(options: ResourceSamplerOptions): () => void {
   if (process.env.AGENTLAS_RESOURCE_SAMPLER === "0") return () => {};
   const { role, directory, extra } = options;
@@ -238,18 +260,101 @@ export function startResourceSampler(options: ResourceSamplerOptions): () => voi
       .finally(() => { profiling = false; });
   };
 
-  const tick = () => {
+  let timer: NodeJS.Timeout | null = null;
+  let idleCollectTimer: NodeJS.Timeout | null = null;
+  let lastSampleAt = 0;
+  let wasWorking = false;
+  /** True while the newest line is the one written when this work period began. */
+  let startLineIsNewest = false;
+  let stopped = false;
+
+  const sampleNow = (reset: boolean, startOfWork = false) => {
     try {
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
       const now = Date.now();
+      // After a rest the elapsed time since the last line is not CPU time spent working: measure from here.
+      if (reset) { cpuPrevious = process.cpuUsage(); sampledAt = now; }
       const collected = collectWhenIdle(now);
       appendSample(logFile, resourceSample(role, cpuPrevious, now - sampledAt, collected ? () => ({ ...extra?.(), idleCollected: true }) : extra));
       cpuPrevious = process.cpuUsage();
       sampledAt = now;
+      lastSampleAt = now;
+      startLineIsNewest = startOfWork;
       serveProfileRequest();
     } catch { /* evidence only: never a host failure */ }
   };
-  const timer = setInterval(tick, options.intervalMs ?? SAMPLE_INTERVAL_MS);
-  timer.unref?.();
-  return () => clearInterval(timer);
+
+  /** After work ends, a collection that is due only for the 10-minute gap gets one timer aimed at the end of the gap. */
+  const aimIdleCollection = () => {
+    if (idleCollectTimer || !options.idle || stopped) return;
+    const gap = collectedAt + IDLE_COLLECT_MIN_INTERVAL_MS - Date.now();
+    if (gap <= 0) return;
+    const worked = process.cpuUsage(collectedCpu);
+    const workedCpuMs = (worked.user + worked.system) / 1_000;
+    if (workedCpuMs < IDLE_COLLECT_MIN_WORK_CPU_MS && process.memoryUsage().heapTotal < IDLE_COLLECT_MIN_HEAP_BYTES) return;
+    idleCollectTimer = setTimeout(() => {
+      idleCollectTimer = null;
+      if (resourceWorkActive() || stopped) return;
+      const now = Date.now();
+      if (!collectWhenIdle(now)) return;
+      try { appendSample(logFile, resourceSample(role, cpuPrevious, now - sampledAt, () => ({ ...extra?.(), idleCollected: true }))); } catch { /* evidence only */ }
+      cpuPrevious = process.cpuUsage();
+      sampledAt = now;
+    }, gap + 1_000);
+    idleCollectTimer.unref?.();
+  };
+
+  /** The work state changed: start or stop the periodic line, each with one line of its own. */
+  const onWorkChange = () => {
+    if (stopped) return;
+    const working = resourceWorkActive();
+    if (working === wasWorking) return;
+    wasWorking = working;
+    const quiet = Date.now() - lastSampleAt < MIN_EVENT_SAMPLE_GAP_MS;
+    if (working) {
+      if (!quiet) sampleNow(true, true);
+      timer = setInterval(() => sampleNow(false), options.intervalMs ?? SAMPLE_INTERVAL_MS);
+      timer.unref?.();
+    } else {
+      if (timer) clearInterval(timer);
+      timer = null;
+      // A period shorter than the gap is one line (its start); a longer one gets its end line too.
+      if (!(quiet && startLineIsNewest)) sampleNow(false);
+      aimIdleCollection();
+    }
+  };
+
+  // A profile request is a file an operator drops in the folder: a watch on the folder tells us, no polling.
+  let watcher: fs.FSWatcher | null = null;
+  try {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    watcher = fs.watch(directory, { persistent: false }, (_event, name) => {
+      if (!name || String(name) === path.basename(requestFile)) serveProfileRequest();
+    });
+    watcher.on("error", () => { try { watcher?.close(); } catch { /* gone */ } watcher = null; });
+  } catch { /* an unusable folder: evidence only */ }
+
+  // A run that never keeps a resident CLI (an API-only run) is work too. Every run takes a run slot, so the slots say when
+  // this process goes from no run to one and back. Loaded here, not imported at the top: this module stays free of the
+  // app's store, and a host without run slots simply has the other work sources.
+  let stopRunSlots = (): void => {};
+  try {
+    const slots = require("../runtime/run-slots") as typeof import("../runtime/run-slots");
+    stopRunSlots = slots.onRunSlotsBusyChange((busy) => setResourceWork("run-slots", busy));
+    if (slots.runSlotStats().inUse > 0) setResourceWork("run-slots", true);
+  } catch { /* no run slots in this host */ }
+
+  workListeners.add(onWorkChange);
+  // One baseline line at start (and a request left by an earlier run); after it, lines only follow work.
+  sampleNow(true);
+  if (resourceWorkActive()) onWorkChange();
+  return () => {
+    stopped = true;
+    workListeners.delete(onWorkChange);
+    stopRunSlots();
+    if (timer) clearInterval(timer);
+    if (idleCollectTimer) clearTimeout(idleCollectTimer);
+    timer = idleCollectTimer = null;
+    try { watcher?.close(); } catch { /* gone */ }
+  };
 }

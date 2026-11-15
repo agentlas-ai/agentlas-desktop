@@ -131,7 +131,7 @@ function currentAccountSid(): string | null {
 }
 
 /** Leaves folder `dir` (empty) readable by the current account only, and every file later made in it. */
-function narrowFolderToCurrentAccount(dir: string): string | null {
+export function narrowFolderToCurrentAccount(dir: string): string | null {
   const sid = currentAccountSid();
   if (!sid) return "account-sid-unavailable";
   try {

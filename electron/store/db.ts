@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isPackagedRuntime, userDataPath } from "../runtime-paths";
+import { sqliteOpenPath, storePathLimit, storePathLimitError } from "./sqlite-open-path";
 import { publicAgentVisibility } from "../agents/policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
@@ -39,7 +40,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 140;
+const SCHEMA_VERSION = 141;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -355,7 +356,7 @@ export function widenLongRunPauseReasonCheck(db: Database.Database): "rebuilt" |
       for (const sql of triggers) db.exec(sql.replace(/^CREATE TRIGGER /i, "CREATE TRIGGER IF NOT EXISTS "));
       const introduced = [...violations()].filter((key) => !dependentsBefore.has(key));
       if (introduced.length > 0) throw new Error(`v135 long_runs rebuild introduced ${introduced.length} integrity violation(s): ${introduced.slice(0, 5).join(", ")}`);
-    })();
+    }).immediate();
   } finally {
     db.pragma("foreign_keys = ON");
   }
@@ -1760,9 +1761,11 @@ export function initStore(options: StoreInitOptions = {}): void {
   try {
   const dbPath = resolveStorePath();
   _openedStorePath = dbPath;
+  const limit = storePathLimit(dbPath);
+  if (limit) throw storePathLimitError(dbPath, limit);
   preparePrivateStorePath(dbPath);
   if (migrationRole === "owner") releaseMigrationLock = acquireStoreMigrationLock(dbPath);
-  _db = new Database(dbPath);
+  _db = new Database(sqliteOpenPath(dbPath));
   // ★busy_timeout 이 journal_mode 보다 **먼저** 와야 한다 (2026-08-18 실측).
   // `journal_mode = WAL` 은 파일에 배타 락을 잡는다. busy_timeout 이 아직 0이면
   // 다른 프로세스가 쓰는 중일 때 대기 없이 즉시 SQLITE_BUSY 로 터진다 — 즉 부팅
@@ -5650,9 +5653,21 @@ export function initStore(options: StoreInitOptions = {}): void {
   addColumnIfMissing(_db, "one_org_members", "collaboration_style", "collaboration_style TEXT NOT NULL DEFAULT 'default' CHECK(collaboration_style IN ('default','concise','warm','direct'))");
   addColumnIfMissing(_db, "one_org_members", "handover_note", "handover_note TEXT");
   addColumnIfMissing(_db, "one_org_members", "unread_generation", "unread_generation INTEGER NOT NULL DEFAULT 0");
-  _db.prepare(
-    "UPDATE one_org_members SET unread_generation = 1 WHERE unread_count > 0 AND unread_generation = 0",
-  ).run();
+  // An UPDATE takes the store's write lock even when no row matches, and an ordinary boot must not (a healthy peer may hold it). A read
+  // decides whether there is anything to write.
+  if (_db.prepare("SELECT 1 FROM one_org_members WHERE unread_count > 0 AND unread_generation = 0 LIMIT 1").get()) {
+    _db.prepare(
+      "UPDATE one_org_members SET unread_generation = 1 WHERE unread_count > 0 AND unread_generation = 0",
+    ).run();
+  }
+  // A conversation still pointing at a firm that was deleted (chats.firm_id lost its FK in v102, so a firm deletion left the pointer)
+  // is cleared once. A read decides whether there is anything to write, like the statement above; the conversation itself is kept.
+  // (A store this old that has no firm_id column or no firms table has nothing to clear.)
+  if (tableExists(_db, "firms") && tableExists(_db, "chats") && schemaColumns(_db, "chats").some((column) => column.name === "firm_id") && _db.prepare(
+    "SELECT 1 FROM chats WHERE firm_id IS NOT NULL AND firm_id NOT IN (SELECT id FROM firms) LIMIT 1",
+  ).get()) {
+    _db.prepare("UPDATE chats SET firm_id = NULL WHERE firm_id IS NOT NULL AND firm_id NOT IN (SELECT id FROM firms)").run();
+  }
   addColumnIfMissing(_db, "one_taskforces", "description", "description TEXT NOT NULL DEFAULT ''");
   // Per-connection credential references (native-harness notyet NH29): two accounts of one MCP endpoint are two rows,
   // each naming the Vault key that holds its own value. Additive and idempotent; an empty object keeps the global key.
@@ -7003,22 +7018,26 @@ export function initStore(options: StoreInitOptions = {}): void {
   // singleton seed row. Keep this owner-side invariant outside the version
   // ladder: followers never repair, an existing epoch is never overwritten,
   // and a missing row resumes after the greatest durable revocation epoch.
-  _db.transaction(() => {
-    _db!.exec(`
+  // It is repaired only when it is broken: an immediate transaction is the store's write lock on every
+  // boot even when it changes nothing, and an ordinary boot must not take it from a healthy peer.
+  if (!tableExists(_db, "memory_forget_clock") || !_db.prepare("SELECT 1 FROM memory_forget_clock WHERE id = 1").get()) {
+    _db.transaction(() => {
+      _db!.exec(`
       CREATE TABLE IF NOT EXISTS memory_forget_clock (
         id INTEGER PRIMARY KEY CHECK(id = 1),
         epoch INTEGER NOT NULL CHECK(epoch >= 0)
       );
     `);
-    if (tableExists(_db!, "memory_revocations")) {
-      _db!.exec(`
+      if (tableExists(_db!, "memory_revocations")) {
+        _db!.exec(`
         INSERT OR IGNORE INTO memory_forget_clock (id, epoch)
           SELECT 1, COALESCE(MAX(revoked_epoch), 0) FROM memory_revocations;
       `);
-    } else {
-      _db!.exec("INSERT OR IGNORE INTO memory_forget_clock (id, epoch) VALUES (1, 0)");
-    }
-  }).immediate();
+      } else {
+        _db!.exec("INSERT OR IGNORE INTO memory_forget_clock (id, epoch) VALUES (1, 0)");
+      }
+    }).immediate();
+  }
 
   // v119: external Memory projections are rebuildable, but an explicit forget
   // must also survive a crash between the canonical DB tombstone and their
@@ -7328,6 +7347,24 @@ export function initStore(options: StoreInitOptions = {}): void {
     _db.transaction(() => {
       addColumnIfMissing(_db!, "long_runs", "budget_segment_epoch", "budget_segment_epoch INTEGER CHECK(budget_segment_epoch IS NULL OR budget_segment_epoch >= 1)");
       addColumnIfMissing(_db!, "long_runs", "budget_segment_json", "budget_segment_json TEXT CHECK(budget_segment_json IS NULL OR json_valid(budget_segment_json))");
+    })();
+  }
+
+  // v141 (Agentlas Harness N3b, decision): harness_due, the one line a conversation has for "when the host looks at this Goal next".
+  // No other table gains a column. Reader, writer and deletion rules sit beside the table in store/harness-due.ts; a store that has only
+  // the old schedule events gets its lines from backfillHarnessDue() on the first start (idempotent). The partial index serves the
+  // earliest-due read of the timer and is empty while no Goal rests on a schedule.
+  if (userVersion < 141) {
+    _db.transaction(() => {
+      _db!.exec(`
+        CREATE TABLE IF NOT EXISTS harness_due (
+          chat_id TEXT PRIMARY KEY REFERENCES chats(id) ON DELETE CASCADE,
+          due_at TEXT,
+          cause TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_harness_due_at ON harness_due(due_at) WHERE due_at IS NOT NULL;
+      `);
     })();
   }
 

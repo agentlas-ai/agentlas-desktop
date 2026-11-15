@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { verifyActivatedFolderIdentity } from "../architecture/activation";
 import { resolveHephaestusStdioLaunch, withDesktopEngineHost } from "../hephaestus/engine";
 import { hephaestusContextRoot } from "../hephaestus/root";
+import { codeMapDir } from "./project-index";
 
 const MAX_TASK_CHARS = 12_000;
 const MAX_RESULT_BYTES = 1_500_000;
@@ -393,7 +394,8 @@ async function contextLaunch(args: string[], signal?: AbortSignal): Promise<{
 const canonicalMapVerdicts = new Map<string, { stamp: string; valid: boolean }>();
 async function canonicalMapStamp(projectPath: string): Promise<string | null> {
   try {
-    const dir = path.join(projectPath, ".agentlas", "code-map");
+    // The folder the engine's refresh just wrote: the project folder, or the project's memory folder once the layout switch is on (project-index.ts).
+    const dir = codeMapDir(projectPath);
     const [map, manifest] = await Promise.all([fs.promises.stat(path.join(dir, "project-map.json")), fs.promises.stat(path.join(dir, "manifest.json"))]);
     return `${map.size}:${map.mtimeMs}:${manifest.size}:${manifest.mtimeMs}`;
   } catch { return null; }
@@ -411,17 +413,12 @@ async function hasCanonicalCodeMap(projectPath: string): Promise<boolean> {
 
 async function readCanonicalCodeMap(projectPath: string): Promise<boolean> {
   try {
+    const dir = codeMapDir(projectPath);
     const payload = JSON.parse(
-      await fs.promises.readFile(
-        path.join(projectPath, ".agentlas", "code-map", "project-map.json"),
-        "utf8",
-      ),
+      await fs.promises.readFile(path.join(dir, "project-map.json"), "utf8"),
     ) as CodeMapResult;
     const manifest = JSON.parse(
-      await fs.promises.readFile(
-        path.join(projectPath, ".agentlas", "code-map", "manifest.json"),
-        "utf8",
-      ),
+      await fs.promises.readFile(path.join(dir, "manifest.json"), "utf8"),
     ) as { schemaVersion?: string; snapshotId?: string; complete?: boolean };
     const verificationSchema = payload.verificationGraph?.schemaVersion ?? "";
     return (
@@ -526,14 +523,17 @@ export function projectSourceSignature(
  */
 export async function triggerProjectContextMapRefresh(
   projectPath: string,
-  options: { signal?: AbortSignal; sourceSignature?: string } = {},
+  options: { signal?: AbortSignal; sourceSignature?: string; force?: boolean } = {},
 ): Promise<boolean> {
   if (options.signal?.aborted || !verifyActivatedFolderIdentity(projectPath)) return false;
   const sourceSignature = options.sourceSignature
     ?? await projectSourceSignature(projectPath, options.signal);
   if (options.signal?.aborted || !sourceSignature || !verifyActivatedFolderIdentity(projectPath)) return false;
+  // `force` (the one-time relocation of the old map, project-index-relocate.ts) asks the engine even when this process already refreshed the same source snapshot:
+  // that refresh may have happened before the layout switch came on, and only a refresh made after it moves the map.
   if (
-    refreshTriggered.get(projectPath) === sourceSignature
+    !options.force
+    && refreshTriggered.get(projectPath) === sourceSignature
     && await hasCanonicalCodeMap(projectPath)
     && !options.signal?.aborted
     && verifyActivatedFolderIdentity(projectPath)

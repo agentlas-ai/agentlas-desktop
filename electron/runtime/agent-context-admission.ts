@@ -3,7 +3,6 @@ import { carrySurfaceMemoryRequest } from "../memory/surface-recall";
 import { createHash } from "node:crypto";
 import { getAuthenticatedActorIds, onAuthSessionInvalidated, onAuthSessionRestored } from "../auth";
 import { onDesktopStoreChange } from "../store/change-bus";
-import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { captureNativeAuthBinding } from "../daemon/native-auth-credentials";
 import { createDaemonAgentContextHost } from "../daemon/agent-context-host";
 import { getDb } from "../store/db";
@@ -180,7 +179,7 @@ export function releaseIdleDaemonAgentContexts(){reconcileDaemonContexts();retur
 export function withDaemonAgentContext(runner: Runner, provider: { kind: string; backend?: string; configurationIdentity?: string }): Runner {
   const routed = routeAgentContextRunner(runner, provider);
   return (request, events) => {
-    if (!isSharedSessionCapability(request.agentContext) || aliveDecisionProfileForRequest(request)) return routed(request, events);
+    if (!isSharedSessionCapability(request.agentContext)) return routed(request, events);
     return (async () => {
       const slot = await waitForSharedSession(request, events);
       try {
@@ -315,7 +314,6 @@ async function waitForSharedSession(request: RunnerRequest, events: RunnerEvents
 function routeAgentContextRunner(runner: Runner, provider: { kind: string; backend?: string; configurationIdentity?: string }): Runner {
   return async (request, events) => {
     if (!request.agentContext) return runner(request, events);
-    if(aliveDecisionProfileForRequest(request))return runner(request,events);
     const held = agentContextHostBinding(request.agentContext as AgentContextCapability), owner = invocationProcessOwner();
     if (owner.ownerKind !== "daemon") {
       // An unsettled earlier turn refuses this one before anything is sent (typed RuntimeTurnDelivery "not-dispatched").

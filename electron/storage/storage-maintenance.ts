@@ -19,10 +19,13 @@ import { DB_RETENTION_HOST } from "./db-retention-policy";
 import { runDbRetentionPass, type DbRetentionReport } from "./db-retention";
 import { observationCaptureDir } from "../media/capture-artifacts";
 import { LEGACY_PRODUCT_SESSIONS_MARKER } from "../runtime/legacy-product-sessions-once";
+import { onceBackgroundRunCouldStart } from "../runtime/run-slots";
 
 /**
- * Runs the storage budget (storage-policy.ts) shortly after start and then
- * every STORAGE_POLICY.sweepIntervalMinutes.
+ * Runs the storage budget (storage-policy.ts) shortly after start, then when a run
+ * ends and the last pass is older than STORAGE_POLICY.sweepIntervalMinutes, and at
+ * most once a day while idle (one timer aimed at last pass + 24 h; no periodic wake).
+ * The time of the last pass is kept in memory: a restart makes one pass anyway.
  * - One process at a time holds the pass; a lock file in userData names the holder.
  * - The pass is asynchronous and yields between run-detail slices, so the Desktop
  *   main thread stays responsive.
@@ -363,6 +366,8 @@ export function startStorageMaintenance(options: {
 }): () => void {
   let running = false;
   const pass = async (): Promise<void> => {
+    // What a conversation delete only detached (a big Goal ledger, a big journal) is removed in pieces; a pass cut short by a quit finds it here.
+    try { (await import("./deleted-chat-ledgers")).scheduleDeletedChatLedgerDrain(); } catch { /* the next pass continues it */ }
     if (running) return;
     running = true;
     let report: StorageMaintenanceReport | null = null;
@@ -392,9 +397,30 @@ export function startStorageMaintenance(options: {
     setMeta(NOTICE_KEY, String(Date.now()));
     options.notifyLowDisk({ freeBytes: report.freeBytes, footprintBytes: await agentlasFootprintBytes(), freedBytes: report.freedBytes });
   };
-  const first = setTimeout(() => { void pass(); }, options.firstDelayMs ?? 120_000);
-  const every = setInterval(() => { void pass(); }, STORAGE_POLICY.sweepIntervalMinutes * 60_000);
+  // Passes are not periodic. A pass starts: (1) once after the start delay, (2) when a run ends and the last pass is
+  // older than the old interval (the run-slots signal "a background run could start now"), (3) one timer aimed at
+  // the last pass + 24 h. Each pass re-aims (3); nothing else keeps a timer.
+  const interval = STORAGE_POLICY.sweepIntervalMinutes * 60_000;
+  let stopped = false;
+  let lastPassAt = Date.now(); // the start counts: a run ending before the start delay must not pull the first pass forward
+  let daily: NodeJS.Timeout | null = null;
+  const aimDaily = (): void => {
+    if (stopped) return;
+    if (daily) clearTimeout(daily);
+    daily = setTimeout(() => { daily = null; void run(); }, Math.max(1_000, lastPassAt + DAY_MS - Date.now()));
+    daily.unref?.();
+  };
+  const run = async (): Promise<void> => {
+    try { await pass(); } finally { lastPassAt = Date.now(); aimDaily(); }
+  };
+  const onRunEnded = (): void => {
+    if (stopped) return;
+    onceBackgroundRunCouldStart(onRunEnded); // the signal is one-shot: listen again for the next run end
+    const sinceLast = Date.now() - lastPassAt;
+    if (!running && (sinceLast < 0 || sinceLast >= interval)) void run();
+  };
+  const first = setTimeout(() => { void run(); }, options.firstDelayMs ?? 120_000);
   first.unref?.();
-  every.unref?.();
-  return () => { clearTimeout(first); clearInterval(every); };
+  onceBackgroundRunCouldStart(onRunEnded);
+  return () => { stopped = true; clearTimeout(first); if (daily) clearTimeout(daily); daily = null; };
 }

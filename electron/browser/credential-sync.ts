@@ -15,6 +15,7 @@ import {
 import { getMeta, setMeta } from "../store/meta";
 import { importBrowserCredentials, listDiscoverableProfiles, scanBrowserCredentials } from "./credential-import";
 import { registrableDomain } from "../../shared/registrable-domain";
+import { isElectronMainProcess } from "../main-process-host";
 
 /** 자동 갱신 주기. 쿠키 만료보다 짧게, 그러나 매 실행마다 파일을 뒤지지 않을 만큼 길게. */
 const REFRESH_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
@@ -190,7 +191,9 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
         };
       }
       writeConsent({ ...current, lastSyncedAt: new Date().toISOString() });
-      if (!result.nativeSession) await (await import("./native-session-cookie-import")).syncConnectBrowserSession({
+      // The copy into the window host's own cookie jar needs its Electron session: only the main process can do it.
+      // A background-service turn already refreshed the dedicated browser profile above; the main process copies it on its own refresh.
+      if (!result.nativeSession && isElectronMainProcess()) await (await import("./native-session-cookie-import")).syncConnectBrowserSession({
         domains: result.linkedSites.filter((site) => !result.requiresLoginSites?.includes(site)),
       });
       // A refresh that only re-issued cookies the source holds fresher adds none, so count those too.

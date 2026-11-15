@@ -887,6 +887,68 @@ export interface AgentRuntimeOverrideSetInput {
   selection: RuntimeSelection;
 }
 
+/** One line of a model order: a model and its effort (machine values; the screen words them). */
+export interface AgentModelLine {
+  kind: RuntimeKind;
+  backend?: RuntimeBackend;
+  source?: string;
+  acpAgentId?: string;
+  model: string | null;
+  effort: string | null;
+  longContext: boolean;
+}
+
+/**
+ * An agent's model order. `follow`: "worker" (the default) / "orchestrator" read the global order at each turn; "own" is the agent's
+ * own lines. `explicit` false = the owner never chose: the agent follows the Worker order in every turn kind (the personal agent and the Work controller
+ * start from the Orchestrator order and say so in `follow`). `effective` is the order read now; `firstForChat` is the first model a one-to-one chat uses.
+ */
+export interface AgentModelOrderView {
+  agentId: string;
+  follow: "worker" | "orchestrator" | "own";
+  explicit: boolean;
+  own: AgentModelLine[];
+  effective: { source: "worker" | "orchestrator" | "own"; lines: AgentModelLine[]; first: AgentModelLine | null };
+  firstForChat: AgentModelLine | null;
+  global: { orchestrator: AgentModelLine[]; worker: AgentModelLine[]; workerInherited: boolean; multimodal: AgentModelLine[] };
+  updatedAt: string | null;
+}
+export type AgentModelOrderResult =
+  | { ok: true; order: AgentModelOrderView }
+  | { ok: false; code: "agent_id_invalid" | "agent_not_found" | "follow_invalid" | "own_order_empty" | "own_order_too_long" | "own_order_line_invalid" | "own_order_nothing_to_copy" | "unavailable"; message: string };
+
+/** A Work session without a project joins a project: an existing one, or the one of a folder the owner picked (a native folder grant). */
+export type ChatProjectAttachInput = {
+  chatId: string;
+  /** Desktop repair 6 (B-5): when a turn of the conversation is running, keep the join in Main until that turn ends instead of only refusing (`turn_running` + `reservation`). Absent/false = refuse, as before. */
+  reserve?: boolean;
+} & ({ projectId: string; folder?: never } | { folder: FsPathGrant; projectId?: never });
+export type ChatProjectAttachResult =
+  | { ok: true; chatId: string; projectId: string; created: boolean; alreadyAttached: boolean; workingFolder: string | null; appliesFrom: "next_turn" }
+  | { ok: false; code: "chat_not_found" | "chat_not_attachable" | "project_not_found" | "folder_missing" | "folder_invalid" | "already_in_project" | "turn_running" | "project_or_folder_required" | "unavailable"; message: string;
+      /** `turn_running` only: the run that holds the conversation now (desktop 3, B-5). Without `reserve` the attach is not kept: ask again when that run has ended. */
+      runningRunId?: string;
+      /** `turn_running` only, and only when the input said `reserve: true`: the join is kept in Main and happens when the turn ends. It is kept in memory: `keptAcrossRestart` is always false (closing the app drops it), and it ends at `until` (24 h). `chats.attachProjectPending` says whether it is still kept. */
+      reservation?: { projectId: string | null; until: string; keptAcrossRestart: false } };
+export interface ChatNewChatOptions {
+  /** The project of the conversation being looked at (the project dropdown's default); null = none. */
+  currentProject: { id: string; name: string; folderPath: string | null; sourceType: string } | null;
+  workSession: { available: true };
+  /** What "Empty project" is: a project of sourceType "empty" whose folder Main makes and manages (projects.create). */
+  emptyProject: { sourceType: "empty"; managedFolder: true };
+  /** "No project": a Work session with project null (chats.create without projectId). */
+  noProject: { available: true };
+  agents: Array<{ id: string; name: string; tone: string | null }>;
+  /** Present only when the agent list could not be read (a store error): `agents` is then empty because of that, not because there are no teammates (desktop 3, A-1 #8). */
+  agentsReadError?: "agents_unreadable";
+}
+export interface ChatSendToConversationInput { fromChatId: string; toChatId: string; text: string }
+export type ChatSendToConversationResult =
+  | { ok: true; to: { chatId: string; title: string; kind: "session" | "room" }; queued: boolean; runId?: string }
+  | { ok: false; code: "empty" | "too_long" | "self" | "no_project" | "not_found" | "not_same_project" | "target_not_allowed" | "repeated" | "chain_stopped" | "chain_too_wide" | "owner_declined" | "no_one_to_ask" | "unavailable"; message: string;
+      /** `unavailable` only: why, when the host knows - `room_has_no_members` and `agent_deleted` never end by themselves; absent = a hand-off failure that a resend may fix. */
+      reason?: "room_has_no_members" | "agent_deleted" };
+
 /** CLI(Claude/Codex/Antigravity)에서 스캔한 슬래시 명령 — 챗 입력 `/` 자동완성에 노출. */
 /**
  * 에이전트의 동기 질문 — 도구가 답을 기다리는 질문(electron/confirm/ask-user.ts).
@@ -1136,6 +1198,8 @@ export interface RosterRemovalResult {
   removed: boolean;
   sourceMovedToTrash: boolean;
   retainedAgentIds?: string[];
+  /** Machine code when nothing was removed on purpose: `builtin_agent` = a built-in or system agent (its memory folder would be deleted and made again empty). */
+  refused?: "builtin_agent";
 }
 
 /**
@@ -1468,6 +1532,13 @@ export interface McpServerStatus {
   checkedAt: string;
   /** Typed transport observation; callers must never classify prose errors. */
   failureCode?: 'authentication_required' | 'configuration_missing' | 'connection_unavailable' | 'connection_cancelled';
+  /**
+   * VD: what a real call proved about this connection's KEYS (electron/mcp-tools/key-verdict.ts), absent for a connection with no keys. `verified` = the provider accepted them; `saved` = stored and the program
+   * starts, no call has used them yet; `rejected` (+ `keyRetry: "tap"`) = 401/403, the owner enters the key again; `provider_down` (+ `keyRetry: "auto"`) = the service did not answer, the key is not blamed, the next read asks again.
+   * Closed words decided from status codes only. The phone's projection (mobile-bridge/connectors.ts projectConnectorTest) does not carry them.
+   */
+  keyVerdict?: 'verified' | 'saved' | 'rejected' | 'provider_down';
+  keyRetry?: 'auto' | 'tap';
   /** HTTP status the transport carried on failure (401/402/403/429 separate login, entitlement and quota; NH31). */
   httpStatus?: number;
   /**
@@ -1859,6 +1930,19 @@ export interface OntologyProjectStatus {
   error?: string;
 }
 
+/** What creating (or growing) an Agent Chat room returns: the room's chat row and, for a group, its taskforce id. */
+export interface AgentChatReceipt {
+  kind: "solo" | "group";
+  chat: Chat;
+  taskforceId: string | null;
+  /** The personal agent is the owner's assistant, not a room member: ids left out of the request (machine-readable, never an error). */
+  excludedPersonalAgentIds?: string[];
+  /** True when a still-empty room of the same agent(s) and project was opened instead of making another one. */
+  reused?: boolean;
+  /** A group that dropped to one participant became a one-to-one room. */
+  convertedToSolo?: boolean;
+}
+
 export interface Chat {
   id: string;
   /** One/Work/Mobile이 함께 여는 durable Task. 구버전 row에는 없을 수 있다. */
@@ -1893,6 +1977,8 @@ export interface Chat {
   /** 어느 표면이 시작한 대화인지 — 'one'(초개인화 One 홈) | 'work'(전역 Work).
    *  One 홈과 Work 사이드바는 이 값으로 서로를 오염하지 않는다. 구버전 row는 'work'. */
   originSurface?: "one" | "work";
+  /** A member's (member, room) child session names its room here; absent on every ordinary chat. */
+  parentChatId?: string | null;
   /** Exact chat-scoped orchestrator pin. null means follow the role default. */
   runtimeSelection?: RuntimeSelection | null;
   /**
@@ -2097,8 +2183,8 @@ export type ChatHostNotice =
   /** One ran a check-in the owner asked for. Never saved as a row: only One's own message, if any, appears. */
   | { purpose: "one-checkin"; runId: string }
   /**
-   * `withdrawn` is never stored: Main's history read sets it on an AGI owner ask whose incident has closed (the restart
-   * it asked for is no longer needed), and every surface then draws the row nowhere.
+   * `withdrawn` is never stored: Main's history read sets it on a "restart the app" ask the retired AGI unblocker wrote (the update
+   * that retired it restarted the app), and every surface then draws the row nowhere.
    */
   | { purpose: "automation-report"; runId: string; automationId: string; withdrawn?: true }
   /** Teammate session: the brief One handed over (shown as coming from One, not the owner). */
@@ -4905,6 +4991,8 @@ export interface MobileBridgeDeviceSummary {
 
 export interface MobileBridgeRuntimeStatus {
   running: boolean;
+  /** Non-secret metadata for the currently scannable pairing attempt. */
+  activePairingAttempt?: {pairingAttemptId:string;expiresAt:string} | null;
   endpoint: string | null;
   secure: boolean;
   hostId: string | null;
@@ -5124,7 +5212,11 @@ export interface McpInvocationEvent {
     causeClass?: "login" | "capacity" | "execution";
     /** Set by the host (invocation/host-recovery.ts) when `message` is its own plain line for an INTERNAL failure: "recovering" = the app
      *  retries by itself, "stopped" = it does not. The phone shows such an event as a notice, never as "Run failed". Optional; older readers ignore it. */
-    hostWorded?: "recovering" | "stopped" };
+    hostWorded?: "recovering" | "stopped";
+    /** Agentlas 2.0 D6: set with the closed codes `needs_registration` / `agent_no_folder` / `seat_archived` / `agent_archived`: what the owner can do about it, as words a
+     *  screen or the phone can put a button on without reading the sentence: `next` register / reconnect / restore, the slugs of the Hub or Cloud agents to register,
+     *  the ids of the registered agents. Optional; older readers ignore it. */
+    register?: { next: "register" | "reconnect" | "restore" | "none"; slugs: string[]; agentIds: string[] } };
   /** kind:"notice" 전용 — 호스트 고지. 답변 본문과 절대 합치지 않는다. */
   notice?: {
     level: "info" | "success" | "warning" | "error";
@@ -6656,45 +6748,6 @@ export interface HubPromptBookmarkResult {
   error?: string;
 }
 
-// ── 퀘스트 (온보딩 대체 신규 유저 튜토리얼 — 웹 /api/quests 프록시) ────────────
-export interface QuestInfo {
-  id: string;
-  titleKo: string;
-  titleEn: string;
-  descKo: string;
-  descEn: string;
-  rewardCredits: number;
-  verification: "server" | "client-attested";
-  claimed: boolean;
-  claimedAt: string | null;
-}
-
-export interface QuestListResult {
-  ok: boolean;
-  authenticated: boolean;
-  quests: QuestInfo[];
-  error?: string;
-}
-
-export interface QuestClaimResult {
-  ok: boolean;
-  receiptVersion?: 1;
-  status?: "ready" | "completed" | "already_claimed";
-  questId?: string;
-  claimIntentId?: string;
-  rewardCredits?: number;
-  claimedAt?: string;
-  replayed?: boolean;
-  outcomeUnknown?: boolean;
-  code?: string;
-  error?: string;
-}
-
-export interface QuestClaimInput {
-  questId: string;
-  claimIntentId: string;
-}
-
 // ── 에이전트 durable 메모리(런타임 큐레이터 DB) — 자가진화/타임라인 UI 소스 ────
 export interface AgentMemoryEntryUi {
   id: string;
@@ -7253,6 +7306,8 @@ export interface AgentlasIpc {
   ) => Promise<ToolApprovalResolutionReceipt>;
   getToolApprovalResolution: (id: string) => Promise<ToolApprovalResolutionReceipt>;
   listToolApprovals: () => Promise<ToolApprovalRequestEvent[]>;
+  /** The answered or closed cards of these conversations (oldest first), for the conversation's one quiet line where the card was. Read only. */
+  listSettledToolApprovals: (chatIds: string[]) => Promise<SettledToolApproval[]>;
   /** 데몬 자동 시작(로그인 기동) — 기본 off. 켜면 부팅 항목까지 같은 턴에 정합된다. */
   getDaemonAutostart: () => Promise<{ enabled: boolean; installed?: boolean; loaded?: boolean; reconciled?: boolean; reason?: string }>;
   setDaemonAutostart: (enabled: boolean) => Promise<{ enabled: boolean; installed?: boolean; loaded?: boolean; reconciled?: boolean; reason?: string }>;
@@ -7292,6 +7347,78 @@ export interface AgentlasIpc {
     revokeDevice: (deviceId: string) => Promise<{ ok: boolean }>;
     /** Reveals the main-process log file. Log contents never cross IPC. */
     revealLog: () => Promise<{ ok: boolean }>;
+  };
+  /**
+   * The Build window's backend (Agentlas 2.0, shared/build-workbench.ts): saved builds, Edit, Preview, live files. Renderer only (not in the phone bridge or the app-control catalog).
+   * Optional so a screen can say so when an older preload does not have it.
+   */
+  buildWorkbench?: import("./build-workbench").BuildWorkbenchApi;
+  /**
+   * "My rules" (Agentlas 2.0 P4, shared/workspace-rules.ts): the owner's rules file on this computer. Renderer only (not in the phone bridge or the app-control catalog).
+   * Optional so a screen can say so when an older preload does not have it.
+   */
+  workspaceRules?: {
+    get: () => Promise<import("./workspace-rules").WorkspaceRulesStatus>;
+    save: (input: { text: string; baseFingerprint: string }) => Promise<import("./workspace-rules").WorkspaceRulesWriteResult>;
+    clear: (input: { baseFingerprint: string }) => Promise<import("./workspace-rules").WorkspaceRulesWriteResult>;
+    candidates: () => Promise<import("./workspace-rules").WorkspaceRulesCandidates>;
+    addPicked: (input: { ids: string[]; baseFingerprint: string }) => Promise<import("./workspace-rules").WorkspaceRulesAddPickedResult>;
+    pickNotice: (input: { state: "offered" | "dismissed" }) => Promise<{ pickNotice: import("./workspace-rules").WorkspaceRulesPickNotice }>;
+    /** Desktop repair 6: Main opens the rules file in the computer's own editor. No argument, no path in the answer; codes in `WorkspaceRulesOpenResult`. Optional: an older preload has none. */
+    openFile?: () => Promise<import("./workspace-rules").WorkspaceRulesOpenResult>;
+  };
+  /**
+   * The personal agent's home (Agentlas 2.0 O-M3a, contracts/one-home-desktop.md §8). Values and codes only; the screen comes later.
+   * Denied to app control and left out of the model's catalog (electron/app-control/policy.ts). `label`s inside `pointer` are untrusted text.
+   */
+  oneHome: {
+    status: () => Promise<OneHomeStatus>;
+    refresh: (input: { reason: "screen" }) => Promise<{ ok: boolean; result?: "read" | "coalesced"; code?: string }>;
+    /** This computer's key registration (the owner's own sign-in is needed; `reauth_required` carries an actionId for oneHome.reauth). */
+    registerDevice: () => Promise<{ ok: boolean; result?: string; code?: string; actionId?: string }>;
+    reauth: (input: { actionId: string }) => Promise<{ ok: boolean; code?: string }>;
+    /** The screen really showed these claim / key ids to the owner; Main refuses unless the window is visible and not minimized. Only this makes the computer say "seen". */
+    noticeShown: (input: { ids: string[] }) => Promise<{ ok: boolean; code?: string; sent?: number }>;
+    /** Passing power is only REQUESTED here; it runs from the Main-owned confirmation window (`confirm_window_unavailable` until that window exists). */
+    requestTrustPhone: (input: { deviceId: string }) => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    requestRevokeKey: (input: { kid: string }) => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** The first move of the personal agent to this computer (contracts/one-home-move.md §5). `not_ready` carries `detail` (the one readiness code); `reauth_required` carries an actionId for oneHome.reauth. */
+    startMoveHere: () => Promise<{ ok: boolean; code?: string; detail?: string; actionId?: string }>;
+    /** The home computer's [move]: only REQUESTS (the number and the yes are the Main confirmation window's). The id is optional: the request takes the current one and the yes re-checks it. */
+    approveMove: (input?: { moveId?: string }) => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** [it was not me] on a request of another computer: cancels it (a refusal hands over nothing, so it is allowed while the screen is operated). */
+    declineMove: (input?: { moveId?: string }) => Promise<{ ok: boolean; code?: string }>;
+    /** The owner confirms the exact number of Personal lines the move would blank (> 20); a different number answers `count_changed` with the new one. */
+    confirmBlank: (input: { count: number; moveId?: string }) => Promise<{ ok: boolean; code?: string; count?: number }>;
+    /** Before the commit only. Counts and codes, never a request id. */
+    cancelMove: (input?: { moveId?: string }) => Promise<{ ok: boolean; code?: string }>;
+    answerProfile: (input: { moveId?: string; keep: "here" | "incoming" }) => Promise<{ ok: boolean; code?: string }>;
+    /** The number this computer's own request is compared by is drawn in the Main confirmation window only (view-only: no yes). */
+    requestShowCode: () => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** Passing power is only REQUESTED (the claim's number and the run are the confirmation window's). */
+    approveClaim: (input: { claimId: string }) => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    rejectClaim: (input: { claimId: string }) => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    confirmHome: () => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    revertHome: () => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** "Start here" (design 5.8.9): a takeover claim against a living home on another computer. Only REQUESTS (the yes is the Main confirmation window's; `reauth_required` is reported by oneHome.status().pendingReauth). `home_is_server` = use startMoveHere. */
+    startHere: () => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** Audit 59 F-1: the answer to a move that waits with `home_key_changed` ("the home's key is not the one this computer wrote down"): only REQUESTS (the yes is the Main confirmation window's, kind `acceptHomeKey`); on yes this computer takes the key the pointer shows for that home. `no_such_request` = nothing waits for it. */
+    acceptHomeKey: () => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** The one question about an `away` computer's old records when the home waited its way in or was never seen: [send] (the yes is the Main confirmation window's; it also confirms an unconfirmed home) - nothing is sent before it. */
+    sendLeftover: () => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** The home's answer to a record from a computer it does not know (status().leftover.receiver.requests): only REQUESTS; nothing is downloaded before the yes in the Main confirmation window. */
+    mergeLeftover: (input: { kid: string }) => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** The exact number of Personal lines the merge would blank (> 20); a different number answers `count_changed` with the new one. */
+    /** "Forget everything that came from this computer": the lines carrying its origin mark go through the owner's forget path, the merged conversation lines are deleted by id. Counts only. */
+    /** Asynchronous: resolves when done. `code`: `forget_incomplete` (a line could not be deleted), `mark_incomplete` (some lines of that computer could not be identified: `notIdentified`, `markIncomplete`), `forget_running`. */
+    forgetLeftoverFrom: (input: { kid: string }) => Promise<{ ok: boolean; code?: string; forgottenLines?: number; failedLines?: number; deletedMessages?: number; notIdentified?: number; markIncomplete?: boolean }>;
+    /**
+     * Things made by a place that is not trusted wait for the owner (contracts/mirror-trust.md section 4). The owner window is given NUMBERS ONLY (`status().mirror.waiting`, `status().waitingReview`) and this one request:
+     * [Review] opens the Main-owned review window (kind `reviewWaiting`), which reads the words itself and answers over a selection. No word of what waits reaches this window.
+     */
+    reviewWaiting: () => Promise<{ ok: boolean; code?: string; requestId?: string }>;
+    /** [Try again] on the line: read the list now and learn only whether it could be read (`server_unreachable` when not); the items are dropped in Main. */
+    waitingCheck: () => Promise<{ ok: boolean; code?: string }>;
   };
   /** First-party product extensions are signed, separately installed products. */
   productExtensions: {
@@ -7528,7 +7655,8 @@ export interface AgentlasIpc {
   };
   /** Hosted AI 사용 잔액. 과거 창작자 수익 전송 메서드는 폐쇄된 IPC 호환용으로만 남는다. */
   billing: {
-    getCredits: () => Promise<HubCreditBalance>;
+    /** `force`: ask the server now, past Main's 2-second shared read (a run that just finished may have spent credits). */
+    getCredits: (input?: { force?: boolean }) => Promise<HubCreditBalance>;
     /** Public plan catalog from the deployed web. Optional on older preloads. */
     getPlans?: () => Promise<BillingPlanCatalog>;
     /** Is checkout open for this plan/cycle? Asked only after "Upgrade" is pressed. Optional on older preloads. */
@@ -7549,15 +7677,15 @@ export interface AgentlasIpc {
     bookmarkAdd: (slug: string) => Promise<HubPromptBookmarkResult>;
     bookmarkRemove: (slug: string) => Promise<HubPromptBookmarkResult>;
   };
-  /** 퀘스트 — 대시보드 신규 유저 튜토리얼(온보딩 대체). 클레임 성공 시 크레딧 지급. */
-  quests: {
-    list: () => Promise<QuestListResult>;
-    claim: (input: QuestClaimInput) => Promise<QuestClaimResult>;
-    claimStatus: (input: QuestClaimInput) => Promise<QuestClaimResult>;
-  };
   /** 에이전트 전역 durable 메모리. 프로젝트 메모리는 프로젝트 화면에서만 조회한다. */
   agentMemory: {
     entries: (agentId: string, limit?: number) => Promise<AgentMemoryEntryUi[]>;
+    /**
+     * Agentlas 2.0 stores the union read could not read for this agent/project, as codes (empty while the split switch is off). `kind` is the store
+     * (agent | project), `code` the reason (store_unreadable, owner_mismatch, store_symlink, agent_local_state_symlink, entries_missing,
+     * forget_clock_unreadable, forget_catchup_withheld = some memories of that store are hidden). The screen words it; no sentence is returned.
+     */
+    skippedStores: (scope: { agentId?: string | null; projectPath?: string | null; projectId?: string | null }) => Promise<Array<{ kind: "personal" | "agent" | "project" | "session"; code: string }>>;
     /** Phase 1b: 레거시 마크다운 폴더/파일 → 멤버·팀·공유 메모리 dry-run 미리보기. 경로 미지정 시 폴더 선택. */
     importPreview: (agentId: string, sourcePath?: string) => Promise<MemoryImportPreviewUi | null>;
     /** Phase 1b: 미리보기 그대로 적용(멱등). */
@@ -7571,27 +7699,23 @@ export interface AgentlasIpc {
     usageSummary: () => Promise<AgentUsageSummaryRow[]>;
     exactBindings: () => Promise<InstalledAgentExactBinding[]>;
     borrowedProfiles: () => Promise<BorrowedAgentProfile[]>;
+    /** Local agents found by scanning the card store, or queued by the engine with `explicit: false`: not installed until the owner imports one. (A queue entry without the mark, from older engines, is installed as before.) */
+    heldLocal: () => Promise<Array<{ ref: string; source: "queue" | "scan"; name: string | null; type: "agent" | "team" | null; enqueuedAt: string | null }>>;
+    importHeldLocal: (ref: string) => Promise<{ imported: boolean }>;
+    /** Per agent: how many visible rooms it sits in and up to 12 of their chat ids (the renderer joins them with the running-chats broadcast). */
+    roomStats: () => Promise<Record<string, { rooms: number; chatIds: string[] }>>;
+    /** The rooms one agent sits in (read when the Agents "rooms" tab is shown). */
+    rooms: (agentId: string) => Promise<Array<{ chatId: string; kind: "solo" | "group"; title: string; projectId: string | null; projectName: string | null; updatedAt: string }>>;
+    /** Says how many memory cleanups of removed agents still wait (read only; the retry runs at app start and after the next removal). */
+    forgetPending: () => Promise<{ pending: number; retried: number }>;
     borrowedOntologyGraph: (profileId: string) => Promise<ExperienceOntologyGraphSnapshot>;
     setBookmark: (agentId: string, bookmarked: boolean) => Promise<{ agentId: string; bookmarkedAt: string | null }>;
   };
-  /** Local Experience ownership and explicit owner-authorized Cloud exchange. */
+  /** Only the owner-authorized way to take an uploaded Experience Chip back from Cloud (Agentlas 2.0 removed the read channels). */
   experience: {
-    listPacks: (input: ExperiencePackListInput) => Promise<ExperiencePackRecord[]>;
-    listCandidates: (packId: string) => Promise<ExperienceCandidateRecord[]>;
-    listOperationalPublicProjections: (packId: string) => Promise<OperationalPublicProjectionRecord[]>;
-    /** Private preference observations only. They are not Hub Taste releases. */
-    listTasteDrafts: (agentId: string) => Promise<LocalTasteDraftRecord[]>;
-    listTasteWorkflows: (agentId: string) => Promise<TasteChipWorkflowRecord[]>;
-    /** Value-free intake funnel counts (blocked/skipped reason codes, redacted admits). */
-    intakeDiagnostics: (agentId: string) => Promise<ExperienceIntakeDiagnostics>;
-    listPromotionReceipts: (packId: string) => Promise<ExperiencePromotionReceipt[]>;
-    listExportIntents: (packId: string) => Promise<ExperienceExportIntentRecord[]>;
     cloudList: (packId: string) => Promise<ExperienceCloudUploadRecord[]>;
     cloudReconcile: (input: ExperienceCloudReconcileInput) => Promise<ExperienceCloudUploadRecord>;
     cloudWithdraw: (input: ExperienceCloudWithdrawInput) => Promise<ExperienceCloudUploadRecord>;
-    ontologySummary: (agentId: string) => Promise<ExperienceOntologySummary>;
-    /** Value-free, bounded relation graph; never includes source summaries, paths, prompts, or secrets. */
-    ontologyGraph: (agentId: string) => Promise<ExperienceOntologyGraphSnapshot>;
   };
   /** 실행/실패 원장 — 긴 원문 없이 runId, 노드, 도구, 오류 메타데이터만 조회한다. */
   runLedger: {
@@ -7719,6 +7843,12 @@ export interface AgentlasIpc {
     ) => Promise<RuntimeRolePoolState>;
     /** 온보딩이 끝날 때 연결한 것으로 오케스트레이터·워커 풀을 채운다. 사람이 고른 역할은 건드리지 않는다. */
     seedFirstRunRoles: (apiChoice?: { backend: RuntimeBackend; model: string }) => Promise<{ seeded: boolean; reason: "owner-chosen" | "nothing-connected" | null; pool: RuntimeSelection[] }>;
+  };
+  /** Agentlas 2.0 an agent's model order (follow the Worker / Orchestrator order, or its own lines). Renderer-only; results carry machine codes. */
+  agentModelOrder?: {
+    get: (agentId: string) => Promise<AgentModelOrderResult>;
+    setFollow: (input: { agentId: string; follow: "worker" | "orchestrator" | "own" }) => Promise<AgentModelOrderResult>;
+    setOwn: (input: { agentId: string; lines: AgentModelLine[] }) => Promise<AgentModelOrderResult>;
   };
   agentRuntime: {
     list: () => Promise<AgentRuntimeOverride[]>;
@@ -8246,6 +8376,24 @@ export interface AgentlasIpc {
     /** Open the durable direct conversation owned by one standing One teammate. */
     /** fresh: a new session — reuses this teammate's still-empty chat instead of stacking another. */
     openOneMember: (input: { agentId: string; title: string; fresh?: boolean }) => Promise<Chat>;
+    /** Agentlas 2.0: a NEW Agent Chat room — one agent = 1:1, two or more = group; optionally inside a project. Never reuses a room. */
+    createAgentChat?: (input: { agentIds: string[]; projectId?: string | null; title?: string }) => Promise<AgentChatReceipt>;
+    /** Agentlas 2.0 a Work session that started without a project joins a project (existing, or made from a picked folder). Applies from its next turn. */
+    attachProject?: (input: ChatProjectAttachInput) => Promise<ChatProjectAttachResult>;
+    /** Desktop repair 6 (B-5): is a join kept for this conversation until its turn ends (`attachProject` with `reserve: true`), and did the last kept join fail (`lastFailure`: the refusal code, read once). */
+    attachProjectPending?: (chatId: string) => Promise<{ pending: boolean; projectId?: string | null; until?: string; keptAcrossRestart?: false; lastFailure?: string }>;
+    /** Agentlas 2.0 what the New chat start screen shows (the current conversation's project, the agents, what Empty project is). */
+    newChatOptions?: (currentChatId?: string | null) => Promise<ChatNewChatOptions>;
+    /** Agentlas 2.0 the owner sends words to another conversation of the same project; they arrive as the owner's own. */
+    sendToConversation?: (input: ChatSendToConversationInput) => Promise<ChatSendToConversationResult>;
+    /** A one-to-one room becomes a group room, or a group room gains participants (newcomers see the room from the moment they join). */
+    addAgentChatParticipants?: (input: { chatId: string; agentIds: string[] }) => Promise<AgentChatReceipt>;
+    removeAgentChatParticipant?: (input: { chatId: string; agentId: string }) => Promise<AgentChatReceipt>;
+    /** The room's lead is its first member: this moves the agent to the front (a Hub agent that is only called is refused). */
+    setAgentChatLead?: (input: { chatId: string; agentId: string }) => Promise<AgentChatReceipt>;
+    /** Whether the room can still take an owner message (a one-to-one room whose agent was deleted is read-only). */
+    // reason "no_members": a group room with no live member (desktop 3 B-12: electron/one/agent-chat-state.ts AgentChatState).
+    agentChatState?: (chatId: string) => Promise<{ readOnly: boolean; reason: "agent_deleted" | "room_dissolved" | "no_members" | null }>;
     rename: (id: string, title: string) => Promise<Chat>;
     /** 보관 — 사이드바에서 숨김. 채팅·메시지는 그대로 유지 */
     archive: (id: string) => Promise<Chat>;
@@ -8541,24 +8689,13 @@ export interface AgentlasIpc {
     concurrencyInfo: () => Promise<AgentConcurrencyInfo>;
     setConcurrency: (value: number) => Promise<AgentConcurrencyInfo>;
   };
-  /** One/Work Alive (AGI toggle). Main owns the lives; see shared/alive.ts. */
-  alive: {
-    resumeUncertainWake: (input: import("./alive").AliveResumeUncertainWakeInput) => Promise<import("./alive").AliveState>;
-    getState: (input: import("./alive").AliveGetStateInput) => Promise<import("./alive").AliveState>;
-    /** Throws `[agentlas:code=alive-goal-required]` when the chat has no Goal yet. */
-    setEnabled: (input: import("./alive").AliveSetEnabledInput) => Promise<import("./alive").AliveState>;
-    setTokenLimit: (input: import("./alive").AliveSetTokenLimitInput) => Promise<import("./alive").AliveState>;
-  };
-  /** AGI goal manager: owner-editable token limits (D1) and defect reports (D5, sent only on the owner's press). */
+  /** Defect reports (D5, sent only on the owner's press). The namespace and its agi:* channels keep their names (a renderer and a preload of the same build). */
   agi: {
-    getTokenLimits: () => Promise<import("./agi").AgiTokenLimitsView>;
-    setTokenLimits: (input: { attemptTokenLimit?: number; dailyGoalTokenLimit?: number }) => Promise<import("./agi").AgiTokenLimitsView>;
-    defectsForChat: (chatId: string) => Promise<import("./agi").AgiDefectChip[]>;
     /** Builds and stores the exact redacted payload; sends nothing. */
-    bugReportPreview: (input: import("./agi").AgiBugReportDraftInput) => Promise<import("./agi").AgiBugReportPreview>;
+    bugReportPreview: (input: import("./defect-report").DefectReportDraftInput) => Promise<import("./defect-report").DefectReportPreview>;
     /** The owner pressed Send on this previewed draft. Queued offline and retried with the same id. */
-    bugReportSend: (input: { clientReportId: string }) => Promise<import("./agi").AgiBugReportRow>;
-    bugReportList: () => Promise<import("./agi").AgiBugReportRow[]>;
+    bugReportSend: (input: { clientReportId: string }) => Promise<import("./defect-report").DefectReportRow>;
+    bugReportList: () => Promise<import("./defect-report").DefectReportRow[]>;
   };
   /** Goal panel (right-panel "목표" tab): ledger read model and the owner's typed edits (shared/goal-panel.ts). */
   goalPanel: {
@@ -9172,6 +9309,37 @@ export interface AgentlasUpdaterEvents {
 }
 
 /**
+ * An answered or closed approval card, as the conversation's one quiet line reads it (Agentlas 2.0 AL). Every value comes from the
+ * durable ledger row (one_supervisor_tool_approvals). The device (`device`) and the automatic approval that made no card (`auto`) are written
+ * there since BB-1a; a row that does not say them draws neither.
+ */
+export interface SettledToolApproval {
+  id: string;
+  chatId: string;
+  tool: string;
+  /** The redacted target the card showed (command line or path). */
+  detail?: string;
+  /** The card's kind: money | delete | send for the approval rule's cards (execute | edit | network | other otherwise). */
+  capability?: string;
+  agentId?: string;
+  requestedAt: string;
+  outcome: "approved" | "declined" | "expired";
+  /** The owner's answer; absent when the card expired unanswered. */
+  choice?: ToolApprovalDecision;
+  decidedAt: string;
+  /**
+   * Which of the owner's devices answered the card: this desktop's screen or the phone. Absent for an expired card, an automatic approval, an answer given through a path that does not say
+   * (the personal agent relaying the owner's message, the background service's own science switch), and every row written before the ledger kept it (Agentlas 2.0 BB-1a). Never guessed.
+   */
+  device?: "desktop" | "phone";
+  /**
+   * Set when the call went through with no card because a saved "always allow" or the run's full access covered it, or the run had nobody to ask (`unattended`, write mode; kinds only: delete, send; a payment is never passed without a card).
+   * Such a row is a record, not an answer: `choice` is "allow_once" and `device` is absent.
+   */
+  auto?: "always_allow" | "full_access" | "unattended";
+}
+
+/**
  * 도구 승인 — 런타임이 제각각 말하는 "승인"을 화면이 한 모양으로 받는다.
  *
  * `mode` 가 이 계약의 중심이다(electron/runtime/tool-approval.ts 주석 참고):
@@ -9192,6 +9360,8 @@ export interface ToolApprovalRequestEvent {
   /** 실제로 무엇을 하려 했는가 — 명령줄이나 대상 경로. */
   detail?: string;
   cwd?: string;
+  /** Main-computed (runtime/session-cwd.ts isAppWorkFolder): `cwd` is the app's own work folder, not one the owner chose. The card leaves the Folder line out. */
+  cwdIsAppFolder?: true;
   mode: "live" | "post-denial";
   deniedBy?: "runtime-headless" | "sandbox";
   requestedAt: string;
@@ -9388,4 +9558,60 @@ export function isUnfilledQuestionTemplate(input: {
   // 짧은 이름만 안 채운 것은 막지 않는다 — 질문과 선택지가 진짜면 답할 수 있다.
   if (header === "short label" && question === "" ) return true;
   return false;
+}
+
+/** The answer of oneHome.status (Agentlas 2.0 O-M3a). `pointer` is the server's view as read last (memory only); `state` is always "legacy" in O-M3a. */
+export interface OneHomeStatus {
+  available: boolean;
+  state: "legacy" | "home" | "sealed" | "away";
+  hostId: string | null;
+  kid: string | null;
+  pointer: {
+    home: { kind: "server" } | { kind: "desktop"; hostId: string; label?: string };
+    epoch: number;
+    homeTrust: "confirmed" | "unconfirmed";
+    claims: Array<Record<string, unknown>>;
+    pendingDevices: Array<Record<string, unknown>>;
+    devices: Array<Record<string, unknown>>;
+  } | null;
+  readAt: number | null;
+  phones: Array<{
+    deviceId: string; name: string; pairedVia: string | null; vouch: "eligible" | "owner_press_needed" | "not_eligible";
+    /** The phone's key id and whether the server has a line for it. The key material and the confirmation number are not given to this window. */
+    kid?: string; keyRegistered?: boolean;
+    /** True when the connected desktop of now vouched for this phone's key (can work on the desktop); the window shows the two lists by it. Absent from an older Main (then `vouch` decides). */
+    desktopWork?: boolean;
+    /** When this desktop recorded the QR connection (ms), or null. */
+    pairedAt?: number | null;
+  }>;
+  /** The server's clock minus this computer's (ms), 0 when they agree. Absent from an older Main. */
+  clockOffsetMs?: number;
+  screenControl: { active: boolean; via?: string };
+  pendingReauth: { actionId: string; kind: string } | null;
+  /** Claims against a living home that this computer refused (claim/reject). */
+  blockedClaims: Array<{ claimId: string; kind: string }>;
+  /** the owner's own successful [Revert] or [This wasn't me] (memory only, the later answer replaces the earlier; `accountUrl` = this deployment's web account page). Absent from an older Main. */
+  ownerAnswer?: { id: number; kind: "restored" | "declined"; accountUrl?: string } | null;
+  /** The mirror's own numbers (a count of things made by a place that is not trusted that wait for the owner; never a word of them). Absent from an older Main. */
+  mirror?: { stale: boolean; behindSince: number | null; holding: string | null; waiting: number };
+  /** The review window's tally (counts and times only) and whether the last read of the list could not reach the server. Absent from an older Main. */
+  waitingReview?: { result: { at: number; accepted: number; declined: number; newer: number; cut: number } | null; failed: "server_unreachable" | null };
+  /** O-M3b: the move in progress as steps, counts and codes only (no id, key or number), the last finished one, and the server's move as the owner window may see it. */
+  move: { role: "receiver" | "sender"; from: "server" | "desktop"; step: string; startedAt: number; waiting?: string; counts?: Record<string, number>; blankAsk?: { count: number }; approvedBy?: "owner" | "phone" } | null;
+  lastMove: { at: number; role: "receiver" | "sender"; from: "server" | "desktop"; outcome: string; code?: string; counts?: Record<string, number> } | null;
+  /** `profileContext` (F-9): the owner-written text of the other computer, asked about like a name; applied only by the answer `incoming`. */
+  profileQuestion: { here: { displayName: string; avatarIcon: string; profileContext?: string }; incoming: { displayName?: string; avatarIcon?: string; profileContext?: string } } | null;
+  homeLabel: string | null;
+  epoch: number | null;
+  pointerMove: { phase?: string; from?: unknown; to: { hostId?: string; label?: string } | null; startedAt?: number; expiresAt?: number; expired: boolean; approved: boolean } | null;
+  /**
+   * O-M4b leftover (null when there is nothing to say). Sender (`away`): state none|empty|packed|uploaded|merged, `waiting` (a code), `ask` (the one question), `cannotSendYet`, counts.
+   * Receiver (`home`): `requests` (records from computers it does not know: computer name = untrusted screen value, bytes), `working`, `done` (counts), `origins` (computers whose lines were merged, for "forget everything from this computer").
+   */
+  leftover: { sender: Record<string, unknown> | null; receiver: Record<string, unknown> | null } | null;
+  /**
+   * O-M4b: what an `away` computer shows (null on any other state). `homeLabel` is untrusted text from another computer: a screen value only, never a prompt or a log line.
+   * `beforeMoveChatId` = the conversation this computer keeps read-only. `phoneNotice` is a fixed code for the old phone's bubble (no name).
+   */
+  away: { homeLabel: string | null; homeTrust: "confirmed" | "unconfirmed" | null; homeKind: "server" | "desktop" | null; mode: string | null; beforeMoveChatId: string | null; phoneNotice: "home_moved" } | null;
 }

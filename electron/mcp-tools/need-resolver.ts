@@ -171,6 +171,15 @@ function renderMcpRuntimeCapabilities(capabilities?: McpRuntimeCapabilities): st
 const MCP_NEED_DEFAULT_TIMEOUT_MS = 15_000;
 
 /**
+ * The selection runs before the turn's model starts, so it runs at low effort whatever the turn carries (judgment.ts
+ * callJudgmentModelDetailed `effort`; the judge's model, backend and account stay the turn's). Measured on
+ * the real CLIs through this function, 14 labeled tasks each: codex gpt-6.1-sol and claude-code sonnet chose the same
+ * tools at "low" as at the turn's "high" on every task; on a production-sized request (60+ entries, a Goal contract)
+ * codex took 18.7 s on average at xhigh, 5.7 s at high and 3.4-4.2 s at low, with the same choices.
+ */
+export const MCP_NEED_JUDGMENT_EFFORT = "low";
+
+/**
  * full: the whole shelf in one selection (hosted judges: subscription CLIs, BYOK, Agentlas serving — unchanged).
  * measured-local: a judge whose competence comes from a measurement of that exact local model (judgment-competence.ts
  * status measured_pass). Same judgment text and order; a meaning shortlist of the shelf and a decoder-enforced answer shape.
@@ -346,6 +355,7 @@ export async function resolveMcpNeeds(input: {
     guidance: MCP_NEED_JUDGMENT_GUIDANCE,
     ...(measuredLocal ? { outputSchema: mcpNeedSubsetOutputSchema(offered.map((candidate) => candidate.id)) } : {}),
     maxInputChars: null,
+    effort: MCP_NEED_JUDGMENT_EFFORT,
     signal: input.signal,
     ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
   }));

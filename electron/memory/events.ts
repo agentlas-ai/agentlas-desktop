@@ -12,6 +12,7 @@ import { didYouMean, invalidValueMessage } from "../../shared/did-you-mean";
 import { widenOverEnclosingHtmlComment } from "../../shared/agent-control-blocks";
 import type { RequestContext } from "./store";
 import type { MemoryEmitterStatus } from "./tickets";
+import { coerceOriginClass, type Certainty, type OriginClass } from "./origin-class";
 
 export interface RawMemoryEvent {
   memory_kind: MemoryKind;
@@ -25,6 +26,14 @@ export interface RawMemoryEvent {
   /** Exact recalled block key; the Curator resolves it under its final owner. */
   supersedes?: string;
   request_context?: RequestContext;
+  /** an origin the model offered; the host only ever lowers its own value to it (origin-class.ts). Unknown words are ignored. */
+  origin_class?: OriginClass;
+  /** K2b' (host-only: `normalize` never copies these two, so a model cannot set them): the event is a memory_ticket rewrite or condense that names its line (`supersedes`), written without the similarity test. */
+  explicit_replace?: boolean;
+  /** K2b' (host-only): the kind a Personal ticket carried before the computer folded it into fact/preference (ruleset ticket.fold). */
+  ticket_kind?: "identity" | "boundary";
+  /** K2b' (host-only): the two columns the ticket receiver decided; written as they are. */
+  ticket_origin?: { originClass: OriginClass; certainty: Certainty };
 }
 
 export interface ParsedMemory {
@@ -103,7 +112,8 @@ function normalize(raw: unknown): RawMemoryEvent | null {
   const evidence = [...new Set([o.evidence_refs, o.evidence].flatMap((values) =>
     Array.isArray(values) ? values.slice(0, 20).flatMap((value) => {
       const ref = coerceString(value, 500);
-      return ref ? [ref] : [];
+      // Audit 55 D2: `supersedes:<id>` is written by the host alone (an owner edit, dreaming); a citation a model hands in never names a line for a forget to follow.
+      return ref && !ref.startsWith("supersedes:") ? [ref] : [];
     }) : []))].slice(0, 20);
   // A malformed explicit replacement cannot fall through to inferred replacement.
   const supersedes = o.supersedes === undefined ? undefined : coerceString(o.supersedes, 32);
@@ -121,41 +131,9 @@ function normalize(raw: unknown): RawMemoryEvent | null {
   if (native && native !== content) event.content_native = native;
   const requestContext = coerceRequestContext(o.request_context);
   if (requestContext) event.request_context = requestContext;
+  const claimed = coerceOriginClass(o.origin_class);
+  if (claimed) event.origin_class = claimed;
   return event;
-}
-
-/**
- * The `memory_note` tool's counterpart of one parsed envelope candidate (agentlas-turn). The tool schema already
- * constrains the enums; this re-checks them strictly (the text parser coerces, a typed call must not) and then runs
- * the very same normalize() the envelope path runs, so a tool note and an equivalent block yield the same event.
- */
-export function memoryNoteToEvent(args: unknown): { ok: true; event: RawMemoryEvent } | { ok: false; error: string } {
-  if (!args || typeof args !== "object" || Array.isArray(args)) return { ok: false, error: "memory_note_invalid: arguments must be an object" };
-  const o = args as Record<string, unknown>;
-  const allowed = ["content", "content_native", "memory_kind", "suggested_scope", "confidence", "evidence", "supersedes", "request_context"];
-  const unknown = Object.keys(o).find((key) => !allowed.includes(key));
-  if (unknown) return { ok: false, error: `memory_note_unknown_field: ${unknown}.${didYouMean(unknown, allowed)}` };
-  if (typeof o.content !== "string" || !o.content.trim()) return { ok: false, error: "memory_note_invalid: content is required" };
-  if (!MEMORY_KINDS.includes(o.memory_kind as MemoryKind)) return { ok: false, error: `memory_note_invalid: ${invalidValueMessage("memory_kind", o.memory_kind, MEMORY_KINDS)}` };
-  if (o.suggested_scope === "agent_team" || !MEMORY_SCOPES.includes(o.suggested_scope as MemoryScope)) {
-    return { ok: false, error: `memory_note_invalid: ${invalidValueMessage("suggested_scope", o.suggested_scope, MEMORY_SCOPES.filter((scope) => scope !== "agent_team"))}` };
-  }
-  if (o.confidence !== undefined && o.confidence !== "high" && o.confidence !== "medium" && o.confidence !== "low") return { ok: false, error: "memory_note_invalid: confidence must be high, medium or low" };
-  if (o.evidence !== undefined && !Array.isArray(o.evidence)) return { ok: false, error: "memory_note_invalid: evidence must be an array of strings" };
-  if (o.supersedes !== undefined && (typeof o.supersedes !== "string" || !/^h:[0-9a-f]{16}$/.test(o.supersedes))) {
-    return { ok: false, error: "memory_note_invalid: supersedes must be an observed h:16hex key; never invent one" };
-  }
-  const event = normalize({
-    memory_kind: o.memory_kind,
-    content: o.content,
-    suggested_scope: o.suggested_scope,
-    ...(o.confidence !== undefined ? { confidence: o.confidence } : {}),
-    evidence_refs: o.evidence,
-    ...(o.content_native !== undefined ? { content_native: o.content_native } : {}),
-    ...(o.supersedes !== undefined ? { supersedes: o.supersedes } : {}),
-    ...(o.request_context !== undefined ? { request_context: o.request_context } : {}),
-  });
-  return event ? { ok: true, event } : { ok: false, error: "memory_note_invalid: note was empty after normalization" };
 }
 
 /**

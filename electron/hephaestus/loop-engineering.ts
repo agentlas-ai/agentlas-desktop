@@ -1,12 +1,10 @@
 // Stormbreaker Loop prompt contract.
 //
-// This is intentionally runtime-agnostic. The native Hephaestus supervisor emits
-// visible scope/route/final-gate events. Host-enforced repair is bounded to
-// verification failures Agentlas can actually detect, such as invalid structured
-// surface manifests. Everything else must be reported as verified, unverified,
-// or blocked instead of being presented as autonomous completion.
+// This is intentionally runtime-agnostic: the continuation marker, the pass limits
+// and the Goal completion protocol. The host writes no scope/route/final-gate rows
+// (the supervisor that wrote them is gone); a turn is reported as verified,
+// unverified, or blocked by what actually ran, never by a host status row.
 
-export const STORMBREAKER_MAX_REPAIR_PASSES = 2;
 /*
  * How many continuation passes a plain request may take.
  *
@@ -58,6 +56,26 @@ export function idleGoalPassStep(input: {
     return { idlePasses, yieldNow: idlePasses >= (input.planFinished ? 1 : GOAL_IDLE_PASS_LIMIT) };
   }
   return { idlePasses: idle ? input.idlePasses : 0, yieldNow: false };
+}
+/**
+ * How many passes one invocation may run that only the Goal ledger kept alive (the model asked for no continuation: no continue
+ * marker, no question, no wait, no completion claim). The idle rule above counts passes that did nothing; this one counts passes
+ * whatever they did, so a request the host admitted as a Goal and the model answered in one reply cannot drive a long run of
+ * "the goal is not met yet" passes (desktop trial "remember this" became one invocation of 9 main answers,
+ * 13 model calls, 150 s, about 1.65 M input tokens). After the limit the invocation ends at the pass boundary like the wall-clock
+ * bound does (no runtime turn is cut, the pass that finished is already accounted); the open Goal is continued by Main from its
+ * ledger, spaced by the ordinary follow-up rule. A pass the model itself asked for (its marker) never counts.
+ */
+export const GOAL_LEDGER_DRIVEN_PASS_LIMIT = 4;
+export function ledgerDrivenPassStep(input: {
+  continuousMode: boolean;
+  goalDrivenPass: boolean;
+  passShouldContinue: boolean;
+  ledgerDrivenPasses: number;
+}): { ledgerDrivenPasses: number; yieldNow: boolean } {
+  if (!(input.continuousMode && input.goalDrivenPass && input.passShouldContinue)) return { ledgerDrivenPasses: input.ledgerDrivenPasses, yieldNow: false };
+  const ledgerDrivenPasses = input.ledgerDrivenPasses + 1;
+  return { ledgerDrivenPasses, yieldNow: ledgerDrivenPasses > GOAL_LEDGER_DRIVEN_PASS_LIMIT };
 }
 export const STORMBREAKER_CONTINUE_MARKER = "<<stormbreaker-continue>>";
 export const STORMBREAKER_LONG_RUN_MARKER = "<<stormbreaker-long-run>>";

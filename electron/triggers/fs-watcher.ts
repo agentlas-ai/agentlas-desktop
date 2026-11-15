@@ -6,6 +6,7 @@
 // 매니저가 경로→구독자 맵을 들고, fs.watch 콜백을 debounce해 구독자에게 팬아웃한다.
 import { existsSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import path from "node:path";
+import { createWatchGuard } from "../fs-watch-guard";
 
 export type FsChangeKind = "create" | "modify" | "delete";
 
@@ -144,7 +145,9 @@ function ensureWatcher(watchedPath: string, entry: PathEntry): void {
   }
   entry.watcher = watcher;
   entry.connectedAt = Date.now();
+  const guard = createWatchGuard({ root: watchedPath, close: () => closeWatcher(entry), onGone: () => recordWatchFailure(watchedPath, entry) });
   watcher.on("change", (eventType, filename) => {
+    if (guard.event()) return;
     const changedPath = typeof filename === "string" ? filename : filename ? filename.toString() : null;
     const key = changedPath && entry.rootIsDirectory ? changedPath : "";
     if (isIgnoredFsChange(key)) return;

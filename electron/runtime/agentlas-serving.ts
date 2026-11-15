@@ -54,7 +54,8 @@ import { tStatus } from "./status-i18n";
 import { createToolLoopProgress, createToolLoopUsage, prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { fetchWithReconnect } from "./reconnecting-fetch";
-import { serverFailure, serverFailureCodeForStatus, serverFailureResendDelayMs, SERVER_FAILURE_CONSECUTIVE_RESENDS, waitForServerResend } from "./provider-overload";
+import { apiSilenceError } from "./api-silence-fetch";
+import { serverFailure, serverFailureCodeForStatus, serverFailureResendDelayMs, serverResendHintNote, SERVER_FAILURE_CONSECUTIVE_RESENDS, waitForServerResend } from "./provider-overload";
 
 const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
 
@@ -461,9 +462,9 @@ async function postServingChecked(body: string, cookie: string, req: RunnerReque
     const delay = response.status === 503 && failure.providerCode === "serving_unavailable" && resends < SERVER_FAILURE_CONSECUTIVE_RESENDS && !req.signal?.aborted
       ? serverFailureResendDelayMs(response.headers.get("retry-after"), resends) : null;
     if (delay === null) return { response, failure };
-    events.onStatus(req.locale === "ko"
+    events.onStatus((req.locale === "ko"
       ? `Agentlas 서버가 잠시 요청을 받지 못해 같은 요청을 다시 보냅니다(${resends + 1}/${SERVER_FAILURE_CONSECUTIVE_RESENDS})…`
-      : `The Agentlas server could not take the request for a moment; sending the same request again (${resends + 1}/${SERVER_FAILURE_CONSECUTIVE_RESENDS})…`);
+      : `The Agentlas server could not take the request for a moment; sending the same request again (${resends + 1}/${SERVER_FAILURE_CONSECUTIVE_RESENDS})…`) + serverResendHintNote(req.locale, response.headers.get("retry-after"), delay));
     await waitForServerResend(delay, req.signal);
     if (req.signal?.aborted) return { response, failure };
   }
@@ -625,7 +626,9 @@ async function runAgentlasServingWithTools(
             failure: streamFailure(frame.data, req.locale), ...usage.settle() });
         }
       }
-    } catch {
+    } catch (error) {
+      // The stream went silent for the window: the CLIs' closed word (api-silence-fetch.ts), not a reconciliation failure.
+      if (apiSilenceError(error)) throw error;
       return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...usage.settle() });
     }
     if (!done) return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...usage.settle() });
@@ -700,7 +703,8 @@ async function runAgentlasServingWithTools(
       const wireEntry = { id: call.id, text: result.content, isError: result.isError };
       results.push(wireEntry);
       const toolImages = result.isError ? [] : servingToolImages(result.visionMessage);
-      if (toolImages.length === 0) effectDeliveries.push({result, projection: {...wireEntry}, wireEntry});
+      // The result entry is what the effect ledger acknowledges; the capture's image travels beside it, so the entry reaching the wire settles the delivery.
+      effectDeliveries.push({result, projection: {...wireEntry}, wireEntry});
       // A harness capture is an observation whose path is in the result: it is left out rather than end the turn on capacity.
       if (!result.visionFromHarness || images.length + toolImages.length + (req.images?.length ?? 0) <= 8) images.push(...toolImages);
       if (images.length + (req.images?.length ?? 0) > 8) throw new Error("serving_tool_image_capacity_exceeded");
@@ -803,7 +807,9 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
             failure: streamFailure(frame.data, req.locale), ...(joined ? usage.settle() : {}) });
         }
       }
-    } catch {
+    } catch (error) {
+      // The stream went silent for the window: the CLIs' closed word (api-silence-fetch.ts), not a reconciliation failure.
+      if (apiSilenceError(error)) throw error;
       return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...(joined ? usage.settle() : {}) });
     }
     if (!done) return assertCurrentHistoryRunnerResult({ text: joined, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...(joined ? usage.settle() : {}) });

@@ -26,25 +26,67 @@ async function timedFetch(cookie: string, url: string, init: RequestInit = {}): 
   return fetchWithHubSession(cookie, url, init, TIMEOUT_MS);
 }
 
-/** GET /api/billing/credits — AI 사용 잔액 조회. 미로그인은 authenticated:false. */
-export async function getBillingCredits(): Promise<HubCreditBalance> {
-  const cookie = getSessionCookieHeader();
-  if (!cookie) { creditObservation = null; return { authenticated: false }; }
+/** Background readers (phone bridge, first-run, wait paths) share a read this young. */
+const CREDIT_SHARE_MAX_AGE_MS = 10_000;
+/** One entry only (the current session); a different session cookie replaces it. */
+let creditShared: { cookie: string; at: number; balance: HubCreditBalance } | null = null;
+let creditFlight: { cookie: string; promise: Promise<HubCreditBalance> } | null = null;
+
+export interface BillingCreditsReadOptions {
+  /** Skip the shared read and the running read: used right after a provider quota rejection. */
+  force?: boolean;
+  /** Accept a shared read at most this old (default 10 s). */
+  maxAgeMs?: number;
+}
+
+/** Test seam: forget the shared read (sign-out already does this through the cookie key). */
+export function resetBillingCreditsShareForTests(): void { creditShared = null; creditFlight = null; creditObservation = null; }
+
+async function fetchBillingCredits(cookie: string): Promise<HubCreditBalance> {
   creditObservation = null;
   try {
     const res = await timedFetch(cookie, `${webBaseUrl()}/api/billing/credits`);
     // 401 = 세션 무효 — 미인증으로 강등. 세션 폐기는 fetchWithHubSession이 이미 처리했으므로
     // 계정 칩도 같은 틱에 로그아웃 상태로 내려간다.
-    if (res.status === 401) return { authenticated: false };
+    if (res.status === 401) { creditShared = null; return { authenticated: false }; }
     if (!res.ok) return { authenticated: true, error: `http_${res.status}` };
     const balance = (await res.json()) as HubCreditBalance;
     // The server may still include a historic creator wallet. Never project it
     // into current Desktop or paired Mobile clients after settlement closure.
     delete balance.earningsCredits;
-    creditObservation = { cookie, at: Date.now(), balance: { ...balance } };
+    // Only a read for the session that is still current is kept; an error answer is never kept.
+    if (cookie === getSessionCookieHeader()) {
+      const at = Date.now();
+      creditObservation = { cookie, at, balance: { ...balance } };
+      creditShared = { cookie, at, balance: { ...balance } };
+    }
     return balance;
   } catch {
     return { authenticated: true, error: "network" };
+  }
+}
+
+/** GET /api/billing/credits — AI 사용 잔액 조회. 미로그인은 authenticated:false.
+ * Concurrent readers of the same session share one request and a read younger than
+ * `maxAgeMs` (10 s) is reused; `force` always asks the server. */
+export async function getBillingCredits(options: BillingCreditsReadOptions = {}): Promise<HubCreditBalance> {
+  const cookie = getSessionCookieHeader();
+  if (!cookie) { creditObservation = null; creditShared = null; creditFlight = null; return { authenticated: false }; }
+  if (!options.force) {
+    const maxAge = typeof options.maxAgeMs === "number" && options.maxAgeMs >= 0 ? options.maxAgeMs : CREDIT_SHARE_MAX_AGE_MS;
+    const shared = creditShared;
+    const now = Date.now();
+    if (shared && shared.cookie === cookie && now >= shared.at && now - shared.at <= maxAge) return { ...shared.balance };
+    const running = creditFlight;
+    if (running && running.cookie === cookie) return { ...(await running.promise) };
+  }
+  const promise = fetchBillingCredits(cookie);
+  const entry = { cookie, promise };
+  if (!options.force || !creditFlight || creditFlight.cookie !== cookie) creditFlight = entry;
+  try {
+    return await promise;
+  } finally {
+    if (creditFlight === entry) creditFlight = null;
   }
 }
 
@@ -110,16 +152,6 @@ export async function getBillingCheckoutReadiness(input: { plan?: unknown; cycle
   } finally {
     clearTimeout(timer);
   }
-}
-
-export type AliveAgentAccess = "allowed" | "alive-sign-in-required" | "alive-plan-required" | "alive-entitlement-unavailable";
-
-/** Fresh Main-side check for both enabling a life and admitting its next wake. */
-export async function checkAliveAgentAccess(): Promise<AliveAgentAccess> {
-  const balance = await getBillingCredits();
-  if (!balance.authenticated) return "alive-sign-in-required";
-  if (balance.error || typeof balance.entitlements?.aliveAgent !== "boolean") return "alive-entitlement-unavailable";
-  return balance.entitlements.aliveAgent ? "allowed" : "alive-plan-required";
 }
 
 /** A short-lived, single-use result from the server, never supplied by renderer input. */

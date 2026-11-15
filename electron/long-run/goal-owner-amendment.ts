@@ -440,6 +440,38 @@ export async function retryUnavailableOwnerGoalReviews(goalId: string, opts: {
   return outcomes;
 }
 
+/**
+ * When the next re-ask of a message the judge could not answer is owed (epoch ms), or null: the earliest of last-attempt + the backoff
+ * step of its attempt count. A message past the last step waits for a signal instead (the judge pool changed: runtime change on the
+ * bus), so it owes no time. The harness' one timer aims at this (harness/due-timer.ts); the same rows the sweep below reads, derived
+ * on demand and stored nowhere. Bounded: the first rows of the same query.
+ */
+export function nextUnavailableOwnerReviewAt(): number | null {
+  const rows = getDb().prepare(`SELECT DISTINCT l.goal_id AS goalId FROM long_runs l
+    WHERE l.status NOT IN ('completed','cancelled','failed') AND l.surface IN ('one','work')
+      AND l.execution_location = 'desktop-local' AND l.host_owner_kind = 'desktop'
+      AND EXISTS (SELECT 1 FROM long_run_events e WHERE e.run_id = l.id AND e.kind = ?
+        AND json_extract(e.payload_json, '$.kind') = 'pending'
+        AND json_extract(e.payload_json, '$.reasonCode') LIKE ?)
+    LIMIT 50`).all(OWNER_EXECUTION_DIRECTIVE_EVENT_KIND, `${GOAL_DIRECTIVE_JUDGE_UNAVAILABLE_PREFIX}%`) as Array<{ goalId: string }>;
+  let soonest: number | null = null;
+  for (const { goalId } of rows) {
+    let sources: ReturnType<typeof unavailableDirectiveReviews>;
+    try { sources = unavailableDirectiveReviews(goalId); } catch { continue; }
+    for (const source of sources) {
+      const prior = getDb().prepare(`SELECT COUNT(*) AS attempts, MAX(occurred_at) AS lastAt FROM long_run_events
+        WHERE run_id = ? AND kind = ? AND json_extract(payload_json, '$.sourceMessageId') = ?`)
+        .get(source.runId, OWNER_GOAL_REVIEW_RETRY_KIND, source.sourceMessageId) as { attempts: number; lastAt: string | null };
+      const attempts = Number(prior.attempts) || 0;
+      if (attempts >= REVIEW_RETRY_BACKOFF_MS.length) continue;
+      const since = Math.max(Date.parse(source.reviewedAt) || 0, Date.parse(prior.lastAt ?? "") || 0);
+      const at = since + REVIEW_RETRY_BACKOFF_MS[attempts];
+      if (soonest === null || at < soonest) soonest = at;
+    }
+  }
+  return soonest;
+}
+
 /** Periodic half (blocked-goal-sweep): ask again for every live Goal that holds a message the judge could not answer. */
 export function sweepUnavailableOwnerGoalReviews(): void {
   const rows = getDb().prepare(`SELECT DISTINCT l.goal_id AS goalId FROM long_runs l

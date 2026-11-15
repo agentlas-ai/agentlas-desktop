@@ -339,7 +339,7 @@ function ProjectPage() {
     if (!background) setLoading(true);
     setRecoveryPending(false);
     if (!id) {
-      navigate("/dashboard", "replace");
+      navigate("/workspace", "replace");
       setLoading(false);
       return;
     }
@@ -358,7 +358,7 @@ function ProjectPage() {
         api.team.list(),
       ]);
       if (!p) {
-        navigate("/dashboard", "replace");
+        navigate("/workspace", "replace");
         return;
       }
       const userFacingPool = (Array.isArray(p.agentPool) ? p.agentPool : [])
@@ -875,7 +875,7 @@ function ProjectPage() {
     if (!await confirmPopup(t("project.confirm_delete", { name: project.name }), { locale, tone: "danger", confirmLabel: locale === "ko" ? "삭제" : "Delete" })) return;
     try {
       await api.projects.remove(project.id);
-      navigate("/dashboard", "replace");
+      navigate("/workspace", "replace");
     } catch {
       setRecoveryPending(true);
     }
@@ -888,17 +888,17 @@ function ProjectPage() {
           <button
             type="button"
             className="project-detail-back titlebar-nodrag"
-            onClick={() => navigate("/dashboard")}
-            aria-label={locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard"}
+            onClick={() => navigate("/workspace")}
+            aria-label={locale === "ko" ? "홈으로 돌아가기" : "Back to Home"}
           >
             <IconArrowLeft size={16} />
-            <span>{locale === "ko" ? "대시보드" : "Dashboard"}</span>
+            <span>{locale === "ko" ? "홈" : "Home"}</span>
           </button>
         </header>
         <section style={{ maxWidth: 720, margin: "24px auto", padding: "0 24px" }}>
           {loading
             ? <div style={{ ...pageNotice, display: "grid", gap: 6 }}><span>{locale === "en" ? "Loading project…" : "프로젝트를 불러오는 중입니다…"}</span><LoadingEstimate locale={locale} operationKey="desktop-project-detail" expectedSeconds={[1, 25]} /></div>
-            : <div style={pageNotice} role="alert">{locale === "en" ? "The project could not be loaded. Return to the dashboard and try again." : "프로젝트를 불러오지 못했습니다. 대시보드로 돌아가 다시 시도하세요."}</div>}
+            : <div style={pageNotice} role="alert">{locale === "en" ? "The project could not be loaded. Return Home and try again." : "프로젝트를 불러오지 못했습니다. 홈으로 돌아가 다시 시도하세요."}</div>}
         </section>
       </div>
     );
@@ -931,11 +931,11 @@ function ProjectPage() {
         <button
           type="button"
           className="project-detail-back titlebar-nodrag"
-          onClick={() => navigate("/dashboard")}
-          aria-label={locale === "ko" ? "대시보드로 돌아가기" : "Back to Dashboard"}
+          onClick={() => navigate("/workspace")}
+          aria-label={locale === "ko" ? "홈으로 돌아가기" : "Back to Home"}
         >
           <IconArrowLeft size={16} />
-          <span>{locale === "ko" ? "대시보드" : "Dashboard"}</span>
+          <span>{locale === "ko" ? "홈" : "Home"}</span>
         </button>
         <div style={{ flex: 1 }}>
           <div style={eyebrowStyle}>{t("project.kind")}</div>
@@ -1248,11 +1248,11 @@ function ProjectPage() {
                 style={{ ...eyebrowStyle, flex: 1, minHeight: 32, display: "inline-flex", alignItems: "center", gap: 7, textAlign: "left", color: "var(--ink-soft)" }}
               >
                 {teamTreeOpen || editingTeam ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
-                <span>{locale === "ko" ? "프로젝트 에이전트" : "Project agents"}</span>
+                <span>{locale === "ko" ? "추천 에이전트 (선택)" : "Suggested agents (optional)"}</span>
                 <span style={{ color: "var(--muted-deep)", fontSize: 10, fontWeight: 650 }}>{agentPoolDraft.length}</span>
               </button>
               {!editingTeam ? (
-                <button type="button" onClick={() => openProjectSettings({ mode: "edit", projectId: project.id, section: "agents" })} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
+                <button type="button" onClick={() => { setTeamTreeOpen(true); setEditingTeam(true); }} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 700 }}>
                   {locale === "ko" ? "편집" : "Edit"}
                 </button>
               ) : null}
@@ -1311,7 +1311,7 @@ function ProjectPage() {
               ) : null}
             </div>}
             {editingTeam ? <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button type="button" onClick={() => void saveTeam()} style={raisedButton}>{locale === "ko" ? "도구 저장" : "Save tools"}</button>
+              <button type="button" onClick={() => void saveTeam()} style={raisedButton}>{locale === "ko" ? "저장" : "Save"}</button>
               <button type="button" onClick={() => { setAgentPoolDraft(project.agentPool.filter((member) => isUserFacingProjectPoolMember(member, agents))); setTeamSaveError(""); setEditingTeam(false); }} style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("common.cancel")}</button>
             </div> : null}
             {teamSaveError ? <div role="alert" style={{ marginTop: 10, color: "var(--danger)", fontSize: 12, lineHeight: 1.5 }}>{teamSaveError}</div> : null}
@@ -2324,7 +2324,7 @@ function ProjectAgentRosterLibrary({
                           disabled={!teamAddable}
                           onClick={() => onAddFirm([firm.team])}
                         >
-                          {locale === "ko" ? "팀 도구 추가" : "Add team tool"}
+                          {locale === "ko" ? "구성원 모두 추가" : "Add all members"}
                         </button>
                       </div>
                       {firmOpen && !firm.selfReferential ? <div className="project-roster-children">{firm.members.map(renderCandidate)}</div> : null}
@@ -2333,9 +2333,9 @@ function ProjectAgentRosterLibrary({
                 })}
                 {section.standalone.length > 0 ? (
                   <>
-                    {/* 단일 에이전트는 어느 팀에도 속하지 않는다. 제목 없이 팀 목록
+                    {/* 구성원 묶음에 속하지 않는 에이전트. 제목 없이 묶음 목록
                         바로 뒤에 이어 붙이면 마지막 팀의 구성원으로 읽힌다. */}
-                    <div className="project-roster-standalone-head">{locale === "ko" ? "단일 에이전트" : "Standalone agents"}</div>
+                    <div className="project-roster-standalone-head">{locale === "ko" ? "에이전트" : "Agents"}</div>
                     <div className="project-roster-standalone">{section.standalone.map(renderCandidate)}</div>
                   </>
                 ) : null}

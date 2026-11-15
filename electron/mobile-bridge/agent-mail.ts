@@ -75,6 +75,8 @@ export interface MobileBridgeAgentMailClient {
   agentMailSyncSnapshot?: () => { unread?: { inbox?: number } | null; changeSeq?: number | null } | null;
   /** Ask Main's sync loop to poll now, so Desktop and phone see a phone write at once. */
   agentMailSyncNow?: () => void;
+  /** The phone is reading mail: leave the sync's quiet slowdown (same wake as the owner's own mail screen). */
+  agentMailUserAttention?: () => void;
 }
 
 export interface MobileBridgeAgentMailService {
@@ -480,7 +482,17 @@ export function createMobileBridgeAgentMailService(
     }
   };
 
+  // A phone mail read is the owner looking at mail: the desktop's quiet slowdown ends (defect 2).
+  const attend = () => {
+    try {
+      client.agentMailUserAttention?.();
+    } catch {
+      // A missed nudge only leaves the sync on its own timer.
+    }
+  };
+
   const readStatus = async (): Promise<MobileBridgeMailStatusDto | MobileBridgeMailRefusalDto> => {
+    attend();
     const status = fn("agentMailStatus");
     if (!status) return unavailable("read mail status");
     const result = await status();
@@ -514,6 +526,7 @@ export function createMobileBridgeAgentMailService(
     status: readStatus,
 
     async threads(input) {
+      attend();
       if (input.view === "drafts") {
         const drafts = fn("agentMailDrafts");
         if (!drafts) return unavailable("list drafts");
@@ -556,6 +569,7 @@ export function createMobileBridgeAgentMailService(
     },
 
     async thread(threadId) {
+      attend();
       const read = fn("agentMailThread");
       if (!read) return unavailable("open a mail conversation");
       const result = await read(threadId);

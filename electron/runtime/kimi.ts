@@ -1,4 +1,5 @@
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { memoryDeathCause } from "./child-death";
 import { abortReasonError } from "./abort-reason";
 // Kimi Code CLI runtime — official Moonshot CLI (`@moonshot-ai/kimi-code`).
 // Headless contract: `kimi -p <prompt> --output-format stream-json`.
@@ -8,7 +9,7 @@ import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
-import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, runtimeProtocolUnrecognizedFailure, cliToolSilenceWindowMs, RuntimeTurnUnsettledError, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
 import { attendedTurnStartsFresh, unattendedFreshSessionStatus } from "./unattended-session-turns";
 import { kimiSessionGone } from "./kimi-journal";
@@ -347,6 +348,8 @@ interface KimiProcessResult {
   silentLimitMs?: number;
   /** Stream-json lines of a shape this adapter understands (assistant text/tool_calls, tool result, resume hint). */
   recognizedEvents: number;
+  /** The computer's memory shortage ended the child (a machine fact, runtime/child-death.ts); absent for every other ending. */
+  memoryCause?: RunnerFailure;
 }
 
 /**
@@ -469,7 +472,10 @@ function runKimiProcess(
       stopHeartbeat();
       req.signal?.removeEventListener("abort", onAbort);
       if (buffer.trim()) consume(buffer);
+      // Desktop R part 2 (DD sibling of claude-code, codex and ACP): a child the computer's memory shortage ended (a machine fact, runtime/child-death.ts) is that turn's typed cause; any other ending keeps what it had.
+      const memoryCause = !silence.tripped && !req.signal?.aborted ? memoryDeathCause(child, KIND) : undefined;
       resolve({ code, text: text.trim(), stderr: stderr.trim(), sessionId, recognizedEvents,
+        ...(memoryCause ? { memoryCause } : {}),
         ...(silence.tripped && !req.signal?.aborted ? { silentLimitMs: silence.trippedWith?.limitMs ?? silenceLimitMs } : {}) });
     });
   });
@@ -638,7 +644,7 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
   // uses, source "heuristic"), not as "no completion receipt". Any other stderr stays the standard unfinished-turn cause.
   const spentKind = acpUsageRefusalKind(result.stderr.slice(0, 800));
   return { text: result.text, sessionId: result.sessionId ?? resumeSessionId ?? undefined,
-    ownerControlTerminal: "uncertain", failure: { kind: spentKind ?? "exit", runtime: KIND, source: spentKind ? "heuristic" : "marker",
+    ownerControlTerminal: "uncertain", failure: result.memoryCause ?? { kind: spentKind ?? "exit", runtime: KIND, source: spentKind ? "heuristic" : "marker",
       providerCode: error.code, ...(result.code != null ? { exitCode: result.code } : {}),
       message: `${error.message}${result.stderr ? `\n${result.stderr.slice(0, 500)}` : ""}` } };
 }

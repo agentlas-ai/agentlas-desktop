@@ -294,10 +294,14 @@
 .footerInput::placeholder { color: var(--ask-footer-ink); opacity: 1; }
 .footerInput[data-resting="true"]::placeholder { color: var(--ask-option-title-ink); }
 
+.skip { composes: agentlas-btn from global; }
+.actionSecondary { composes: agentlas-btn from global; }
+.actionPrimary { composes: agentlas-btn from global; }
+
 .skip {
   flex: 0 0 auto;
   height: var(--ask-button-height);
-  padding: 0 12px;
+  padding: 0 max(12px, var(--agentlas-btn-pad-x-sm));
   border: 0;
   border-radius: var(--ask-button-radius);
   background: var(--ask-secondary-bg);
@@ -305,7 +309,6 @@
   font: inherit;
   font-size: var(--ask-button-size);
   font-weight: 500;
-  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -353,16 +356,14 @@
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 8px;
   height: var(--ask-button-height);
-  padding: 0 12px;
+  padding: 0 max(12px, var(--agentlas-btn-pad-x-sm));
   border: 0;
   border-radius: var(--ask-button-radius);
   font: inherit;
   font-size: var(--ask-button-size);
   font-weight: 500;
-  white-space: nowrap;
   cursor: pointer;
 }
 

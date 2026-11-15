@@ -15,6 +15,8 @@
 import { randomUUID } from "node:crypto";
 import type { AskUserRequestEvent } from "../../shared/types";
 import { reportOwnerAsk } from "../owner-ask-alerts";
+import { waitingForPerson } from "../runtime/run-slot-lease";
+import { nativeApprovalSignalChain } from "../runtime/native-approval-provenance";
 
 export interface AskUserOption {
   label: string;
@@ -141,7 +143,7 @@ export function askUser(
     expiresAt: createdAt + ASK_TIMEOUT_MS,
   };
 
-  return new Promise<AskUserOutcome>((resolve) => {
+  const answered = new Promise<AskUserOutcome>((resolve) => {
     let abortListener: (() => void) | null = null;
     const settle = (outcome: AskUserOutcome): void => {
       const entry = pending.get(requestId);
@@ -174,6 +176,9 @@ export function askUser(
       opts.signal.addEventListener("abort", abortListener, { once: true });
     }
   });
+  // N0b: a question a person still has to answer lets the asking turn's run slot go until the answer is in (a question that
+  // was settled at once - no window to draw it in - never held anything up).
+  return pending.has(requestId) ? waitingForPerson(answered, opts.signal && nativeApprovalSignalChain(opts.signal)) : answered;
 }
 
 /** 렌더러가 답을 보냈다. 알 수 없는 id 는 조용히 버린다(이미 만료·취소된 질문). */

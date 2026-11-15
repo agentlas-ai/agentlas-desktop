@@ -1,4 +1,5 @@
 import { projectMobileCanonicalQuestionDecisions } from "./canonical-question";
+import { agentUsability, usabilityEnforced } from "../agents/usability";
 import { isMobileBridgeOneDecisionDto } from "../../shared/mobile-question-decision";
 import { Buffer } from "node:buffer";
 import { listUiInstances } from "../harness/ui-instances";
@@ -6,6 +7,7 @@ import { fitInlineUiTranscriptText } from "../../shared/inline-ui-transcript";
 import { MOBILE_SNAPSHOT_VISUAL_BYTES, mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
 import { withoutArchivedAgents } from "../archive/auto-archive";
 import { isHousekeepingHostNotice, normalizeChatHostNotice } from "../../shared/chat-host-notice";
+import { chatBelongsToOne } from "../../shared/chat-surface";
 import { oneDispatchRoomUpdatedAt } from "../one/dispatch-presentation";
 import { projectOneDecisionOwnerAnswerV4 } from "./one-decision-owner-answer";
 import path from "node:path";
@@ -26,6 +28,8 @@ import {
   getChat,
   getChatWorkingFolder,
   listChatMessages,
+  answerStartIn,
+  storedAnswerStarts,
   isPersonalSupervisorConversation,
   listRecentChats,
 } from "../store/chats";
@@ -294,6 +298,8 @@ export interface MobileBridgeProjectionOptions {
   pendingBrowserApprovals?: readonly MobileBridgeBrowserApprovalDto[];
   /** 실행 전에 사람을 기다리는 런타임 도구 승인(live 만). 없으면 빈 배열로 내려 낡은 카드를 지운다. */
   pendingToolApprovals?: readonly MobileBridgeToolApprovalDto[];
+  /** Cards that closed unanswered in the last two minutes (tool-approval.ts listRecentlyExpiredToolApprovalIds); the key is left out when empty. */
+  expiredToolApprovalIds?: readonly string[];
   /** Chat-bound synchronous runtime questions. */
   pendingUserInputs?: readonly MobileBridgeUserInputDto[];
   /** Explicit client refreshes bypass the shared usage cache, subject to the provider cooldown. */
@@ -592,6 +598,11 @@ function cloudListingForInstalledAgent(
   return undefined;
 }
 
+/** Agentlas 2.0 D6: the `registered` column of a phone row, only while the 2.0 switch is on (off: no column, the phone behaves as it does today). */
+function registeredField(isRegistered: () => boolean): { registered?: boolean } {
+  return usabilityEnforced() ? { registered: isRegistered() } : {};
+}
+
 function agentsDto(
   presentEnvKeys: ReadonlySet<string>,
   cloudListings: readonly import("../../shared/types").MarketplaceListing[],
@@ -655,6 +666,8 @@ function agentsDto(
       requiresSetup: agent.envRequirements.some(
         (requirement) => requirement.required && !presentEnvKeys.has(requirement.key),
       ),
+      // Agentlas 2.0 D6: registered here = usable by agents/usability.ts (character, row, folder). Sent only with the 2.0 switch on; an older phone ignores it.
+      ...registeredField(() => agentUsability({ agentId: agent.id }).usable),
       ...(binding
         ? {
             agentDefinitionId: binding.agentDefinitionId,
@@ -694,6 +707,7 @@ function agentsDto(
       kind: listing.entityKind === "team" ? "team" : "agent",
       visibility: listing.visibility ?? "visible",
       requiresSetup: false,
+      ...registeredField(() => false), // a Cloud shelf row that is not installed here is not registered
       projectSelectable: Boolean(definitionId && releaseId),
       ...(definitionId && releaseId
         ? { agentDefinitionId: definitionId, agentReleaseId: releaseId }
@@ -890,7 +904,7 @@ function projectsDto(): MobileBridgeProjectDto[] {
 export function isMobileBridgeOneChat(
   chat: Pick<Chat, "id" | "originSurface">,
 ): boolean {
-  return chat.originSurface === "one" || isOneInvocationChat(chat.id);
+  return chatBelongsToOne(chat, chat.originSurface !== "one" && isOneInvocationChat(chat.id));
 }
 
 /** DESKTOP_MOBILE_BRIDGE: One canonical secret-free chat DTO for snapshots and RPC replies. */
@@ -992,6 +1006,11 @@ export function projectMobileBridgeHistory(
         selected.filter((message) => message.role === "user").map((message) => message.id),
       )
     : new Map<string, string>();
+  // Where each saved answer starts (store/chats.ts recordAnswerStart): the sentences before the run's last tool call stay on the desktop
+  // and the phone gets the answer, which it draws as one block of text. One read per page; a message with no record is sent whole.
+  const answerStarts = chatId
+    ? storedAnswerStarts(chatId, selected.filter((message) => message.role === "assistant").map((message) => message.id))
+    : new Map<string, never>();
   // Newest messages are authoritative when a byte budget forces a shorter page.
   for (let index = selected.length - 1; index >= 0; index -= 1) {
     const message = selected[index];
@@ -1087,6 +1106,19 @@ export function projectMobileBridgeHistory(
         ) : undefined;
     // A card that does not fit what is left of this page waits for the next one whole: the older page reads it first, never as a bare label.
     if (typedUnchanged && inlineText !== inlineMessageText && out.length > 0) break;
+    // Only a plain saved answer is cut: a typed card, a teammate's result and a user's words are never.
+    const answerAt = message.role === "assistant" && inlineText === undefined && !outNotice?.dispatch?.resultText && messageText === message.text
+      ? answerStartIn(message.text, answerStarts.get(message.id)) : 0;
+    const answerOnly = answerAt > 0 ? messageText.slice(answerAt).replace(/^\s+/, "") : messageText;
+    let progressOmitted = answerAt > 0 && !options.chatFileLinks;
+    // chat.file.open numbers a path by its place among ALL the paths of the whole stored text, so the links are made on the whole text
+    // and the progress part is taken off after; if that cannot be shown to line up, nothing is cut.
+    let linkedAnswer: string | undefined;
+    if (answerAt > 0 && options.chatFileLinks) {
+      const whole = rewriteChatFilePaths(chatFileSourceText(message.text, notice), true).text;
+      const head = rewriteChatFilePaths(chatFileSourceText(message.text.slice(0, answerAt), notice), true).text;
+      if (whole.startsWith(head) && whole.slice(head.length).trim()) { linkedAnswer = whole.slice(head.length).replace(/^\s+/, ""); progressOmitted = true; }
+    }
     const candidate: MobileBridgeChatMessageDto = {
       ...shell,
       // 제어 블록 제거는 **모델의 답**에만 적용한다.
@@ -1102,12 +1134,14 @@ export function projectMobileBridgeHistory(
             ? messageText
             // chat.file.v1: a stored answer's paths become file links (chat-file-links.ts); a row whose text the host made keeps the mask.
             : options.chatFileLinks && message.role === "assistant" && linkedResult === undefined && messageText === message.text
-              ? cutChatFileText(rewriteChatFilePaths(chatFileSourceText(message.text, notice), true).text, Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining))
-              : stripMobileBridgeControlFences(messageText)),
+              ? cutChatFileText(linkedAnswer ?? rewriteChatFilePaths(chatFileSourceText(message.text, notice), true).text, Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining))
+              : stripMobileBridgeControlFences(answerOnly)),
           images,
         ),
         Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),
       ),
+      // The text above starts at the answer: the part before it (the model's lines before its tool calls) stays on the desktop.
+      ...(progressOmitted ? { progressOmitted: true as const } : {}),
     };
     const candidateBytes = mobileBridgeJsonBytes(candidate) + (out.length > 0 ? 1 : 0);
     if (outBytes + candidateBytes > budget) break;
@@ -2251,6 +2285,7 @@ export async function projectMobileBridgeSnapshotVariants(
     pendingConfirmations: decisions.pendingConfirmations,
     pendingBrowserApprovals: [...(options.pendingBrowserApprovals ?? [])],
     pendingToolApprovals: [...(options.pendingToolApprovals ?? [])],
+    ...(options.expiredToolApprovalIds?.length ? { expiredToolApprovals: options.expiredToolApprovalIds.map((id) => ({ id, outcome: "expired" as const })) } : {}),
     pendingUserInputs: [...(options.pendingUserInputs ?? [])],
     automations: automationsDto(),
     usage: projectMobileBridgeUsage(usage),

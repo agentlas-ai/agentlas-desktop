@@ -5,10 +5,9 @@ import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { invalidateViewData } from "@/lib/view-data-cache";
 import { projectAgentLimitMessage } from "@/lib/project-agent-roster";
-import type { NewProjectSource, ProjectSettingsRequest, ProjectSettingsSection } from "@/lib/project-settings";
+import type { NewProjectSource, ProjectSettingsRequest } from "@/lib/project-settings";
 import type { FsPathGrant, Project, ProjectAgentPoolMember } from "@/lib/types";
-import { IconArrowLeft, IconCheck, IconChevronRight, IconFolder, IconGithub, IconPlus, IconUsers } from "./Icon";
-import { ProjectAgentPicker } from "./ProjectAgentPicker";
+import { IconArrowLeft, IconCheck, IconChevronRight, IconFolder, IconGithub, IconPlus } from "./Icon";
 import { projectSettingsPatch } from "@/lib/edit-patch";
 import styles from "./ProjectSettingsModal.module.css";
 
@@ -16,7 +15,7 @@ export function ProjectSourceChoices({ onSelect }: { onSelect: (source: NewProje
   const { locale } = useT();
   const ko = locale === "ko";
   const choices = [
-    { id: "local" as const, icon: <IconFolder size={23} />, title: ko ? "로컬 폴더" : "Local folder", detail: ko ? "내 컴퓨터의 파일로 시작" : "Work with files on your computer" },
+    { id: "local" as const, icon: <IconFolder size={23} />, title: ko ? "로컬 폴더" : "Local folder", detail: ko ? "내 데스크탑의 파일로 시작" : "Work with files on your computer" },
     { id: "github" as const, icon: <IconGithub size={23} />, title: "GitHub", detail: ko ? "저장소 주소로 연결" : "Connect a repository URL" },
     { id: "empty" as const, icon: <IconPlus size={23} />, title: ko ? "빈 프로젝트" : "Empty project", detail: ko ? "새 폴더에서 자유롭게 시작" : "Start fresh in a new folder" },
   ];
@@ -37,8 +36,9 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
   const { locale } = useT();
   const ko = locale === "ko";
   const editing = request.mode === "edit";
-  const [source, setSource] = useState<NewProjectSource | "sample" | null>(request.mode === "create" ? request.sourceType ?? null : null);
-  const [section, setSection] = useState<ProjectSettingsSection>(request.mode === "edit" ? request.section ?? "source" : request.sourceType === "empty" ? "agents" : "source");
+  // One screen: name, folder, goal. A new project starts as "decide the folder later" (the app prepares its own folder, as the
+  // empty project always did) unless the caller chose a source. Which agents belong to a project is edited on the project's page.
+  const [source, setSource] = useState<NewProjectSource | "sample" | null>(request.mode === "create" ? request.sourceType ?? "empty" : null);
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(editing);
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -94,7 +94,6 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
       setFolderPath(saved.folderPath ?? "");
       setGithubUrl(saved.sourceType === "github" ? saved.sourceRef ?? "" : "");
       setConnectedGithub(saved.sourceType === "github" ? saved.sourceRef ?? "" : "");
-      if (saved.sourceType === "empty" || saved.sourceType === "sample") setSection("agents");
     }).catch(() => {
       if (!cancelled) setError(ko ? "프로젝트를 불러오지 못했습니다. 다시 시도해 주세요." : "Could not load this project. Please try again.");
     }).finally(() => { if (!cancelled) setLoading(false); });
@@ -109,7 +108,6 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
 
   function selectSource(next: NewProjectSource) {
     setSource(next);
-    setSection(next === "empty" ? "agents" : "source");
     setError("");
     setFolderGrant(null);
     setFolderPath("");
@@ -220,6 +218,28 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
     </label>
   </details>;
 
+  const sourceOptions: Array<{ id: NewProjectSource; label: string; detail: string; icon: React.ReactNode }> = [
+    { id: "empty", label: ko ? "나중에 정하기" : "Decide later", detail: ko ? "앱이 전용 폴더를 준비합니다" : "The app prepares its own folder", icon: <IconPlus size={17} /> },
+    { id: "local", label: ko ? "로컬 폴더" : "Local folder", detail: ko ? "내 데스크탑의 폴더" : "A folder on this computer", icon: <IconFolder size={17} /> },
+    { id: "github", label: "GitHub", detail: ko ? "저장소 주소로 연결" : "Connect a repository URL", icon: <IconGithub size={17} /> },
+  ];
+  const caption = editing ? (ko ? "프로젝트 설정" : "Project settings") : (ko ? "새 프로젝트" : "New project");
+  const folderBlock = <div className={styles.sourceBody}>
+    {!editing && <div role="radiogroup" aria-label={ko ? "작업 폴더" : "Work folder"} className={styles.sourceChoices} data-project-source-choices>
+      {sourceOptions.map((option) => <button key={option.id} type="button" role="radio" aria-checked={source === option.id} data-project-source={option.id} disabled={Boolean(pending)}
+        className={styles.sourceChoice} data-selected={source === option.id} onClick={() => selectSource(option.id)}>{option.icon}<strong>{option.label}</strong><span>{option.detail}</span></button>)}
+    </div>}
+    {source === "github" ? <label className={styles.field}><span>{ko ? "GitHub 주소" : "GitHub URL"}</span><div className={styles.urlRow}>
+      <input type="url" aria-label={ko ? "GitHub 주소" : "GitHub URL"} value={githubUrl} placeholder="https://github.com/owner/repository" disabled={Boolean(pending)} onChange={(event) => { setGithubUrl(event.target.value); setConnectedGithub(""); setFolderGrant(null); setFolderPath(""); }} />
+      <button type="button" className={styles.secondary} onClick={() => void connectGithub()} disabled={!githubUrl.trim() || Boolean(pending)}>{pending === "github" ? (ko ? "연결 중…" : "Connecting…") : (ko ? "연결" : "Connect")}</button>
+    </div></label> : null}
+    {source === "github" || source === "local" ? <div className={styles.folder} data-connected={Boolean(folderPath)}>
+      <span className={styles.folderIcon}><IconFolder size={26} /></span>
+      <div><strong>{folderPath ? folderPath.split(/[\\/]/).filter(Boolean).at(-1) : (ko ? "연결된 폴더가 없어요" : "No folder connected")}</strong><span>{folderPath || (ko ? "프로젝트에 사용할 폴더를 선택해 주세요." : "Choose a folder for this project.")}</span></div>
+      {source === "local" ? <button type="button" className={styles.secondary} onClick={() => void chooseFolder()} disabled={Boolean(pending)}>{pending === "folder" ? (ko ? "선택 중…" : "Selecting…") : folderPath ? (ko ? "변경" : "Change") : (ko ? "폴더 선택" : "Choose folder")}</button> : folderPath ? <IconCheck size={18} /> : null}
+    </div> : <p className={styles.hint}>{project?.folderPath || (ko ? "만들기를 누르면 ~/.agentlas/projects/에 전용 폴더를 준비합니다. 폴더는 나중에 바꿀 수 있어요." : "Creating the project prepares its own folder in ~/.agentlas/projects/. You can change the folder later.")}</p>}
+  </div>;
+
   return (
     <section ref={pageRef} tabIndex={-1} className={styles.dialog} aria-labelledby="project-settings-title" aria-busy={Boolean(pending)} data-project-settings>
       <div className={styles.layout}>
@@ -227,53 +247,27 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
           <button className={styles.back} type="button" onClick={requestClose}><IconArrowLeft size={16} />{ko ? "뒤로" : "Back"}</button>
           <div className={styles.projectMark}><IconFolder size={20} /></div>
           <strong className={styles.projectName}>{project?.name || (ko ? "새 프로젝트" : "New project")}</strong>
-          <span className={styles.navCaption}>{editing ? (ko ? "프로젝트 설정" : "Project settings") : source === "github" ? "GitHub" : source === "local" ? (ko ? "로컬 폴더 연결" : "Local folder") : source ? (ko ? "빈 프로젝트" : "Empty project") : "Agentlas Work"}</span>
-          <nav aria-label={ko ? "프로젝트 설정 메뉴" : "Project settings sections"}>
-            {source && !managed && <button type="button" aria-current={section === "source" ? "page" : undefined} disabled={Boolean(pending)} onClick={() => setSection("source")}>
-              {source === "github" ? <IconGithub size={17} /> : <IconFolder size={17} />}{source === "github" ? (ko ? "저장소 연결" : "Repository") : (ko ? "폴더 선택" : "Folder")}{sourceReady && <span className={styles.navCheck}><IconCheck size={13} /></span>}
-            </button>}
-            {source && <button type="button" aria-current={section === "agents" ? "page" : undefined} disabled={Boolean(pending)} onClick={() => setSection("agents")}><IconUsers size={17} />{ko ? "에이전트 연결" : "Agents"}</button>}
-          </nav>
-          <div className={styles.navFoot}>
-            {!editing && source && <button type="button" onClick={() => { setSource(null); setError(""); }} disabled={Boolean(pending)}><IconArrowLeft size={13} />{ko ? "시작 방법 변경" : "Change source"}</button>}
-            <span>Agentlas Work</span>
-          </div>
+          <span className={styles.navCaption}>{caption}</span>
+          <div className={styles.navFoot}><span>Agentlas</span></div>
         </aside>
         <div className={styles.right}>
           <header className={styles.header}>
-            <div><h2 id="project-settings-title">{!source ? (ko ? "어디서 시작할까요?" : "Where would you like to start?") : section === "agents" ? (ko ? "에이전트 연결" : "Connect agents") : source === "github" ? (ko ? "GitHub 저장소 연결" : "Connect a GitHub repository") : (ko ? "로컬 폴더 연결" : "Connect a local folder")}</h2>
-              <p>{!source ? (ko ? "프로젝트에 필요한 파일과 에이전트를 한곳에 모으세요." : "Bring your project's files and agents together.") : section === "agents" ? (ko ? "함께할 팀과 에이전트를 골라 주세요. 나중에 바꿀 수 있어요." : "Choose your teams and agents. You can change them later.") : source === "github" ? (ko ? "저장소를 내 컴퓨터에 복제해 작업합니다." : "Work with a local clone of your repository.") : (ko ? "작업할 폴더를 연결하세요. 원래 위치에서 이어서 작업합니다." : "Connect a folder to work with its files in place.")}</p>
+            <div><h2 id="project-settings-title">{editing ? (ko ? "프로젝트 설정" : "Project settings") : (ko ? "새 프로젝트" : "New project")}</h2>
+              <p>{ko ? "이름만 있으면 시작할 수 있어요. 폴더와 목표는 나중에 정해도 됩니다." : "A name is enough to start. The folder and goal can wait."}</p>
             </div>
           </header>
           <div className={styles.content}>
-            {loading ? <p role="status">{ko ? "프로젝트를 불러오는 중…" : "Loading project…"}</p> : editing && !project ? <div role="alert"><p>{error}</p><button className={styles.secondary} onClick={() => setLoadAttempt((value) => value + 1)}>{ko ? "다시 시도" : "Retry"}</button></div> : !source ? <ProjectSourceChoices onSelect={selectSource} /> : <>
-              {section === "source" ? <div className={styles.sourceBody}>
-                {source === "github" ? <>
-                  <label className={styles.field}><span>{ko ? "GitHub 주소" : "GitHub URL"}</span><div className={styles.urlRow}>
-                    <input type="url" aria-label={ko ? "GitHub 주소" : "GitHub URL"} value={githubUrl} placeholder="https://github.com/owner/repository" disabled={Boolean(pending)} onChange={(event) => { setGithubUrl(event.target.value); setConnectedGithub(""); setFolderGrant(null); setFolderPath(""); }} />
-                    <button type="button" className={styles.secondary} onClick={() => void connectGithub()} disabled={!githubUrl.trim() || Boolean(pending)}>{pending === "github" ? (ko ? "연결 중…" : "Connecting…") : (ko ? "연결" : "Connect")}</button>
-                  </div></label>
-                  <p className={styles.hint}>{ko ? "연결할 때 저장 위치를 선택합니다." : "Choose where to save when connecting."}</p>
-                </> : null}
-                <div className={styles.folder} data-connected={Boolean(folderPath)}>
-                  <span className={styles.folderIcon}><IconFolder size={26} /></span>
-                  <div><strong>{folderPath ? folderPath.split(/[\\/]/).filter(Boolean).at(-1) : (ko ? "연결된 폴더가 없어요" : "No folder connected")}</strong><span>{folderPath || (ko ? "프로젝트에 사용할 폴더를 선택해 주세요." : "Choose a folder for this project.")}</span></div>
-                  {source === "local" ? <button type="button" className={styles.secondary} onClick={() => void chooseFolder()} disabled={Boolean(pending)}>{pending === "folder" ? (ko ? "선택 중…" : "Selecting…") : folderPath ? (ko ? "변경" : "Change") : (ko ? "폴더 선택" : "Choose folder")}</button> : folderPath ? <IconCheck size={18} /> : null}
-                </div>
-                {nameField}{instructionField}
-              </div> : <>
-                {managed && <div className={styles.managedHeading}>{nameField}<p className={styles.hint}>{project?.folderPath || (ko ? "만들기를 누르면 ~/.agentlas/projects/에 전용 폴더를 준비합니다." : "Creating the project prepares its own folder in ~/.agentlas/projects/.")}</p></div>}
-                {goalField}
-                <ProjectAgentPicker value={agentPool} onChange={setAgentPool} disabled={Boolean(pending)} autoTeam={{ name, goal }} />
-                {managed && instructionField}
-              </>}
-            </>}
+            {loading ? <p role="status">{ko ? "프로젝트를 불러오는 중…" : "Loading project…"}</p> : editing && !project ? <div role="alert"><p>{error}</p><button className={styles.secondary} onClick={() => setLoadAttempt((value) => value + 1)}>{ko ? "다시 시도" : "Retry"}</button></div> : <div className={styles.sourceBody}>
+              {nameField}
+              {folderBlock}
+              {goalField}
+              {instructionField}
+            </div>}
           </div>
           {source && !loading && (!editing || project) && <footer className={styles.footer}>
-            <div className={styles.feedback} aria-live="polite">{error ? <span role="alert" className={styles.error}>{error}</span> : pending ? (ko ? "닫아도 작업은 백그라운드에서 계속됩니다." : "You can close this window; the operation will continue in the background.") : !sourceReady ? (ko ? "먼저 작업할 폴더를 연결해 주세요." : "Connect your project folder first.") : !name.trim() ? (ko ? "프로젝트 이름을 적어 주세요." : "Give your project a name.") : managed && !editing ? (ko ? "폴더는 자동으로 준비됩니다." : "Your folder will be prepared automatically.") : (ko ? "저장 후 프로젝트에 적용됩니다." : "Changes apply after saving.")}</div>
+            <div className={styles.feedback} aria-live="polite">{error ? <span role="alert" className={styles.error}>{error}</span> : pending ? (ko ? "닫아도 작업은 백그라운드에서 계속됩니다." : "You can close this window; the operation will continue in the background.") : !name.trim() ? (ko ? "프로젝트 이름을 적어 주세요." : "Give your project a name.") : !sourceReady ? (ko ? "폴더를 연결하거나 '나중에 정하기'를 고르세요." : "Connect a folder, or choose “Decide later”.") : ""}</div>
             <button className={styles.secondary} type="button" onClick={requestClose}>{pending ? (ko ? "백그라운드에서 계속" : "Continue in background") : (ko ? "취소" : "Cancel")}</button>
-            {!editing && section === "source" ? <button className={styles.primary} type="button" onClick={() => setSection("agents")} disabled={!sourceReady || !name.trim() || Boolean(pending)}>{ko ? "에이전트 연결" : "Connect agents"}<IconChevronRight size={15} /></button>
-              : <button className={styles.primary} type="button" onClick={() => void save()} disabled={!canSave}>{pending === "save" ? (ko ? "저장 중…" : "Saving…") : editing ? (ko ? "저장" : "Save changes") : (ko ? "프로젝트 만들기" : "Create project")}</button>}
+            <button className={styles.primary} type="button" onClick={() => void save()} disabled={!canSave}>{pending === "save" ? (ko ? "저장 중…" : "Saving…") : editing ? (ko ? "저장" : "Save changes") : (ko ? "프로젝트 만들기" : "Create project")}</button>
           </footer>}
         </div>
       </div>

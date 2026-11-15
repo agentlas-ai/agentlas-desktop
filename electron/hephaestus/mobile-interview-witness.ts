@@ -1,3 +1,4 @@
+import fs from "node:fs";
 /** Native in-process evidence only. No request/DTO field can recreate these WeakMap identities. */
 interface NativeBuildInput {
   runId: string;
@@ -59,13 +60,28 @@ export function createMobileBuildInterviewWitnessSource() {
   };
 }
 
-/** Aliases one genuine native input to its explicit internal Builder request; never mints evidence. */
-export function transferMobileBuildInterviewWitness(input: NativeBuildInput, request: NativeBuildRequest): void {
+/** The same folder, by real path (the Build turn resolves its folder from a grant, which is the real path of what the phone's run recorded). */
+function sameFolder(a: string, b: string): boolean {
+  try { return fs.realpathSync.native(a) === fs.realpathSync.native(b); } catch { return a === b; }
+}
+
+/**
+ * Aliases one genuine native input to its explicit internal Builder request; never mints evidence.
+ * `builder`: the Build turn is a tracked one (hephaestus/build-turn-tracked.ts) and the Builder is handed its own run id and cancel signal, not the phone's: the witness is
+ * re-bound to those, after the same checks against the native input. The folder is compared by real path, the answer text exactly.
+ */
+export function transferMobileBuildInterviewWitness(input: NativeBuildInput, request: NativeBuildRequest, builder?: { runId: string; signal: AbortSignal }): void {
   const witness = inputs.get(input);
   inputs.delete(input);
   if (!witness || witness.runId !== input.runId || witness.signal !== input.signal
-    || witness.workspace !== input.workspace || witness.answerText !== input.goal || !matches(witness, request)) return;
-  requests.set(request, witness);
+    || witness.workspace !== input.workspace || witness.answerText !== input.goal) return;
+  if (!builder) {
+    if (!matches(witness, request)) return;
+    requests.set(request, witness);
+    return;
+  }
+  if (request.request !== witness.answerText || !current(witness) || !sameFolder(request.workspace, witness.workspace)) return;
+  requests.set(request, { ...witness, runId: builder.runId, signal: builder.signal, workspace: request.workspace });
 }
 
 /** Optional observation only: missing/stale evidence falls back to the ordinary existing Build path. */

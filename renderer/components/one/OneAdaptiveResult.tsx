@@ -1283,7 +1283,7 @@ function AgentBuildBlock({
             description: block.request,
           })}
         >
-          <span>{ko ? "One Team에서 완성" : "Finish in One Team"}</span>
+          <span>{ko ? "에이전트로 완성하기" : "Finish as an agent"}</span>
         </button>
       </div>
     </div>

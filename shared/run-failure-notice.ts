@@ -48,7 +48,7 @@ import { EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_NO_TOOL_RAN_CODES, READ_ANSWER_O
  */
 
 export type RunFailureNoticeLocale = "ko" | "en";
-export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "empty_no_tool" | "tools_unusable" | "unavailable" | "provider_unavailable" | "capacity" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen" | "working_folder" | "unsettled";
+export type RunFailureNoticeCause = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "empty_no_tool" | "tools_unusable" | "unavailable" | "provider_unavailable" | "capacity" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen" | "working_folder" | "memory_exhausted" | "unsettled";
 
 /** The terminal code of a dispatched turn that ended without a terminal receipt (runtime/runner.ts RUNTIME_TURN_UNSETTLED_CODE). */
 export const RUN_FAILURE_UNSETTLED_CODE = "runtime_turn_unsettled";
@@ -82,7 +82,7 @@ export const PROVIDER_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "STOP_REASON_CONTENT_FILTER",
 ]);
 
-type HostFailureClass = "capacity" | "unavailable" | "provider_unavailable" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen" | "working_folder";
+type HostFailureClass = "capacity" | "unavailable" | "provider_unavailable" | "subscription_credits_off" | "tool_missing" | "tool_failed" | "tools_unprepared" | "runtime_unavailable" | "runtime_changed" | "goal_changed" | "store_busy" | "project_busy" | "provider_connection" | "browser_host_unavailable" | "session_reopen" | "working_folder" | "memory_exhausted";
 
 /**
  * Codes whose notice names something only the owner can do (sign in to the Agentlas Browser). A Goal continuation the host
@@ -129,6 +129,8 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   ["goal-runtime-binding-mismatch", "runtime_changed"],
   ["store_busy", "store_busy"],
   ["work_project_residency_busy", "project_busy"], ["codex_http_connection_failed", "provider_connection"],
+  // Desktop repair 11 (N6): a socket-level failure of the request (no route, no DNS answer, a timed-out or reset connection; shared/turn-settlement.ts networkFailureCode) is a connection failure, not the provider's refusal.
+  ["network_unreachable", "provider_connection"],
   // Kimi's journal: the last step began and never ended (acp.ts, kind exit). Carried as the cause behind the unfinished turn like
   // the codex connection failure above, so the owner table below reads it instead of a bare runtime_turn_unsettled.
   ["kimi_turn_failed", "provider_unavailable"],
@@ -144,6 +146,9 @@ export const HOST_FAILURE_CODE_CLASSES: ReadonlyMap<string, HostFailureClass> = 
   // The folder is the owner's (moved, deleted, permissions): nothing the app does by itself changes that, so it is not retried as the app's own
   // state (shared/run-failure-cause.ts) and the line says what to fix (regression review 3 F4).
   ["project_folder_missing", "working_folder"], ["project_folder_not_directory", "working_folder"], ["project_folder_unreadable", "working_folder"],
+  // Desktop R part 2: the model program (a subscription CLI's child) was ended because the COMPUTER ran out of memory - said only on a machine fact the host measured
+  // (runtime/child-death.ts: Windows' NTSTATUS for "no memory", Linux's own oom_kill counter; a SIGKILL on macOS is never named this). As the cause behind an unfinished turn.
+  ["runtime_out_of_memory", "memory_exhausted"],
 ]);
 
 /**
@@ -231,7 +236,7 @@ function resolve(facts: Pick<RunFailureNoticeFacts, "errorCode" | "runtimeFailur
     const named = causeClass(failure);
     if (named) return { cause: named, unfinished: false, failure };
     // The typed failure names no class of its own (a refusal under a host-owned code, an exit kind): the run's terminal machine code still
-    // may, so the cause is not lost to the generic line (E22). A typed provider verdict above always wins.
+    // may, so the cause is not lost to the generic line. A typed provider verdict above always wins.
     const hostNamed = hostClassOfCode(facts.errorCode);
     return hostNamed ? { cause: hostNamed, unfinished: false, failure: { source: "marker" } } : null;
   }
@@ -295,6 +300,8 @@ const KO: Record<RunFailureNoticeCause, Copy> = {
     action: "같은 요청을 다시 보내 주세요. 계속 실패하면 이 방의 모델을 다른 실행기로 바꿔 보내 주세요." },
   working_folder: { lead: ["이 대화의 작업 폴더를 쓸 수 없어(없거나, 폴더가 아니거나, 열 수 없습니다) 실행을 시작하지 못했습니다.", "이 대화의 작업 폴더를 쓸 수 없어(없거나, 폴더가 아니거나, 열 수 없는 것으로 보입니다) 실행을 시작하지 못했습니다."],
     action: "폴더가 옮겨졌거나 지워졌는지 확인하고, 작업 폴더를 다시 지정한 뒤 같은 요청을 보내 주세요." },
+  memory_exhausted: { lead: ["컴퓨터의 메모리가 부족해 모델 프로그램이 종료되어 답변을 완료하지 못했습니다.", "컴퓨터의 메모리가 부족해 모델 프로그램이 종료되어 답변을 완료하지 못한 것으로 보입니다."],
+    action: "다른 앱을 닫아 메모리를 확보한 뒤 같은 요청을 다시 보내거나, 더 가벼운 모델을 선택해 보세요." },
   unsettled: { lead: ["응답이 완료 확인 없이 끝나 답변을 완료하지 못했습니다.", "응답이 완료 확인 없이 끝나 답변을 완료하지 못한 것으로 보입니다."],
     action: "같은 요청을 다시 보내거나 다른 모델을 선택해 보세요." },
 };
@@ -346,6 +353,8 @@ const EN: Record<RunFailureNoticeCause, Copy> = {
     action: "Send it again. If it keeps failing, switch this room to a model on another runtime and send it." },
   working_folder: { lead: ["This chat's working folder cannot be used (it is missing, is not a folder, or cannot be opened), so the run could not start.", "This chat's working folder appears not to be usable (it is missing, is not a folder, or cannot be opened), so the run could not start."],
     action: "Check whether the folder was moved or deleted, set the working folder again, then send the same request." },
+  memory_exhausted: { lead: ["The model program was ended because the computer ran out of memory, so the reply could not be completed.", "The model program appears to have been ended because the computer ran out of memory, so the reply could not be completed."],
+    action: "Close other apps to free memory and send it again, or choose a lighter model." },
   unsettled: { lead: ["The reply ended without a completion receipt, so it could not be completed.", "The reply appears to have ended without a completion receipt, so it could not be completed."],
     action: "Send it again, or choose another model." },
 };
@@ -386,7 +395,7 @@ export function runFailureNoticeText(facts: RunFailureNoticeFacts): string | nul
   // An unfinished turn with no cause from the provider: the app sends it once more by itself (said, and no instruction to send it), or
   // already did (said, and the owner is asked). Only this class is ever forecast; every other cause keeps its own remedy line.
   // A store lock after dispatch (store_busy) is the same case: the turn may have run, and the app's own exception that the lock raised is sent once more.
-  const resend = (resolved.cause === "unsettled" || resolved.cause === "store_busy") && facts.turnDelivery !== "not-dispatched" ? facts.resend : undefined;
+  const resend = (resolved.cause === "unsettled" || resolved.cause === "store_busy" || resolved.cause === "memory_exhausted") && facts.turnDelivery !== "not-dispatched" ? facts.resend : undefined;
   // The runner's own "automatic replay stopped" words are not quoted beside "the app is sending it again".
   const detail = quoted && resend !== "now" ? boundedFailureDetail(facts.detail) : null;
   const queuedByApp = facts.queuedRetry === true && facts.turnDelivery === "not-dispatched" && !resolved.unfinished;
@@ -400,7 +409,7 @@ export function runFailureNoticeText(facts: RunFailureNoticeFacts): string | nul
     SAVED[locale],
     resolved.unfinished && resolved.cause !== "empty_no_tool" && resend !== "now" ? CHECK_HISTORY[locale] : undefined,
     // The send queue starts this message again by itself (queueWillStartRunAgain, read at the failure): whatever the cause, the line says
-    // that and does not ask the owner to send it again, which would overlap the app's own retry (E20).
+    // that and does not ask the owner to send it again, which would overlap the app's own retry.
     queuedByApp ? QUEUE_RETRIES[locale]
       : resend === "now" ? undefined : copy.action,
     detail ? `${DETAIL_LABEL[locale]}: “${detail}”` : undefined,

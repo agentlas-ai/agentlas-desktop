@@ -4,7 +4,7 @@ import type { NativeAuthenticatedIdentity } from "./native-session-auth";
 import { createNativeJsonTransfers, NATIVE_JSON_CHUNK_BYTES, type NativeJsonTransferDescriptor } from "./native-json-transfer";
 import { nativeToolApprovalOwner, type NativeApprovalObservation } from "../runtime/native-approval-provenance";
 import { onToolApprovalRequested, onToolApprovalResolved, resolveNativeToolApproval, resolveToolApproval, getToolApprovalResolution,
-  listNativeToolApprovalRequests } from "../runtime/tool-approval";
+  listNativeToolApprovalRequests, listRecentlyExpiredToolApprovalIds } from "../runtime/tool-approval";
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 function exact(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)
@@ -79,8 +79,12 @@ export function createNativeInvocationApprovalChannel(options: {
   releases.push(onToolApprovalRequested(receive), onToolApprovalResolved(id => {
     const record = records.get(id) ?? historical.get(id); if (!record || !available) return;
     record.resolved = true; if ("transferOwner" in record) transfers.release(record.transferOwner);
+    // L1 D6: `expired` is both "nobody answered" and "the run was stopped"; only the first is in the daemon's own recently-expired memory. The optional flag
+    // is added only for it, so a cancel and an older Main read the same notice as before.
+    const receipt = getToolApprovalResolution(id);
+    const byTimeout = (receipt as { status?: unknown } | null)?.status === "expired" && listRecentlyExpiredToolApprovalIds().includes(id);
     if (!options.notify("invocation.approval.resolved", { version: "agentlas.native-approval.v1", requestId: id,
-      receipt: getToolApprovalResolution(id) }, record.owner.mode)) {
+      receipt, ...(byTimeout ? { expiredByTimeout: true } : {}) }, record.owner.mode)) {
         const error = Object.assign(new Error("native_approval_channel_unavailable"), {code:"native_approval_channel_unavailable"});
         if (record.owner.mode === "post-denial") record.uncertainty = error; else fault(error);
       }

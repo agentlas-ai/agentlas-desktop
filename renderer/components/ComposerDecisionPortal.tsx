@@ -2,12 +2,29 @@
 
 import { useLayoutEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { focusedSpaceChatId, subscribeSpaceLayout } from "@/lib/space-store";
 
 const slots = new Set<HTMLElement>();
 const listeners = new Set<() => void>();
 const notify = () => listeners.forEach((listener) => listener());
-const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
-const snapshot = () => [...slots].filter((slot) => slot.isConnected).at(-1) ?? null;
+const subscribe = (listener: () => void) => {
+  listeners.add(listener);
+  const offLayout = subscribeSpaceLayout(listener); // the focused Space pane decides which composer a card lands in
+  return () => { listeners.delete(listener); offLayout(); };
+};
+/**
+ * The newest connected slot - except in Space, where several composers are on screen: the slot inside the focused
+ * pane (`[data-space-chat]` = its chat id) wins, so a card lands next to the conversation the person is typing in.
+ */
+const snapshot = () => {
+  const live = [...slots].filter((slot) => slot.isConnected);
+  const focus = live.length > 1 ? focusedSpaceChatId() : null;
+  if (focus) {
+    const inFocus = live.filter((slot) => slot.closest("[data-space-chat]")?.getAttribute("data-space-chat") === focus).at(-1);
+    if (inFocus) return inFocus;
+  }
+  return live.at(-1) ?? null;
+};
 
 /** Registration follows composer mount/unmount, without observing every streamed DOM mutation. */
 export function ComposerDecisionSlot({ surface, className }: { surface: "one" | "work"; className?: string }) {

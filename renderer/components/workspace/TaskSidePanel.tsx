@@ -25,6 +25,7 @@ import {
   IconCode,
   IconFileUp,
   IconFileText,
+  IconLayers,
   IconExpand,
   IconMoreHorizontal,
   IconNetwork,
@@ -80,6 +81,7 @@ import { AUTOMATION_TAB_OPEN_EVENT, AutomationRailPanel, AutomationTabLiveDot, a
 import { GOAL_PANEL_OPEN_EVENT, GoalRailPanel, useGoalPanel } from "../goal/GoalPanel";
 import { ArtifactsRailPanel, artifactsRailCount, useArtifactsRail } from "./ArtifactsRailPanel";
 import { EarlierOutputsSection } from "./EarlierOutputsSection";
+import { PanelOverview, type OverviewRow } from "./PanelOverview";
 import type { OneEarlierOutputsView } from "@/lib/one-earlier-outputs";
 import { LiveDocumentRailPanel, useLiveDocuments } from "../live-document/LiveDocumentRailPanel";
 import { WorkbookView } from "./WorkbookView";
@@ -119,13 +121,14 @@ function RailTabIcon({ view }: { view: OutputRailView }) {
   if (view === "goal") return <IconTarget size={12} />;
   if (view === "artifacts") return <IconFileUp size={12} />;
   if (view === "document") return <IconFileText size={12} />;
+  if (view === "activity") return <IconLayers size={12} />;
   return <IconSparkles size={12} />;
 }
 
 function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
   if (view === "worker") return locale === "ko" ? "서브에이전트" : "Subagent";
   if (view === "result") return locale === "ko" ? "결과" : "Result";
-  if (view === "activity") return locale === "ko" ? "작업" : "Activity";
+  if (view === "activity") return locale === "ko" ? "개요" : "Overview";
   if (view === "terminal") return locale === "ko" ? "터미널" : "Terminal";
   if (view === "screen") return locale === "ko" ? "화면" : "Screen";
   if (view === "automation") return locale === "ko" ? "자동화" : "Automations";
@@ -904,6 +907,8 @@ export type TaskSidePanelProps = {
   resultKind?: OutputPresentationKind;
   /** A generated web app that is already reachable on its verified preview URL. */
   appPreview?: OneLiveAppPreview | null;
+  /** The Overview's Environment section: the project's name and its folder, when the screen knows them (absent = the section is not drawn). */
+  environment?: { name: string | null; folder: string | null } | null;
 };
 
 /** Task-local view state belongs to this exact thread and chat pair. */
@@ -950,6 +955,7 @@ function TaskSidePanelContent({
   resultKey,
   resultKind = "standard",
   appPreview,
+  environment,
   workerSelection,
   workerRun,
   onCloseWorker,
@@ -981,14 +987,17 @@ function TaskSidePanelContent({
     return () => { panelGenerationRef.current += 1; };
   }, [browserScopeKey, screenChatId, navigationKey]);
   const [openTabs, setOpenTabs] = useState<OutputRailView[]>([]);
+  // The Overview is the panel's first tab whenever the panel has any tab (F-D7): it is put in front of the first view that appears, never closed by hand.
+  const withOverview = useCallback((tabs: OutputRailView[], view: OutputRailView): OutputRailView[] => tabs.includes(view) ? tabs
+    : view === "activity" || tabs.includes("activity") || view === "worker" ? [...tabs, view] : ["activity", ...tabs, view], []);
   const observeRailTab = useCallback((view: OutputRailView) => {
     if (dismissedTabsRef.current.has(view)) return;
-    setOpenTabs((tabs) => tabs.includes(view) ? tabs : [...tabs, view]);
-  }, []);
+    setOpenTabs((tabs) => withOverview(tabs, view));
+  }, [withOverview]);
   const reopenRailTab = useCallback((view: OutputRailView) => {
     if (dismissedTabsRef.current.delete(view)) writeRailDismissals(dismissalScope, dismissedTabsRef.current);
-    setOpenTabs((tabs) => tabs.includes(view) ? tabs : [...tabs, view]);
-  }, [dismissalScope]);
+    setOpenTabs((tabs) => withOverview(tabs, view));
+  }, [dismissalScope, withOverview]);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
@@ -1025,7 +1034,7 @@ function TaskSidePanelContent({
   const browserNewTabConsumedRef = useRef(0);
   const [railView, setRailView] = useState<OutputRailView | null>(null);
   useEffect(() => {
-    if (visible) setRailView((current) => current ?? openTabs[0] ?? null);
+    if (visible) setRailView((current) => current ?? (openTabs.includes("activity") ? "activity" : openTabs[0]) ?? null);
   }, [visible, openTabs]);
   /*
    * 브라우저와 앱은 좁은 칸에서 아무것도 못 읽는다(실측 324px 에서 페이지가
@@ -1126,7 +1135,8 @@ function TaskSidePanelContent({
   const hasArtifacts = artifactsRailCount({ items, files: artifactsRail.files, visuals: artifactsRail.visuals }) > 0
     || (earlierOutputs?.count ?? 0) > 0;
   useEffect(() => {
-    if (hasArtifacts) observeRailTab("artifacts");
+    // The Outputs list of the Overview shows these; the gallery tab is added by the "+" menu or a chart's "open in panel", not by itself (F-D7).
+    if (hasArtifacts) observeRailTab("activity");
     else {
       setOpenTabs((tabs) => tabs.includes("artifacts") ? tabs.filter((tab) => tab !== "artifacts") : tabs);
       setRailView((current) => current === "artifacts" ? null : current);
@@ -1439,7 +1449,7 @@ function TaskSidePanelContent({
   useEffect(() => {
     if (!latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
     presentedArtifactIdRef.current = latestArtifactId;
-    observeRailTab("result");
+    observeRailTab("activity");
   }, [latestArtifactId, observeRailTab]);
   useEffect(() => {
     const latest = mcpResults.at(-1)?.id ?? null;
@@ -1585,6 +1595,22 @@ function TaskSidePanelContent({
     });
   };
   const sectionExpanded = (section: OutputSectionKey) => !collapsedSections.has(section);
+  // The Overview's rows: the activity the panel already reads, in the picture's words (a command is its first line; a subagent is its name).
+  const overviewSubagents = useMemo<OverviewRow[]>(() => agents.map((item) => ({
+    id: item.id,
+    label: item.agentName || (locale === "ko" ? "에이전트" : "Agent"),
+    state: item.status === "completed" ? "done" : item.status === "failed" || item.status === "cancelled" ? "failed" : item.status === "waiting_input" ? "waiting" : "running",
+    meta: item.status === "completed" ? (locale === "ko" ? "완료" : "done") : item.durationMs ? elapsedLabel(item.durationMs) : undefined,
+  })), [agents, locale]);
+  const overviewCommands = useMemo<OverviewRow[]>(() => processes.map((item) => {
+    const presentation = toolPresentation(item, locale, null);
+    const first = (presentation?.summary || item.tool?.args || item.tool?.name || "").split("\n")[0].trim().slice(0, 120);
+    return {
+      id: item.id, label: first || (locale === "ko" ? "명령" : "Command"), mono: true,
+      state: item.status === "completed" ? "done" : item.status === "failed" || item.status === "cancelled" ? "failed" : "running",
+      meta: item.durationMs ? elapsedLabel(item.durationMs) : undefined,
+    } satisfies OverviewRow;
+  }), [processes, locale]);
   // Owner 2026-10-13 (Yotube vs Thread Marketing): an open panel with no view drew a blank 300px column beside the
   // chat. With nothing to show it takes no space; it reappears as soon as a view, file or worker opens.
   const empty = openTabs.length === 0 && chatFileTabs.length === 0 && !workerSelection && !result;
@@ -1680,14 +1706,14 @@ function TaskSidePanelContent({
                 {railTabLabel(view, locale)}
                 {view === "automation" && automationRunning && <AutomationTabLiveDot locale={locale} />}
               </button>
-              <button
+              {view !== "activity" && <button
                 type="button"
                 className={styles.artifactTabClose}
                 aria-label={locale === "ko" ? `${railTabLabel(view, locale)} 닫기` : `Close ${railTabLabel(view, locale)}`}
                 onClick={() => view === "worker" ? closeWorkerTab() : closeRailTab(view)}
               >
                 <IconClose size={11} />
-              </button>
+              </button>}
             </span>
           ))}
           {chatFileTabs.length > 0 && <ChatFileTabs
@@ -1824,13 +1850,18 @@ function TaskSidePanelContent({
           </>}
           {!activeChatFile && !openedArtifact && <><BoundImageArtifacts items={boundImages} chatId={screenChatId} locale={locale} />{result}</>}
         </div>}
-        {railView === "activity" && <>
+        {railView === "activity" && <PanelOverview
+          locale={locale}
+          environment={environment}
+          goal={goalPanel.view && goalPanel.view.root ? { title: goalPanel.view.root.intent, done: goalPanel.view.root.progress?.done ?? 0, total: goalPanel.view.root.progress?.total ?? 0 } : null}
+          onOpenGoal={() => openRailTab("goal")}
+          subagents={overviewSubagents}
+          commands={overviewCommands}
+          onOpenTerminal={() => openRailTab("terminal")}
+          outputs={(visible ? items : []).map((item) => ({ id: item.id, name: item.label, kind: item.kind, onOpen: () => openArtifact(item) }))}
+          earlier={earlierOutputs ? <EarlierOutputsSection view={earlierOutputs} locale={locale} /> : undefined}
+        >
           <ContinuityStatus chatId={screenChatId} locale={locale} detail />
-          <OutputDisclosure section="files" label={locale === "ko" ? "결과물" : "Artifacts"} count={fileArtifacts.length} expanded={sectionExpanded("files")} onToggle={toggleSection}>
-            {fileArtifacts.length === 0 && <p className={styles.artifactEmpty}>{locale === "ko" ? "만든 파일 또는 사이트가 여기에 표시됩니다" : "Files or sites you create appear here"}</p>}
-            {fileArtifacts.map((item) => <ArtifactPreviewCard key={item.id} item={item} locale={locale} wide={(width ?? defaultWidth) >= 560} />)}
-          </OutputDisclosure>
-          {earlierOutputs && <EarlierOutputsSection view={earlierOutputs} locale={locale} />}
           {mcpResults.length > 0 && <OutputDisclosure section="mcp" label={locale === "ko" ? "MCP 결과" : "MCP results"} count={mcpResults.length} expanded={sectionExpanded("mcp")} onToggle={toggleSection}>
             {mcpResults.map((item) => (
               <McpResultPreview
@@ -1847,12 +1878,7 @@ function TaskSidePanelContent({
           {sources.length > 0 && <OutputDisclosure section="sources" label={locale === "ko" ? "출처" : "Sources"} count={sources.length} expanded={sectionExpanded("sources")} onToggle={toggleSection}>
             {sources.slice(-5).map((source) => <SourceRow key={source.id} source={source} />)}
           </OutputDisclosure>}
-          <OutputDisclosure section="agents" label={locale === "ko" ? "하위 에이전트" : "Subagents"} count={agents.length} expanded={sectionExpanded("agents")} onToggle={toggleSection}>
-            {agents.length === 0
-              ? <p className={styles.artifactEmpty}>{locale === "ko" ? "실행된 하위 에이전트 없음" : "No subagents used"}</p>
-              : agents.slice(-5).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconSparkles size={13} /><span>{item.agentName || (locale === "ko" ? "에이전트" : "Agent")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
-          </OutputDisclosure>
-        </>}
+        </PanelOverview>}
         {railView === "terminal" && <>
           {/* A completed shell tool is evidence of a command, not proof that a
               persistent background process exists. */}
@@ -1864,7 +1890,7 @@ function TaskSidePanelContent({
           <OutputDisclosure section="computer" label={locale === "ko" ? "컴퓨터 사용" : "Computer use"} count={computerUse.length} expanded={sectionExpanded("computer")} onToggle={toggleSection}>
             {computerUse.length === 0
               ? <p className={styles.artifactEmpty}>{locale === "ko" ? "사용 기록 없음" : "No computer activity"}</p>
-              : computerUse.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconPanelRight size={13} /><span>{item.tool?.name || (locale === "ko" ? "컴퓨터 작업" : "Computer task")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
+              : computerUse.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconPanelRight size={13} /><span>{item.tool?.name || (locale === "ko" ? "데스크탑 작업" : "Computer task")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
           </OutputDisclosure>
         </>}
         {railView === "automation" && <AutomationRailPanel snapshot={automationSnapshot} locale={locale} />}

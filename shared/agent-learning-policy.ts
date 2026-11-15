@@ -6,7 +6,7 @@
  * facts is the compiler model's judgment (electron/agents/workspace-service.ts). The owner then reads the diff and decides.
  */
 export const AGENT_LEARNING_POLICY = Object.freeze({
-  /** Distinct runs a lesson must come from. Two notes from one run are one observation. */
+  /** Distinct observations a lesson must come from: runs, where every turn of one chat on one day counts once. Two notes from one run are one observation. */
   minRuns: 3,
   /** Proposals the background proposer makes per agent per day (model cost, and the owner's reading time). */
   proposalsPerAgentPerDay: 1,

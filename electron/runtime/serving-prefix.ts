@@ -12,9 +12,38 @@
  * 영속 컨텍스트 경로(agent-context.ts HOST_MESSAGE_CONTEXT_KINDS)에서 이미 그렇게 한다.
  */
 import { composeResumeTurnPrompt } from "./continuity";
+import type { PromptOrderingMetadata } from "./prompt-order";
 
 /** Stateless API / local host loops: they resend the whole prefix every request (server cache or local KV-cache reuse). */
 const STATELESS_HOST_LOOP_KINDS = new Set(["agentlas", "byok", "lmstudio", "mlx", "agentlas-local", "ollama"]);
+
+/**
+ * Collector modules a stateless host loop is given in its system text, not in front of every user message.
+ *
+ * The framed host context sits after the conversation history, so a provider prefix cache (tools → system → messages) and a
+ * local model's prefix cache never reuse it: every turn pays for it again. A module may be listed here only when, for one
+ * conversation, it is present on every turn with the same bytes: it is decided by the conversation's lane or run kind, never
+ * by what the owner typed or switched for one turn. A module that comes and goes would change the system text on those turns
+ * and move the cached prefix (system and the whole history after it), which costs far more than the module saves.
+ *  - reply.display, reply.document: every turn of a One conversation (invocation/one-execution-lane.ts decides the lane by
+ *    the conversation's origin).
+ * Left in the user message on purpose: surface.protocol.execution is sent only on turns that carry a One team
+ * execution policy (a task turn; an ordinary conversation turn has none), and work.session.main is dropped on a turn with an
+ * explicit execution request and changes text with plan mode.
+ */
+const STATELESS_SYSTEM_CHANNEL_MODULE_IDS: ReadonlySet<string> = new Set(["reply.display", "reply.document"]);
+
+/**
+ * The one placement rule for those modules: for a stateless host loop, the listed fixed-policy parts go to the system
+ * composition (`system`, bytes and declarations unchanged) and the rest stays the turn context; every other runtime keeps
+ * all parts as its turn context. Order inside each list is the caller's.
+ */
+export function splitSystemChannelParts<T extends PromptOrderingMetadata & { text?: string | null }>(runtimeKind: string, parts: readonly T[]): { system: T[]; turn: T[] } {
+  if (!STATELESS_HOST_LOOP_KINDS.has(runtimeKind)) return { system: [], turn: [...parts] };
+  const system: T[] = [], turn: T[] = [];
+  for (const part of parts) (part.stability === "fixed-policy" && STATELESS_SYSTEM_CHANNEL_MODULE_IDS.has(part.id) && part.text?.trim() ? system : turn).push(part);
+  return { system, turn };
+}
 
 export function placeTurnContextForRuntime(input: {
   runtimeKind: string;

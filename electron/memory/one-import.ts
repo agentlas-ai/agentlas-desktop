@@ -19,11 +19,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { agentlasHomeDir } from "../agents/home";
 
 import { getMemoryDb as getDb, getMemoryStoreInfo } from "./database";
 import { applyTranslation } from "./english-migration";
+import { MemoryRevokedError } from "./revocations";
 import { isNonEnglishText, translationSourceHash } from "./native-text";
-import { insertMemoryEntry, listMemoryEvidenceTokensForAgent } from "./store";
+import { insertMemoryEntryOnce, listMemoryEvidenceTokensForAgent } from "./store";
+import { FORGOTTEN_IMPORT_SOURCE, importSourceDigest, importSourceKey, importSourcePrefix } from "./import-source-receipt";
 import type { MemoryKind, MemoryScope } from "../architecture/manifest";
 
 /** Desktop `BUILTIN_AGENTS` 의 `agentlas-one` 과 같은 값이어야 한다. */
@@ -97,18 +100,20 @@ export function selectUnimported(
  * second desktop memory beside the row this app already holds for the old h:
  * (~1,700 duplicates on the owner's drawer). Returns successor → predecessor.
  */
-export function readEngineTranslationSuccessors(root: string): Map<string, string> {
-  const successors = new Map<string, string>();
+export function readEngineTranslationSuccessors(root: string): Map<string, string | null> {
+  const successors = new Map<string, string | null>();
   try {
     const data = JSON.parse(fs.readFileSync(path.join(root, ONE_TRANSLATION_MAP_RELATIVE), "utf8")) as unknown;
-    if (!data || typeof data !== "object" || Array.isArray(data)) return successors;
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("memory_import_translation_map_invalid");
     for (const [oldHash, newHash] of Object.entries(data as Record<string, unknown>)) {
       if (/^[0-9a-f]{16}$/.test(oldHash) && typeof newHash === "string" && /^[0-9a-f]{16}$/.test(newHash)) {
-        successors.set(newHash, oldHash);
-      }
+        const previous = successors.get(newHash);
+        successors.set(newHash, previous === undefined || previous === oldHash ? oldHash : null);
+      } else throw new Error("memory_import_translation_map_invalid");
     }
-  } catch {
-    // no migration yet → nothing to link
+  } catch (error) {
+    // The map is optional; a corrupt or unreadable map is not an empty one.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   return successors;
 }
@@ -120,16 +125,36 @@ export function readEngineTranslationSuccessors(root: string): Map<string, strin
  * the desktop translator uses: hash-checked, forget-aware, original kept in the
  * side table), so the same memory is not translated twice.
  */
-function adoptEngineTranslation(predecessor: string, block: OneDurableBlock): "linked" | "gone" {
+function adoptEngineTranslation(predecessor: string, block: OneDurableBlock, owner: string): "linked" | "gone" {
   const db = getDb();
-  const row = db.prepare(
+  return db.transaction(() => {
+  if (getMemoryStoreInfo().ownerNamespace !== owner) throw new Error("memory_import_owner_changed");
+  const key = importSourceKey(owner, ONE_AGENT_ID, block.hash), digest = importSourceDigest(block.kind, block.content, block.native);
+  const receipt = db.prepare("SELECT value FROM memory_store_meta WHERE key = ?").get(key) as { value: string } | undefined;
+  if (receipt) {
+    if (receipt.value !== FORGOTTEN_IMPORT_SOURCE && receipt.value !== digest) throw new Error("memory_import_source_conflict");
+    return "linked";
+  }
+  const priorSource = db.prepare("SELECT value FROM memory_store_meta WHERE key = ?")
+    .get(importSourceKey(owner, ONE_AGENT_ID, predecessor)) as { value: string } | undefined;
+  // A durable forget wins even if conflicting legacy duplicates remain.
+  if (priorSource?.value === FORGOTTEN_IMPORT_SOURCE) {
+    db.prepare("INSERT INTO memory_store_meta(key,value) VALUES(?,?)").run(key, FORGOTTEN_IMPORT_SOURCE);
+    return "gone";
+  }
+  const rows = db.prepare(
     `SELECT id, content, sensitivity, evidence_json FROM memory_entries
       WHERE scope = 'agent_repo' AND agent_id = ? AND superseded_at IS NULL AND evidence_json LIKE ?
-      LIMIT 1`,
-  ).get(ONE_AGENT_ID, `%"one-soul:${predecessor}"%`) as
-    { id: string; content: string; sensitivity: string | null; evidence_json: string } | undefined;
-  // Predecessor forgotten or superseded on this desktop: its translation must not return as new memory.
-  if (!row) return "gone";
+      LIMIT 2`,
+  ).all(ONE_AGENT_ID, `%"one-soul:${predecessor}"%`) as
+    Array<{ id: string; content: string; sensitivity: string | null; evidence_json: string }>;
+  // Never choose an arbitrary legacy duplicate as a translation owner.
+  if (rows.length > 1) throw new Error("memory_import_source_conflict");
+  const row = rows[0];
+  if (!row) {
+    if (priorSource) throw new Error("memory_import_source_unconfirmed");
+    return "gone";
+  }
   if (isNonEnglishText(row.content) && !isNonEnglishText(block.content)) {
     const outcome = applyTranslation(db, {
       kind: "memory_entry",
@@ -139,7 +164,11 @@ function adoptEngineTranslation(predecessor: string, block: OneDurableBlock): "l
       text: row.content,
       sensitivity: row.sensitivity,
     }, block.content, { translator: "engine:english-memory-backfill.v1", backCheck: null, intakeEpoch: null });
-    if (outcome === "forgotten") return "gone";
+    if (outcome === "forgotten") {
+      db.prepare("INSERT INTO memory_store_meta(key,value) VALUES(?,?)").run(key, FORGOTTEN_IMPORT_SOURCE);
+      return "gone";
+    }
+    if (outcome === "stale") throw new Error("memory_import_source_unconfirmed");
   }
   let evidence: unknown = [];
   try { evidence = JSON.parse(row.evidence_json); } catch { evidence = []; }
@@ -149,7 +178,9 @@ function adoptEngineTranslation(predecessor: string, block: OneDurableBlock): "l
     db.prepare("UPDATE memory_entries SET evidence_json = ? WHERE id = ?")
       .run(JSON.stringify([...list, token]), row.id);
   }
+  db.prepare("INSERT INTO memory_store_meta(key,value) VALUES(?,?)").run(key, digest);
   return "linked";
+  }).immediate();
 }
 
 export interface OneImportResult {
@@ -161,7 +192,7 @@ export interface OneImportResult {
 }
 
 export function oneWorkspaceRoot(): string {
-  return process.env.AGENTLAS_ONE_DIR || path.join(os.homedir(), ".agentlas", "one");
+  return process.env.AGENTLAS_ONE_DIR || path.join(agentlasHomeDir(), "one");
 }
 
 /** One 이 켜져 있을 때만 반입한다. 꺼진 One 의 서랍을 앱이 임의로 흡수하지 않는다. */
@@ -184,8 +215,12 @@ function normalizeKind(value: string): MemoryKind {
 }
 
 /** 이미 반입한 해시 집합. 최근 N개가 아니라 전체 provenance를 읽어 오래된 중복도 막는다. */
-function importedHashes(): Set<string> {
+function importedHashes(prefix: string, receipts: Array<{ key: string }>): Set<string> {
   const seen = new Set<string>();
+  for (const row of receipts) {
+    const hash = row.key.slice(prefix.length);
+    if (/^[0-9a-f]{16}$/.test(hash)) seen.add(hash);
+  }
   for (const item of listMemoryEvidenceTokensForAgent(ONE_AGENT_ID, "one-soul:")) {
     const match = /^one-soul:([0-9a-f]{16})$/.exec(item);
     if (match) seen.add(match[1]);
@@ -194,7 +229,16 @@ function importedHashes(): Set<string> {
 }
 
 let importTimer: NodeJS.Timeout | null = null;
-let lastImportedSoulMtimeMs = 0;
+let lastImportedFiles: string | null = null;
+let lastConflictClock: string | null = null;
+// Private scheduling metadata: the public failed count remains truthful.
+const retryableFailures = new WeakMap<OneImportResult, number>();
+const receiptConflicts = new WeakSet<OneImportResult>();
+const importStartClocks = new WeakMap<OneImportResult, string>();
+/** True when a failure of this pass can be fixed by trying again (a deterministic conflict cannot). The 2.0 first-run migration retires the import only when this is false. */
+export function oneImportHasRetryableFailures(result: OneImportResult): boolean {
+  return result.failed > 0 && retryableFailures.get(result) !== 0;
+}
 /** One import at a time: the boot import and the rescan tick share it, so a
  *  block can never be inserted twice by two overlapping chunked passes. */
 let inflightImport: Promise<OneImportResult> | null = null;
@@ -208,20 +252,35 @@ let importStopped = false;
 export function startOneImportScheduler(intervalMs = 5 * 60 * 1000): void {
   if (importTimer) return;
   importStopped = false;
-  // Resume durable curation at a host lifecycle boundary, never in recall.
-  (require("./automatic-curator") as typeof import("./automatic-curator")).scheduleAutomaticMemoryCuration();
   importTimer = setInterval(() => {
-    let mtimeMs: number;
+    let signature: string;
     try {
-      mtimeMs = fs.statSync(path.join(oneWorkspaceRoot(), ONE_SOUL_RELATIVE)).mtimeMs;
+      signature = importFilesSignature(oneWorkspaceRoot());
     } catch {
-      return; // soul missing or unreadable — nothing to import this tick
+      return;
     }
-    if (mtimeMs <= lastImportedSoulMtimeMs) return;
+    if (inflightImport) return;
+    if (signature === lastImportedFiles) {
+      if (lastConflictClock === null) return;
+      if (!oneIsOn(oneWorkspaceRoot())) return;
+      try { if (importForgetClock() === lastConflictClock) return; } catch { return; }
+    }
     void runOneImportInBackground().then((outcome) => {
-      // 일부 insert가 실패했으면 같은 파일을 다음 tick에 다시 읽는다. 성공하지 않은
-      // 블록은 DB provenance가 없으므로 재시도되고, 성공한 블록은 전체 해시 조회로 skip된다.
-      if (outcome.failed === 0 && !outcome.reason) lastImportedSoulMtimeMs = mtimeMs;
+      // Deterministic conflicts remain failures, but repeating an unchanged
+      // file cannot resolve them. Transient failures remain eligible for retry.
+      if (!outcome.reason && (outcome.failed === 0 || retryableFailures.get(outcome) === 0)) {
+        try {
+          if (importFilesSignature(oneWorkspaceRoot()) === signature) {
+            const conflictClock = receiptConflicts.has(outcome) ? importForgetClock() : null;
+            const startClock = importStartClocks.get(outcome);
+            // A forget during the pass must not be hidden by the cached signature.
+            if (!receiptConflicts.has(outcome) || (startClock !== undefined && startClock === conflictClock)) {
+              lastImportedFiles = signature;
+              lastConflictClock = conflictClock;
+            }
+          }
+        } catch { /* retry */ }
+      }
       if (outcome.imported > 0 || outcome.failed > 0) {
         console.log(
           `[one-import] rescan imported=${outcome.imported} skipped=${outcome.skipped} failed=${outcome.failed}`,
@@ -230,6 +289,27 @@ export function startOneImportScheduler(intervalMs = 5 * 60 * 1000): void {
     }, () => { /* reported by the caller path; the next tick retries */ });
   }, intervalMs);
   importTimer.unref?.();
+}
+
+function importForgetClock(): string {
+  return forgetClockKey(getMemoryStoreInfo());
+}
+
+function forgetClockKey(info: ReturnType<typeof getMemoryStoreInfo>): string {
+  return JSON.stringify([info.ownerNamespace, info.path, info.revocationEpoch]);
+}
+
+function importFilesSignature(root: string): string {
+  const signature = (file: string, optional: boolean): string => {
+    try {
+      const s = fs.statSync(file);
+      return JSON.stringify([s.dev, s.ino, s.size, s.mtimeMs, s.ctimeMs]);
+    } catch (error) {
+      if (optional && (error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+      throw error;
+    }
+  };
+  return JSON.stringify([root, signature(path.join(root, ONE_SOUL_RELATIVE), false), signature(path.join(root, ONE_TRANSLATION_MAP_RELATIVE), true)]);
 }
 
 /** Stops the rescan tick and makes an in-flight chunked import return at its next block. */
@@ -243,21 +323,70 @@ interface PreparedImport {
   result: OneImportResult;
   pending: OneDurableBlock[];
   already: Set<string>;
-  successors: Map<string, string>;
+  successors: Map<string, string | null>;
+  owner: string;
+  ambiguous: Set<string>;
+  failedSources: Set<string>;
+  retryableSources: Set<string>;
 }
 
 function prepareImport(root: string, text: string | null): PreparedImport | OneImportResult {
   const result: OneImportResult = { scanned: 0, imported: 0, skipped: 0, failed: 0 };
   // An unbound legacy machine drawer cannot be attributed to a freshly signed
   // in account. It remains available only in its explicit device-local store.
-  if (!getMemoryStoreInfo().ownerNamespace.startsWith("device-local:")) return { ...result, reason: "legacy_owner_unbound" };
+  const info = getMemoryStoreInfo();
+  const owner = info.ownerNamespace;
+  if (!owner.startsWith("device-local:")) return { ...result, reason: "legacy_owner_unbound" };
   if (text === null) return { ...result, reason: "soul_missing" };
+  importStartClocks.set(result, forgetClockKey(info));
   const blocks = parseOneDurableBlocks(text);
   result.scanned = blocks.length;
-  const already = importedHashes();
-  const pending = selectUnimported(blocks, already);
-  result.skipped = blocks.length - pending.length;
-  return { result, pending, already, successors: readEngineTranslationSuccessors(root) };
+  const prefix = importSourcePrefix(owner, ONE_AGENT_ID);
+  const receipts = getDb().prepare("SELECT key,value FROM memory_store_meta WHERE key >= ? AND key < ?").all(prefix, `${prefix}\uffff`) as Array<{ key: string; value: string }>;
+  const already = importedHashes(prefix, receipts);
+  const receiptByHash = new Map(receipts.map((row) => [row.key.slice(prefix.length), row.value]));
+  const changed = new Set<string>();
+  let hasReceiptConflict = false;
+  const observedDigests = new Map<string, string>();
+  for (const block of blocks) {
+    const digest = importSourceDigest(block.kind, block.content, block.native);
+    const receipt = receiptByHash.get(block.hash), prior = observedDigests.get(block.hash);
+    const receiptChanged = receipt !== undefined && receipt !== FORGOTTEN_IMPORT_SOURCE && receipt !== digest;
+    if (receiptChanged) hasReceiptConflict = true;
+    if (receiptChanged || (prior !== undefined && prior !== digest)) changed.add(block.hash);
+    observedDigests.set(block.hash, digest);
+  }
+  const rawPending = selectUnimported(blocks, already).filter((block) => !changed.has(block.hash));
+  result.failed = changed.size;
+  result.skipped = blocks.length - rawPending.length - changed.size;
+  const successors = readEngineTranslationSuccessors(root);
+  const byHash = new Map(rawPending.map((block) => [block.hash, block]));
+  const state = new Map<string, number>(), pending: OneDurableBlock[] = [], ambiguous = new Set<string>();
+  for (const block of rawPending) {
+    const stack: Array<{ block: OneDurableBlock; expanded: boolean }> = [{ block, expanded: false }];
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      const predecessor = successors.get(frame.block.hash);
+      if (!frame.expanded) {
+        if (state.get(frame.block.hash) === 2) { stack.pop(); continue; }
+        state.set(frame.block.hash, 1);
+        frame.expanded = true;
+        if (predecessor === null) ambiguous.add(frame.block.hash);
+        else if (predecessor && byHash.has(predecessor)) {
+          if (state.get(predecessor) === 1) ambiguous.add(predecessor);
+          else if (state.get(predecessor) !== 2) stack.push({ block: byHash.get(predecessor)!, expanded: false });
+        }
+      } else {
+        if (predecessor && ambiguous.has(predecessor)) ambiguous.add(frame.block.hash);
+        state.set(frame.block.hash, 2);
+        pending.push(frame.block);
+        stack.pop();
+      }
+    }
+  }
+  retryableFailures.set(result, 0);
+  if (hasReceiptConflict) receiptConflicts.add(result);
+  return { result, pending, already, successors, owner, ambiguous, failedSources: new Set(changed), retryableSources: new Set() };
 }
 
 /**
@@ -268,19 +397,30 @@ function prepareImport(root: string, text: string | null): PreparedImport | OneI
  * nor duplicates anything.
  */
 function importBlock(block: OneDurableBlock, prepared: PreparedImport): void {
-  const { result, already, successors } = prepared;
+  const { result, already, successors, owner, ambiguous, failedSources, retryableSources } = prepared;
   const predecessor = successors.get(block.hash);
+  if (!block.content || ambiguous.has(block.hash) || (predecessor && failedSources.has(predecessor))) {
+    if (predecessor && retryableSources.has(predecessor)) {
+      retryableSources.add(block.hash);
+      retryableFailures.set(result, (retryableFailures.get(result) ?? 0) + 1);
+    }
+    failedSources.add(block.hash); result.failed += 1; return;
+  }
   if (predecessor && already.has(predecessor)) {
     try {
-      adoptEngineTranslation(predecessor, block);
+      adoptEngineTranslation(predecessor, block, owner);
+      already.add(block.hash);
       result.skipped += 1;
     } catch {
+      failedSources.add(block.hash);
+      retryableSources.add(block.hash);
+      retryableFailures.set(result, (retryableFailures.get(result) ?? 0) + 1);
       result.failed += 1;
     }
     return;
   }
   try {
-    insertMemoryEntry({
+    const entry = insertMemoryEntryOnce({
       scope: "agent_repo" as MemoryScope,
       kind: normalizeKind(block.kind),
       content: block.content,
@@ -290,9 +430,15 @@ function importBlock(block: OneDurableBlock, prepared: PreparedImport): void {
       sensitivity: "internal",
       // 첫 항목이 멱등 키다. 두 번째는 One 이 기록한 원 근거.
       evidence: [`one-soul:${block.hash}`, block.evidence].filter(Boolean),
-    });
-    result.imported += 1;
-  } catch {
+    }, { key: importSourceKey(owner, ONE_AGENT_ID, block.hash), digest: importSourceDigest(block.kind, block.content, block.native), ownerNamespace: owner });
+    already.add(block.hash);
+    if (entry) result.imported += 1; else result.skipped += 1;
+  } catch (error) {
+    failedSources.add(block.hash);
+    if (!(error instanceof MemoryRevokedError && error.reason === "exact-content-revoked")) {
+      retryableSources.add(block.hash);
+      retryableFailures.set(result, (retryableFailures.get(result) ?? 0) + 1);
+    }
     result.failed += 1;
   }
 }

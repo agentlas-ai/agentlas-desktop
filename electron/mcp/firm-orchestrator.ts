@@ -34,6 +34,8 @@ import type {
   RuntimeStatus,
 } from "../../shared/types";
 import { memoryOwnerAgentId } from "../../shared/memory-ownership";
+import { sameRuntimeIdentity } from "../../shared/runtime-selection";
+import { ollamaModelNamesEqual } from "../../shared/runtime-connect";
 import { delegatedWorkerAutoReview, effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { attestDelegatedPermission, DelegatedAuthorityError, resolveHostDelegatedPermission, type HostDelegatedGrant } from "./delegated-authority";
 import { executionFailureReport, readExecutionFailureCause, type ExecutionFailureReport } from "../../shared/execution-effect-contract";
@@ -56,9 +58,7 @@ import {
   recordTerminalMemoryTurn,
   stripReplyMemoryEventsReadOnly,
 } from "../memory/curator";
-import { runSemanticMemoryReview } from "../memory/semantic-curator";
 import { parseMemoryEvents, stripAllMemoryEventBlocks } from "../memory/events";
-import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { mainOneMachineTurnContext } from "../one/turn-context";
 import { parseAutomations } from "../automation-emitter";
 import { parseSurfaces } from "../surface-emitter";
@@ -94,6 +94,7 @@ import {
 import { withProjectWriteLease } from "./project-write-lease";
 import { withholdTurnAskForRun } from "../turn-tools/control-server";
 import { createInactivityGuard } from "./inactivity-guard";
+import { outerSilenceLimitMs } from "../invocation/outer-silence";
 import { linkAbort } from "../runtime/linked-abort";
 import {
   FirmExecutionEvidenceCollector,
@@ -113,11 +114,13 @@ function mainOneProfileContext(req: McpInvocationRequest): string {
   return typeof value === "string" && value.length > 0 && value.length <= 16_000 ? value : "";
 }
 function sameRuntime(left: RuntimeStatus, right: RuntimeStatus): boolean {
-  return left.kind === right.kind && left.backend === right.backend && left.source === right.source;
+  return sameRuntimeIdentity(left, right);
 }
 
 function sameRuntimeModel(left: RuntimeStatus, right: RuntimeStatus): boolean {
-  return sameRuntime(left, right) && left.model === right.model;
+  return sameRuntime(left, right) && (left.kind === "ollama" && left.model && right.model
+    ? ollamaModelNamesEqual(left.model, right.model)
+    : left.model === right.model);
 }
 
 function firmCandidateRuntimes(
@@ -162,8 +165,10 @@ function cleanAgentAppControlBlocks(text: string): string {
 
 /** 동시성 캡 — 팀이 많아도 한 번에 이만큼만 연다. 하드코딩이 아니라 사양 기반 추천 + 사용자
  *  슬라이더 설정값(getAgentConcurrency). 저사양은 낮게, 강한 머신은 크게 = 스웜 크기 조절. */
-/** 노드 1턴 안전 타임아웃 — 멈춘 CLI 1개가 전체를 무한 대기시키지 않게. */
-const NODE_TIMEOUT_MS = 30 * 60 * 1000;
+/** 노드 1턴 안전 타임아웃 — 멈춘 CLI 1개가 전체를 무한 대기시키지 않게. 값은 러너의 침묵 한도를 따른다(invocation/outer-silence.ts):
+ *  예전 30분은 러너의 도구 중 창(90분)보다 짧아 조용한 도구가 도는 노드를 끊었다(데스크탑 값 수리 S2, 감사 가-12). 닿으면: 노드를 중단하고
+ *  `firm_node_inactivity_timeout`로 끝낸다(러너 자신의 가드가 있으면 그것이 먼저 `runtime_silent_timeout`으로 끝낸다). */
+const nodeTimeoutMs = (): number => outerSilenceLimitMs();
 
 export interface FirmRunParams {
   /** Host-local approved step grant; not a renderer/planner permission field. */
@@ -825,7 +830,7 @@ async function runNodeTurnSafe(
         // worker's execution budget. The timeout starts only after the turn
         // owns the project write lease.
         inactivityGuard.current = createInactivityGuard({
-          timeoutMs: NODE_TIMEOUT_MS,
+          timeoutMs: nodeTimeoutMs(),
           onTimeout: () => {
             timedOut = true;
             link.abort();
@@ -906,8 +911,8 @@ async function runNodeTurnSafe(
       return {
         text: firmFailureCheckpoint(
           p.locale === "ko"
-            ? `(${turn.node.name} 응답 실패: ${Math.round(NODE_TIMEOUT_MS / 1000)}초 동안 응답이 없어 자동 중단했습니다.)`
-            : `(${turn.node.name} failed: no response for ${Math.round(NODE_TIMEOUT_MS / 1000)}s, auto-aborted.)`,
+            ? `(${turn.node.name} 응답 실패: ${Math.round(nodeTimeoutMs() / 1000)}초 동안 응답이 없어 자동 중단했습니다.)`
+            : `(${turn.node.name} failed: no response for ${Math.round(nodeTimeoutMs() / 1000)}s, auto-aborted.)`,
           partialCheckpoint,
           evidence,
         ),
@@ -1281,9 +1286,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       "output: synthesis, or only a Delegate block for a genuinely missing listed report, then stop",
     ].join("\n");
   }
-  if (!workerSeatFirm && !p.req.agentAppMode && !turn.runtimeToolsDisabled && !controlPlaneTurn && !firmProjectReadOnly(p, nodePermission)) {
-    systemPrompt += `\n\n${memoryEmitterPromptFor(turn.userPrompt)}`;
-  }
+  // K2b': the memory receipt text that ended a firm turn's system prompt is gone (no reply is asked to end with a memory block); memory is written through the memory_ticket tool where the run has it.
 
   const workloadResolution = turn.allocation
     ? resolveWorkloadAllocationAcrossRuntimes({
@@ -1654,19 +1657,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
             }
           : {}),
       };
-      const semanticOptions = await runSemanticMemoryReview({
-        replyText: display,
-        runner: executedPicked.runner,
-        backendLabel: executedPicked.label,
-        model: executedRuntime.model ?? undefined,
-        effort: executedRuntime.effort ?? undefined,
-        env: p.runnerEnv,
-        locale: p.locale,
-        signal: turn.signal ?? p.signal,
-        hasProject: Boolean(memoryReadPath),
-        hasAgent: Boolean(memoryOwnerId),
-      }).catch(() => ({ semanticAttempted: true, semanticFailed: true }));
-      const { cleanedText: c2 } = curateReply(display, curationContext, semanticOptions);
+      const { cleanedText: c2 } = curateReply(display, curationContext);
       display = c2 || display;
     } catch (error) {
       try {

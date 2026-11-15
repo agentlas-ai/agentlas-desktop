@@ -31,7 +31,7 @@ const THEME_BOOTSTRAP = `(function(){try{document.documentElement.dataset.theme=
 const PLATFORM_BOOTSTRAP = `(function(){try{var p=navigator.platform||'';var ua=navigator.userAgent||'';document.documentElement.dataset.platform=/Win32|Win64|Windows/i.test(p+' '+ua)?'windows':/Mac/i.test(p)?'macos':'other';}catch(e){}})();`;
 
 // 루트 layout은 셸 없이 — 셸은 (shell)/layout.tsx에서 입힌다.
-// 캔버스/QA 전용 화면은 (no-shell)에 두고, 신규 사용자 안내는 대시보드 QuestBoard가 담당한다.
+// 캔버스/QA 전용 화면은 (no-shell)에 둔다.
 export default function RootLayout({
   children,
 }: {

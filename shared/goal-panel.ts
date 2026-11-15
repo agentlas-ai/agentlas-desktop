@@ -4,15 +4,14 @@
  * 목표 칩 편집 누르면 나오던지".
  *
  * Terms on screen follow the owner's 2026-09-25 wording: 최종목표 · 전략목표 · 하위목표 (the plan's mission · strategies ·
- * tactics). Per node the panel shows its intent (목적, one line), its current method (방법), done_when, a status and the
- * latest AGI action on it.
+ * tactics). Per node the panel shows its intent (목적, one line), its current method (방법), done_when and a status.
  *
  * Rules this module encodes (pure — no DB, no clock; Main passes nowMs):
  *  - Status follows shared/goal-display-state.ts: between scheduled runs is running; only an explicit owner pause is
  *    paused (the goal's pauseReason "user", or a branch the owner paused here). Nothing is inferred from time.
- *  - Intent is the owner's: the final goal text, a strategy's aim and a sub-goal's description and done_when. The AGI may
- *    change methods only (electron/agi/actions.ts refuses intent edits as purpose_change); a refused AGI intent edit is
- *    listed as a suggestion the owner can accept.
+ *  - Intent is the owner's: the final goal text, a strategy's aim and a sub-goal's description and done_when.
+ *  - `agi`, `suggestions` and `agiWorking` stay in the view as null / empty / null: the phone builds that existed before the AGI unblocker
+ *    was removed decode a panel that has those keys (mobile goal_management_models.dart), so the keys are kept and nothing fills them.
  */
 import { goalDisplayState, goalOwnerAttention, type GoalOwnerAttention, type GoalDisplayState } from "./goal-display-state";
 import { goalObjectiveText } from "./auto-goal";
@@ -24,27 +23,11 @@ export const GOAL_PANEL_SCHEMA = "agentlas.goal-panel.v1" as const;
 export type GoalPanelNodeState = "running" | "paused" | "blocked" | "done";
 export interface GoalPanelText { ko: string; en: string }
 
-export interface GoalPanelAgiAction {
-  /** Plan node the action was about (tactic id), or null for the goal as a whole. */
-  nodeId: string | null;
-  at: string;
-  text: GoalPanelText;
-}
-
-export interface GoalPanelSuggestion {
-  /** `<agi action id>:<index>` — stable, so accept/dismiss is replay-safe. */
-  id: string;
-  nodeId: string | null;
-  field: "objective" | "intent" | "done_when";
-  text: string;
-  at: string;
-}
-
 export interface GoalPanelNode {
   id: string;
   kind: "strategy" | "tactic";
   intent: string;
-  /** How it is being pursued right now (host/AGI chosen path, cadence, KPI) — null when nothing beyond the intent. */
+  /** How it is being pursued right now (host chosen path, cadence, KPI) — null when nothing beyond the intent. */
   method: GoalPanelText | null;
   doneWhen: string;
   state: GoalPanelNodeState;
@@ -57,8 +40,9 @@ export interface GoalPanelNode {
   recurring: boolean;
   runs: number;
   ownerPaused: boolean;
-  agi: GoalPanelAgiAction | null;
-  suggestions: GoalPanelSuggestion[];
+  /** Always null (see the header). */
+  agi: null;
+  suggestions: never[];
   children: GoalPanelNode[];
 }
 
@@ -91,8 +75,8 @@ export interface GoalPanelView {
     diagnosis: string | null;
     doneWhen: string[];
     progress: { done: number; total: number } | null;
-    agi: GoalPanelAgiAction | null;
-    suggestions: GoalPanelSuggestion[];
+    agi: null;
+    suggestions: never[];
   };
   deadlineAt: string | null;
   budget: { maxCycles: number | null; cycleCount: number; maxCostUsd: number | null; costUsedUsd: number; wallclockDeadline: string | null };
@@ -100,8 +84,8 @@ export interface GoalPanelView {
   pendingAmendments: number;
   /** Strategic goals (mission tree) or, for single/list shapes, the sub-goals directly under the final goal. */
   nodes: GoalPanelNode[];
-  /** AGI has an open incident on this goal (it is looking into a blocker). */
-  agiWorking: { attempts: number } | null;
+  /** Always null (see the header). */
+  agiWorking: null;
   /** "나누기": the goal has no structured plan yet (no plan, a provisional one, or a single sub-goal). */
   canShape: boolean;
   shaping: boolean;
@@ -122,10 +106,6 @@ export interface GoalPanelBuildInput {
   plan: LiveGoalPlan | null;
   deadlineAt: string | null;
   pendingAmendments: number;
-  /** Newest first. */
-  agiActions: GoalPanelAgiAction[];
-  agiIncident: { attempts: number } | null;
-  suggestions: GoalPanelSuggestion[];
   shaping: boolean;
   shapeFailed: boolean;
   /** False when another surface or room runs this Goal: the "Divide" action is then not offered (it could only be refused). */
@@ -199,8 +179,6 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
   const { plan, run, revision } = input;
   const state = run ? goalDisplayState({ status: run.status, pauseReason: run.pauseReason, blockedReason: run.blockedReason }) : "none";
   const goalPaused = state === "paused";
-  const agiFor = (nodeId: string) => input.agiActions.find((action) => action.nodeId === nodeId) ?? null;
-  const suggestionsFor = (nodeId: string | null) => input.suggestions.filter((s) => s.nodeId === nodeId);
   const current = plan ? selectActiveTactics(plan, { nowMs: input.nowMs })[0]?.id ?? null : null;
   const pausedStrategies = new Set((plan?.strategies ?? []).filter((s) => s.ownerPaused).map((s) => s.id));
 
@@ -215,7 +193,7 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
       id: tactic.id, kind: "tactic", intent: oneLine(tactic.description), method: tacticMethod(tactic), doneWhen: oneLine(tactic.done_when),
       state: nodeState, stateReason: nodeState === "blocked" ? blocked : null, current: tactic.id === current,
       progress: null, recurring: tactic.kind === "recurring", runs: tactic.runs, ownerPaused: tactic.ownerPaused === true,
-      agi: agiFor(tactic.id), suggestions: suggestionsFor(tactic.id), children: [],
+      agi: null, suggestions: [], children: [],
     };
   };
   const liveTactics = (plan?.tactics ?? []).filter((t) => t.status !== "retired").sort((a, b) => a.ord - b.ord);
@@ -240,9 +218,7 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
       stateReason: nodeState === "blocked" ? (open[0]?.stateReason ?? null) : null,
       current: children.some((child) => child.current), progress: { done, total: children.length },
       recurring: false, runs: 0, ownerPaused: strategy.ownerPaused === true,
-      // AGI acts on sub-goals; its line shows on that sub-goal (and the latest one on the final goal), not repeated here.
-      agi: agiFor(strategy.id),
-      suggestions: suggestionsFor(strategy.id), children,
+      agi: null, suggestions: [], children,
     };
   };
 
@@ -284,8 +260,8 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
       diagnosis: plan?.mission?.diagnosis ? oneLine(plan.mission.diagnosis) : null,
       doneWhen,
       progress: leaves.length ? { done: leaves.filter((leaf) => leaf.state === "done").length, total: leaves.length } : null,
-      agi: input.agiActions[0] ?? null,
-      suggestions: suggestionsFor(null),
+      agi: null,
+      suggestions: [],
     },
     deadlineAt: input.deadlineAt ?? (planCurrent ? plan?.deadline_at ?? null : null),
     budget: {
@@ -295,7 +271,7 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
     },
     pendingAmendments: input.pendingAmendments,
     nodes,
-    agiWorking: input.agiIncident,
+    agiWorking: null,
     canShape: input.hostRunsGoal !== false && (!plan || plan.fallback || plan.shape === "single_tactic" || Boolean(revision && plan.revision < revision.revision)),
     shaping: input.shaping,
     shapeFailed: input.shapeFailed,

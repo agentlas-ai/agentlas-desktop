@@ -132,7 +132,7 @@ export function OneComputerHistory({
   const copy = locale === "ko" ? {
     title: "기록",
     localOnly: "원본은 로컬에만 보관됩니다",
-    subtitle: "컴퓨터에서 관찰한 작업의 요약",
+    subtitle: "데스크탑에서 관찰한 작업의 요약",
     clear: "기록 지우기",
     ask: "기록에 대해 물어보기",
     /* ko 명칭은 웹 "컴퓨터 사용 기록" 과 통일(A3/D-9). */

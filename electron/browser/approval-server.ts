@@ -10,6 +10,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { browserRequestApproval } from "./connect";
 import { BROWSER_SOCIAL_ENGAGE_ACTION, browserApprovalInfoPath } from "./approval-channel";
 import { resolveBrowserApprovalAuthority } from "./approval-authority";
+import { registerSlotLeaseSignal } from "../runtime/run-slot-lease";
 import { logBrowserAction } from "../store/browser-vault";
 
 
@@ -141,16 +142,19 @@ export function startBrowserApprovalServer(): Promise<number> {
             res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision: "refused", code: admission.code, message: admission.message }));
             return;
           }
+          const grantedAuthority = authority;
+          const sheetSignal = AbortSignal.any([controller.signal, grantedAuthority.signal]);
+          registerSlotLeaseSignal(sheetSignal, grantedAuthority.slotLease); // N0b: the sheet lets the minting turn's run slot go while the owner decides
           const decision = await browserRequestApproval({
             site: parsed.site ?? "",
             actionType: parsed.actionType ?? "action",
             summary: parsed.summary ?? "Approve browser action",
             target: parsed.target,
           }, {
-            signal: AbortSignal.any([controller.signal, authority.signal]),
-            owner: authority.owner,
-            permission: authority.permission,
-            unattended: authority.unattended,
+            signal: sheetSignal,
+            owner: grantedAuthority.owner,
+            permission: grantedAuthority.permission,
+            unattended: grantedAuthority.unattended,
           });
           if (controller.signal.aborted || res.destroyed) return;
           res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision }));

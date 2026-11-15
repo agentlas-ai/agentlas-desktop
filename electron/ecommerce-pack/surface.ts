@@ -83,7 +83,7 @@ export async function resolveCommerceCategory(
       input: prompt.slice(0, 2_000),
       guidance:
         "Judge the business the user actually wants to run, in any language. When the niche is unclear or mixed, choose commerce.",
-      timeoutMs: opts.timeoutMs ?? 8_000,
+      timeoutMs: opts.timeoutMs,
       signal: opts.signal,
     });
     return verdict.source === "llm" ? verdict.verdict : null;

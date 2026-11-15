@@ -55,8 +55,10 @@ export function withRemoteCurationRuntime(runner: Runner, active: RuntimeStatus,
         }, { onPartial: () => {}, onStatus: () => {}, onTool: () => { toolObserved = true; } }, selection.kind);
         signal.throwIfAborted();
         const model = result.observedModel || selection.model;
-        if (!capability.current() || toolObserved || result.failure || !model || !result.text
-          || Buffer.byteLength(result.text, "utf8") > 48_000) throw new Error("remote_memory_model_result_unavailable");
+        // Whose fault the failure is is a code, never prose: the foreground ended (nobody's), the model call failed (the model's), the model answered and the answer cannot be used (the job's).
+        if (!capability.current()) throw new Error("remote_memory_runtime_ended");
+        if (result.failure || !model) throw new Error("remote_memory_model_call_failed");
+        if (toolObserved || !result.text || Buffer.byteLength(result.text, "utf8") > 48_000) throw new Error("remote_memory_model_result_unavailable");
         return { model, output: result.text };
       },
     });

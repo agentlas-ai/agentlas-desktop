@@ -35,7 +35,12 @@
 // This module is intentionally DATA + tiny pure helpers only (no electron/node imports)
 // so it compiles into dist/electron/** (packaged).
 
-export const ARCHITECTURE_VERSION = "1.10.7";
+import { registerSpecialStoreAgent } from "../memory/special-store-agents";
+import { SPECIAL_FOLDER_AGENTS } from "../../shared/special-folder-agents";
+
+// 1.10.9: one more built-in row, the special agent defined in shared/special-folder-agents.ts. The count rule of the seeder
+// cannot add it (an old install that kept the retired PM Soul row already has as many built-in rows as before), so the version moves.
+export const ARCHITECTURE_VERSION = "1.10.9";
 export const GLOBAL_ORCHESTRATOR_SLUG = "agentlas-orchestrator";
 export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
@@ -98,7 +103,7 @@ export const MEMORY_KINDS: readonly MemoryKind[] = [
   "conflict",
 ];
 
-/** Heading the curator scans for in an agent's reply. Keep in sync with MEMORY_EMITTER_BLOCK. */
+/** Heading the reply parser scans for (memory/events.ts): a block an older session still appends is cut from the answer and read. No text asks a model to write it any more (K2b': memory_ticket). */
 export const MEMORY_EVENTS_HEADING = "## Memory Events";
 
 /** Per-project memory lives in this dir inside the user's working folder. */
@@ -124,17 +129,6 @@ export const CAREER_GRAPH_INBOX_DIR = "career-graph-inbox";
 export const CAREER_GRAPH_DB_FILE = "career-graph.sqlite";
 export const EXPERIENCE_RELATION_LEDGER_FILE = "experience-relations.jsonl";
 
-/**
- * The per-turn memory receipt for runtimes that write it as text. Owner 2026-10-13: turn_summary only — no candidates,
- * no schema, no examples (they cost output tokens on every answer). The curator reads the receipt; the host keeps
- * everything else.
- */
-export const MEMORY_EMITTER_BLOCK = `memory: end each completed reply with (hidden; no secrets, paths or transcripts):
-${MEMORY_EVENTS_HEADING}
-\`\`\`json
-{"schema_version":"agentlas.memory-ticket.v1","turn_summary":"<one English sentence>"}
-\`\`\``;
-
 // ── Built-in agents ──────────────────────────────────────────────────────────
 
 export type BuiltinRole = "orchestrator" | "builder" | "pm" | "curator" | "governance";
@@ -152,48 +146,6 @@ export interface BuiltinAgentDef {
   tone: "blue" | "green" | "purple" | "amber" | "peach";
   systemPrompt: string;
 }
-
-const PM_SOUL_PROMPT = `# Project PM Soul (Agentlas built-in)
-
-You are the Project PM Soul for ONE project folder. Preserve continuity, coordinate
-specialists, and keep the project moving — without turning yourself into a universal
-implementer or a generic "consultant persona". The useful behavior is the operating
-system: rhythm, evidence, ownership, synthesis, and continuity.
-
-## Core principle
-Own project memory. Delegate specialist execution.
-
-## What you do every turn
-- Read ${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE} (and relevant files) BEFORE making claims.
-- For deploy, release, store, billing, auth, API, or cloud work, read the top
-  "Local Credential Index" section and ${PROJECT_MEMORY_DIR}/${LOCAL_CREDENTIALS_MAP_FILE}
-  before saying a credential is missing.
-- Frame the problem before analysis; keep a single source of truth.
-- Track decisions, constraints, user preferences, pending work, risks, and open loops.
-- Give specialists task-scoped briefs (file paths, goal, acceptance checks) — never the
-  whole project history.
-- After meaningful decisions or changes, update ${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE}.
-- Escalate unresolved decisions to the user explicitly.
-
-## Memory update rules
-Update memory for: a durable user preference, a project decision, a stable architecture
-fact, a repeated workflow pattern, an unresolved blocker, a completed milestone.
-Do NOT store: temporary speculation, credentials, raw logs, file dumps, or context that
-belongs to another project.
-If a release or integration needs a real credential, keep the value in this
-project's local .env, .env.local, signing/, or credentials/ store and
-record only env names, local relative paths, owner, and stale-check notes in
-${PROJECT_MEMORY_DIR}/${LOCAL_CREDENTIALS_MAP_FILE}.
-The credential index belongs at the top of ${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE}
-so future sessions see it before ordinary project notes.
-
-## Operating artifacts (prefer these over loose summaries)
-problem statement · workstream map · decision log · risk/action log · evidence index ·
-specialist handoff brief · milestone closeout · memory update proposal.
-
-## Done criteria
-The request has a clear owner, relevant context was inspected, the next action is
-concrete, durable memory changes are recorded, and unresolved decisions are escalated.`;
 
 const GLOBAL_ORCHESTRATOR_PROMPT = `# Agentlas Orchestrator (built-in)
 
@@ -370,7 +322,7 @@ explicit blocker.`;
 const MEMORY_CURATOR_PROMPT = `# Memory Curator (Agentlas built-in)
 
 You are the Memory Curator for this workspace. You do not perform the original domain
-task — you manage memory QUALITY. Agents emit Memory Events; you own durable memory writes.
+task — you manage memory QUALITY. Agents write memory through their typed memory tool; you own durable memory quality.
 
 ## Responsibilities
 - Validate incoming memory events; reject/redact secrets, credentials, private logs,
@@ -390,8 +342,8 @@ task — you manage memory QUALITY. Agents emit Memory Events; you own durable m
 - Classify the kind: fact | decision | preference | risk | procedure | hypothesis |
   evidence | deprecation | conflict.
 - Deduplicate against existing memory; detect conflicts instead of silently overwriting.
-- Require evidence for durable fact/decision/procedure writes; mark low-confidence or
-  stale items as session/discard.
+- Where a line came from (origin_class, certainty) is recorded by the host; it is never a
+  condition of writing the line. Mark stale items as session/discard.
 - Preserve request context as a compact provenance capsule for recall. Never store
   raw prompts, full transcripts, credentials, or private logs in the capsule.
 - Return a concise curation report: what was written, proposed, rejected, or deferred.
@@ -460,7 +412,7 @@ limits: query held means (local, owner cloud, Hub, plugins) before "cannot"; unc
 irreversible (delete, send, pay, publish): measure live; unverifiable → ask owner
 memory conflict: expose, do not pick
 blocked: remaining means in order → one line: where, why, machine evidence
-memory: no direct writes; Memory Events → runtime ticket → curator; no evidence = hypothesis
+memory: written only through the typed memory tool
 boundary: no Hub/cloud upload; raw memory, credentials, transcripts stay internal`;
 
 const SCIENCE_RESEARCH_DIRECTOR_SEED_PROMPT = `# Agentlas Science Research Director
@@ -510,17 +462,8 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     tone: "purple",
     systemPrompt: CORE_META_AGENT_PROMPT,
   },
-  {
-    slug: "agentlas-pm-soul",
-    name: "프로젝트 PM 소울",
-    nameEn: "Project PM Soul",
-    tagline: "프로젝트 폴더의 연속성·기억·조율을 지키는 PM",
-    taglineEn: "Keeps one project folder's continuity, memory, and coordination",
-    role: "pm",
-    visibility: "background",
-    tone: "purple",
-    systemPrompt: PM_SOUL_PROMPT,
-  },
+  // "agentlas-pm-soul" (Project PM Soul) is no longer seeded: the project note it kept is the project's always-loaded
+  // memory document, read by memory/context.ts, not an agent's job. A row an earlier version seeded stays as it is (deleting it would cascade into chats).
   {
     slug: "agentlas-memory-curator",
     name: "메모리 큐레이터",
@@ -579,6 +522,8 @@ export const BUILTIN_AGENTS: readonly BuiltinAgentDef[] = [
     tone: "green",
     systemPrompt: SCIENCE_RESEARCH_DIRECTOR_SEED_PROMPT,
   },
+  // Special agents with a folder and memory like any agent (hidden, no character); their definitions are plain data in shared/special-folder-agents.ts.
+  ...SPECIAL_FOLDER_AGENTS,
 ];
 
 export const BUILTIN_SLUGS: ReadonlySet<string> = new Set(
@@ -589,6 +534,9 @@ export const BUILTIN_SLUGS: ReadonlySet<string> = new Set(
 export function builtinAgentId(slug: string): string {
   return `builtin-${slug}`;
 }
+
+// Science's research director has its own memory store like any agent (the engine's memory-scopes.json `specialAgentIds`); register its id here, where it is defined.
+registerSpecialStoreAgent(builtinAgentId(SCIENCE_RESEARCH_DIRECTOR_SLUG));
 
 export function isBuiltinSlug(slug: string): boolean {
   return BUILTIN_SLUGS.has(slug);

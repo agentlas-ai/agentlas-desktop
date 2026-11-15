@@ -315,13 +315,15 @@ export function ensureGroupSeatForTaskforce(input: {
   title: string;
   memberAgentIds: string[];
   createdAt?: string;
+  /** A room made inside a project. Only a NEW seat takes it; an existing seat keeps what it has. */
+  projectId?: string | null;
 }): string {
   const db = getDb();
   const seatId = `seat_tf_${input.taskforceId}`;
   const now = new Date().toISOString();
   db.prepare(
-    "INSERT OR IGNORE INTO one_seats (id, kind, title, project_id, created_at, updated_at) VALUES (?, 'group', ?, NULL, ?, ?)",
-  ).run(seatId, input.title, input.createdAt ?? now, now);
+    "INSERT OR IGNORE INTO one_seats (id, kind, title, project_id, created_at, updated_at) VALUES (?, 'group', ?, ?, ?, ?)",
+  ).run(seatId, input.title, input.projectId ?? null, input.createdAt ?? now, now);
   db.prepare("UPDATE one_seats SET title = ?, updated_at = ? WHERE id = ?").run(input.title, now, seatId);
   syncGroupSeatOccupants(seatId, input.memberAgentIds);
   return seatId;

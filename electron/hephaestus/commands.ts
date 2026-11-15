@@ -207,9 +207,12 @@ export function hepCall(
   context: string[],
   opts: { project?: string; runtime?: string; version?: string } & HephaestusRunOptions = {},
 ): Promise<HephaestusResult> {
+  // Agentlas 2.0 D6-2: the desktop's door judged this call; the engine's own registered-door stays off for it (agents/usability.ts engineHostGateEnv; switch off: no change).
+  const gate = (require("../agents/usability") as typeof import("../agents/usability")).engineHostGateEnv(); // eslint-disable-line @typescript-eslint/no-require-imports
   return runHephaestus("agentlas_cloud", buildHepCallArgs(agents, context, opts), {
     timeoutMs: 180_000,
     ...opts,
+    ...(Object.keys(gate).length ? { env: { ...gate, ...opts.env } } : {}),
   });
 }
 

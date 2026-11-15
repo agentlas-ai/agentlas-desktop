@@ -1,0 +1,73 @@
+/*
+ * The confirmation window's page (picture desktop-home-trust-1 J and -2 M / N / O). Existing tokens only. The window is small and centered: title, who, the number,
+ * one line, two buttons. No colored fill behind a state line, no left color bar, roomy padding, buttons never wrap (the one rule `agentlas-btn`).
+ */
+.win { box-sizing: border-box; min-height: 100vh; display: grid; align-content: center; justify-items: center; gap: 0; padding: 32px; background: var(--paper); color: var(--ink); text-align: center; word-break: keep-all; overflow-wrap: anywhere; }
+.title { margin: 0 0 14px; font-family: var(--font-head); font-size: 18px; font-weight: 700; line-height: 1.35; letter-spacing: -0.01em; }
+.who { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 22px; font-size: 13px; color: var(--muted-deep, var(--ink-soft)); max-width: 100%; }
+.code { margin: 0 0 18px; font-size: 48px; font-weight: 800; letter-spacing: 0.04em; font-variant-numeric: tabular-nums; line-height: 1.1; user-select: none; }
+.caption { margin: 0 0 28px; font-size: 14px; line-height: 1.5; color: var(--ink); }
+.line { margin: 0 0 14px; font-size: 14px; line-height: 1.55; color: var(--ink); }
+.items { width: 100%; max-height: 170px; overflow: auto; margin: 0 0 18px; padding: 4px 0; list-style: none; text-align: left; border-top: 1px solid var(--paper-edge); border-bottom: 1px solid var(--paper-edge); }
+.items li { padding: 8px 2px; font-size: 12.5px; line-height: 1.45; color: var(--ink-soft); border-bottom: 1px solid var(--paper-edge); }
+.items li:last-child { border-bottom: 0; }
+.note { width: 100%; box-sizing: border-box; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; gap: 10px; margin: 0 0 18px; padding: 12px 14px; border: 1px solid var(--paper-edge); border-radius: var(--rd-r-sm, 10px); background: transparent; text-align: left; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
+.noteIcon { color: var(--muted-deep, var(--ink-soft)); display: grid; place-items: center; padding-top: 2px; }
+.word { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; color: var(--muted-deep, var(--ink-soft)); background: var(--paper-2); padding: 1px 6px; border-radius: 5px; }
+.buttons { width: 100%; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 12px; margin-top: 8px; }
+.btn, .btnPrimary { composes: agentlas-btn from global; }
+.btn.btn, .btnPrimary.btnPrimary { min-height: 44px; padding: 0 max(16px, var(--agentlas-btn-pad-x)); border-radius: var(--rd-r-sm, 10px); border: 0; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.15s ease; text-align: center; justify-content: center; }
+.btn.btn { background: var(--paper); color: var(--ink); box-shadow: inset 0 0 0 1px var(--paper-edge); }
+.btn.btn:hover:not(:disabled) { background: var(--paper-2); }
+.btnPrimary.btnPrimary { background: var(--black); color: var(--white); box-shadow: var(--shadow-1); }
+.btnPrimary.btnPrimary:hover:not(:disabled) { background: var(--black-soft); }
+/* Dark theme: --black does not change with the theme, so the main button sat on the dark paper looking like [Cancel]. In the dark theme it is a light fill with dark text (one rule for every kind of this window, the review window's buttons too). */
+:global(:root[data-theme="dark"]) .btnPrimary.btnPrimary { background: var(--ink); color: var(--paper); box-shadow: none; }
+:global(:root[data-theme="dark"]) .btnPrimary.btnPrimary:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 88%, var(--paper)); }
+.btn:disabled, .btnPrimary:disabled { opacity: 0.45; cursor: default; }
+.spacer { flex: 1; }
+
+/* ── The review window for what waits (kind reviewWaiting; pictures desktop-impl-gaps-6 AI-3 / AI-4). Same tokens; no colored fill behind a state line, no left bar, roomy rows, buttons never wrap. ── */
+.rv { box-sizing: border-box; height: 100vh; display: flex; flex-direction: column; padding: 28px 28px 24px; background: var(--paper); color: var(--ink); word-break: keep-all; overflow-wrap: anywhere; }
+.rvHead { text-align: center; margin: 0 0 14px; }
+.rvTitle { margin: 0 0 8px; font-family: var(--font-head); font-size: 18px; font-weight: 700; line-height: 1.35; letter-spacing: -0.01em; }
+.rvLead { margin: 0; font-size: 13px; line-height: 1.6; color: var(--ink-soft); }
+.rvBody { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+.rvScroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.rvAll { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 2px 10px; font-size: 12.5px; color: var(--ink-soft); border-bottom: 1px solid var(--paper-edge); }
+.rvList { margin: 0; padding: 0; list-style: none; }
+.rvItem { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; padding: 12px 2px; border-bottom: 1px solid var(--paper-edge); }
+.rvItemMain { min-width: 0; }
+.rvItemHead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 6px; font-size: 12px; }
+.rvKind { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); }
+.rvKind b { font-weight: 650; color: var(--ink-soft); }
+.rvSoft { font-size: 12px; color: var(--muted-deep, var(--ink-soft)); font-variant-numeric: tabular-nums; }
+.rvText { margin: 0; font-size: 14px; line-height: 1.5; color: var(--ink); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.rvReadAll { composes: agentlas-btn from global; }
+.rvReadAll.rvReadAll { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; margin-top: 6px; padding: 0; border: 0; background: transparent; font: inherit; font-size: 12px; color: var(--ink); cursor: pointer; }
+.rvReadAll b { font-weight: 700; }
+.rvHint { margin: 8px 0 0; text-align: center; font-size: 12.5px; line-height: 1.5; color: var(--muted-deep, var(--ink-soft)); }
+.rvBox { composes: agentlas-btn from global; }
+.rvBox.rvBox { box-sizing: border-box; width: 18px; height: 18px; min-height: 18px; min-width: 18px; padding: 0; margin-top: 2px; border-radius: 5px; border: 1.5px solid var(--paper-edge-strong, var(--muted)); background: var(--paper); color: var(--white); display: inline-grid; place-items: center; cursor: pointer; }
+.rvBox[data-on="true"] { background: var(--black); border-color: var(--black); }
+.rvBox:disabled { opacity: 0.45; cursor: default; }
+.rvNote { width: 100%; box-sizing: border-box; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 11px 14px; border: 1px solid var(--paper-edge); border-radius: var(--rd-r-sm, 10px); background: transparent; text-align: left; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
+.rvNote b { color: var(--ink); font-weight: 650; }
+.rvButtons { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 10px; margin-top: 16px; }
+.rvButtons[data-three="true"] { grid-template-columns: minmax(0, 0.7fr) minmax(0, 1fr) minmax(0, 1.15fr); grid-auto-flow: row; }
+.rvButtons .btn.btn, .rvButtons .btnPrimary.btnPrimary { min-height: 44px; }
+.rvButtons .btn[data-tone="decline"].btn { color: var(--danger, #8a3b2a); }
+.rvBack { composes: agentlas-btn from global; }
+.rvBack.rvBack { display: inline-flex; align-items: center; align-self: flex-start; gap: 4px; min-height: 28px; padding: 0; border: 0; background: transparent; font: inherit; font-size: 13px; font-weight: 600; color: var(--ink); cursor: pointer; }
+.rvFullHead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 0 12px; font-size: 12.5px; }
+.rvFullText { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px 16px; border: 1px solid var(--paper-edge); border-radius: var(--rd-r-sm, 10px); font-size: 14px; line-height: 1.65; color: var(--ink); white-space: pre-wrap; text-align: left; }
+.rvDone { flex: 1 1 auto; display: grid; align-content: center; justify-items: center; gap: 8px; text-align: center; }
+.rvDoneMark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--paper-2); color: var(--muted-deep, var(--ink-soft)); margin-bottom: 8px; }
+.rvDoneTitle { margin: 0; font-family: var(--font-head); font-size: 18px; font-weight: 700; }
+.rvDoneLine { margin: 0; font-size: 13px; line-height: 1.55; color: var(--ink-soft); }
+.rvSkeleton { margin: 0; padding: 0; list-style: none; }
+.rvSkeleton li { display: grid; gap: 8px; padding: 16px 2px 18px 32px; border-bottom: 1px solid var(--paper-edge); }
+.rvSkeleton i { display: block; height: 10px; border-radius: 5px; background: var(--paper-2); }
+.rvSkeleton i:first-child { width: 22%; }
+.rvSkeleton i:last-child { width: 78%; }
+.rvRetry { display: grid; gap: 12px; justify-items: center; }

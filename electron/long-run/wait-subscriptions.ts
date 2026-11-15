@@ -645,7 +645,8 @@ function* goalWaitPollingCandidates(owner: GoalWaitHostOwner, exactEpoch: boolea
   // subscription cannot remain invisible on every scheduler tick.
   while (true) {
     const rows = getDb().prepare(`SELECT id FROM long_runs WHERE id > ?
-      AND (status IN ('waiting_tool','paused') OR (status='running' AND (
+      AND ((status IN ('waiting_tool','paused') AND EXISTS (SELECT 1 FROM long_run_events w WHERE w.run_id=long_runs.id AND w.kind='run.wait_subscription'))
+        OR (status='running' AND (
         ((SELECT json_extract(e.payload_json,'$.subscription.state') FROM long_run_events e
           WHERE e.run_id=long_runs.id AND e.kind='run.wait_subscription' ORDER BY e.seq DESC LIMIT 1)
           IN ('cancelled','expired') AND
@@ -670,7 +671,9 @@ function* goalWaitPollingCandidates(owner: GoalWaitHostOwner, exactEpoch: boolea
 export async function pollGoalWaitSubscriptions(options: { now?: number; clock?: () => number; host?: GoalWaitHost;
   observe?: (wait: GoalWaitSubscription) => GoalWaitObservation | Promise<GoalWaitObservation>;
   /** Synthetic test seam; production always uses the pinned no-tools runner. */
-  reflect?: typeof reflectOngoingStall } = {}): Promise<void> {
+  reflect?: typeof reflectOngoingStall;
+  /** Synthetic test seam; production reads the app's runtime inventory. */
+  detect?: (force: boolean) => ReturnType<typeof detectRuntimes> } = {}): Promise<void> {
   drainGoalEpisodeNotices();
   const target = options.host ?? host;
   if (!target) return;
@@ -804,7 +807,10 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         const cooling = runtimeCooldownForSelection(current, clock());
         if (cooling?.kind === "quota" || goalAutoRuntimeRestoreDue(checkpoint, current, clock())) {
           quotaWaitUntil = cooling?.until ?? clock();
-          quotaInventory = await detectRuntimes(true);
+          // A quota stop is one event and the wait then sleeps to the cooldown's end, so it looks afresh once. The return to the
+          // preferred model is tried again at every due wait while the Goal runs on its fallback: that one reads the shared
+          // inventory, which sign-in and account changes already refresh, and starts no probes of its own.
+          quotaInventory = await (options.detect ?? detectRuntimes)(cooling?.kind === "quota");
         }
       } catch { /* The transaction below owns the exact context refusal. */ }
     }

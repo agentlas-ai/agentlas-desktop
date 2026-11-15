@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { onAskUserLifecycle,listPendingAskUserRequests,submitAskUserAnswer } from "../confirm/ask-user";
 import type { AskUserRequestEvent } from "../../shared/types";
 import { OneSupervisorOwner } from "../one/supervisor-owner";
@@ -6,13 +7,14 @@ import { getDb, STORE_SCHEMA_VERSION } from "../store/db";
 import { getOneProfile } from "../store/one-profile";
 import { getAuthenticatedActorIds } from "../auth";
 import { ONE_SUPERVISOR_SCHEMA } from "../../shared/one-supervisor";
+import { MOBILE_BRIDGE_PROTOCOL_VERSION } from "../../shared/mobile-bridge";
 import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, ONE_SUPERVISOR_EXTENSIONS_SCHEMA, sameSupervisorRuntimeCompatibility } from "../../shared/one-supervisor-runtime";
 import { getInvocationAdmission } from "../store/invocation-admissions";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { OneSupervisorService } from "../one/supervisor-service";
 
-const METHODS = new Set(["snapshot", "send", "startWork", "startScience", "control", "stopReply", "appearance", "journal", "receipt", "stopTask", "checkin", "followUp", "sendToChat", "assertConversation", "ownerTurn", "assertAutomaticWriteAllowed", "budgets", "budgetConfigure"]);
+const METHODS = new Set(["snapshot", "send", "startWork", "startScience", "control", "stopReply", "appearance", "journal", "receipt", "stopTask", "checkin", "followUp", "sendToChat", "assertConversation", "ownerTurn", "assertAutomaticWriteAllowed", "scienceAllowedForReply", "budgets", "budgetConfigure"]);
 function fail(code: string): never { throw Object.assign(new Error(code),{code}); }
 function exact(value: unknown, required: string[], optional: string[] = []): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -140,7 +142,59 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
       return initialize(String(input.oneId),JSON.stringify(getAuthenticatedActorIds()),prior);
 
     }
+    // This narrow local control remains available after sign-out. The enrolled
+    // GUI has already observed server cancellation; the daemon still proves its
+    // original account/One/owner and the exact run never crossed start.
+    if (raw.op === "companion.work.retireUnstarted") {
+      if (process.env.AGENTLAS_COMPANION_GUI_LEASE_V1 !== "enabled" || !identity || !service) return false;
+      const bound = JSON.parse(identity.actor) as {userId?:unknown;workspaceId?:unknown} | null;
+      if (!bound || typeof bound.userId !== "string" || typeof bound.workspaceId !== "string") return false;
+      const db=getDb(),assertOriginalOwner=()=>{options.assertOwner();
+        const held=db.prepare("SELECT one_id,owner_epoch,owner_kind,generation,phase,lease_until FROM one_supervisor_runtime_owner WHERE slot='personal'").get() as
+          {one_id:string;owner_epoch:string;owner_kind:string;generation:number;phase:string;lease_until:number}|undefined;
+        const grant=db.prepare("SELECT one_id,actor_json,owner_epoch,generation FROM one_supervisor_domain_authority WHERE slot='personal'").get() as
+          {one_id:string;actor_json:string;owner_epoch:string;generation:number}|undefined;
+        if (!held || !grant || held.one_id!==identity!.oneId || held.owner_epoch!==options.bootId || held.owner_kind!=="work-daemon" ||
+          held.phase==="released" || held.lease_until<=Date.now() || grant.one_id!==held.one_id || grant.owner_epoch!==held.owner_epoch ||
+          grant.generation!==held.generation || grant.actor_json!==identity!.actor) fail("supervisor_daemon_retirement_owner_changed");};
+      assertOriginalOwner();
+      const [{retireDaemonCompanionUnstarted},{OneSupervisorStore},{OneSupervisorWorkQueue},{invocationProvenNotStarted},{getInvocationRunReceipt}] = await Promise.all([
+        import("../one/companion-daemon-retirement"),import("../one/supervisor-store"),import("../one/supervisor-work-queue"),
+        import("../store/invocation-admissions"),import("../store/run-events")]);
+      assertOriginalOwner();return retireDaemonCompanionUnstarted({store:new OneSupervisorStore(db),queue:new OneSupervisorWorkQueue(db,false),input:raw.input,
+        owner:{userId:bound.userId,workspaceId:bound.workspaceId,oneId:identity.oneId},assertOwner:assertOriginalOwner,
+        noStartProof:invocationProvenNotStarted,nativeReceipt:getInvocationRunReceipt});
+    }
     authority(); if (!service) fail("supervisor_daemon_not_adopted");
+    if (raw.op === "companion.credential.retry") {
+      if (!exact(raw.input, ["kind"]) || (raw.input.kind !== "registry" && raw.input.kind !== "gui-private")) fail("native_auth_recovery_invalid");
+      authority(); service.assertHostWriteAuthority(identity!.oneId);
+      const { retryNativeGuiResourceFromUser } = await import("./native-auth-credentials");
+      return retryNativeGuiResourceFromUser(raw.input.kind);
+    }
+    if (raw.op === "companion.work.admit") {
+      const { createDaemonCompanionWorkAuthority } = await import("./companion-work-authority");
+      const { MobileBridgePairingManager, mobileBridgeHostIdentityPath } = await import("../mobile-bridge/pairing");
+      const { MobileBridgeAccountPairingClient } = await import("../mobile-bridge/account-pairing");
+      const { userDataDir } = await import("../runtime-paths");
+      const { loadCompanionWorkKey } = await import("../one/companion-work-key");
+      const dir = userDataDir(), pairing = new MobileBridgePairingManager(dir), account = new MobileBridgeAccountPairingClient();
+      const hostId = () => {
+        try {
+          const row: unknown = JSON.parse(readFileSync(mobileBridgeHostIdentityPath(dir), "utf8"));
+          if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+          const value = row as { hostId?: unknown; version?: unknown; createdAt?: unknown };
+          return Object.keys(row).sort().join(",") === "createdAt,hostId,version" && value.version === MOBILE_BRIDGE_PROTOCOL_VERSION &&
+            typeof value.createdAt === "string" && Number.isFinite(Date.parse(value.createdAt)) && typeof value.hostId === "string" &&
+            /^host_[a-f0-9]{32}$/.test(value.hostId) ? value.hostId : null;
+        } catch { return null; }
+      };
+      const receiver = createDaemonCompanionWorkAuthority({ actor: getAuthenticatedActorIds, device: (deviceId) => pairing.deviceAccountBinding(deviceId),
+        hostId, oneId: () => getOneProfile().oneId, assertOwner: () => { authority(); service!.assertHostWriteAuthority(identity!.oneId); },
+        accountActive: async (device) => device.accountAuthorityOrigin === account.origin && await account.accountAuthorityStatus({ accountSubject: device.accountSubject }) === "active",
+        loadKey: loadCompanionWorkKey, receive: (capability) => service!.receiveCompanionWork(capability) });
+      return receiver.admit(raw.input);
+    }
     if(raw.op==='personal.command') {
       if(!exact(raw.input,['method','args']) || typeof raw.input.method!=='string' || !Array.isArray(raw.input.args) || raw.input.args.length>1)fail('personal_data_native_command_invalid');
       authority(); service.assertHostWriteAuthority(identity!.oneId);

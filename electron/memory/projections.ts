@@ -12,6 +12,13 @@ const MAX_ROWS = 20_000;
 const MAX_BYTES = 12 * 1024 * 1024;
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 const running = new Set<string>();
+/** Audit 62 (memory B3): a store that is over the view budget at some revision. The queued work is closed (nothing is retried for ever) and the same revision is not read again; one entry per store path, replaced on change. */
+export const MEMORY_VIEW_BUDGET_CODE = "memory_view_budget_exceeded" as const;
+const overBudgetAt = new Map<string, string>();
+/** The machine code when the current store's view files are not written because the store is over the view budget (the revision it was seen at); null otherwise. */
+export function memoryViewBudgetCode(): string | null {
+  try { const info = getMemoryStoreInfo(); return overBudgetAt.get(info.path) === `${info.revision}:${info.revocationEpoch}` ? MEMORY_VIEW_BUDGET_CODE : null; } catch { return null; }
+}
 
 interface ViewRow {
   id: string; scope: string; kind: string; content: string; agent_id: string | null; actor_id: string | null;
@@ -123,7 +130,7 @@ export function purgeGeneratedMemoryViews(): boolean {
 }
 
 /** File projection only. No model call, memory admission or project-file write. */
-export function processMemoryProjections(): { completed: number; state: "idle" | "complete" | "retry"; moreWork?: boolean } {
+export function processMemoryProjections(): { completed: number; state: "idle" | "complete" | "retry"; moreWork?: boolean; code?: typeof MEMORY_VIEW_BUDGET_CODE } {
   const db = getMemoryDb(), info = getMemoryStoreInfo();
   if (running.has(info.path) || db.inTransaction) return { completed: 0, state: "idle" };
   running.add(info.path);
@@ -140,7 +147,9 @@ export function processMemoryProjections(): { completed: number; state: "idle" |
         fresh = existing.authorityRevision === current.revision && existing.revocationEpoch === current.revocationEpoch
           && existing.actorFamilyContract === MEMORY_ACTOR_FAMILY_SCHEMA;
       }
+      const stamp = `${current.revision}:${current.revocationEpoch}`;
       if (!pending.length && fresh) return { completed: 0, state: "idle" as const };
+      if (!pending.length && overBudgetAt.get(current.path) === stamp) return { completed: 0, state: "idle" as const, code: MEMORY_VIEW_BUDGET_CODE };
       // Repair the existing deterministic similarity projection, never infer
       // a new durable memory or a replacement decision from these files.
       for (const id of new Set(pending.map(row => row.memory_id).filter((value): value is string => Boolean(value)))) {
@@ -156,6 +165,8 @@ export function processMemoryProjections(): { completed: number; state: "idle" |
         const moreWork = Boolean(db.prepare("SELECT 1 FROM memory_projection_outbox WHERE state IN ('queued','processing','retry') LIMIT 1").get());
         return { completed: pending.length, state: "complete" as const, moreWork };
       };
+      // Over the budget is a fact about the store, not a failure: the graph repair above is kept, the queued work is closed with a code, and the view files wait for the store to shrink (the next change reads it once more).
+      const overBudget = () => { overBudgetAt.set(current.path, stamp); return { ...finishPending(), code: MEMORY_VIEW_BUDGET_CODE }; };
       // Later outbox chunks can repair graph edges without regenerating the
       // same already-current files for every chunk.
       if (fresh) return finishPending();
@@ -166,7 +177,7 @@ export function processMemoryProjections(): { completed: number; state: "idle" |
           AND (b.owner_namespace IS NULL OR b.owner_namespace=?)
           AND COALESCE(json_extract(b.applicability_json,'$.enabled'),1)<>0
         ORDER BY m.created_at,m.id LIMIT ?`).all(current.ownerNamespace, MAX_ROWS + 1) as ViewRow[];
-      if (rows.length > MAX_ROWS) throw new Error("memory_view_budget_exceeded");
+      if (rows.length > MAX_ROWS) return overBudget();
       const nativeExists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_entry_native'").get();
       const native = new Map<string, string>();
       if (nativeExists) for (const row of db.prepare("SELECT entry_id,content_native FROM memory_entry_native").all() as Array<{ entry_id: string; content_native: string }>) native.set(row.entry_id, row.content_native);
@@ -205,7 +216,8 @@ export function processMemoryProjections(): { completed: number; state: "idle" |
           authorityRevision: current.revision, revocationEpoch: current.revocationEpoch, kind: group.kind,
           actorId: group.actorId, projectId: group.projectId, entries: group.entries } };
       });
-      if (rendered.reduce((bytes, file) => bytes + Buffer.byteLength(JSON.stringify(file.value)), 0) > MAX_BYTES) throw new Error("memory_view_budget_exceeded");
+      if (rendered.reduce((bytes, file) => bytes + Buffer.byteLength(JSON.stringify(file.value)), 0) > MAX_BYTES) return overBudget();
+      overBudgetAt.delete(current.path);
       realDirectory(path.dirname(current.path), "views");
       const old = managedJson(path.join(base, "manifest.json"), ref) as ViewManifest | null;
       const next = new Set(manifest.files.map(file => file.path));

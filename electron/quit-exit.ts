@@ -128,6 +128,21 @@ export function cleanupDoneExit(platform: NodeJS.Platform, macWatchdogArmed: boo
   return platform === "darwin" && macWatchdogArmed ? "mac-native-watchdog" : "exit-now";
 }
 
+/**
+ * Asks Electron to quit again without being inside the `before-quit` handler that is still running.
+ *
+ * Main prevents the first `before-quit` to decide what the quit does (quit-policy.ts), then calls `app.quit()` once the
+ * plan is committed. When no census has to be awaited (a signal, the OS shutting down, a relaunch) the commit happens
+ * synchronously inside that first handler. Electron then runs the nested quit to the end (closes the windows) and, when
+ * the outer handler returns having called preventDefault, resets "quitting" to false. Closing the last window is then
+ * an ordinary `window-all-closed`, `will-quit` never comes, and the quit sat until the 30 s cleanup deadline forced the
+ * exit (measured: SIGTERM with one window, 31-34 s, 3 of 3; the same quit asked after the handler returned, 1 s).
+ * A macrotask is enough: it runs after the handler's stack has unwound and Electron has stored its verdict.
+ */
+export function quitOutsideBeforeQuit(quit: () => void, defer: (run: () => void) => unknown = setImmediate): void {
+  defer(quit);
+}
+
 const ONE_FLAGS = ["--one-only", "--one"] as const;
 
 /**

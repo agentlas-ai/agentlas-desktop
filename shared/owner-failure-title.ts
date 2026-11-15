@@ -39,6 +39,7 @@ const HOST_CLASS_TITLE: Readonly<Record<string, Title>> = {
   browser_host_unavailable: { ko: "Agentlas Browser를 쓸 수 없음", en: "Agentlas Browser unavailable" },
   session_reopen: { ko: "이전 세션을 다시 열지 못함", en: "Could not reopen the previous session" },
   working_folder: { ko: "작업 폴더를 쓸 수 없음", en: "Working folder unavailable" },
+  memory_exhausted: { ko: "컴퓨터의 메모리가 부족함", en: "The computer ran out of memory" },
 };
 
 /** Labels the harness gave a whole class of outcomes and that are not in the run-level notice table. */

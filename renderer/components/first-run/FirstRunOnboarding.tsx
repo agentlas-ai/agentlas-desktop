@@ -9,7 +9,8 @@
  *
  * Each step writes to an existing store and re-reads it before it counts as done:
  *   name/prefs → One profile (displayName, profileContext, operatingPrinciples)
- *   Chrome     → CredentialImportDialog (consent ≠ import ≠ sign-in kept)
+ *   Chrome     → CredentialImportDialog (consent ≠ import ≠ sign-in kept); the screen states what connecting does,
+ *                the dialog starts with that consent given (no separate checkbox on the screen, F-D13)
  *   AI         → chip grid (components/connect/RuntimeConnect): green only after a live
  *                auth probe; small "연결" → step popup (확인·설치·로그인·확인·완료);
  *                Agentlas → "Upgrade" (plan picker); the black button is always "다음으로".
@@ -30,6 +31,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { IconUser, IconMonitor, IconCpu, IconSettings, IconAtSign } from "@/components/Icon";
+import { FirstRunAlreadyHere, useAlreadyHere } from "@/components/first-run/FirstRunAlreadyHere";
 import { useT } from "@/lib/i18n";
 import type { AuthSession, HubCreditBalance, OneProfile, RuntimeStatus } from "@/lib/types";
 import type { AgentMailStatus } from "@shared/agent-mail";
@@ -55,7 +57,10 @@ import {
   type FirstRunStep,
 } from "@/lib/first-run-state";
 import { setOnePersonaName } from "@/lib/one-persona-name";
+import { nameSaveAllowed, nextNameInput } from "@shared/one-agent-name";
 import { AgentMailOfferCard } from "@/components/one/mail/AgentMailOfferCard";
+import { mailErrorText } from "@/components/one/mail/mailErrorText";
+import { FIRST_RUN_NAME_SUGGESTIONS, FIRST_RUN_PILLS, fieldLines, joinNames, objectParticle, pillText, togglePillInField, withIyo } from "@/lib/first-run-copy";
 import styles from "./FirstRun.module.css";
 import { FirstRunPaywallLayer } from "./FirstRunPaywall";
 import { Select } from "@/components/Select";
@@ -112,8 +117,8 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
   const currentFingerprint = useRef(fingerprint);
   currentFingerprint.current = fingerprint;
   const { locale } = useT();
-  // Finishing navigates to One first and unmounts the flow only once the route is
-  // there. Closing first would mount "/" whose redirect sends people to Work
+  // Finishing navigates to the personal agent (/one?personal=1) first and unmounts the flow only once the route is
+  // there. Closing first would mount "/" whose redirect sent people elsewhere
   // (real run 2026-09-25 landed on /dashboard).
   const [leavingTo, setLeavingTo] = useState<string | null>(null);
   const pathname = usePathname();
@@ -121,7 +126,8 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
 
   useEffect(() => {
     if (!leavingTo) return;
-    if (pathname?.startsWith(leavingTo)) { setOpen(false); setLeavingTo(null); return; }
+    // usePathname() has no query string, so compare the path part of a target such as "/one?personal=1".
+    if (pathname?.startsWith(leavingTo.split("?")[0])) { setOpen(false); setLeavingTo(null); return; }
     router.replace(leavingTo);
   }, [leavingTo, pathname, router]);
 
@@ -184,7 +190,7 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
           </div>
           <div style={{ fontSize: 13, color: "rgba(238,245,242,0.72)", lineHeight: 1.5 }}>
             {checkTimedOut
-              ? (ko ? "다시 시도하거나 이번에는 설정을 건너뛰고 앱을 열 수 있어요. 요금제 안내가 표시되지 않을 수 있으며, 첫 설정은 설정 메뉴에서 다시 열 수 있어요." : "Try again or open the app without setup for now. The plan introduction may not appear; you can reopen setup from Settings.")
+              ? (ko ? "다시 시도하거나 설정을 건너뛰고 앱을 열 수 있어요." : "Try again or open the app without setup.")
               : (ko ? "잠시만 기다려 주세요." : "Please wait a moment.")}
           </div>
           {checkTimedOut && <div style={{ display: "flex", justifyContent: "center", flexWrap: "wrap", gap: 8 }}><button type="button" onClick={() => {
@@ -232,55 +238,49 @@ type Copy = ReturnType<typeof makeCopy>;
 
 function makeCopy(ko: boolean, name: string) {
   return ko ? {
-    back: "이전", next: "다음으로", skip: "건너뛰기", saving: "저장하는 중…", checking: "확인하는 중…",
-    nameTitle: "에이전트 이름을 정해주세요.", nameSub: "One 대신 이 이름으로 불리게 됩니다.",
-    nameLabel: "에이전트 이름", namePlaceholder: "예: 루나", namePreview: (n: string) => `안녕하세요, ${n}입니다.`, namePreviewEmpty: "이름을 적으면 여기에서 첫인사를 미리 볼 수 있어요.",
-    nameHint: "나중에 프로필에서 언제든 바꿀 수 있어요.",
+    back: "이전", next: "다음", skip: "건너뛰기", saving: "저장하는 중…", checking: "확인하는 중…",
+    nameTitle: "에이전트 이름을 정해 주세요.", nameSub: "이 이름으로 불리게 됩니다.",
+    nameLabel: "에이전트 이름", nameLimit: "최대 12자", namePlaceholder: "예: 루나", namePreview: (n: string) => `안녕하세요, ${withIyo(n)}.`, namePreviewEmpty: "이름을 적으면 여기에서 첫인사를 미리 볼 수 있어요.",
     browserTitle: "Chrome을 연결할까요?", browserSub: "에이전트가 로그인된 서비스를 쓰며 일하기 쉬워져요.",
-    chromeName: "Google Chrome", chromeSub: "이 기기의 Chrome 프로필에서 가져올 사이트를 고릅니다.",
-    consent: "선택한 Chrome 프로필의 로그인 세션을 에이전트 전용 브라우저로 가져오는 데 동의합니다.",
-    connectChrome: "Chrome 연결", reopenChrome: "더 가져오기",
-    chipNone: "연결 전", chipImported: "가져옴", chipConsented: "동의함",
-    factConsent: "동의", factImport: "가져오기", factKept: "로그인 유지",
-    yes: "했어요", notYet: "아직", sitesKept: (n: number) => `${n}개 사이트`, keptUnknown: "확인 불가",
-    browserHint: "건너뛰어도 브라우저 화면에서 나중에 연결할 수 있어요.",
-    aiTitle: "어떤 AI를 쓰세요?", aiSub: "이미 로그인된 AI는 설치됨으로 보여요. 필요한 것만 하나씩 연결하세요.",
-    aiCaption: "설치됨은 실제로 로그인 상태를 물어 확인한 뒤에만 표시돼요.",
-    aiNeedOne: "일을 맡기려면 AI가 하나 이상 필요해요. 지금 건너뛰어도 설정에서 언제든 연결할 수 있어요.",
-    localName: "로컬 모델", localSub: "이 기기에서 실행", localNone: "찾은 모델 없음", localHint: "로컬 모델은 앱의 로컬 모델 화면에서 받을 수 있어요.",
+    chromeName: "Google Chrome", chromeSub: "Chrome 프로필에서 가져올 사이트 선택",
+    browserNote: "연결하면 고른 Chrome 프로필의 로그인 상태를 에이전트 전용 브라우저로 가져옵니다.",
+    connectChrome: "Chrome 연결",
+    chipNone: "연결 전", chipImported: "가져옴",
+    aiTitle: "어떤 AI를 쓰세요?", aiSub: "로그인된 AI는 연결됨으로 표시돼요.",
+    aiFound: (names: string) => `이 데스크탑에서 ${names}${objectParticle(names)} 찾아 연결했어요.`,
+    aiCaption: "로그인 상태를 확인한 뒤에만 연결됨으로 표시돼요.",
+    aiNeedOne: "작업을 맡기려면 AI가 하나 이상 필요해요.",
+    localName: "로컬 모델", localSub: "이 기기에서 실행", localNone: "찾은 모델 없음", localHint: "로컬 모델 화면에서 받을 수 있어요.",
     agentlasName: "Agentlas", agentlasSub: "매주 무료로 시작, 이후 크레딧", agentlasFree: "로그인 필요",
-    prefTitle: "에이전트가 지켜야 할 것이 있나요?", prefSub: "선호하는 성격과 말투를 적어 주세요. 비워 두어도 돼요.",
+    prefTitle: "에이전트가 지켜야 할 원칙이 있나요?", prefSub: "성격과 말투를 적어 주세요. 선택 사항이에요.",
     prefLabel: "성격과 말투 · 선택", prefPlaceholder: "예: 짧고 차분하게, 근거를 먼저 보여줘.",
     principleLabel: "꼭 지켜야 할 원칙 · 한 줄에 하나", principlePlaceholder: "예: 외부로 보내기 전에 꼭 물어봐.",
-    prefHint: "원칙은 적은 그대로만 지켜요. 언제든 프로필에서 고칠 수 있어요.",
     mailTitle: "에이전트에게 메일함을 줄까요?", mailSub: "에이전트만 쓰는 고유한 메일 주소예요.",
-    mailHint: "실제 주소는 서버에서 발급된 뒤에만 보여 드려요.",
+    mailName: "에이전트 전용 메일", mailChecking: "확인 중…", mailAvailable: "쓸 수 있음", mailSkip: "메일함 없이 가기",
+    mailCreate: `메일함 만들고 ${name}에게 가기`,
     finish: `${name}에게 가기`, stepsLabel: "진행 단계",
     saveFailed: "저장하지 못했어요. 다시 시도해 주세요.",
   } : {
     back: "Back", next: "Next", skip: "Skip", saving: "Saving…", checking: "Checking…",
-    nameTitle: "Name your agent.", nameSub: "Your agent goes by this name instead of One.",
-    nameLabel: "Agent name", namePlaceholder: "e.g. Luna", namePreview: (n: string) => `Hi, I'm ${n}.`, namePreviewEmpty: "Type a name to preview its greeting here.",
-    nameHint: "You can change it anytime in the profile.",
+    nameTitle: "Name your agent.", nameSub: "Your agent goes by this name.",
+    nameLabel: "Agent name", nameLimit: "Up to 12 characters", namePlaceholder: "e.g. Luna", namePreview: (n: string) => `Hi, I'm ${n}.`, namePreviewEmpty: "Type a name to preview its greeting here.",
     browserTitle: "Connect Chrome?", browserSub: "Your agent can work in the services you're already signed in to.",
     chromeName: "Google Chrome", chromeSub: "Pick the sites to bring over from a Chrome profile on this computer.",
-    consent: "I agree to copy sign-in sessions from the selected Chrome profile into the agent's own browser.",
-    connectChrome: "Connect Chrome", reopenChrome: "Import more",
-    chipNone: "Not connected", chipImported: "Imported", chipConsented: "Agreed",
-    factConsent: "Consent", factImport: "Import", factKept: "Signed in",
-    yes: "Done", notYet: "Not yet", sitesKept: (n: number) => `${n} site${n === 1 ? "" : "s"}`, keptUnknown: "Unknown",
-    browserHint: "You can connect later from the Browser screen.",
-    aiTitle: "Which AI do you use?", aiSub: "AI you're already signed in to shows as Installed. Connect the ones you need, one at a time.",
-    aiCaption: "Installed appears only after we actually ask the AI whether you're signed in.",
+    browserNote: "Connecting copies the sign-in sessions of the Chrome profile you pick into the agent's own browser.",
+    connectChrome: "Connect Chrome",
+    chipNone: "Not connected", chipImported: "Imported",
+    aiTitle: "Which AI do you use?", aiSub: "AI you're already signed in to shows as Connected. Connect the ones you need, one at a time.",
+    aiFound: (names: string) => `${names} ${names.includes(" and ") || names.includes(",") ? "were" : "was"} found on this computer and connected. Tap any other to add it.`,
+    aiCaption: "Connected appears only after we actually ask the AI whether you're signed in.",
     aiNeedOne: "You need at least one AI to run work. You can skip now and connect anytime in Settings.",
     localName: "Local models", localSub: "Runs on this computer", localNone: "No models found", localHint: "Get local models from the Local models screen in the app.",
     agentlasName: "Agentlas", agentlasSub: "Free every week, then credits", agentlasFree: "Sign in",
     prefTitle: "Anything your agent should keep in mind?", prefSub: "Describe the personality and tone you like. You can leave it blank.",
     prefLabel: "Personality and tone · optional", prefPlaceholder: "e.g. Short and calm. Show the evidence first.",
     principleLabel: "Must-keep principles · one per line", principlePlaceholder: "e.g. Always ask before sending anything out.",
-    prefHint: "Principles are followed exactly as written. Edit them anytime in the profile.",
     mailTitle: "Give your agent a mailbox?", mailSub: "A unique email address only your agent uses.",
-    mailHint: "An address is shown only after the server issues it.",
+    mailName: "Agent mailbox", mailChecking: "Checking…", mailAvailable: "Available", mailSkip: "Go without a mailbox",
+    mailCreate: `Create it and go to ${name}`,
     finish: `Go to ${name}`, stepsLabel: "Progress",
     saveFailed: "Could not save. Please try again.",
   };
@@ -308,10 +308,8 @@ export function FirstRunOnboarding({
   const [error, setError] = useState<string | null>(null);
 
   // Chrome
-  const [consent, setConsent] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importSummary, setImportSummary] = useState<string | null>(null);
-  const [keptSites, setKeptSites] = useState<number | null | undefined>(undefined);
 
   // AI — 칩 하나 = 연결할 것 하나. 초록은 살아 있는 확인(runtime.probeAuth) 뒤에만.
   const [runtimes, setRuntimes] = useState<RuntimeStatus[] | null>(null);
@@ -329,7 +327,9 @@ export function FirstRunOnboarding({
   const [principleText, setPrincipleText] = useState("");
 
   const displayName = (profile?.displayName ?? "").trim() || "One";
-  const copy: Copy = useMemo(() => makeCopy(ko, displayName), [ko, displayName]);
+  // A profile still on the built-in default name is not shown as a name: the buttons then say "your agent" instead of a fixed word.
+  const shownName = displayName === "One" ? (ko ? "개인 에이전트" : "your agent") : displayName;
+  const copy: Copy = useMemo(() => makeCopy(ko, shownName), [ko, shownName]);
 
   const persist = useCallback((next: FirstRunRecord) => {
     writeFirstRunRecord(window.localStorage, fingerprint, next);
@@ -361,8 +361,17 @@ export function FirstRunOnboarding({
   useEffect(() => {
     void reloadProfile().then((p) => {
       if (!p) return;
-      setName(p.displayName === "One" ? "" : p.displayName);
-      setPrefText(p.profileContext);
+      // Fill what can be known (F-D13): a first suggestion for the name; for a profile with nothing saved yet, the two
+      // preselected pills' phrases. A profile that already has text keeps exactly that text.
+      setName(p.displayName === "One" ? FIRST_RUN_NAME_SUGGESTIONS[0] : p.displayName);
+      if (p.profileContext) {
+        setPrefText(p.profileContext);
+      } else {
+        const known = new Set(p.operatingPrinciples.map((x) => x.content.trim()));
+        const pick = (field: "tone" | "rule") => FIRST_RUN_PILLS.filter((pill) => pill.field === field && pill.preselected && !known.has(pillText(pill, ko))).map((pill) => pillText(pill, ko)).join("\n");
+        setPrefText(pick("tone"));
+        setPrincipleText(pick("rule"));
+      }
     }).catch(() => undefined);
   }, [reloadProfile]);
 
@@ -385,18 +394,6 @@ export function FirstRunOnboarding({
       setBusy(false);
     }
   };
-
-  /* ── 03 Chrome ───────────────────────────── */
-  const refreshKept = useCallback(async () => {
-    try {
-      const readiness = await api?.browserUi?.readiness();
-      setKeptSites(readiness && readiness.state !== "unknown" ? readiness.connectSessionCount : null);
-    } catch {
-      setKeptSites(null);
-    }
-  }, [api]);
-
-  useEffect(() => { if (step === "browser") void refreshKept(); }, [step, refreshKept]);
 
   /* ── 04 AI ───────────────────────────── */
   const refreshAi = useCallback(async (force: boolean) => {
@@ -501,13 +498,53 @@ export function FirstRunOnboarding({
     window.addEventListener(PLAN_CHANGED_EVENT, onPlan);
     return () => window.removeEventListener(PLAN_CHANGED_EVENT, onPlan);
   }, [step, loadMail]);
-  const mailActive = agentMailOffer(mail).kind === "active";
+  const mailOffer = agentMailOffer(mail);
+  const mailActive = mailOffer.kind === "active";
 
-  const finish = () => {
-    const withMail = recordStep(recordRef.current, "mailbox", mailActive ? "done" : "skipped");
+  // The address the server suggests from the agent's name, checked for availability (F-D13: pre-filled, one press to create).
+  // undefined = not read yet, null = no free suggestion (the card's own address picker takes over).
+  const [mailSuggest, setMailSuggest] = useState<{ localPart: string; address: string } | null | undefined>(undefined);
+  const suggestFor = mailOffer.kind === "choose-address" ? displayName : null;
+  useEffect(() => {
+    const mailApi = api?.agentMail;
+    if (step !== "mailbox" || suggestFor === null || !mailApi?.suggestAddresses || !mailApi.checkAddress) { setMailSuggest(undefined); return; }
+    let alive = true;
+    void (async () => {
+      try {
+        const suggested = await mailApi.suggestAddresses(suggestFor);
+        const first = suggested.ok ? suggested.suggestions[0] : undefined;
+        if (!first) { if (alive) setMailSuggest(null); return; }
+        const checked = await mailApi.checkAddress(first.localPart);
+        if (alive) setMailSuggest(checked.ok && checked.available ? { localPart: first.localPart, address: first.address } : null);
+      } catch { if (alive) setMailSuggest(null); }
+    })();
+    return () => { alive = false; };
+  }, [api, step, suggestFor]);
+
+  const finish = (withMailbox: boolean = mailActive) => {
+    const withMail = recordStep(recordRef.current, "mailbox", withMailbox ? "done" : "skipped");
     persist(recordCompleted(withMail));
-    onClose("/one");
+    onClose("/one?personal=1");
   };
+  const createMailboxAndFinish = async () => {
+    const mailApi = api?.agentMail;
+    if (!mailApi || !mailSuggest || busy) return;
+    setBusy(true); setError(null);
+    try {
+      const res = await mailApi.issue({ displayName, localPart: mailSuggest.localPart });
+      if (!res.ok) { setError(mailErrorText(ko ? "ko" : "en", res)); return; }
+      finish(true);
+    } catch { setError(mailErrorText(ko ? "ko" : "en", { code: "network" })); }
+    finally { setBusy(false); }
+  };
+  const quietSkip: { label: string; onClick: () => void } | null = (() => {
+    switch (step) {
+      case "browser": return importSummary ? null : { label: copy.skip, onClick: () => complete("browser", "skipped") };
+      case "preferences": return { label: copy.skip, onClick: () => complete("preferences", "skipped") };
+      case "mailbox": return mailOffer.kind === "choose-address" ? { label: copy.mailSkip, onClick: () => finish(false) } : null;
+      default: return null;
+    }
+  })();
 
   const goBack = () => {
     const index = FIRST_RUN_STEPS.indexOf(step);
@@ -529,38 +566,47 @@ export function FirstRunOnboarding({
       const result = await api?.runtime.seedFirstRunRoles?.();
       if (!result || (!result.seeded && result.reason !== "owner-chosen")) throw new Error("first_run_roles_not_ready");
       complete("ai", "done");
-    } catch { setError(ko ? "실행 모델을 배정하지 못했습니다. 연결과 모델을 확인하거나 건너뛰세요." : "Could not assign the execution models. Check the connection and model, or skip this step."); }
+    } catch { setError(ko ? "실행 모델을 배정하지 못했어요. 연결과 모델을 확인하거나 건너뛰어 주세요." : "Could not assign the execution models. Check the connection and model, or skip this step."); }
     finally { setBusy(false); }
   };
-  const cc = useMemo(() => connectCopy(ko), [ko]);
+  // "Connected" (not "Installed"): a chip is green only after the live sign-in probe, and that is what the person sees as connected.
+  const cc = useMemo(() => ({ ...connectCopy(ko), installed: ko ? "연결됨" : "Connected" }), [ko]);
 
   const primary: { label: string; onClick: () => void; disabled?: boolean } = (() => {
     switch (step) {
-      case "name": return { label: busy ? copy.saving : copy.next, onClick: () => void saveName(), disabled: busy || !name.trim() };
+      case "name": return { label: busy ? copy.saving : copy.next, onClick: () => void saveName(), disabled: busy || !name.trim() || !nameSaveAllowed(name.trim(), profile?.displayName ?? "") };
+      // The dark button is the setup action itself (F-D13): it opens the Chrome import; Skip is the quiet word beside it.
       case "browser": return importSummary
         ? { label: copy.next, onClick: () => complete("browser", "done") }
-        : { label: copy.skip, onClick: () => complete("browser", "skipped") };
+        : { label: copy.connectChrome, onClick: () => setImportOpen(true) };
       // 오너 2026-09-29: 큰 검정 버튼은 "다음으로" — 연결을 시작하지 않고, 몇 개를 연결했든(0개여도) 넘어간다.
       case "ai": return { label: busy ? copy.saving : copy.next, onClick: () => void finishAi(), disabled: busy || apiBusy };
       case "preferences": return {
-        label: busy ? copy.saving : (prefText.trim() || principleText.trim() ? copy.next : copy.skip),
+        label: busy ? copy.saving : copy.next,
         onClick: () => void savePreferences(),
         disabled: busy,
       };
-      case "mailbox": return { label: copy.finish, onClick: finish };
+      case "mailbox": return mailOffer.kind === "choose-address" && mailSuggest !== null
+        ? { label: busy ? copy.saving : copy.mailCreate, onClick: () => void createMailboxAndFinish(), disabled: busy || !mailSuggest }
+        : { label: copy.finish, onClick: () => finish() };
     }
   })();
 
+  // CLIs the live probe found signed in: they show "Connected" without a press, and the line under the title names them.
+  const connectedClis = RUNTIME_CHIPS.filter((spec) => auth.probes[spec.kind]?.state === "signed-in").map((spec) => spec.name);
   const heading = {
     name: [copy.nameTitle, copy.nameSub],
     browser: [copy.browserTitle, copy.browserSub],
-    ai: [copy.aiTitle, copy.aiSub],
+    ai: [copy.aiTitle, connectedClis.length > 0 ? copy.aiFound(joinNames(connectedClis, ko)) : copy.aiSub],
     preferences: [copy.prefTitle, copy.prefSub],
     mailbox: [copy.mailTitle, copy.mailSub],
   }[step];
 
   const stepIndex = FIRST_RUN_STEPS.indexOf(step);
   const popupOpen = importOpen || Boolean(connectFor);
+  // A personal agent that already lives on the server is offered first, once (nothing else of the flow has been done yet).
+  const alreadyHere = useAlreadyHere(step === "name" && Object.keys(record.steps).length === 0 && !record.completedAt);
+  if (alreadyHere.show) return <FirstRunAlreadyHere ko={ko} onNotNow={alreadyHere.notNow} onBrought={() => { persist(recordCompleted(recordRef.current)); onClose("/one?personal=1"); }} />;
 
   return (
     <div ref={rootRef} className={styles.root} role={popupOpen ? undefined : "dialog"} aria-modal={popupOpen ? undefined : true} aria-labelledby={popupOpen ? undefined : "first-run-title"}>
@@ -588,14 +634,19 @@ export function FirstRunOnboarding({
                     maxLength={64}
                     autoFocus
                     placeholder={copy.namePlaceholder}
-                    onChange={(event) => setName(event.target.value)}
-                    onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229 && name.trim()) void saveName(); }}
+                    onChange={(event) => setName((previous) => nextNameInput(previous, event.target.value))}
+                    onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229 && name.trim() && nameSaveAllowed(name.trim(), profile?.displayName ?? "")) void saveName(); }}
                   />
+                  <small data-first-run-name-limit style={{ display: "block", marginTop: 6, color: "var(--muted-deep)", fontSize: 12 }}>{copy.nameLimit}</small>
                 </div>
                 {/* The placeholder "루나" is an example, not a value: with no name typed the
                     preview used it as if the agent were already called that (QA 2026-09-27). */}
                 <div className={styles.preview} aria-live="polite" data-empty={name.trim() ? undefined : "true"}>{name.trim() ? copy.namePreview(name.trim()) : copy.namePreviewEmpty}</div>
-                <details className={styles.help}><summary>{ko ? "이름 설정 안내" : "Name details"}</summary><p className={styles.hint}>{copy.nameHint}</p></details>
+                <div className={styles.pills}>
+                  {FIRST_RUN_NAME_SUGGESTIONS.map((suggestion) => (
+                    <button key={suggestion} type="button" className={styles.pill} data-on={name.trim() === suggestion ? "true" : undefined} aria-pressed={name.trim() === suggestion} onClick={() => setName(suggestion)}>{suggestion}</button>
+                  ))}
+                </div>
               </>
             )}
 
@@ -608,23 +659,11 @@ export function FirstRunOnboarding({
                     <small>{copy.chromeSub}</small>
                   </div>
                   <span className={styles.chip} data-tone={importSummary ? "ok" : undefined}>
-                    {importSummary ? copy.chipImported : consent ? copy.chipConsented : copy.chipNone}
+                    {importSummary ? copy.chipImported : copy.chipNone}
                   </span>
                 </div>
-                <label className={styles.consent}>
-                  <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
-                  <span>{copy.consent}</span>
-                </label>
-                <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} disabled={!consent} onClick={() => setImportOpen(true)}>
-                  {importSummary ? copy.reopenChrome : copy.connectChrome}
-                </button>
-                <ul className={styles.facts} aria-label={copy.chromeName}>
-                  <li><span>{copy.factConsent}</span><b>{consent ? copy.yes : copy.notYet}</b></li>
-                  <li><span>{copy.factImport}</span><b>{importSummary ? copy.yes : copy.notYet}</b></li>
-                  <li><span>{copy.factKept}</span><b>{keptSites === undefined ? copy.checking : keptSites === null ? copy.keptUnknown : copy.sitesKept(keptSites)}</b></li>
-                </ul>
+                <p className={styles.note}>{copy.browserNote}</p>
                 {importSummary && <p className={styles.hint} role="status">{importSummary}</p>}
-                {!importSummary && <details className={styles.help}><summary>{ko ? "브라우저 연결 안내" : "Browser details"}</summary><p className={styles.hint}>{copy.browserHint}</p></details>}
               </>
             )}
 
@@ -663,6 +702,16 @@ export function FirstRunOnboarding({
 
             {step === "preferences" && (
               <>
+                <div className={styles.pills} role="group" aria-label={copy.prefLabel}>
+                  {FIRST_RUN_PILLS.map((pill) => {
+                    const phrase = pillText(pill, ko);
+                    const on = fieldLines(pill.field === "tone" ? prefText : principleText).includes(phrase);
+                    return (
+                      <button key={pill.id} type="button" className={styles.pill} data-on={on ? "true" : undefined} aria-pressed={on}
+                        onClick={() => (pill.field === "tone" ? setPrefText((text) => togglePillInField(text, phrase)) : setPrincipleText((text) => togglePillInField(text, phrase)))}>{phrase}</button>
+                    );
+                  })}
+                </div>
                 <div className={styles.field}>
                   <label htmlFor="first-run-pref">{copy.prefLabel}</label>
                   <textarea id="first-run-pref" className={styles.textarea} rows={4} maxLength={4000} value={prefText} placeholder={copy.prefPlaceholder} onChange={(event) => setPrefText(event.target.value)} />
@@ -671,14 +720,22 @@ export function FirstRunOnboarding({
                   <label htmlFor="first-run-principles">{copy.principleLabel}</label>
                   <textarea id="first-run-principles" className={styles.textarea} rows={2} value={principleText} placeholder={copy.principlePlaceholder} onChange={(event) => setPrincipleText(event.target.value)} />
                 </div>
-                <details className={styles.help}><summary>{ko ? "맞춤 설정 안내" : "Preference details"}</summary><p className={styles.hint}>{copy.prefHint}</p></details>
               </>
             )}
 
             {step === "mailbox" && (
               <>
-                <AgentMailOfferCard locale={ko ? "ko" : "en"} oneName={displayName} status={mail} reload={async () => { await loadMail(); }} />
-                <details className={styles.help}><summary>{ko ? "메일함 안내" : "Mailbox details"}</summary><p className={styles.hint}>{copy.mailHint}</p></details>
+                {mailOffer.kind === "choose-address" && mailSuggest !== null ? (
+                  <div className={styles.setupCard} data-first-run-mailbox="suggested">
+                    <div className={styles.setupCopy}>
+                      <strong>{copy.mailName}</strong>
+                      <small>{mailSuggest ? mailSuggest.address : copy.mailChecking}</small>
+                    </div>
+                    <span className={styles.chip} data-tone={mailSuggest ? "ok" : undefined}>{mailSuggest ? copy.mailAvailable : copy.mailChecking}</span>
+                  </div>
+                ) : (
+                  <AgentMailOfferCard locale={ko ? "ko" : "en"} oneName={displayName} status={mail} reload={async () => { await loadMail(); }} />
+                )}
               </>
             )}
 
@@ -697,6 +754,7 @@ export function FirstRunOnboarding({
             onClick={() => complete("ai", "skipped")} disabled={busy || apiBusy}>
             {ko ? "나중에 연결" : "Connect later"}
           </button>}
+          {quietSkip && <button type="button" className={styles.quiet} onClick={quietSkip.onClick} disabled={busy}>{quietSkip.label}</button>}
           <button type="button" className={styles.primary} onClick={primary.onClick} disabled={primary.disabled}>{primary.label}</button>
         </div>
       </footer>
@@ -704,11 +762,11 @@ export function FirstRunOnboarding({
       {importOpen && (
         <CredentialImportDialog
           ko={ko}
+          consentGiven
           onClose={() => setImportOpen(false)}
           onDone={(message) => {
             setImportOpen(false);
             setImportSummary(message || (ko ? "가져오기를 마쳤어요." : "Import finished."));
-            void refreshKept();
           }}
         />
       )}

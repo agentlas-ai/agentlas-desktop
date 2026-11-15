@@ -169,6 +169,17 @@ function currentServer(
     : null;
 }
 
+/**
+ * Whether a candidate needs the native Build scope, asked after the groups were resolved. A registry that cannot be read here has already
+ * degraded its groups as host_failure (advanceFallbackGroup); this question must not throw the whole consent for it, so the answer then rests on
+ * the candidate's own declared catalog id (what buildBrowserNeedsNativeScope does for a server it cannot see).
+ */
+function candidateNeedsNativeScope(candidate: InternalMcpBuildCandidate, deps: McpAttachmentResolverDependencies): boolean {
+  let server: InstalledMcpServer | null = null;
+  try { server = currentServer(candidate, deps); } catch { server = null; }
+  return buildBrowserNeedsNativeScope(candidate, server);
+}
+
 interface GroupResolutionState {
   ordered: InternalMcpBuildCandidate[];
   cursor: number;
@@ -453,7 +464,7 @@ export async function resolveApprovedMcpCandidates(input: {
     } catch (error) {
       if (input.nativeBuildRun && active.some(entry => {
         const candidate = candidateById.get(entry.item.candidateId)!;
-        return buildBrowserNeedsNativeScope(candidate, currentServer(candidate, deps));
+        return candidateNeedsNativeScope(candidate, deps);
       })) throw error;
       nextConfig = null;
     }
@@ -558,7 +569,7 @@ export async function resolveApprovedMcpCandidates(input: {
         ),
     runtimeBindings,
   };
-  if (!input.nativeBuildRun && selectedCandidates.some(candidate => buildBrowserNeedsNativeScope(candidate, currentServer(candidate, deps)))) {
+  if (!input.nativeBuildRun && selectedCandidates.some(candidate => candidateNeedsNativeScope(candidate, deps))) {
     resolvedAttachment.prepareForBuildRun = (runId, signal) => resolveApprovedMcpCandidates({
       ...input, signal, nativeBuildRun: { runId, signal },
     });
@@ -585,10 +596,10 @@ export async function resolveApprovedMcpCandidates(input: {
         .filter((item) => item.candidateId !== failedCandidateId)
         .map((item) => item.candidateId);
       const failedCandidate = candidateById.get(failedCandidateId)!;
-      const nativeFailed = Boolean(input.nativeBuildRun && buildBrowserNeedsNativeScope(failedCandidate, currentServer(failedCandidate, deps)));
+      const nativeFailed = Boolean(input.nativeBuildRun && candidateNeedsNativeScope(failedCandidate, deps));
       const remainingSelected = [...selected].filter(candidateId => candidateId !== failedCandidateId
         && (!nativeFailed || candidateById.get(candidateId)?.public.fallbackGroup !== failedItem.fallbackGroup
-          || buildBrowserNeedsNativeScope(candidateById.get(candidateId)!, currentServer(candidateById.get(candidateId)!, deps))));
+          || candidateNeedsNativeScope(candidateById.get(candidateId)!, deps)));
       const recovered = await resolveApprovedMcpCandidates({
         planId: input.planId,
         candidates: input.candidates,

@@ -66,8 +66,9 @@ import {
   recordTerminalMemoryTurn,
   stripReplyMemoryEventsReadOnly,
 } from "../memory/curator";
-import { runSemanticMemoryReview } from "../memory/semantic-curator";
 import { buildMemoryContext } from "../memory/context";
+import { isBorrowedGuestSpec, taskForceRecallReader } from "../workspace-rules/guest";
+import { enterGuestNode } from "../harness/tool-caller";
 import { currentMemoryForgetEpoch } from "../memory/revocations";
 import { bindAppMemoryRequest, appRunMemory, assertAppMemoryRun, appMemoryRunGuard } from "../memory/agent-app-memory";
 import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
@@ -127,7 +128,6 @@ import { assessExternalEffect, combineExternalEffectRequirements, EXTERNAL_EFFEC
   readExecutionFailureCause, type ExternalEffectRequirement, type ExternalEffectState, type ExternalEffectAssessment,
   type ExecutionFailureCause, type ExecutionFailureReport } from "../../shared/execution-effect-contract";
 import { roomPinnedTeammateRuntime, roomRuntimeTeammateRefusal } from "./room-runtime";
-import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { mainOneMachineTurnContext } from "../one/turn-context";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import {
@@ -162,6 +162,7 @@ import {
   borrowedMemoryKey,
 } from "../agents/borrowed-owner-scope";
 import { eventRenewsInactivityGuard } from "./inactivity-guard";
+import { outerSilenceLimitMs } from "../invocation/outer-silence";
 import { oneBackgroundSection, ownerVisiblePrompt, splitOneExecutionPrompt } from "../one/owner-prompt";
 import {
   buildBorrowedAgentMemoryContext,
@@ -223,7 +224,10 @@ function activeGoalContextForPlanner(p: Pick<BorrowedTaskForceParams, "goalConte
   return JSON.stringify({ ...JSON.parse(text), ...goalObligationPlannerData(p.goalContext.goalId, p.goalContext.goalRevision) });
 }
 
-const BORROWED_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
+/** The quiet window of a borrowed agent: the runner's own silence limit (invocation/outer-silence.ts), not a number of this file. The old 30 minutes was shorter than
+ *  the runner's 90 minutes while a tool call is in flight, so a quiet tool stopped the agent (desktop values S2, audit ga-12). On reaching it the agent is aborted
+ *  as timed out; a runner with its own guard ends first with `runtime_silent_timeout`. */
+const borrowedAgentTimeoutMs = (): number => outerSilenceLimitMs();
 
 /** Runtime/queue heartbeats prove liveness, not semantic task progress. */
 export function borrowedEventRenewsInactivityGuard(
@@ -1449,6 +1453,8 @@ async function taskForceMemoryContext(
   agentId: string | null,
   task: string,
   permission: RunnerRequest["permission"] = taskForcePermission(p),
+  /** P3b: a borrowed node: its recall carries none of the owner's Personal or team-shared lines (not tied to the workspace-rules switch). */
+  guestIsolated = false,
 ): Promise<string> {
   if (p.req.agentAppMode) return appRunMemory({runId:p.req.runId,chatId:p.chat.id,actorId:agentId,query:task})?.text ?? "";
   try {
@@ -1457,6 +1463,8 @@ async function taskForceMemoryContext(
       taskPrompt: task,
       projectId: p.chat.projectId ?? null,
       signal: p.signal,
+      // A guest: { guest: true } always. Not a guest: `{}` with the switch off.
+      ...taskForceRecallReader(getDb(), { guest: guestIsolated, chatId: p.chat.id, agentId, agentAppMode: p.req.agentAppMode }),
     });
     const ontology = p.memoryReadPath
       ? await queryWorkingFolderOntologyContext(p.memoryReadPath, task, {
@@ -1531,23 +1539,9 @@ async function curateOwnedTaskForceResult(input: {
           }
         : {}),
     };
-    const semanticOptions = readOnly
-      ? {}
-      : await runSemanticMemoryReview({
-          replyText: text,
-          runner: input.runner,
-          backendLabel: input.backendLabel,
-          model: input.model,
-          effort: input.effort,
-          env: input.env,
-          locale: p.locale,
-          signal: input.signal,
-          hasProject: Boolean(context.projectPath),
-          hasAgent: Boolean(context.agentId),
-        }).catch(() => ({ semanticAttempted: true, semanticFailed: true }));
     const curated = readOnly
       ? stripReplyMemoryEventsReadOnly(text, context)
-      : curateReply(text, context, semanticOptions);
+      : curateReply(text, context);
     return readOnly ? curated.cleanedText : curated.cleanedText || text;
   } catch {
     recordTaskForceTerminalTurn(p, {
@@ -4740,16 +4734,16 @@ function taskForceSystemRequest(parts: readonly DeclaredPromptPart[]): { systemP
  * "no memory-event JSON" and "end each completed reply with ## Memory Events", "end with one next action" and the
  * owner's progress-bar line at once, and wrote its closing lines into the last string of its JSON handoff for 56 minutes.
  */
-type TaskForceTurnReader = { reader: "owner"; memory: string; emitter: string } | { reader: "host"; memory: string };
-function taskForceRuntimeContextParts(p: Pick<BorrowedTaskForceParams, "req" | "workspaceBinding">, turn: TaskForceTurnReader): DeclaredPromptPart[] {
-  const ownerContext = !p.workspaceBinding && !p.req.agentAppMode;
+type TaskForceTurnReader = { reader: "owner"; memory: string } | { reader: "host"; memory: string };
+function taskForceRuntimeContextParts(p: Pick<BorrowedTaskForceParams, "req" | "workspaceBinding">, turn: TaskForceTurnReader, guestIsolated = false): DeclaredPromptPart[] {
+  // A borrowed (Hub/Cloud) node is a guest (P3b, decision): none of the owner's approved principles, profile text or approved One memory reaches it. Same empty text as a workspace-bound run.
+  const ownerContext = !p.workspaceBinding && !p.req.agentAppMode && !guestIsolated;
   const memory: DeclaredPromptPart = { id: "taskforce.shared.system.memory", revision: 1, stability: "turn-context", changeTriggers: ["retrieval", "owner-input"], order: 110, text: turn.memory };
   if (turn.reader === "host") return [
     { id: "taskforce.shared.system.owner-substance", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input"], order: 100, text: ownerContext ? mainOneMachineTurnContext(p.req) : "" },
     memory,
   ];
   return [
-    { id: "taskforce.shared.system.memory-receipt", revision: 1, stability: "configuration", changeTriggers: ["release", "profile", "permission"], order: 60, text: turn.emitter },
     { id: "taskforce.shared.system.profile", revision: 1, stability: "turn-context", changeTriggers: ["owner-profile", "owner-input"], order: 100, text: ownerContext ? mainOneProfileContext(p.req) : "" },
     memory,
   ];
@@ -5213,7 +5207,21 @@ interface WorkforceNestedExecutionEvidence {
   status: "completed" | "failed" | "blocked";
 }
 
+/**
+ * A borrowed (Hub / Cloud) node is a guest in what its tool calls may reach too: every node of a run shares the run's one tool
+ * capability, so while a guest node is live, calls that carry this run are read as a guest's (harness/tool-caller.ts enterGuestNode). Released in finally.
+ */
 async function runBorrowedAgentTurn(
+  p: BorrowedTaskForceParams,
+  spec: BorrowedAgentSpec,
+  ...rest: Parameters<typeof runBorrowedAgentTurnUnscoped> extends [unknown, unknown, ...infer R] ? R : never
+): Promise<BorrowedAgentResult> {
+  const release = isBorrowedGuestSpec(spec) ? enterGuestNode(p.req.runId) : null;
+  try { return await runBorrowedAgentTurnUnscoped(p, spec, ...rest); }
+  finally { release?.(); }
+}
+
+async function runBorrowedAgentTurnUnscoped(
   p: BorrowedTaskForceParams,
   spec: BorrowedAgentSpec,
   packet: BorrowedInputPacket,
@@ -5228,6 +5236,8 @@ async function runBorrowedAgentTurn(
     (spec.source === "installed" || spec.source === "firm-node") && spec.installedAgentId
       ? getAgentById(spec.installedAgentId)
       : null;
+  // P3b: a borrowed Hub/Cloud node is a guest (decision, principle P10) whatever the workspace-rules switch says; asked once per node turn so its owner parts and its memory read agree.
+  const guestIsolated = isBorrowedGuestSpec(spec);
   const invocationId = `task-force-child:${randomUUID()}`;
   const handoffId = `task-force-handoff:${randomUUID()}`;
   const link = linkAbort(p.signal);
@@ -5242,7 +5252,7 @@ async function runBorrowedAgentTurn(
     timer = setTimeout(() => {
       timedOut = true;
       link.abort();
-    }, BORROWED_AGENT_TIMEOUT_MS);
+    }, borrowedAgentTimeoutMs());
   };
   refreshTimeout();
   const recordSemanticActivity = (ev: McpInvocationEvent) => {
@@ -5465,7 +5475,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
     },
   }));
   const nodeTask = packet.brief || oneAttachmentExecutionPrompt(p.req);
-  const localNodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask, workerPermission);
+  const localNodeMemory = await taskForceMemoryContext(p, installedAgent?.id ?? null, nodeTask, workerPermission, guestIsolated);
   const borrowedNodeMemory =
     !p.req.agentAppMode
     && (!p.borrowedCareerOwnerScopeKey || p.borrowedCareerOwnerScopeKey === activeBorrowedOwnerScopeKey())
@@ -5772,7 +5782,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
           taskForceWorkerRunnerRequest(p, {
             ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(managerSpec, packagePermission, undefined, { node: graph.manager.content, package: spec.directive }),
-...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }),
+...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }, guestIsolated),
 { id: "taskforce.nested.manager-plan.system.role", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 130, text: "role: manager of this prepared team; output: delegation plan only; no worker tasks; declared workers unchanged, none omitted/added/reordered" },
 { id: "taskforce.nested.manager-plan.system.output-contract", revision: 1, stability: "task-context", changeTriggers: ["plan-revision", "output-schema"], order: 60, text: `output:\n${TEAM_MANAGER_PLAN_HEADING}\n\`\`\`json\n${JSON.stringify({
                 plannedWorkerIds: expectedWorkerIds,
@@ -5944,7 +5954,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
               {
                 ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(workerSpec, packagePermission, materializedWorkerMcpTools, { node: worker.content, package: spec.directive }),
-...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }),
+...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }, guestIsolated),
 { id: "taskforce.worker.system.handoff-correction", revision: 1, stability: "turn-context", changeTriggers: ["validation-result", "child-result"], order: 80, text: directive }
 ]),
                 history: [],
@@ -6207,7 +6217,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         taskForceWorkerRunnerRequest(p, {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(managerSpec, packagePermission, undefined, { node: graph.manager.content, package: spec.directive }),
-...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory })
+...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }, guestIsolated)
 ]),
           history: [],
           userPrompt: composeDeclaredPrompt([
@@ -6489,7 +6499,7 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         {
           ...taskForceSystemRequest([
 ...borrowedAgentSystemPromptParts(spec, packagePermission, materializedWorkerMcpTools),
-...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }),
+...taskForceRuntimeContextParts(p, { reader: "host", memory: nodeMemory }, guestIsolated),
 { id: "taskforce.worker.system.handoff-correction", revision: 1, stability: "turn-context", changeTriggers: ["validation-result", "child-result"], order: 80, text: directive }
 ]),
           history: [],
@@ -8492,9 +8502,6 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   });
 
   const synthesisMemory = await taskForceMemoryContext(p, p.orchestratorAgent.id, p.req.userPrompt);
-  const synthesisMemoryEmitter = !p.req.agentAppMode && !p.restrictedReadBoundary
-    ? memoryEmitterPromptFor(p.req.userPrompt)
-    : "";
 
   if (p.workspaceBinding) revalidateInvocationWorkspaceBinding(p.workspaceBinding);
   const synthesisInvocationId = taskForceSessionId(p, "borrow-synthesis");
@@ -8551,7 +8558,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           forceSurfaceForCall,
         ),
 ...(approvalPartition.gateActive ? taskForceApprovalGatePromptParts(p.locale, approvalPartition.deferred.length) : []),
-...taskForceRuntimeContextParts(p, { reader: "owner", memory: synthesisMemory, emitter: synthesisMemoryEmitter })
+...taskForceRuntimeContextParts(p, { reader: "owner", memory: synthesisMemory })
 ]),
       history: p.chat.goalId ? [] : taskForceConversationWindow(history, p.req.userPrompt),
       userPrompt: composeDeclaredPrompt([
@@ -8843,24 +8850,11 @@ taskForceCheckpointPromptPart(p.goalCheckpoint ? compileLongRunCheckpoint(p.goal
         // 결정론 큐레이터가 agent_repo 제안을 project/session으로 강등하고 출처를 기록한다.
         sourceProvenance: "task-force-synthesis",
       } as const;
-      const semanticOptions = await runSemanticMemoryReview({
-        replyText: displayText,
-        runner: synthesisPicked.runner,
-        backendLabel: synthesisPicked.label,
-        model: synthesisActive.model ?? undefined,
-        effort: synthesisActive.effort ?? undefined,
-        env: p.runnerEnv,
-        locale: p.locale,
-        signal: p.signal,
-        hasProject: Boolean(curationContext.projectPath),
-        hasAgent: Boolean(curationContext.agentId),
-        sourceProvenance: "task-force-synthesis",
-      }).catch(() => ({ semanticAttempted: true, semanticFailed: true }));
       const curated = curateReply(displayText, {
         ...curationContext,
         // Keep the ownership boundary explicit at the final deterministic write gate.
         sourceProvenance: "task-force-synthesis",
-      }, semanticOptions);
+      });
       displayText = redactSensitiveText(curated.cleanedText || displayText);
     } catch (error) {
       recordTaskForceTerminalTurn(p, {

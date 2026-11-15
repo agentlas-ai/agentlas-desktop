@@ -282,13 +282,47 @@ function LegacyOneMemoryView({open,active,locale}:{open:boolean;active:boolean;l
             </section>{message&&<p className={styles.message} role="status">{message}</p>}{error&&<p className={styles.error} role="alert">{error}</p>}</>;
 }
 
-function DesktopMemoryInspector({open,active,locale,revisionHint}:{open:boolean;active:boolean;locale:"ko"|"en";revisionHint:OneMemoryState|null}) {
+/** `fixed`: the Agents screen's memory tab shows ONE agent's memories (no actor picker, a smaller first read, the map names that agent). */
+/** One easy line per code the engine-side union read reports for a store it could not (fully) read. A code that is not a read failure, or not known yet, shows the code itself. */
+function skippedStoreText(kind:string,code:string,locale:"ko"|"en"):string{
+  const what=kind==="project"?(locale==="ko"?"프로젝트 기억 저장소":"project memory store"):kind==="session"?(locale==="ko"?"세션 기억 저장소":"session memory store"):kind==="personal"?(locale==="ko"?"개인 기억 저장소":"personal memory store"):(locale==="ko"?"에이전트 기억 저장소":"agent memory store");
+  const reason:Record<string,[string,string]>={
+    store_unreadable:["파일을 열 수 없어요","the file could not be opened"],
+    owner_mismatch:["다른 계정의 것이에요","it belongs to another account"],
+    store_symlink:["바로가기(링크)라 안전을 위해 건너뛰었어요","it is a link, skipped for safety"],
+    agent_local_state_symlink:["에이전트 폴더 안의 기록이 바로가기(링크)라 건너뛰었어요","the agent folder's local records are a link, skipped for safety"],
+    entries_missing:["기억 목록이 없어요","its memory list is missing"],
+    forget_clock_unreadable:["잊은 기록을 확인할 수 없어요","the forgotten-memory record could not be checked"],
+    forget_catchup_withheld:["일부 기억이 숨겨져 있어요","some memories are hidden"],
+  };
+  const pair=reason[code];
+  if(pair){
+    if(locale==="ko")return `이 ${what}를 읽지 못했어요 (${pair[0]}).`;
+    return `This ${what} could not be read (${pair[1]}).`;
+  }
+  // Codes that are not a failure to read (a forget or a project deletion not finished yet, a write that went to the main store) and codes this screen does not know yet:
+  // never "could not be read" (the store was read). A known reason inside the code (`forget_partial:agent:forget_catchup_withheld`) gets its line; otherwise the code itself is shown.
+  const inner=code.split(":").pop()??code,innerPair=reason[inner];
+  // The 2.0 first-run cleanup is waiting (its stop reason is a code like `first_run:failed/no_answer`): one plain phrase, never the code.
+  const detail=innerPair?(locale==="ko"?innerPair[0]:innerPair[1]):code.startsWith("first_run:")?(locale==="ko"?"기억 정리가 잠시 멈춰 있어요":"the memory cleanup is paused for now"):code;
+  return locale==="ko"?`이 ${what}에 확인이 필요한 상태가 있어요 (${detail}).`:`This ${what} has a state that needs attention (${detail}).`;
+}
+export interface DesktopMemoryInspectorFixedActor { actorId: string; name: string; limit?: number }
+export function DesktopMemoryInspector({open,active,locale,revisionHint,fixed}:{open:boolean;active:boolean;locale:"ko"|"en";revisionHint:OneMemoryState|null;fixed?:DesktopMemoryInspectorFixedActor}) {
   const [result,setResult]=useState<DesktopMemoryQueryResult|null>(null),[detail,setDetail]=useState<DesktopMemoryDetail|null>(null);
-  const [actor,setActor]=useState(BUILTIN_ONE_AGENT_ID),[project,setProject]=useState(""),[scope,setScope]=useState("");
+  const [actor,setActor]=useState(fixed?.actorId??BUILTIN_ONE_AGENT_ID),[project,setProject]=useState(""),[scope,setScope]=useState("");
   const [status,setStatus]=useState<DesktopMemoryStatus|"all">("active"),[selected,setSelected]=useState<string|null>(null);
   const [text,setText]=useState(""),[editing,setEditing]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState<string|null>(null),[notice,setNotice]=useState<string|null>(null),[retry,setRetry]=useState(0);
   const [appSharing,setAppSharing]=useState<AgentAppMemorySharing|null>(null),[appChoice,setAppChoice]=useState("");
   const generation=useRef(0),detailGeneration=useRef(0);
+  const [skipped,setSkipped]=useState<Array<{kind:string;code:string}>>([]);
+  // "This store could not be read (reason)": read once when the view becomes visible (and again when the agent shown changes), never on a timer.
+  useEffect(()=>{
+    if(!open||!active){return;}
+    let gone=false;
+    void ipc()?.agentMemory?.skippedStores?.({agentId:actor==="*"?null:actor}).then(value=>{if(!gone)setSkipped(Array.isArray(value)?value:[]);}).catch(()=>{if(!gone)setSkipped([]);});
+    return()=>{gone=true;};
+  },[open,active,actor]);
   const errorText=(cause:unknown)=>memorySheetFailureText(cause,locale);
   // A memory that changed under the sheet is not an error to reload by hand: the list is read again here and the owner is told so. Only an
   // action the owner just took does this (never the effects that read the list, which would loop on a memory that keeps changing).
@@ -304,7 +338,7 @@ function DesktopMemoryInspector({open,active,locale,revisionHint}:{open:boolean;
     setResult(null);setDetail(null);setSelected(null);setEditing(false);setError(null);
     const api=ipc()?.oneMemory.inspector;
     if(!api){setError(locale==="ko"?"기억 정보를 불러올 수 없습니다.":"Memory information is unavailable.");return;}
-    void api.query({actorId:actor==="*"?null:actor,projectId:project||null,scope:(scope||null) as OneMemoryMapSnapshot["nodes"][number]["scope"]|null,status})
+    void api.query({actorId:actor==="*"?null:actor,...(fixed?.limit?{limit:fixed.limit}:{}),projectId:project||null,scope:(scope||null) as OneMemoryMapSnapshot["nodes"][number]["scope"]|null,status})
       .then(value=>{if(current===generation.current){if(value.schemaVersion!=="agentlas.desktop-memory-inspector.v1")throw Error("Memory information is unavailable");
         const suspended=suspendedEdit.current;suspendedEdit.current=null;
         if(suspended) keptEdit.current=suspended.ownerRef===value.ownerRef?{memoryId:suspended.memoryId,text:suspended.text}:null;
@@ -361,19 +395,20 @@ function DesktopMemoryInspector({open,active,locale,revisionHint}:{open:boolean;
   return <section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
     <h3 id="durable-memory-title" className={styles.memoryCount}>{locale==="ko"?"기억":"Memories"} <span>{result?.total??"…"}</span></h3>
     <div className={`${styles.editForm} ${styles.memoryFilters}`}>
-      <label><span>{locale==="ko"?"One / Agent":"One / Agent"}</span><select aria-label="Memory actor" value={actor} disabled={busy} onChange={event=>setActor(event.target.value)}>
+      {!fixed&&<label><span>{locale==="ko"?"One / Agent":"One / Agent"}</span><select aria-label="Memory actor" value={actor} disabled={busy} onChange={event=>setActor(event.target.value)}>
         <option value={BUILTIN_ONE_AGENT_ID}>One</option><option value="*">{locale==="ko"?"모든 Agent":"All agents"}</option>
-        {result?.actors.filter(value=>value.id&&value.id!==BUILTIN_ONE_AGENT_ID).map(value=><option key={value.id} value={value.id!}>{value.name}</option>)}</select></label>
+        {result?.actors.filter(value=>value.id&&value.id!==BUILTIN_ONE_AGENT_ID).map(value=><option key={value.id} value={value.id!}>{value.name}</option>)}</select></label>}
       <label><span>{locale==="ko"?"프로젝트":"Project"}</span><select aria-label="Memory project" value={project} disabled={busy} onChange={event=>setProject(event.target.value)}><option value="">{locale==="ko"?"모든 프로젝트":"All projects"}</option>{result?.projects.map(value=><option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
       <label><span>{locale==="ko"?"적용 범위":"Scope"}</span><select aria-label="Memory scope" value={scope} disabled={busy} onChange={event=>setScope(event.target.value)}><option value="">{locale==="ko"?"모든 범위":"All scopes"}</option>{["user_identity","team_memory","agent_repo","agent_team","project","session"].map(value=><option key={value} value={value}>{recallLabel(value)}</option>)}</select></label>
       <label><span>{locale==="ko"?"상태":"Status"}</span><select aria-label="Memory status" value={status} disabled={busy} onChange={event=>setStatus(event.target.value as DesktopMemoryStatus|"all")}>{["active","disabled","superseded","forgotten","all"].map(value=><option key={value} value={value}>{statusLabel(value)}</option>)}</select></label>
     </div>
     <p className={styles.memoryHint}>{locale==="ko"?"Agent별 회상 범위를 유지하며 소유자가 기억을 관리할 수 있습니다.":"Manage your memories while preserving each agent's recall scope."}</p>
+    {skipped.map(item=><p key={`${item.kind}:${item.code}`} className={styles.memoryHint} role="status" data-skipped-store={item.code}>{skippedStoreText(item.kind,item.code,locale)}</p>)}
     {error&&<p className={styles.error} role="alert">{error} <button type="button" className={styles.secondaryButton} disabled={busy} onClick={()=>setRetry(value=>value+1)}>{locale==="ko"?"다시 불러오기":"Reload"}</button></p>}
     {notice&&<p className={styles.message} role="status">{notice}</p>}
     {!result&&!error&&<p className={styles.empty} role="status">{locale==="ko"?"기억을 불러오는 중입니다.":"Loading memories."}</p>}
     {result?.truncated&&<p className={styles.memoryHint}>{locale==="ko"?`최근 ${result.entries.length}개를 표시합니다. 필터로 범위를 좁혀 주세요.`:`Showing the latest ${result.entries.length}. Narrow the filters to see a smaller range.`}</p>}
-    {result&&result.map.nodes.length>0&&<div className={styles.memoryMap}><OneMemoryMap snapshot={result.map} locale={locale} height={232} colorByKind selectedId={selected} onSelect={setSelected} describe={describe} unassignedProjectLabel={locale==="ko"?"프로젝트 없음":"No project"}/></div>}
+    {result&&result.map.nodes.length>0&&<div className={styles.memoryMap}><OneMemoryMap snapshot={result.map} locale={locale} height={232} colorByKind selectedId={selected} onSelect={setSelected} describe={describe} unassignedProjectLabel={locale==="ko"?"프로젝트 없음":"No project"} ownerLabel={fixed?.name}/></div>}
     <div className={styles.memoryList}>{result?.entries.map(row=><button key={row.memoryId} type="button" className={styles.memoryEntryButton} data-selected={selected===row.memoryId?"true":undefined} onClick={()=>setSelected(value=>value===row.memoryId?null:row.memoryId)}>
       <KindIcon kind={row.kind}/><span>{row.title||statusLabel(row.status)}</span><small>{row.actorName} · {statusLabel(row.status)}</small></button>)}</div>
     {result&&result.entries.length===0&&<p className={styles.empty}>{locale==="ko"?"선택한 범위에 기억이 없습니다.":"No memories in this selection."}</p>}

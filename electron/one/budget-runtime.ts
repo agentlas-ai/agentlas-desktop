@@ -19,7 +19,8 @@ function tokens(value:Record<string,unknown>|null):OneBudgetUsage["tokens"] {
 /** Existing native receipts and host accounting events supply observations.
  * There is no renderer/model settlement endpoint or price lookup. */
 export class OneBudgetRuntime {
-  constructor(private readonly deps:{budget:OneBudgetStore;store:OneSupervisorStore;oneId():string;assertOwner():void;receipt(runId:string):InvocationRunReceipt|null}){}
+  constructor(private readonly deps:{budget:OneBudgetStore;store:OneSupervisorStore;oneId():string;assertOwner():void;receipt(runId:string):InvocationRunReceipt|null;
+    /** A reservation now exists: the reconcile timer (supervisor.ts) runs while one is open. */afterAdmit?():void}){}
   dispatch<T>(request:McpInvocationRequest,start:()=>T):T {
     try {
       this.deps.assertOwner();
@@ -29,6 +30,7 @@ export class OneBudgetRuntime {
       const row=rows[0];
       this.deps.budget.admit({commandId:row.command_id,oneId:row.one_id,taskId:row.task_id,runId:request.runId,chatId:request.chatId,
         bindingHash:canonicalInvocationRequestJson(request)});
+      try{this.deps.afterAdmit?.();}catch{/* the timer is a safety net: the next admission or settle looks again */}
     }catch(error){throw new OneBudgetAdmissionDenied(error && typeof error==="object" && "code" in error && typeof error.code==="string"?error.code:"supervisor_budget_admission_unavailable");}
     // The reservation stays unresolved if this call throws, loses its reply,
     // or is cancelled: preparation itself can already have incurred usage.

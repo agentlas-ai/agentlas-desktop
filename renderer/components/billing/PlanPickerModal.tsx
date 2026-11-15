@@ -53,7 +53,6 @@ function makeCopy(ko: boolean) {
     credits: (n: string) => `월 ${n} AI 크레딧`,
     cloud: (n: string) => `Cloud 에이전트 ${n}개 보관`,
     mail: (addresses: string, recipients: string) => `에이전트 전용 메일 주소 ${addresses}개 · 월 ${recipients}명 발송`,
-    alive: "Alive 에이전트 (스스로 깨어나 일함)",
     byo: "내 AI 구독 연결 · 로컬 실행",
     loading: "요금제를 불러오는 중…",
     loadFailed: "요금제를 불러오지 못했어요.",
@@ -92,7 +91,6 @@ function makeCopy(ko: boolean) {
     credits: (n: string) => `${n} AI credits / month`,
     cloud: (n: string) => `Keep ${n} Cloud agents`,
     mail: (addresses: string, recipients: string) => `${addresses} agent mail address · ${recipients} recipients / month`,
-    alive: "Alive agent (wakes up and works on its own)",
     byo: "Connect your own AI · local runs",
     loading: "Loading plans…",
     loadFailed: "Could not load plans.",
@@ -269,7 +267,6 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
               if ((plan.agentMailAddresses ?? 0) > 0) {
                 features.push({ key: "agentMail", text: copy.mail(num(plan.agentMailAddresses ?? 0), num(plan.agentMailMonthlyRecipients ?? 0)) });
               }
-              if (plan.aliveAgent) features.push({ key: "aliveAgent", text: copy.alive });
               if (free) features.push({ key: "byo", text: copy.byo });
               return (
                 <section

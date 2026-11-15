@@ -7,8 +7,9 @@ import type { GoalIntakeDecision, GoalCriterion, GoalSourceMessage } from "../..
 import { admitsAutomaticGoal } from "../../shared/auto-goal";
 import { LONG_RUN_TERMINAL_STATUSES, type LongRunBudget } from "../../shared/long-run";
 import { getDb } from "../store/db";
-import { createStoredAutomaticGoal, completeChatGoalContract } from "../store/chat-goals";
-import { getChat, setChatGoalBinding } from "../store/chats";
+import { createStoredAutomaticGoal } from "../store/chat-goals";
+import { closeGoal } from "../store/goal-close";
+import { setChatGoalBinding } from "../store/chats";
 import {
   appendLongRunEvent, bindCurrentGoalRevisionToLongRun, createLongRun, getLongRun, getLongRunByGoalId,
   longRunContinueDecision, resumeLongRunByUser, transitionLongRun, type LongRunRecord,
@@ -68,11 +69,8 @@ export function admitJudgedAutomaticGoal(input: {
       if (!priorRun || !LONG_RUN_TERMINAL_STATUSES.has(priorRun.status)) {
         throw new Error("auto_goal_chat_already_bound");
       }
-      completeChatGoalContract(priorRun.goalId, priorRun.status === "completed" ? "completed" : "cancelled");
-      // Release through the binding writer, never raw SQL: setChatGoalBinding is
-      // the only path that emits the store-change signal, and skipping it leaves a
-      // finished Goal drawn as still running until the next unrelated refresh.
-      setChatGoalBinding(input.chatId, null);
+      // The one close (store/goal-close.ts) ends the stale contract, clears the link and emits the store-change signal.
+      closeGoal(priorRun.goalId, priorRun.status === "completed" ? "completed" : "cancelled", "cleanup", { reason: "stale_binding_to_ended_goal" });
       chat.goal_id = null;
     }
     const revision = createStoredAutomaticGoal({ goalId: input.goalId, source, decision: input.decision,
@@ -122,19 +120,7 @@ export function controlAutomaticGoal(input: {
     if (unsettled.n === 0 && ["pausing", "cancelling"].includes(run.status)) {
       run = transitionLongRun({ runId: run.id, to: run.status === "pausing" ? "paused" : "cancelled", actorKind: "host", reason: "user" });
     }
-    if (run.status === "cancelled") {
-      completeChatGoalContract(run.goalId, "cancelled");
-      /*
-       * ★원장만 바꾸고 화면에 알리지 않으면, 끝난 목표가 화면에서 계속 진행 중이다.
-       *
-       * 여기는 결속을 직접 SQL 로 풀고 있었다. 그러면 setChatGoalBinding 안의
-       * emitDesktopStoreChange 를 지나지 않아 **대화 화면이 갱신 신호를 못 받는다.**
-       * 나머지 세 완료 지점은 전부 그 함수를 쓴다 — 이 자리만 달랐다.
-       * (QA 실측 2026-09-08: 원장이 닫힌 뒤에도 목표 칩과 "목표 추진" 토글이 그대로였다.)
-       */
-      const rootChatId = run.rootChatId;
-      if (rootChatId && getChat(rootChatId)?.goalId === run.goalId) setChatGoalBinding(rootChatId, null);
-    }
+    if (run.status === "cancelled") closeGoal(run.goalId, "cancelled", "owner-stop", { reason: "user" }); // contract, link, tasks, due line: the one close
     appendLongRunEvent({ runId: run.id, kind: "run.user_control", actorKind: "user", actorId: source.messageId,
       payload: { command: input.command, status: run.status } });
     return getLongRun(run.id)!;

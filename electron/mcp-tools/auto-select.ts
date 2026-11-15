@@ -11,10 +11,10 @@ import {
 } from "./need-resolver";
 import os from "node:os";
 import path from "node:path";
-import { pluginSlugForToolId, supersededByLivePeer } from "../plugins/builtin";
+import { hostChannelToolIds, pluginSlugForToolId, supersededByLivePeer } from "../plugins/builtin";
 import { MCP_TOOL_CATALOG, refreshDedicatedPluginToolCatalog } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
-import { toolSelectionMode } from "./tool-selection-mode";
+import { LOCAL_MODEL_RUNTIME_KINDS, toolSelectionMode } from "./tool-selection-mode";
 export { toolSelectionMode, DEFAULT_TOOL_SELECTION_MODE, type ToolSelectionMode } from "./tool-selection-mode";
 import { testServerConnection, requiredMcpManualEnvKeys } from "./client";
 import { resolveMcpOAuthAccessToken } from "./oauth";
@@ -27,6 +27,7 @@ import { listBundledHubPlugins } from "../../shared/bundled-hub-catalog";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { listPendingHubPluginApprovals } from "./hub-plugin-bridge";
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
+import { invocationJudgmentContext, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import { isKeylessPlaywrightMcpDuplicate } from "./mcp-config";
 import {
   listInstalledPluginCandidates,
@@ -70,7 +71,8 @@ export interface AutoSelectedMcpTool {
   required: boolean;
   /** Exact value-free observation from the invocation's owned prepared binding. */
   connectionOutcome?: import("../one/one-original-mcp-credential").OneMcpScopedOutcome;
-  /** A row kept from an earlier turn of the conversation that was not ready then: listed, never asked for again by the key sheet. */
+  /** A row kept from an earlier turn of the conversation that was not ready then, or one the previous turn's verdict named whose key is
+   *  missing now (a follow-up turn that started with that verdict): listed, never asked for again by the key sheet. */
   carriedFromEarlierTurn?: true;
   state:
     | "ready"
@@ -97,6 +99,8 @@ export interface HubPluginCandidate {
  * so the run continued without the browser (need-resolver: the judge must never block the run). Only an owner binding
  * (toolMode "browser", an explicit catalog assignment, an @mention of the plugin) keeps the before-model refusal.
  */
+/** DD: the id prefix of a connected app of the server in the judgment's menu (never a catalog id). */
+export const SERVER_APP_CANDIDATE_PREFIX = "server-app:";
 export const AGENTLAS_BROWSER_WITHDRAWN_CODE = "agentlas-browser-host-unavailable-continued-without-browser";
 
 /** An installed plugin the relevance routing attached to this turn (skills inlined, tools attached). */
@@ -132,7 +136,7 @@ export interface AutoSelectedMcpContext {
     code: typeof AGENTLAS_BROWSER_WITHDRAWN_CODE;
     host: "agentlas-browser";
     state: AutoSelectedMcpTool["state"] | "not-selected";
-    /** judge = this turn's judgment; carried = an earlier choice in this Goal/conversation (retained or agent-requested). */
+    /** judge = this turn's judgment; carried = an earlier choice in this Goal/conversation (retained, agent-requested, or the previous turn's verdict). */
     selectedBy: "judge" | "carried";
   };
   tools: AutoSelectedMcpTool[];
@@ -150,8 +154,9 @@ export interface AutoSelectedMcpContext {
   needsDecided: boolean;
   /** Installed plugins routed to this turn. Their router text is inlined in the turn context. */
   routedPlugins?: RoutedPluginSelection[];
-  /** Who chose the optional set: the judge, the deterministic fallback, or nobody. */
-  selectionSource?: "judge" | "local-relevance" | "none";
+  /** Who chose the optional set: the judge, the deterministic fallback, nobody, or the previous turn of this conversation
+   *  (its verdict, reused so this turn starts without waiting; this turn's own judgment runs behind it and serves the next turn). */
+  selectionSource?: "judge" | "local-relevance" | "none" | "previous-turn";
   /** Value-free note: nothing was decided, or the candidate inventory was capped (receipt; not prompt text). */
   needsNote?: string;
   /** Hub plugins left off this run's shelf; the prompt names only this count (harness_search finds them). */
@@ -165,6 +170,8 @@ export interface AutoSelectedMcpContext {
    * and collapsing them made the product warn on every single message. A plain request with no
    * optional tool in play produced the same alarming card as a browser task whose judge was dead.
    */
+  /** DD: the connector ids (not the `server-app:` ids) of the extra candidates the judgment picked this turn; empty when nothing was picked or nobody answered. */
+  serverAppIds?: string[];
   needsOutcome?: {
     decided: boolean;
     /** Candidates the judge was actually offered. Zero means there was nothing to decide. */
@@ -464,6 +471,85 @@ const stickySelectionMemo = new Map<string, SelectionMemoEntry>();
 const goalSelectionMemo = new Map<string, { scopeKey: string; selectedIds: string[] }>();
 /** key = `${structuralKey}\u0000${serverId}` → 마지막 접속 성공 시각 */
 const probeMemo = new Map<string, number>();
+/**
+ * ── Previous-turn verdict ─────────────────────────────────────
+ * The tool-need judgment blocked every turn before its model started (owner's machine, 30 days: median 8.5 s from turn start to
+ * "selection done", the judgment itself 4-6 s). Of 464 follow-up turns in 27 conversations, 436 chose exactly the tools of the turn
+ * before; with the browser attached whenever it is available, a host-channel tool the turn lacked was newly needed in 1.
+ * A follow-up turn in the same structural situation therefore starts with the verdict of the turn before it, and the judgment of its
+ * own message runs behind it and becomes the next turn's verdict. The first turn of a situation still waits for its judgment.
+ *
+ * Neither memo above can serve this: `selectionMemo` is keyed by the exact task text, and `stickySelectionMemo` holds a finished
+ * context (rows with their probe states, pins and baselines mixed in, never written under a Goal) from which the judge's own
+ * answer cannot be read back. This holds only that answer: ids and its reason. Readiness, keys and connections are read again every
+ * turn, and an id that is no longer offered is dropped exactly as a fresh verdict's would be.
+ *
+ * Process memory only: read and written by autoSelectMcpTools alone, nothing is stored. A restart, a crash or another host process
+ * (Main and the background service each have their own) has no entry and judges first, as before. Bounds: PREVIOUS_TURN_NEEDS_MAX
+ * entries (the oldest is dropped), each for PREVIOUS_TURN_NEEDS_TTL_MS after its verdict, so a judge that stops answering cannot
+ * leave an old verdict in use for ever.
+ */
+const PREVIOUS_TURN_NEEDS_TTL_MS = 6 * 60 * 60_000;
+const PREVIOUS_TURN_NEEDS_MAX = 300;
+/** A background judgment older than this is taken as lost: no turn waits for it and a new one may start. The judgment's own ceiling
+ *  is 300 s (system-agents/judgment.ts), so a live one never reaches it. */
+const PREVIOUS_TURN_JUDGMENT_CEILING_MS = 330_000;
+/** The receipt text of a tool that rides a reused verdict (the "Agentlas Plugins · auto-select" row). Never prompt text. */
+export const PREVIOUS_TURN_SELECTION_REASON = "reused from the previous turn of this conversation; this turn's judgment updates the next turn";
+type DecidedMcpNeeds = Pick<ResolvedMcpNeeds, "needed" | "reason" | "omitted">;
+interface PreviousTurnNeedsEntry {
+  needs: DecidedMcpNeeds;
+  /** When the verdict was made. Reading it does not renew it. */
+  at: number;
+  /** What the latest turn of this situation was given, by its task text: a second selection inside that turn (a Goal that moved, the
+   *  config build) gets the same answer, without waiting and whatever the background judgment has written since. */
+  served?: { textHash: string; needs: DecidedMcpNeeds; reused: boolean; at: number };
+}
+const previousTurnNeeds = new Map<string, PreviousTurnNeedsEntry>();
+/** The one background judgment of a situation. Removed when it settles, so it holds no more entries than there are turns in flight. */
+const previousTurnJudgments = new Map<string, { textHash: string; startedAt: number; settled: Promise<DecidedMcpNeeds | null> }>();
+
+function readPreviousTurnNeeds(key: string): PreviousTurnNeedsEntry | undefined {
+  const entry = previousTurnNeeds.get(key);
+  if (entry && Date.now() - entry.at > PREVIOUS_TURN_NEEDS_TTL_MS) {
+    previousTurnNeeds.delete(key);
+    return undefined;
+  }
+  return entry;
+}
+
+function writePreviousTurnNeeds(key: string, needs: DecidedMcpNeeds, served?: PreviousTurnNeedsEntry["served"]): void {
+  const kept = served ?? previousTurnNeeds.get(key)?.served;
+  previousTurnNeeds.delete(key);
+  previousTurnNeeds.set(key, { needs, at: Date.now(), ...(kept ? { served: kept } : {}) });
+  while (previousTurnNeeds.size > PREVIOUS_TURN_NEEDS_MAX) {
+    const oldest = previousTurnNeeds.keys().next().value;
+    if (oldest === undefined) break;
+    previousTurnNeeds.delete(oldest);
+  }
+}
+
+function decidedMcpNeeds(needs: Pick<ResolvedMcpNeeds, "needed" | "reason" | "omitted">): DecidedMcpNeeds {
+  return { needed: [...needs.needed], reason: needs.reason, omitted: [...needs.omitted] };
+}
+
+/** The judgment in flight; null as soon as the waiting turn is cancelled or `maxMs` has passed. A turn never waits for another
+ *  turn's judgment longer than that judgment may run, and a stopped turn does not wait at all. */
+function settledWithin<T>(settled: Promise<T>, maxMs: number, signal?: AbortSignal): Promise<T | null> {
+  if (signal?.aborted || maxMs <= 0) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const finish = (value: T | null): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const onAbort = (): void => finish(null);
+    const timer = setTimeout(() => finish(null), maxMs);
+    timer.unref?.();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void settled.then(finish);
+  });
+}
 
 /** 메모는 여러 턴에 걸쳐 살아 있다 — 호출부가 만진 흔적이 다음 턴으로 새면 안 된다. */
 function cloneContext(context: AutoSelectedMcpContext): AutoSelectedMcpContext {
@@ -499,6 +585,8 @@ export function invalidateMcpSelectionMemo(): void {
   selectionMemo.clear();
   probeMemo.clear();
   stickySelectionMemo.clear();
+  // A judgment already in flight is left to finish (one per situation); its verdict is ids only and holds no credential state.
+  previousTurnNeeds.clear();
 }
 
 function isExplicitProjectFolder(workingFolder?: string | null): boolean {
@@ -611,6 +699,8 @@ export async function autoSelectMcpTools(input: {
   bypassSelectionMemo?: boolean;
   /** One Team per-member tool policy. Omitted means the normal automatic mode. */
   autoSelectTools?: boolean;
+  /** DD: the connected apps of the server, one line each (id `server-app:<connectorId>`), offered to the SAME judgment call as every other candidate. Never decides anything here: the picked ids come back in `serverAppIds` and only list those apps' tools first. */
+  extraCandidates?: McpNeedCandidate[];
   /**
    * The conversation is a One group room (a taskforce seat). A group room is a team by
    * definition, so every turn, goal passes included, carries the One Team tool set without
@@ -645,6 +735,8 @@ export async function autoSelectMcpTools(input: {
    * One Team's room_say tool only: no router text is inlined, and the control capability offers nothing else.
    */
   roomMember?: boolean;
+  /** A plain conversation of a project with another conversation to write to: One Team rides it with the one tool message_send (N6, O9). */
+  peerMessage?: boolean;
   /** Installed MCP ids declared by the bound One Team member when auto mode is off. */
   fixedServerIds?: string[];
   /** Graph-declared tool ids; canonical browser declarations suppress duplicate probing. */
@@ -658,6 +750,17 @@ export async function autoSelectMcpTools(input: {
   requestedPluginSlugs?: string[];
   /** A plugin workflow the owner's own gesture asked this turn to carry (plugins/owner-capability-request.ts). Main-read typed data. */
   ownerRequestedWorkflows?: ReadonlyArray<{ plugin: string; workflow: string }>;
+  /**
+   * Nobody is waiting for this run to start (an automation step, Site Studio, T-Rex, Alive, agent mail), and the runs that share its
+   * chat are separate jobs: the steps of one graph run in the same chat one after another, so the "previous turn" of a step is a
+   * different step. Such a run always waits for its own judgment, as before. Main-derived (client.ts isUnattendedExecution).
+   */
+  unattendedRun?: boolean;
+  /**
+   * Measurement only. This turn started with the previous turn's verdict, and its own judgment, settled later, named host-channel
+   * tools the turn does not carry (they cannot attach mid-turn). Ids only; called at most once per turn and never thrown into the run.
+   */
+  onLateHostChannelNeed?: (toolIds: string[]) => void;
 }, injectedDeps: Partial<AutoSelectMcpDependencies> = {}): Promise<AutoSelectedMcpContext> {
   const deps: AutoSelectMcpDependencies = { ...DEFAULT_AUTO_SELECT_DEPS, ...injectedDeps };
   // The task as written, not lowercased and not tokenized — the resident judge reads it.
@@ -714,7 +817,7 @@ export async function autoSelectMcpTools(input: {
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", `menu:${toolMenu.restricted ? toolMenu.plugins.join("+") : "all"}`, input.oneOwnConversation === true ? "one-own" : "", (input.projectBaselinePlugins ?? []).map((plugin) => `project-baseline:${plugin.slug}`).sort().join("+"), input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
+      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", `menu:${toolMenu.restricted ? toolMenu.plugins.join("+") : "all"}`, input.oneOwnConversation === true ? "one-own" : "", (input.projectBaselinePlugins ?? []).map((plugin) => `project-baseline:${plugin.slug}`).sort().join("+"), (input.roomMember === true ? "room-member" : "") + (input.peerMessage === true ? "peer-message" : ""), fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -746,7 +849,7 @@ export async function autoSelectMcpTools(input: {
     && registryFingerprint(deps.listInstalledServers()) === expectedInstalledFingerprint;
   const requestedPluginSlugs = [...new Set((input.requestedPluginSlugs ?? []).filter((slug) => pluginBySlug.has(slug)))].sort();
   const ownerWorkflows = (input.ownerRequestedWorkflows ?? []).filter((row) => pluginBySlug.has(row.plugin));
-  const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}\u0000${requestedPluginSlugs.join(",")}\u0000${ownerWorkflows.map((row) => `${row.plugin}/${row.workflow}`).join(",")}` : "";
+  const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}\u0000${requestedPluginSlugs.join(",")}\u0000${ownerWorkflows.map((row) => `${row.plugin}/${row.workflow}`).join(",")}${input.extraCandidates?.length ? `\u0000${input.extraCandidates.map((candidate) => candidate.id).join(",")}` : ""}` : "";
   if (memoKey && !activeGoalScope) {
     const hit = selectionMemo.get(memoKey);
     const selectedRemote = hit && initialInstalledServers.some(server => server.transport !== "stdio"
@@ -947,16 +1050,15 @@ export async function autoSelectMcpTools(input: {
     }));
 
   // ONE judgment call decides the whole optional tool set — Hub entries offered first.
-  const needsCandidates = [...hubCandidates, ...localCandidates, ...customCandidates, ...skillCandidates];
+  const extraCandidates = (input.extraCandidates ?? []).filter((candidate) => candidate.id.startsWith(SERVER_APP_CANDIDATE_PREFIX));
+  const needsCandidates = [...hubCandidates, ...localCandidates, ...customCandidates, ...skillCandidates, ...extraCandidates];
   const needsCandidateCount = needsCandidates.length;
   // Model-picks mode (output/tool-search-at-scale-20261105/TOOL-ARCHITECTURE.md): no pre-run judgment call. An installed
   // connector is reached in the turn itself (harness_search -> tool.describe live -> tool.call: tool-dispatch.ts runScopedBinding
   // binds an ordinary installed connector at call time); a skill through skill.activate. Only tools that need the host channel
   // must be attached before the run, and the browser is attached below as an ordinary selection (the host mode stays "auto").
   const modelPicks = toolSelectionMode(process.env, input.runtimeKind) === "model";
-  const needs = modelPicks
-    ? { needed: [] as string[], decided: true, reason: "the model picks its tools in the turn (harness_search); no pre-run judgment", omitted: [] as string[] }
-    : await deps.resolveNeeds({
+  const needsRequest = (signal: AbortSignal | undefined): Parameters<AutoSelectMcpDependencies["resolveNeeds"]>[0] => ({
     // The judge reads this turn's request on its own; agent name, folder and the
     // standing system prompt travel as separate background (see McpTaskContext).
     task: input.userPrompt,
@@ -971,9 +1073,89 @@ export async function autoSelectMcpTools(input: {
       acceptanceCriteria: activeGoalScope.acceptanceCriteria,
     } } : {}),
     runtimeCapabilities,
-    signal: input.signal,
+    signal,
     timeoutMs: 15_000,
+  });
+  // ── Previous-turn verdict (see previousTurnNeeds) ──
+  // One entry per structural situation: the conversation and everything structuralKey already separates (tool mode, Hub mode,
+  // menus, baselines, the installed-tool and plugin fingerprints), the active Goal scope, the agent, the runtime's own web search,
+  // and what the agent or the owner asked this turn to carry. Any difference is a new situation and waits for its judgment.
+  // A tool mode the caller set (the owner's browser / Computer Use binding; One's own reply turns set Computer Use on every turn) is
+  // one of those situations: the same mode on the next turn reuses, another mode waits. Only the optional ids are reused. The mode's
+  // host pins are made from this turn's mode before and after the verdict, and a pinned or blocked host is never offered to the judge,
+  // so a reused verdict can neither drop nor add one. The browser kept at hand on a reused turn stays the automatic decision's rule.
+  // Never reused: a credential retry, an unattended run, model-picks mode and a local-model runtime (both keep what they did), and a
+  // call with no conversation.
+  const previousTurnKey = structuralKey && !modelPicks && !input.bypassSelectionMemo
+    && input.unattendedRun !== true && !(input.runtimeKind && LOCAL_MODEL_RUNTIME_KINDS.has(input.runtimeKind))
+    ? createHash("sha256").update(JSON.stringify([structuralKey, goalScopeKey, input.agentName, runtimeCapabilities.nativeWebSearch,
+      requestedPluginSlugs, ownerWorkflows.map((row) => `${row.plugin}/${row.workflow}`).sort()])).digest("hex")
+    : "";
+  const taskTextHash = shortHash(taskText);
+  let reusedPreviousTurn = false;
+  /** This turn's own judgment, running behind the reused verdict. Null when undecided or failed; it never rejects. */
+  let laterVerdict: Promise<DecidedMcpNeeds | null> | null = null;
+  const judgeBehindThisTurn = (key: string): Promise<DecidedMcpNeeds | null> => {
+    const run = async (): Promise<DecidedMcpNeeds | null> => {
+      try {
+        const verdict = await deps.resolveNeeds(needsRequest(undefined));
+        if (!verdict?.decided) return null;
+        const decided = decidedMcpNeeds(verdict);
+        writePreviousTurnNeeds(key, decided);
+        return decided;
+      } catch {
+        return null;
+      }
+    };
+    // The same model and account as this turn (its pin), without the turn's abort signal: the verdict is for the next turn, so a
+    // turn that ends or is cancelled first does not cancel it. The judgment's own ceiling still ends it.
+    const flight = { textHash: taskTextHash, startedAt: Date.now(), settled: null as unknown as Promise<DecidedMcpNeeds | null> };
+    flight.settled = withInvocationJudgmentContext(invocationJudgmentContext()?.selection, undefined, run).then((verdict) => {
+      if (previousTurnJudgments.get(key) === flight) previousTurnJudgments.delete(key);
+      return verdict;
     });
+    previousTurnJudgments.set(key, flight);
+    return flight.settled;
+  };
+  let needs: ResolvedMcpNeeds;
+  if (modelPicks) {
+    needs = { needed: [], decided: true, reason: "the model picks its tools in the turn (harness_search); no pre-run judgment", omitted: [] };
+  } else {
+    let previous = previousTurnKey ? readPreviousTurnNeeds(previousTurnKey) : undefined;
+    const sameTurn = previous?.served && previous.served.textHash === taskTextHash
+      && Date.now() - previous.served.at < SELECTION_MEMO_TTL_MS ? previous.served : undefined;
+    if (sameTurn) {
+      // This turn selecting again: the answer it was given the first time, so its prepared tools do not change under it.
+      needs = { ...decidedMcpNeeds(sameTurn.needs), decided: true };
+      reusedPreviousTurn = sameTurn.reused;
+    } else if (previous) {
+      let flight = previousTurnJudgments.get(previousTurnKey);
+      if (flight && Date.now() - flight.startedAt > PREVIOUS_TURN_JUDGMENT_CEILING_MS) {
+        previousTurnJudgments.delete(previousTurnKey);
+        flight = undefined;
+      }
+      // The previous turn's judgment is still running: it is the verdict this turn wants, and waiting for it costs no more than
+      // judging did. A second judgment is not started beside it (one per situation). A selection of the same text is the turn that
+      // started it selecting again, and does not wait.
+      const waited = Boolean(flight && flight.textHash !== taskTextHash);
+      if (flight && waited) {
+        await settledWithin(flight.settled, flight.startedAt + PREVIOUS_TURN_JUDGMENT_CEILING_MS - Date.now(), input.signal);
+        previous = readPreviousTurnNeeds(previousTurnKey) ?? previous;
+      }
+      needs = { ...decidedMcpNeeds(previous.needs), decided: true };
+      reusedPreviousTurn = true;
+      const served = { textHash: taskTextHash, needs: previous.needs, reused: true, at: Date.now() };
+      const live = previousTurnNeeds.get(previousTurnKey);
+      if (live) live.served = served;
+      if (!waited && !flight) laterVerdict = judgeBehindThisTurn(previousTurnKey);
+    } else {
+      needs = await deps.resolveNeeds(needsRequest(input.signal));
+      if (previousTurnKey && needs.decided) {
+        const decided = decidedMcpNeeds(needs);
+        writePreviousTurnNeeds(previousTurnKey, decided, { textHash: taskTextHash, needs: decided, reused: false, at: Date.now() });
+      }
+    }
+  }
   // Only what the judge was offered: a name outside the menu (a guessed id, or a tool this machine has not installed)
   // would otherwise be installed or raise a key sheet before the run (THOUGHT-EXPERIMENTS.md F5).
   const offeredIds = new Set(needsCandidates.map((candidate) => candidate.id));
@@ -993,7 +1175,7 @@ export async function autoSelectMcpTools(input: {
   // Coordinator decision 2026-09-29 (soak 1.2.50): an undecided judgment falls back to the
   // baseline set only (below), never to local-relevance guesses — those attached
   // science-statistics and research-director to a YouTube metrics teammate.
-  const selectionSource = (needs.decided ? "judge" : "none") as "judge" | "local-relevance" | "none";
+  const selectionSource = (reusedPreviousTurn ? "previous-turn" : needs.decided ? "judge" : "none") as NonNullable<AutoSelectedMcpContext["selectionSource"]>;
   const fallbackIds: string[] = [];
   // Reuse only exact prior choices in the same still-active host scope. Inserting
   // IDs before normal resolution prevents carrying stale ready/credential states.
@@ -1071,9 +1253,13 @@ export async function autoSelectMcpTools(input: {
   }
   // Model-picks mode: the browser is the host-channel tool a turn reaches for most (34% of 30 days' tool calls), and a host-channel
   // tool cannot be bound in the middle of a turn, so it stays at hand as an ordinary selection whenever it is available.
-  if (modelPicks && automaticHostDecision && effectiveToolMode === "auto" && canonicalBrowserAvailable && !neededIds.has("agentlas-browser")) {
+  // A turn that starts with the previous turn's verdict is in the same position: its own judgment arrives too late to attach the
+  // browser (the one host-channel tool follow-up turns newly needed, 10 of 464).
+  if ((modelPicks || reusedPreviousTurn) && automaticHostDecision && effectiveToolMode === "auto" && canonicalBrowserAvailable && !neededIds.has("agentlas-browser")) {
     neededIds.add("agentlas-browser");
-    pinnedReasons.set("agentlas-browser", "model-picks mode: the browser stays at hand (a host-channel tool cannot attach mid-turn)");
+    pinnedReasons.set("agentlas-browser", modelPicks
+      ? "model-picks mode: the browser stays at hand (a host-channel tool cannot attach mid-turn)"
+      : "previous-turn selection: the browser stays at hand (a host-channel tool cannot attach mid-turn)");
   }
   const cappedHub = Math.max(0, hubInventory.listings.length - hubOffered.length);
   const needsNote = [
@@ -1149,6 +1335,13 @@ export async function autoSelectMcpTools(input: {
     pinnedReasons.set(ONE_TEAM_BASELINE_TOOL_ID, "baseline capability: a teammate working from a group room can post to the room (room_say)");
   }
 
+  if (input.peerMessage === true && !baselineIds.has(ONE_TEAM_BASELINE_TOOL_ID) && !blockedByHostBinding(ONE_TEAM_BASELINE_TOOL_ID)
+    && MCP_TOOL_CATALOG.some((entry) => entry.id === ONE_TEAM_BASELINE_TOOL_ID)) {
+    baselineIds.add(ONE_TEAM_BASELINE_TOOL_ID);
+    neededIds.add(ONE_TEAM_BASELINE_TOOL_ID);
+    pinnedReasons.set(ONE_TEAM_BASELINE_TOOL_ID, "baseline capability: a conversation of a project with other conversations can write to them (message_send)");
+  }
+
   // Rank before the probe cap so a convenience pin can never crowd out a host binding or a
   // capability the judge said the task actually needs.
   const pickRank = (id: string): number => {
@@ -1204,7 +1397,8 @@ export async function autoSelectMcpTools(input: {
         pinnedReasons.get(entry.id) ??
         (retainedIds.has(entry.id) && !needs.needed.includes(entry.id)
           ? "previous selection in this active Goal, revalidated for this run"
-          : `resident judgment: ${needs.reason || "the task needs this capability"}`),
+          : reusedPreviousTurn ? PREVIOUS_TURN_SELECTION_REASON
+            : `resident judgment: ${needs.reason || "the task needs this capability"}`),
       required,
     };
     const existingServer = deps.listInstalledServers().find(candidate => candidate.catalogId === entry.id || candidate.id === entry.id);
@@ -1284,7 +1478,7 @@ export async function autoSelectMcpTools(input: {
     return {
       id: entry.id,
       name: entry.nameEn || entry.name,
-      reason: pinnedReasons.get(entry.id) ?? "resident judgment: the task needs this capability",
+      reason: pinnedReasons.get(entry.id) ?? (reusedPreviousTurn ? PREVIOUS_TURN_SELECTION_REASON : "resident judgment: the task needs this capability"),
       installed: false,
       missingEnv: [],
       required: input.toolMode === "browser" && entry.id === "agentlas-browser"
@@ -1375,7 +1569,8 @@ export async function autoSelectMcpTools(input: {
       reason: requiredServerIds.has(server.id) ? "explicitly assigned to this run"
         : retainedIds.has(server.id) && !needs.needed.includes(server.id)
           ? "previous selection in this active Goal, revalidated for this run"
-          : "resident judgment: the task needs this custom MCP",
+          : reusedPreviousTurn ? PREVIOUS_TURN_SELECTION_REASON
+            : "resident judgment: the task needs this custom MCP",
       installed: state === "ready",
       missingEnv,
       required: false,
@@ -1392,6 +1587,16 @@ export async function autoSelectMcpTools(input: {
   // a 0.6B resident judge sent 4/4 plain file/shell Work turns to agentlas-browser and every one was refused
   // (QA 2026-10-28). A selection that cannot be honored proceeds without the browser; the tool stays in the result
   // with its real state so the turn context lists it as unavailable, and the withdrawal is a typed record.
+  // A reused verdict was made for the message before this one. It attaches what is ready; a tool whose key is missing now stays
+  // listed with that state and does not open the key sheet, which asks only for what this turn's own judgment, the owner's binding
+  // or an explicit assignment named (the invariant above). The model can still call it, and that call asks (run-key-challenge.ts).
+  if (reusedPreviousTurn) {
+    for (const tool of result) {
+      if (tool.state === "missing-key" && !tool.required && !explicitlyAssignedIds.has(tool.id) && !requiredServerIds.has(tool.id)) {
+        tool.carriedFromEarlierTurn = true;
+      }
+    }
+  }
   let hostBindingWithdrawn: AutoSelectedMcpContext["hostBindingWithdrawn"];
   const browserOwnerBound = input.toolMode === "browser"
     || explicitlyAssignedIds.has("agentlas-browser")
@@ -1408,7 +1613,7 @@ export async function autoSelectMcpTools(input: {
     if (browser?.state !== "ready") {
       effectiveToolMode = "auto";
       hostBindingWithdrawn = { code: AGENTLAS_BROWSER_WITHDRAWN_CODE, host: "agentlas-browser",
-        state: browser?.state ?? "not-selected", selectedBy: "judge" };
+        state: browser?.state ?? "not-selected", selectedBy: reusedPreviousTurn ? "carried" : "judge" };
     }
   }
   const carriedBrowserWaiting = browserCarried && effectiveToolMode === "browser"
@@ -1478,6 +1683,7 @@ export async function autoSelectMcpTools(input: {
     needsDecided: needs.decided,
     ...(routedPlugins.length > 0 ? { routedPlugins } : {}),
     selectionSource,
+    ...(extraCandidates.length ? { serverAppIds: extraCandidates.filter((candidate) => neededIds.has(candidate.id)).map((candidate) => candidate.id.slice(SERVER_APP_CANDIDATE_PREFIX.length)) } : {}),
     needsOutcome: { decided: needs.decided, candidateCount: needsCandidateCount, reason: needs.reason },
     ...(needsNote ? { needsNote } : {}),
     ...(notAttached.length > 0 ? { notAttached } : {}),
@@ -1519,6 +1725,17 @@ export async function autoSelectMcpTools(input: {
   // 모델이 못 닿아 아무것도 못 정한 실행은 기억하지 않는다 — 그 침묵을 다음 턴까지 굳히면 안 된다.
   // A withdrawn browser reflects this moment's host state; the next turn must look at the host again.
   if (!activeGoalScope && memoKey && needs.decided && !hostBindingWithdrawn) memoSet(selectionMemo, memoKey, { context: cloneContext(context), at: Date.now() });
+  // The 1-in-464 case, counted: this turn's own judgment names a host-channel tool the turn started without.
+  if (laterVerdict && input.onLateHostChannelNeed) {
+    const carried = new Set(context.tools.map((tool) => tool.id));
+    const hostChannel = hostChannelToolIds();
+    const report = input.onLateHostChannelNeed;
+    void laterVerdict.then((verdict) => {
+      const late = (verdict?.needed ?? []).filter((id) => offeredIds.has(id) && hostChannel.has(id) && !carried.has(id)).sort();
+      if (late.length === 0) return;
+      try { report(late); } catch { /* a measurement, never a failure of the run */ }
+    });
+  }
   return context;
 }
 

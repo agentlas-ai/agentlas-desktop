@@ -71,8 +71,8 @@ export function credentialRecoveryMenuItems(
             return;
           }
           const kinds = korean
-            ? { api: "API 키", "api-metadata": "API 키 등록 정보", env: "연결 키", secret: "연결 인증 정보" }
-            : { api: "API key", "api-metadata": "API-key metadata", env: "Connection key", secret: "Connection credential" };
+            ? { api: "API 키", "api-metadata": "API 키 등록 정보", env: "연결 키", secret: "연결 인증 정보", "native-one": "One 백그라운드 연결" }
+            : { api: "API key", "api-metadata": "API-key metadata", env: "Connection key", secret: "Connection credential", "native-one": "One background connection" };
           const menu = Menu.buildFromTemplate(failures.map((failure) => ({
             label: failure.operation === "list"
               ? korean ? "저장된 항목 목록 — 다시 시도" : "Saved item list — retry"

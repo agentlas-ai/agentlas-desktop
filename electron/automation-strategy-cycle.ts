@@ -15,8 +15,6 @@ import { automationOutputDigest, getAutomation, previousSuccessfulRunOutput } fr
 import {
   adjudicateAutomationStrategyProposal,
   createAutomationStrategyProposalForRun,
-  createEpisodeReservedStrategyProposal,
-  type AutomationStrategyProposalReceipt,
   getAutomationStrategyGoalOrigin,
   settleAutomationStrategyProposalBacklog,
   type AutomationStrategyProposalObservationV1,
@@ -53,8 +51,6 @@ type StrategyEventCoverage = "complete" | "truncated" | "unavailable";
 export interface AutomationStrategyCycleInput {
   automationId: string;
   sourceRunId: string;
-  /** Main-only preparation: no revision apply, backlog transition or execution. */
-  episodePreparation?: { captureId: string; prepared(receipt: AutomationStrategyProposalReceipt): void };
   status: AutomationRunRecord["status"];
   outcome: AutomationRunRecord["outcome"];
   reasonCode?: string | null;
@@ -228,8 +224,8 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
   // A command automation is an on-demand work step that a chat or a Goal run invokes; it has no cadence or standing
   // prompt to tune. Measured 2026-10-20 on the owner's store: 228 of 229 drafts in one day came from 16 command
   // automations, 154 of them "keep the current strategy", none ever reviewed or applied. Only the generic post-run
-  // loop is skipped; a Goal-recommended cycle and an episode preparation still run.
-  if (!input.goalRecommendation && !input.episodePreparation
+  // loop is skipped; a Goal-recommended cycle still runs.
+  if (!input.goalRecommendation
     && getAutomation(input.automationId)?.triggerType === "command") {
     unavailable(input, "strategy_reflection_skipped_command_trigger");
     return;
@@ -237,7 +233,7 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
   // Nothing changed since the last review that kept the strategy: the same definition and the same output as the run it reviewed.
   // Asking again is one more model call and one more "keep" row nobody reads (a real installation a daily 9 am automation, 43
   // "keep" reviews in a row, one model call each). A changed graph, prompt or schedule (definition digest) or a new output asks again.
-  if (!input.goalRecommendation && !input.episodePreparation && unchangedSinceLastKeep(input)) {
+  if (!input.goalRecommendation && unchangedSinceLastKeep(input)) {
     unavailable(input, "strategy_reflection_skipped_unchanged");
     return;
   }
@@ -271,7 +267,6 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
     || strategyRunSummary.metrics.toolActivityCoverage !== "complete";
 
   const advisoryOnly = input.backgroundAdvisory === true || effectsUnconfirmed || observationCoverageIncomplete;
-  if (input.episodePreparation && advisoryOnly) { unavailable(input, "strategy_episode_evidence_unavailable"); return; }
   if (advisoryOnly) tryRecordRunEvent({ runId: input.sourceRunId, automationId: input.automationId,
     kind: "automation_strategy_evidence_pending", payload: { effectsUnconfirmed,
       coverage: strategyRunSummary.metrics.coverage, toolActivityCoverage: strategyRunSummary.metrics.toolActivityCoverage } });
@@ -290,6 +285,13 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
         const reflectionGoalId = goalId ?? origin?.goalId ?? null;
         const goalRevision = reflectionGoalId ? getChatGoalRevision(reflectionGoalId) : null;
         const goalContract = reflectionGoalId ? getChatGoalContract(reflectionGoalId) : null;
+        // A finite Goal's strategy change was applied only by the removed goal strategy episode; nothing applies one now
+        // (store/automation-strategy-proposals.ts proposal_finite_episode_required). The review would be two model calls whose
+        // result nobody reads. An ongoing Goal, a Goal's own recommendation and an automation with no Goal ask as before.
+        if (!input.goalRecommendation && goalRevision && (goalRevision.lifecycle ?? "finite") === "finite") {
+          unavailable(input, "strategy_reflection_skipped_finite_goal");
+          return;
+        }
         if (input.goalRecommendation && (
           input.goalRecommendation.intent === "hold"
           || !binding
@@ -342,14 +344,11 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
             })) } : {}),
           });
         } else {
-          const create = input.episodePreparation
-            ? (draft: Parameters<typeof createAutomationStrategyProposalForRun>[0]) => createEpisodeReservedStrategyProposal(draft, input.episodePreparation!.captureId)
-            : createAutomationStrategyProposalForRun;
-          const proposal = create({
+          const proposal = createAutomationStrategyProposalForRun({
             actor: "main",
             automationId: input.automationId,
             sourceRunId: input.sourceRunId,
-            requestId: input.episodePreparation ? `strategy-episode:${input.episodePreparation.captureId}` : input.goalRecommendation
+            requestId: input.goalRecommendation
               ? `strategy-proposal:goal:${input.goalRecommendation.proposalId}:${input.sourceRunId}`
               : `strategy-proposal:reflection:${input.sourceRunId}`,
             intent: reflection.envelope.intent,
@@ -364,10 +363,8 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
           const reviewed = advisoryOnly ? proposal : await adjudicateAutomationStrategyProposal({
             automationId: input.automationId,
             proposalId: proposal.id,
-            ...(input.episodePreparation ? { episodeCaptureId: input.episodePreparation.captureId } : {}),
           });
           if (!current()) { unavailable(input, "reflection_source_changed"); return; }
-          if (input.episodePreparation) { input.episodePreparation.prepared(reviewed); return; }
           tryRecordRunEvent({
             runId: input.sourceRunId,
             kind: "automation_strategy_reflection_proposed",
@@ -413,8 +410,6 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
   }
 
   if (!current()) { unavailable(input, "reflection_source_changed"); return; }
-  // Preparation owns no ordinary backlog or follow-up mutation, including failure.
-  if (input.episodePreparation) return;
   // One live proposal per automation (P0-5): retire older drafts and a live draft whose definition moved.
   // Receipt-only; never changes the graph, schedule, Goal, or authority.
   try {

@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { PersonalAgentRoomRelease } from "../../shared/one-supervisor";
+import { AGENT_CHAT_READ_ONLY, agentChatState } from "./agent-chat-state";
 
 /*
  * Rooms the personal agent opened (owner 2026-10-27): "개인 에이전트가 띄운 Work 는 기존 Work·One 과 다르게 돼야 한다.
@@ -170,6 +171,36 @@ export function assertOwnerMayWriteRoom(chatId: unknown, db?: Database.Database)
   let supervised = false;
   try { supervised = isPersonalAgentRoom(chatId, db ?? defaultDb()); } catch { supervised = false; }
   if (supervised) throw new PersonalAgentRoomError(PERSONAL_AGENT_ROOM_READ_ONLY);
+  // A one-to-one room whose agent was deleted has nobody to answer; the root controller would take the message (item 1).
+  // Every owner-input route (renderer, phone, the personal agent's chat-send) passes this, so the guard is here, once.
+  let deleted = false;
+  let reason: string | null = null;
+  try { reason = agentChatState(chatId, db ?? defaultDb()).reason; } catch { reason = null; }
+  deleted = reason === "agent_deleted" || reason === "no_members";
+  if (deleted) throw new AgentChatReadOnlyError(reason === "no_members" ? "no_members" : "agent_deleted");
+}
+
+/**
+ * The deleted-agent half of the guard, for the routes that are not the owner's own typing (the personal agent's chat-send, Telegram,
+ * mail, automations): a one-to-one room whose agent is gone takes no message from anybody, and the sentence says what to do next.
+ * (The personal-agent-room half is not here: the personal agent's own writes into its rooms are legitimate.)
+ */
+export function assertAgentChatWritable(chatId: unknown, db?: Database.Database): void {
+  if (typeof chatId !== "string" || !chatId) return;
+  let reason: string | null = null;
+  try { reason = agentChatState(chatId, db ?? defaultDb()).reason; } catch { reason = null; }
+  if (reason === "agent_deleted" || reason === "no_members") throw new AgentChatReadOnlyError(reason);
+}
+
+/** Plain sentence for the owner; the code is machine-readable (agent-chat-state.ts). */
+export class AgentChatReadOnlyError extends Error {
+  readonly code = AGENT_CHAT_READ_ONLY;
+  constructor(readonly reason: "agent_deleted" | "no_members" = "agent_deleted") {
+    super(reason === "no_members"
+      ? "Nobody in this room can answer any more (every member was deleted or removed). Start a new Agent Chat to keep going."
+      : "This room's agent was deleted, so nobody can answer here. Continue with another agent to keep going.");
+    this.name = "AgentChatReadOnlyError";
+  }
 }
 
 

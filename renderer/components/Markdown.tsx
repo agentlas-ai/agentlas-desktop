@@ -1,8 +1,10 @@
-// 가벼운 마크다운 렌더 — 의존성 0. LLM 출력을 안전하게 표시.
+// 가벼운 마크다운 렌더 — 자체 파서(외부 마크다운 라이브러리 없음). LLM 출력을 안전하게 표시.
 // 지원: 펜스 코드블록 ```lang\n...```, 인라인 코드 `...`, **bold**, *italic*,
 //      # H1 / ## H2 / ### H3, - 또는 * 리스트, 1. 번호 리스트, [link](url), 인용 >,
 //      GFM 테이블 (| a | b | + |---|---| 구분자 + 본문),
 //      자동 줄바꿈(빈 줄로 단락 구분).
+// 채팅 답변에서만(AnswerCards.tsx 가 켜진 곳) 숫자 표에는 "표 | 차트" 전환, 번호 목록에는 "단계 카드로 보기" 칩이 붙는다 —
+// 같은 카드 렌더러(shared/canvas)를 쓰므로 이 파일은 더 이상 의존성 0 이 아니다. 켜지 않은 곳은 이전과 똑같이 그린다.
 //
 // 의도적으로 단순 — HTML 태그는 모두 escape, 사용자 입력 출처 X (LLM 출력만)이지만 안전 우선.
 "use client";
@@ -22,6 +24,7 @@ import { designOutputSurfaceProps } from "@/lib/design-output-tokens";
 import { splitMentions } from "@/lib/room-mentions";
 import { absoluteFileRefsWithSpaces, maskSpans } from "@/lib/local-file-refs";
 import { IntellectUI } from "./IntellectUI";
+import { AnswerCardsHold, ListWithSteps, TableWithChart } from "./AnswerCards";
 import { IntellectUiActions, type IntellectUiFollowup } from "@/lib/intellect-ui-actions";
 import { INTELLECT_UI_LIMITS } from "@shared/intellect-ui";
 import { withoutEmptyCommentShells } from "@/lib/empty-comment-shell";
@@ -163,6 +166,7 @@ export function StreamingMarkdown({
   onOpenLinkedFile,
   onUiFollowup,
   uiActionsDisabled,
+  growing = true,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
 }: {
   /** 차트·시각물이 이 대화의 산출물 탭에 알릴 때 쓰는 대화 id. */
@@ -174,6 +178,8 @@ export function StreamingMarkdown({
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   onUiFollowup?: IntellectUiFollowup;
   uiActionsDisabled?: boolean;
+  /** 글이 아직 도착하는 중인가. 그렇다면 마지막 블록의 표·목록은 그대로 그린다(행이 늘 때마다 전환 스위치가 생겼다 사라지지 않게). 끝난 답을 이 컴포넌트로 그리는 곳은 false 를 넘긴다. 기본값 true: 모르면 끝난 것으로 치지 않는다. */
+  growing?: boolean;
   mediaBasePaths?: string[];
 }) {
   // 콜백 identity를 고정 — 부모가 매 렌더 새 함수를 넘겨도 memo 세그먼트가 깨지지 않게.
@@ -200,15 +206,16 @@ export function StreamingMarkdown({
   const body = (
     <>
       {segments.map((seg, i) => (
-        <MarkdownSegment
-          key={`${messageId}-s${i}`}
-          text={seg}
-          messageId={`${messageId}-s${i}`}
-          onOpenArtifact={stableArtifact}
-          onOpenMedia={stableMedia}
-          onOpenLinkedFile={stableLinkedFile}
-          mediaBasePaths={mediaBasePaths}
-        />
+        <AnswerCardsHold key={`${messageId}-s${i}`} hold={growing && i === segments.length - 1}>
+          <MarkdownSegment
+            text={seg}
+            messageId={`${messageId}-s${i}`}
+            onOpenArtifact={stableArtifact}
+            onOpenMedia={stableMedia}
+            onOpenLinkedFile={stableLinkedFile}
+            mediaBasePaths={mediaBasePaths}
+          />
+        </AnswerCardsHold>
       ))}
     </>
   );
@@ -599,13 +606,13 @@ function renderBlock(
         );
       };
       return b.type === "ol"
-        ? <ol key={i} start={b.start} style={{ paddingLeft: 22, margin: "6px 0" }}>{b.items.map(renderItem)}</ol>
+        ? <ListWithSteps key={i} block={b}><ol start={b.start} style={{ paddingLeft: 22, margin: "6px 0" }}>{b.items.map(renderItem)}</ol></ListWithSteps>
         : <ul key={i} style={{ paddingLeft: 22, margin: "6px 0" }}>{b.items.map(renderItem)}</ul>;
     }
     case "hr":
       return <hr key={i} style={{ border: 0, borderTop: "var(--hairline, 1px solid var(--paper-3))", margin: "12px 0" }} />;
     case "table":
-      return <TableBlock key={i} block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} />;
+      return <TableWithChart key={i} block={b}><TableBlock block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} /></TableWithChart>;
     case "quote":
       return (
         <blockquote
@@ -1541,7 +1548,7 @@ function fileUrlForLocalPath(absPath: string): string {
   return `file://${encodeURI(withSlash).replace(/#/g, "%23").replace(/\?/g, "%3F")}`;
 }
 
-function fileUrlForLinkedFile(target: string): string {
+export function fileUrlForLinkedFile(target: string): string {
   if (/^(https?:|data:|blob:|agentlas:)/i.test(target)) return target;
   if (target.startsWith("file://")) return target;
   // 이미지·영상·PDF 는 렌더러가 직접 그린다 — `file://` 은 webSecurity 에 막히므로 전용 프로토콜로.

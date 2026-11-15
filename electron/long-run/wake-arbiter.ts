@@ -3,9 +3,9 @@
  * layer rule 6 and P1; owner 2026-10-04).
  *
  * Six places started a Goal's next turn, each with its own spacing: the minute sweep, a turn's follow-up, the
- * wait poller, the effect observer, the startup checkpoint pass and Alive. On the owner's DB (Thread Marketing,
+ * wait poller, the effect observer, the startup checkpoint pass. On the owner's DB (Thread Marketing,
  * 2026-10-04) they combined into 39 identical ~247k-token turns an hour, and one of them took the room while the
- * owner's own message was in preflight. The paths that start on their own schedule (sweep, Alive, a released
+ * owner's own message was in preflight. The paths that start on their own schedule (sweep, a released
  * project, the wait poller, the effect observer) ask here first; every path, including the startup replay of an
  * interrupted turn, records its start here.
  *
@@ -23,6 +23,7 @@ import { appendChatMessage } from "../store/chats";
 import { recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
 import { currentUiLocale } from "../ui-locale";
+import { decideLastTurn, ladderDelayMs, turnEndFromTerminalEvent, type TurnEnd } from "../harness/cause";
 
 export const GOAL_WAKE_DAILY_BUDGET = 48;
 export const GOAL_WAKE_EVENT_KIND = "goal_wake_started";
@@ -34,8 +35,8 @@ const DAY_MS = 24 * 60 * 60_000;
 /** A pending owner admission older than this belongs to a process that died; it must not hold a Goal back. */
 const OWNER_REQUEST_FRESH_MS = 120_000;
 
-/** "agi": a teammate session the AGI unblocker starts for the Goal (agi/wiring.ts through hostGoalWake below). */
-export type GoalWakeSource = "sweep" | "alive" | "project-released" | "startup" | "observation" | "wait" | "agi" | "continuation";
+/** Older wake records may carry source "agi" (a teammate session the removed AGI unblocker started); nothing writes it now. */
+export type GoalWakeSource = "sweep" | "project-released" | "startup" | "observation" | "wait" | "continuation";
 
 export interface GoalWakeGate {
   activeChatIds?(): string[];
@@ -105,8 +106,8 @@ function tellBudgetOnce(runId: string, chatId: string, window: { count: number; 
  * and each invocation's terminal run event (its machine errorCode). Prose is never read. The streak ends at a completed turn,
  * a cancelled or host-stopped turn, a different cause, the owner speaking or using a Goal control (windowFloor), or a new
  * launch of the app (an update or relaunch may have changed what failed: one prompt look is owed, as for retries).
- * Only the paths that replay the Goal's own continuation ask (sweep, Alive, a released project, startup). A satisfied wait, an
- * AGI teammate tactic (a different move) and Science keep their own rules.
+ * Only the paths that replay the Goal's own continuation ask (sweep, a released project, startup). A satisfied wait and
+ * Science keep their own rules.
  */
 export const SAME_CAUSE_WAKE_REASON = "same_cause_backoff";
 /** Wait before the same move after the 1st and the 2nd consecutive failure with one cause. */
@@ -127,12 +128,16 @@ const TERMINAL_KINDS = ["invoke_completed", "invoke_failed", "invoke_cancelled",
 
 export interface SameCauseWakeHold {
   cause: string;
+  /** How the newest failed turn ended, as the cause table reads it (harness/cause.ts turnEndFromTerminalEvent: typed fields only). */
+  end?: TurnEnd;
   /** Consecutive failed host starts with this cause. */
   failures: number;
   lastFailedAt: string;
   retryAt: string;
   /** The newest failure was the provider's typed quota / rate-limit / auth failure (the long wait applies). */
   external?: boolean;
+  /** The row of the cause table that set the wait (harness/cause.ts: auth_no_runtime, limit_no_time, host_interrupted_twice ...). */
+  row?: string;
 }
 
 /** Consecutive failed host starts of this Goal with one machine cause, newest first; null when the last one did not fail. */
@@ -143,7 +148,7 @@ export function sameCauseFailureStreak(runId: string, chatId: string, now = Date
     .all(chatId, GOAL_WAKE_EVENT_KIND, floor, runId, SAME_CAUSE_SCAN_LIMIT) as Array<{ invocationRunId: string }>;
   const terminalOf = getDb().prepare(`SELECT kind, ts, payload_json FROM run_events WHERE run_id = ? AND kind IN (${TERMINAL_KINDS.map(() => "?").join(",")})
     ORDER BY seq DESC LIMIT 1`);
-  let cause: string | null = null, failures = 0, lastFailedAt: string | null = null, external = false;
+  let cause: string | null = null, failures = 0, lastFailedAt: string | null = null, external = false, end: TurnEnd | undefined;
   for (const wake of wakes) {
     const terminal = terminalOf.get(wake.invocationRunId, ...TERMINAL_KINDS) as { kind: string; ts: string; payload_json: string } | undefined;
     if (!terminal || (terminal.kind !== "invoke_failed" && terminal.kind !== "invoke_threw")) break;
@@ -153,31 +158,92 @@ export function sameCauseFailureStreak(runId: string, chatId: string, now = Date
     const code = typeof payload.errorCode === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(payload.errorCode) ? payload.errorCode : "invoke_failed_uncoded";
     if (cause !== null && code !== cause) break;
     // Newest failure decides: the provider reported it itself (typed kind from a marker or the exit), not a heuristic reading of prose.
-    if (cause === null) external = typeof payload.runtimeFailureKind === "string" && EXTERNAL_FAILURE_KINDS.has(payload.runtimeFailureKind)
-      && payload.runtimeFailureSource !== "heuristic";
+    if (cause === null) {
+      external = typeof payload.runtimeFailureKind === "string" && EXTERNAL_FAILURE_KINDS.has(payload.runtimeFailureKind)
+        && payload.runtimeFailureSource !== "heuristic";
+      end = turnEndFromTerminalEvent(terminal.kind, payload as Record<string, unknown>);
+    }
     cause = code; failures += 1; lastFailedAt ??= terminal.ts;
   }
-  return cause && lastFailedAt ? { cause, failures, lastFailedAt, external } : null;
+  return cause && lastFailedAt ? { cause, failures, lastFailedAt, external, ...(end ? { end } : {}) } : null;
 }
 
-/** When the same move may next be made for this Goal; null = now. */
+/**
+ * When the same move may next be made for this Goal; null = now. The waiting time is the cause table's (harness/cause.ts decideLastTurn,
+ * Agentlas 2.0 N3c): the newest failed turn's typed ending picks the rung - a transient failure 30 s, 2 min, 8 min then the outside rung;
+ * a provider limit or sign-in 30 min, 2 h, 6 h then every 6 h; anything inside the app, an unknown code or no code 5 min, 30 min then every
+ * hour - counted from that failure. One schedule instead of two: the 5 min / 30 min / 6 h of before and the table's ladders were different
+ * numbers for the same cause.
+ * Rows that start another runtime or a fresh session are not made here (the pool's fallback runs inside the turn; a fresh session
+ * generation is not built): they answer as their following rung, so a turn that cannot be helped by another start is never repeated at once.
+ */
+/** The cut of a recorded turn: no terminal line at all (the process was killed), or the app's own stop cause. */
+const HOST_CUT_CAUSES: ReadonlySet<string> = new Set(["app_closed", "update_restart"]);
+/** How many of the Goal's latest wakes are looked at: the ladder's third rung is reached at four. */
+const UNFINISHED_WAKE_SCAN = 5;
+
+/**
+ * Consecutive latest wakes of this Goal whose turn never finished because the APP went away under it (no terminal line, or hostStopCause app_closed /
+ * update_restart), newest first, with the time of the last of them. Counted across app launches (a turn that kills the app is exactly the one that is
+ * cut again after every start), reset by a turn that ended in any other way, and by the owner's word or a Goal control (windowFloor). Typed fields only.
+ * Audit 49 defect 11: cause.ts holds the row "host_interrupted_twice" and its only caller passed 0.
+ */
+export function unfinishedWakeStreak(runId: string, chatId: string, now = Date.now()): { count: number; lastAt: string | null } {
+  const floor = windowFloor(runId, chatId, now);
+  const wakes = getDb().prepare(`SELECT run_id AS invocationRunId, ts FROM run_events WHERE chat_id = ? AND kind = ? AND ts > ?
+    AND json_extract(payload_json, '$.longRunId') = ? ORDER BY ts DESC, seq DESC LIMIT ?`)
+    .all(chatId, GOAL_WAKE_EVENT_KIND, floor, runId, UNFINISHED_WAKE_SCAN) as Array<{ invocationRunId: string; ts: string }>;
+  const terminalOf = getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id = ? AND kind IN (${TERMINAL_KINDS.map(() => "?").join(",")})
+    ORDER BY seq DESC LIMIT 1`);
+  const lastEventOf = getDb().prepare("SELECT MAX(ts) AS ts FROM run_events WHERE run_id = ?");
+  let count = 0, lastAt: string | null = null;
+  for (const wake of wakes) {
+    // A wake record that names no turn that began (a placeholder id) is not a turn.
+    const began = getDb().prepare("SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'invoke_started' LIMIT 1").get(wake.invocationRunId);
+    if (!began) continue;
+    const terminal = terminalOf.get(wake.invocationRunId, ...TERMINAL_KINDS) as { payload_json: string } | undefined;
+    if (terminal) {
+      let payload: { hostStopCause?: unknown } = {};
+      try { payload = JSON.parse(terminal.payload_json); } catch { /* an unreadable terminal is a finished turn */ }
+      if (typeof payload.hostStopCause !== "string" || !HOST_CUT_CAUSES.has(payload.hostStopCause)) break; // it ended in another way: the streak ends
+    }
+    count += 1;
+    lastAt ??= (lastEventOf.get(wake.invocationRunId) as { ts: string | null } | undefined)?.ts ?? wake.ts;
+  }
+  return { count, lastAt };
+}
+
 export function sameCauseWakeHold(runId: string, chatId: string, now = Date.now()): SameCauseWakeHold | null {
+  // A turn that kills the app is cut again after every start: from the second cut in a row the Goal waits on the app-side ladder (5 min, 30 min, 1 h).
+  const unfinished = unfinishedWakeStreak(runId, chatId, now);
+  if (unfinished.count >= 2 && unfinished.lastAt) {
+    const decision = decideLastTurn({ end: { kind: "none" }, failureStreak: 1, otherRuntimeAvailable: false, transientRetriesInTurn: 0,
+      unfinishedWakesInARow: unfinished.count, freshSessionTried: true });
+    const delay = decision.wait?.kind === "ladder" ? decision.wait.delayMs : ladderDelayMs("inside", unfinished.count - 1);
+    const retryAt = Date.parse(unfinished.lastAt) + delay;
+    if (Number.isFinite(retryAt) && retryAt > now) return { cause: "host_interrupted_twice", failures: unfinished.count, lastFailedAt: unfinished.lastAt, retryAt: new Date(retryAt).toISOString(), row: decision.row };
+  }
   const streak = sameCauseFailureStreak(runId, chatId, now);
   if (!streak) return null;
-  const delay = SAME_CAUSE_RETRY_DELAYS_MS[streak.failures - 1] ?? (streak.external ? SAME_CAUSE_WAIT_MS : SAME_CAUSE_INTERNAL_WAIT_MS);
-  const retryAt = Date.parse(streak.lastFailedAt) + delay;
-  return Number.isFinite(retryAt) && retryAt > now ? { ...streak, retryAt: new Date(retryAt).toISOString() } : null;
+  const decision = decideLastTurn({ end: streak.end ?? { kind: "none" }, failureStreak: streak.failures,
+    otherRuntimeAvailable: false, transientRetriesInTurn: 0, unfinishedWakesInARow: 0, freshSessionTried: true });
+  const waitFor = decision.wait;
+  const delay = waitFor?.kind === "ladder" ? waitFor.delayMs
+    : decision.action === "owner_wait" ? ladderDelayMs("outside", streak.failures) // the table's sign-in card is not asked from here: the long rung it stands on is
+      : ladderDelayMs("inside", streak.failures);
+  const retryAt = waitFor?.kind === "at" ? Date.parse(waitFor.at) : Date.parse(streak.lastFailedAt) + delay;
+  return Number.isFinite(retryAt) && retryAt > now ? { ...streak, retryAt: new Date(retryAt).toISOString(), row: decision.row } : null;
 }
 
 export type GoalContinuationWakeVerdict = GoalWakeVerdict
-  | { start: false; reason: typeof SAME_CAUSE_WAKE_REASON; retryAt: string; cause: string; failures: number };
+  | { start: false; reason: typeof SAME_CAUSE_WAKE_REASON; retryAt: string; cause: string; failures: number; row?: string };
 
 /** decideGoalWake for the paths that replay the Goal's own continuation, plus the same-cause rule above. */
 export function decideGoalContinuationWake(input: Parameters<typeof decideGoalWake>[0]): GoalContinuationWakeVerdict {
   const verdict = decideGoalWake(input);
   if (!verdict.start) return verdict;
   const hold = sameCauseWakeHold(input.runId, input.chatId, input.now ?? Date.now());
-  return hold ? { start: false, reason: SAME_CAUSE_WAKE_REASON, retryAt: hold.retryAt, cause: hold.cause, failures: hold.failures } : verdict;
+  return hold ? { start: false, reason: SAME_CAUSE_WAKE_REASON, retryAt: hold.retryAt, cause: hold.cause, failures: hold.failures, ...(hold.row ? { row: hold.row } : {}) } : verdict;
 }
 
 export function decideGoalWake(input: {
@@ -201,10 +267,10 @@ export function decideGoalWake(input: {
 }
 
 /**
- * A host path that starts model work for a Goal outside the paths above (the AGI unblocker handing a tactic to a teammate) goes
- * through the same answer: refused with a typed code (goal_wake_budget_reached | goal_wake_owner_request_queued |
- * goal_wake_chat_busy) before anything starts, and recorded once when it did start new work. Production Yotube room: AGI
- * teammate dispatches 27 on 10-18 and 96 on 10-19, none of them counted against the Goal's wakes.
+ * A host path that starts model work for a Goal outside the paths above goes through the same answer: refused with a typed code
+ * (goal_wake_budget_reached | goal_wake_owner_request_queued | goal_wake_chat_busy) before anything starts, and recorded once when it
+ * did start new work. (Production Yotube room: teammate dispatches by the removed AGI unblocker, 27 on 10-18 and 96 on 10-19, none of
+ * them counted against the Goal's wakes.)
  */
 export interface HostGoalWakeInput {
   runId: string; chatId: string; source: GoalWakeSource; cause?: string | null; now?: number;

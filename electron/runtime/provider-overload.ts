@@ -13,8 +13,8 @@ import { httpRetryAfterIso, httpRetryAfterTimestamp } from "./http-retry-after";
  * output and no tool effect, whatever earlier turns of the run did (their results are already in the messages). A busy
  * server (RUNTIME_OVERLOADED_CODE) is resent on consecutive failures up to SERVER_FAILURE_CONSECUTIVE_RESENDS times with an
  * exponential wait, and the count restarts once a response opens. A model that dropped out of memory
- * (LOCAL_MODEL_UNLOADED_CODE) is resent once: the resend makes the server load it again. A Retry-After longer than
- * MAX_RESEND_DELAY_MS is never shortened: the typed failure returns.
+ * (LOCAL_MODEL_UNLOADED_CODE) is resent once: the resend makes the server load it again. The provider's Retry-After is waited out
+ * up to MAX_RESEND_DELAY_MS (60 s) and is never shortened; a longer one returns the typed failure.
  */
 
 /** 503 / 529 (Anthropic "overloaded") / 502 / 504 (a gateway in front of the server): the server is busy right now. */
@@ -30,7 +30,20 @@ export const SERVER_FAILURE_CONSECUTIVE_RESENDS = 3;
 /** A model dropped from memory is resent once: the resend reloads it, which is itself a memory load. */
 export const LOCAL_MODEL_UNLOADED_RESENDS = 1;
 const DEFAULT_RESEND_DELAY_MS = 1_500;
-const MAX_RESEND_DELAY_MS = 10_000;
+/**
+ * The longest wait for a provider's own Retry-After before one resend. The provider's time is believed up to here (it used to stop
+ * at 10 s, a number nobody measured: a server that said 15 s or 60 s got no second try at all). Beyond it the typed failure returns
+ * with the provider's time attached (retryAfterHint) and the owner is told, because a person is waiting on this turn.
+ *
+ * Basis: a chosen value, not a measurement. It is the time a person waits on one visible line ("the server asked to retry in N s",
+ * serverResendHintNote) before they would rather decide for themselves; it sits far inside the other clocks of the same turn, so
+ * nothing multiplies: at most SERVER_FAILURE_CONSECUTIVE_RESENDS (3) waits of 60 s = 3 min, each resend is one request under the
+ * 20-minute API silence window (api-silence-fetch.ts), and a refused connection inside a resend gets its own 120 s
+ * (reconnecting-fetch.ts RECONNECT_MAX_MS), so the worst chain of one turn is 3 x (60 s + 120 s) = 9 min. A 529 / 503 is not a
+ * runtime cooldown (runtime-cooldown.ts records quota / rate_limit / auth only), so no third clock is added on top.
+ * When it is reached: runtime_overloaded with retryAfterHint, as before; Stop ends the wait at once.
+ */
+const MAX_RESEND_DELAY_MS = 60_000;
 
 /** How many consecutive resends this class of server failure gets. */
 export function serverFailureResendLimit(code: ServerFailureCode): number {
@@ -93,6 +106,16 @@ export function serverFailureResendDelayMs(retryAfter: string | null | undefined
   const hinted = at === null ? 0 : Math.max(0, at - now);
   if (hinted > MAX_RESEND_DELAY_MS) return null;
   return Math.max(backoff, hinted);
+}
+
+/**
+ * The owner line's tail while a resend waits on the provider's own Retry-After: "the server asked to retry in N s". Empty when the
+ * provider gave no usable time (the plain backoff is not the provider's word). The line is the existing resend status, not a new one.
+ */
+export function serverResendHintNote(locale: string | undefined, retryAfter: string | null | undefined, delayMs: number | null, now = Date.now()): string {
+  if (delayMs === null || delayMs <= 0 || httpRetryAfterTimestamp(retryAfter, now) === null) return "";
+  const seconds = Math.max(1, Math.round(delayMs / 1000));
+  return locale === "ko" ? ` · 서버가 ${seconds}초 뒤에 다시 하라고 했습니다` : ` · the server asked to retry in ${seconds}s`;
 }
 
 /** Waits, or ends early on Stop (the caller then reads the abort reason). */

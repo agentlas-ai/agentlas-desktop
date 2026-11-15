@@ -15,7 +15,6 @@ import { goalNextWakeLabel, goalNextWakeOf } from "@shared/goal-wake";
 import { goalHeldForOwnerGrant, goalOwnerAttention, type GoalOwnerAttention } from "@shared/goal-display-state";
 import { requestGoalPanelOpen } from "@/components/goal/GoalPanel";
 import styles from "./OneGoalControls.module.css";
-import { AgiDefectChip } from "../agi/AgiBugReport";
 
 type GoalAction = "pause" | "delete" | "resume" | "edit";
 
@@ -548,7 +547,6 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
       <IconTarget size={13} />
       <strong>{ongoing ? (ko ? "지속 목표" : "Ongoing goal") : (ko ? "목표" : "Goal")}</strong>
       <span className={styles.label} title={label} role="status">{shortStatus}</span>
-      <AgiDefectChip chatId={chatId} locale={locale} />
       {modelPending && <button type="button" ref={modelChipRef} className={styles.modelChip} data-goal-model-pending="true"
         aria-expanded={modelNoteOpen} aria-controls={modelNoteId} aria-describedby={modelNoteOpen ? modelNoteId : undefined}
         aria-label={ko ? "모델 변경 대기 — 설명 보기" : "Model change pending — show details"}

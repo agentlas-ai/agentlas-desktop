@@ -27,7 +27,7 @@ export class FinanceRunHistory {
     let db:Database.Database;scope.assertCurrent();try{db=new Database(file,{timeout:1000});}catch(error){throw historyError(error);}try{scope.assertCurrent();chmodSync(file,0o600);
     db.pragma('busy_timeout = 1000');db.pragma('journal_mode = DELETE');
     db.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY,sequence INTEGER NOT NULL UNIQUE,started_at TEXT NOT NULL,status TEXT NOT NULL); CREATE INDEX IF NOT EXISTS runs_order ON runs(started_at DESC,id DESC); CREATE INDEX IF NOT EXISTS runs_status ON runs(status);');
-    db.transaction(()=>{if(this.get(db,'count')===undefined)this.set(db,'count',String((db.prepare('SELECT COUNT(*) AS value FROM runs').get() as {value:number}).value));})();
+    db.transaction(()=>{if(this.get(db,'count')===undefined)this.set(db,'count',String((db.prepare('SELECT COUNT(*) AS value FROM runs').get() as {value:number}).value));}).immediate();
     return db;}catch(error){db.close();throw historyError(error);}
   }
   private get(db:Database.Database,key:string):string|undefined{return (db.prepare('SELECT value FROM meta WHERE key=?').get(key) as {value:string}|undefined)?.value;}
@@ -35,7 +35,7 @@ export class FinanceRunHistory {
   private indexed(db:Database.Database,run:FinanceMonitorRun):void{
     db.transaction(()=>{const previous=db.prepare('SELECT sequence FROM runs WHERE id=?').get(run.id);if(previous){db.prepare('UPDATE runs SET started_at=?,status=? WHERE id=?').run(new Date(run.startedAt).toISOString(),run.status,run.id);return;}
       const max=(db.prepare('SELECT COALESCE(MAX(sequence),0) AS value FROM runs').get() as {value:number}).value;
-      db.prepare('INSERT INTO runs(id,sequence,started_at,status) VALUES(?,?,?,?)').run(run.id,max+1,new Date(run.startedAt).toISOString(),run.status);this.set(db,'count',String(Number(this.get(db,'count')??0)+1));})();
+      db.prepare('INSERT INTO runs(id,sequence,started_at,status) VALUES(?,?,?,?)').run(run.id,max+1,new Date(run.startedAt).toISOString(),run.status);this.set(db,'count',String(Number(this.get(db,'count')??0)+1));}).immediate();
   }
   private async read(id:string):Promise<FinanceMonitorRun>{const run=runSchema.parse(await readFinanceJsonFile(path.join(this.directory,`${uuid.parse(id)}.json`),MAX_RUN_BYTES));if(run.id!==id||run.monitorId!==this.monitorId)throw new Error('finance_monitor_run_invalid');return run;}
   private async step(db:Database.Database,scope:FinanceScope):Promise<boolean>{

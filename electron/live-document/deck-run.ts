@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import path from "node:path";
 
@@ -251,8 +252,10 @@ export async function runDeckScript(input: { script: string; timeoutMs?: number;
     const child = spawn(line.file, line.args, { cwd: tmp, env, stdio: ["ignore", "pipe", "pipe"], ...detachedSpawnOpts() });
     trackRunChild(child);
     let stdout = "", stderr = "", timedOut = false, cancelled = false, spawnError: string | undefined, signal: string | null = null;
-    child.stdout?.on("data", (chunk: Buffer) => { if (stdout.length < STREAM_LIMIT) stdout += chunk.toString("utf8"); });
-    child.stderr?.on("data", (chunk: Buffer) => { if (stderr.length < STREAM_LIMIT) stderr += chunk.toString("utf8"); });
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => { const text = stdoutDecoder.write(chunk); if (stdout.length < STREAM_LIMIT) stdout += text; });
+    child.stderr?.on("data", (chunk: Buffer) => { const text = stderrDecoder.write(chunk); if (stderr.length < STREAM_LIMIT) stderr += text; });
     const timer = setTimeout(() => { timedOut = true; killCodeTree(child); }, timeoutMs);
     const onAbort = () => { cancelled = true; killCodeTree(child); };
     input.signal?.addEventListener("abort", onAbort, { once: true });

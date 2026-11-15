@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import type { RuntimeBackend, RuntimeKind, RuntimeSelection, RuntimeStatus } from "@/lib/types";
 import { cliModelTagLabel, cliModels, runtimeUsesEngineModelSetting } from "@shared/models";
 import { llmLogoSrc } from "@/lib/llm-logo";
+import { IconChevronDown } from "@/components/Icon";
 
 export type RuntimeModelPickerOption = {
   key: string;
@@ -232,7 +233,7 @@ export function RuntimeBrandIdentity({
         <small>{engine}{source ? ` · ${source}` : ""}</small>
         {runtime?.credentialAccess?.status === "unavailable" && (
           <small role="status">{locale === "ko"
-            ? "저장된 API 키 접근 불가 · 도움말 메뉴에서 다시 시도할 수 있습니다."
+            ? "저장된 API 키에 접근할 수 없어요 · 도움말 메뉴에서 다시 시도할 수 있어요."
             : "Saved API key unavailable · Retry access from the Help menu."}</small>
         )}
       </span>
@@ -247,6 +248,7 @@ export function RuntimeModelPicker({
   disabled = false,
   ariaLabel,
   placeholder,
+  dashboardLook = false,
   onSelect,
 }: {
   options: RuntimeModelPickerOption[];
@@ -255,6 +257,8 @@ export function RuntimeModelPicker({
   disabled?: boolean;
   ariaLabel: string;
   placeholder?: string;
+  /** Dashboard picture: the same chevron icon as the effort box, and the engine name alone under the model (no provider). */
+  dashboardLook?: boolean;
   onSelect: (option: RuntimeModelPickerOption) => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -468,7 +472,7 @@ export function RuntimeModelPicker({
          *   그리고 고를 모델이 하나도 없어 회색일 때도 이유가 없었다.
          */
         title={open ? undefined : visibleOptions.length === 0
-          ? (locale === "ko" ? "고를 수 있는 모델이 없습니다. 설정에서 런타임을 먼저 연결하세요." : "No models to choose from. Connect a runtime in Settings first.")
+          ? (locale === "ko" ? "고를 수 있는 모델이 없어요. 설정에서 모델과 엔진을 먼저 연결해 주세요." : "No models to choose from. Connect a runtime in Settings first.")
           : selected
             ? `${optionModelLabel(selected, locale)} · ${selectedIdentity}`
             : undefined}
@@ -487,7 +491,7 @@ export function RuntimeModelPicker({
             </span>
             <span className="dashboard-runtime-model-picker-value">
               <strong>{optionModelLabel(selected, locale)}</strong>
-              <small>{selectedIdentity}</small>
+              <small>{dashboardLook && selected ? runtimeEngineLabel(selected.runtime) : selectedIdentity}</small>
             </span>
           </>
         ) : (
@@ -495,7 +499,7 @@ export function RuntimeModelPicker({
             {placeholder ?? (locale === "ko" ? "사용 가능한 모델 없음" : "No models available")}
           </span>
         )}
-        <span className="dashboard-runtime-model-picker-chevron" aria-hidden="true">⌄</span>
+        <span className="dashboard-runtime-model-picker-chevron" aria-hidden="true">{dashboardLook ? <IconChevronDown size={15} /> : "⌄"}</span>
       </button>
       {open && (
         <div

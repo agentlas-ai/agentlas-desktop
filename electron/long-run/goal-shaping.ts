@@ -50,7 +50,9 @@ import {
   krStrategyView,
 } from "./agent-strategy";
 import type { RuntimeSelection } from "../../shared/types";
-import { decidePersistenceMove, isPersistenceBoundaryKind, type FailureCause, type PersistenceAttempt } from "../../shared/persistence-policy";
+import { decidePersistenceMove, isPersistenceBoundaryKind, type FailureCause, type PersistenceAttempt, type PersistenceBoundaryKind } from "../../shared/persistence-policy";
+import { askOwnerOnce } from "../harness/owner-ask";
+import { AGENT_ASK_OPEN } from "../../shared/agent-control-blocks";
 import {
   goalPlanTacticPayload,
   withCurrentGoalPlan,
@@ -357,7 +359,7 @@ function guidanceLine(tactic: LiveTactic): string | null {
     case "retry_backoff": return `This tactic was blocked (${g.cause}); retry${g.at ? ` after ${g.at}` : ""}; meanwhile work another open tactic.`;
     case "escalate_boundary": return `This tactic waits on the owner for a ${g.boundary ?? "boundary"} decision. Ask once; continue other tactics.`;
     case "switch_tool": return g.path
-      ? `This tactic was blocked (${g.cause}); the AGI unblocker chose the installed alternative "${g.path}". Use "${g.path}" now, not the failed path.`
+      ? `This tactic was blocked (${g.cause}); the installed alternative "${g.path}" was chosen. Use "${g.path}" now, not the failed path.`
       : `This tactic was blocked (${g.cause}); use an alternative installed tool with the same capability.`;
     default: return `This tactic was blocked (${g.cause}); the host chose ${g.move}.`;
   }
@@ -372,10 +374,28 @@ function laterHint(tactic: LiveTactic): string {
 /** How long a native-harness hand-off holds before the unblocker has to see the capability fail again. */
 export const NATIVE_HARNESS_HOLD_MS = 24 * 60 * 60_000;
 
-/** The capabilities the AGI unblocker handed to the runtime's own tools for this plan within the hold (newest per capability). */
-export function activeNativeHarness(goalId: string, revision: number, planSeq: number, nowMs: number): Array<{ capability: string; defect: string; since: string }> {
+/**
+ * The runtime's own tools (shell, direct API calls with saved keys, local programs) can write: a Goal the owner granted read-only only is never
+ * pointed at them (the deleted unblocker's rule, #15). The permission is the one the Goal's newest recorded owner grant names; a Goal
+ * with none recorded is treated as read-only.
+ */
+export function goalAllowsRuntimeOwnTools(goalId: string): boolean {
+  const refs = getChatGoalRevision(goalId)?.authorityRefs ?? [];
+  for (const ref of [...refs].reverse()) {
+    const match = /^invocation:[^:]+:permission:(read|write|full)$/.exec(ref);
+    if (match) return match[1] !== "read";
+  }
+  return false;
+}
+
+/**
+ * The capabilities handed to the runtime's own tools for this Goal within the hold (newest per capability). Read across plan numbers and
+ * revisions: a broken Agentlas tool is the app's fact, not one plan's, so a new plan carries the same line at once and the sweep does not
+ * write the same fact again under every plan number (#13).
+ */
+export function activeNativeHarness(goalId: string, nowMs: number): Array<{ capability: string; defect: string; since: string }> {
   const out = new Map<string, { capability: string; defect: string; since: string }>();
-  for (const row of listGoalPlanDecisions(goalId, { revision, planSeq, kind: "native_harness", limit: 20 })) {
+  for (const row of listGoalPlanDecisions(goalId, { kind: "native_harness", limit: 20 })) {
     const capability = typeof row.payload?.capability === "string" ? row.payload.capability : null;
     if (!capability || out.has(capability) || nowMs - Date.parse(row.createdAt) > NATIVE_HARNESS_HOLD_MS) continue;
     out.set(capability, { capability, defect: typeof row.payload?.defect === "string" ? row.payload.defect : "our_defect", since: row.createdAt });
@@ -385,7 +405,7 @@ export function activeNativeHarness(goalId: string, revision: number, planSeq: n
 
 /** The turn-context line for a capability handed to the runtime's own tools. */
 export function nativeHarnessLine(entry: { capability: string; defect: string }): string {
-  return `AGI unblocker: Agentlas ${entry.capability} path keeps failing here (${entry.defect}; app defect, recorded). `
+  return `Agentlas ${entry.capability} path keeps failing here (${entry.defect}; app defect). `
     + `For steps needing ${entry.capability === "browser" ? "browser, web or app control" : "that tool"}: use runtime-own tools (shell, direct APIs with env keys, local programs, built-in web). `
     + "Write each result as a file in the task folder and name it in the answer. Do not retry the failing Agentlas tool. Owner needed (sign-in, payment, consent): ask once.";
 }
@@ -413,7 +433,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const lines: string[] = [];
   // Goal id / revision / planSeq / problem_nature are host state the model never has to echo (markers carry only tactic ids).
   snapshot.push(`Plan ${plan.shape}${plan.fallback ? " (provisional)" : ""}: ${plan.rationale}`);
-  for (const entry of activeNativeHarness(plan.goalId, plan.revision, plan.planSeq, nowMs)) lines.push(nativeHarnessLine(entry));
+  if (goalAllowsRuntimeOwnTools(plan.goalId)) for (const entry of activeNativeHarness(plan.goalId, nowMs)) lines.push(nativeHarnessLine(entry));
   // Agent Strategy: 이 패스의 KPI 상태를 먼저 갱신한다(멱등). 읽기 전용 재렌더(record:false)는 쓰지 않는다.
   if (plan.shape === "mission_tree" && input.record !== false) {
     try { evaluateGoalKpis(plan, nowMs); } catch (error) { console.warn("[agent-strategy] evaluation failed:", error instanceof Error ? error.message : error); }
@@ -601,7 +621,7 @@ function withPlanNodeIds(plan: LiveGoalPlan, item: { kind: "tactic"; value: Tact
   return item;
 }
 
-function applyTacticMarker(plan: LiveGoalPlan, marker: TacticMarker, runId: string | null, nowMs: number): string {
+function applyTacticMarker(plan: LiveGoalPlan, marker: TacticMarker, runId: string | null, nowMs: number, asks: Array<{ tacticId: string; boundary: PersistenceBoundaryKind }>): string {
   const tactic = plan.tactics.find((t) => t.id === marker.id);
   if (!tactic) return "tactic_not_found";
   if (tactic.status === "done" || tactic.status === "retired") return "tactic_not_open";
@@ -620,6 +640,8 @@ function applyTacticMarker(plan: LiveGoalPlan, marker: TacticMarker, runId: stri
   const decision = decidePersistenceMove({ cause, history: tacticHistory(plan, tactic.id),
     goal: { status: "active", switchableRuntimes: 0, switchableTools: 0 }, nowMs });
   const move = decision.move;
+  // The tactic waits on the owner for a boundary: the card goes out once the plan change is committed (see applyGoalPlanMarkers).
+  if (move.kind === "escalate_boundary") asks.push({ tacticId: tactic.id, boundary: move.boundary });
   const failures = tactic.failures + 1;
   updateGoalPlanNode(plan, tactic.id, { payload: { failures,
     guidance: { move: move.kind, cause: cause.kind === "boundary" ? `boundary:${cause.boundary}` : cause.kind,
@@ -795,6 +817,7 @@ export function applyGoalPlanMarkers(input: { goalId: string | null; text: strin
   const extracted = extractGoalPlanMarkers(strategyMarkers.text);
   if (!input.goalId || (!extracted.tactics.length && !extracted.ops.length && !shifts.length)) return { text: extracted.text, applied: [] };
   const applied: GoalPlanMarkerOutcome["applied"] = [];
+  const asks: Array<{ tacticId: string; boundary: PersistenceBoundaryKind }> = [];
   const nowMs = input.nowMs ?? Date.now();
   try {
     if (input.signal?.aborted) throw new Error("goal_plan_dispatch_cancelled");
@@ -817,6 +840,7 @@ export function applyGoalPlanMarkers(input: { goalId: string | null; text: strin
       if (sourcePlan.deadline_at && Date.parse(sourcePlan.deadline_at) <= nowMs) throw new Error("goal_plan_deadline_reached");
       const outcome: GoalPlanMarkerOutcome["applied"] = [];
       const keys: string[] = [];
+      asks.length = 0;
       for (const item of [...extracted.tactics.map(marker => ({ kind: "tactic" as const, value: marker })),
         ...extracted.ops.map(op => ({ kind: "plan_op" as const, value: op }))]) {
         const key = JSON.stringify(item);
@@ -829,7 +853,7 @@ export function applyGoalPlanMarkers(input: { goalId: string | null; text: strin
         const strategyId = named.kind === "plan_op" && named.value.op === "add_tactic" ? named.value.strategy_id : branchId;
         const pausedStrategy = named.kind === "plan_op" && (named.value.op === "retire_strategy" || named.value.op === "add_tactic") && plan.strategies.find(s => s.id === strategyId)?.ownerPaused;
         if (branch?.ownerHeld || pausedStrategy) throw new Error("goal_plan_owner_held");
-        const value = named.kind === "tactic" ? applyTacticMarker(plan, named.value, input.runId!, nowMs) : applyPlanOp(plan, named.value, input.runId!, nowMs);
+        const value = named.kind === "tactic" ? applyTacticMarker(plan, named.value, input.runId!, nowMs, asks) : applyPlanOp(plan, named.value, input.runId!, nowMs);
         outcome.push({ kind: item.kind, id, result: value }); keys.push(key); seen.add(key);
       }
       for (const shift of shifts) {
@@ -845,6 +869,10 @@ export function applyGoalPlanMarkers(input: { goalId: string | null; text: strin
       return outcome;
     }, (current) => reportsStillValid(context.payload.fence, current, named));
     applied.push(...result);
+    // A tactic the model reported blocked on an owner-only boundary: one card that rings (once per goal, tactic and boundary), unless this
+    // very answer already asks the owner itself.
+    const chatId = asks.length && !input.text.includes(AGENT_ASK_OPEN) ? getLongRunByGoalId(input.goalId)?.rootChatId : null;
+    if (chatId) for (const ask of asks) askOwnerOnce({ chatId, key: `owner-ask:${input.goalId}:${ask.tacticId}:${ask.boundary}`, kind: ask.boundary });
   } catch (error) {
     const known = new Set(["goal_plan_context_missing", "goal_plan_stale", "goal_revision_stale", "goal_plan_owner_held",
       "goal_plan_terminal", "goal_plan_deadline_reached", "goal_plan_dispatch_cancelled", "goal_plan_owner_control_changed"]);

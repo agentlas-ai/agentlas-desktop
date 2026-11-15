@@ -13,6 +13,9 @@ import { defaultLegacyCleanupPaths, moveLegacyProductSessions } from "./legacy-p
 export const LEGACY_PRODUCT_SESSIONS_MARKER = "legacy-product-sessions.v2.json";
 
 export function scheduleLegacyProductSessionMove(delayMs = 90_000): void {
+  // A test rig (AGENTLAS_E2E=1) runs with a temporary userData but the real HOME: this pass would MOVE the person's real ~/.codex,
+  // ~/.claude and ~/.copilot product sessions into the temporary folder, and they vanish with it. A test never runs the move.
+  if (process.env.AGENTLAS_E2E === "1") return;
   const timer = setTimeout(() => {
     void (async () => {
       try {

@@ -17,6 +17,7 @@ import { observeArtifactRender, ARTIFACT_PREVIEW_CSP } from "./artifact-render";
 import { readArtifactPresentation, writeArtifactPresentation } from "../store/artifact-presentation";
 import { artifactPresentationClient } from "./presentation-client";
 import { secretEquals } from "../security/secret-equals";
+import { createWatchGuard } from "../fs-watch-guard";
 
 type ActivePreview = {
   appId: string;
@@ -306,7 +307,10 @@ function watchFiles(preview: ActivePreview): fs.FSWatcher | null {
     }, 160);
   };
   try {
-    return fs.watch(preview.rootPath, { recursive: true }, changed);
+    let started: fs.FSWatcher | null = null;
+    const guard = createWatchGuard({ root: preview.rootPath, close: () => { try { started?.close(); } catch { /* already closed */ } } });
+    started = fs.watch(preview.rootPath, { recursive: true }, () => { if (!guard.event()) changed(); });
+    return started;
   } catch {
     try { return fs.watch(preview.contentRoot, changed); } catch { return null; }
   }

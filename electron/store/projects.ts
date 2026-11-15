@@ -1,10 +1,11 @@
 // Project CRUD — 프로젝트가 소스, 지시, 직접 선택한 에이전트 풀을 소유한다.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { agentlasHomeDir } from "../agents/home";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
+import { removeProjectApprovalGrants } from "./capability-grants";
 import { PROJECT_AGENT_POOL_MAX, projectPoolMemberKey, projectPoolMemberReferences } from "../../shared/project-agent-pool";
 import { consumeProjectAgentLimitGrant, type ProjectAgentLimitGrant } from "../billing";
 import type { Project, ProjectAgentPoolMember, ProjectSourceType } from "../../shared/types";
@@ -58,16 +59,21 @@ function assertManagedProjectsRoot(root: string): string {
   return resolved;
 }
 
+/** The one place that names the managed projects folder: `~/.agentlas/projects`, or `$AGENTLAS_HOME/projects` for an isolated run. */
+export function defaultManagedProjectsRoot(): string {
+  return path.join(agentlasHomeDir(), "projects");
+}
+
 /**
  * Allocate a Main-owned folder for an explicit empty-project save.
  *
  * The optional root is dependency injection for isolated verification only;
- * production callers always use ~/.agentlas/projects.
+ * production callers always use <agentlas home>/projects (~/.agentlas/projects; AGENTLAS_HOME moves it, like every other store).
  */
 export function createManagedEmptyProjectDirectory(
   projectId: string,
   projectName: string,
-  managedProjectsRoot = path.join(os.homedir(), ".agentlas", "projects"),
+  managedProjectsRoot = defaultManagedProjectsRoot(),
 ): string {
   const root = assertManagedProjectsRoot(managedProjectsRoot);
   const base = `${managedProjectSlug(projectName)}-${projectId}`;
@@ -301,7 +307,7 @@ export function updateProject(
     folderPath = null;
   } else if (sourceType === "empty") {
     if (patch.folderPath) throw new Error("empty_project_folder_must_be_managed");
-    const managedRoot = options.managedProjectsRoot ?? path.join(os.homedir(), ".agentlas", "projects");
+    const managedRoot = options.managedProjectsRoot ?? defaultManagedProjectsRoot();
     if (options.allocateManagedEmptyFolder) {
       folderPath = !sourceChanged && existing.sourceType === "empty"
         && isReusableManagedEmptyProjectDirectory(existing.folderPath, managedRoot)
@@ -377,8 +383,34 @@ export function detachProjectPoolReferences(refs: {
 }
 
 export function removeProject(id: string): void {
+  // read the folder before the row goes — the memory chain below names the project by id and folder. It does nothing while the memory layout switch is OFF.
+  let folderPath: string | null = null;
+  try { folderPath = getProject(id)?.folderPath ?? null; } catch { /* the row is removed anyway */ }
   const result = getDb().prepare("DELETE FROM projects WHERE id = ?").run(id);
-  if (result.changes > 0) emitDesktopStoreChange({ entity: "project", id });
+  if (result.changes > 0) {
+    void import("../memory/store-delete").then(async (chain) => {
+      await chain.forgetProjectTraces({ id, path: folderPath });
+      await chain.retryPendingProjectForgets({ except: id }); // the one that just failed is not retried at once
+    }).catch(() => undefined);
+    // the project's code index in its memory folder goes with the row (best effort; a folder that is already gone leaves an orphan the engine prunes after 30 days). The map inside the
+    // user's own project folder (`.agentlas/code-map/`) is never touched. It does nothing while no index exists in the memory folder, and it creates nothing.
+    // Another project row for the same folder keeps the map (it is named by the folder, not by the row): only the last row of a folder removes it (G).
+    let folderStillUsed = false;
+    try { folderStillUsed = Boolean(folderPath && getDb().prepare("SELECT 1 FROM projects WHERE folder_path = ? LIMIT 1").get(folderPath)); } catch { /* the index is removed as before */ }
+    if (!folderStillUsed) void (async () => {
+      const index = await import("../memory/project-index");
+      let active: string[] = [];
+      try {
+        const database = await import("../memory/database");
+        if (fs.existsSync(path.join(database.memoryRoot(), "owners"))) active = [database.getMemoryStoreInfo().ownerNamespace];
+      } catch { /* no store yet: the engine's own owner is the only one */ }
+      const removal = await index.removeProjectIndex({ id, path: folderPath }, index.defaultIndexContext(active));
+      if (removal.left > 0) console.warn(`[project-index] ${removal.left} index folder(s) of a removed project could not be deleted`);
+    })().catch(() => undefined);
+    // The "always allow" answers kept for this project go with it.
+    removeProjectApprovalGrants(id);
+    emitDesktopStoreChange({ entity: "project", id });
+  }
 }
 
 export function touchProject(id: string): void {

@@ -14,6 +14,9 @@ import type {
   RuntimeBackend,
 } from "../../shared/types";
 import { userDataDir } from "../runtime-paths";
+import { agentHomeRoot, agentHomeRootStatus, ensureAgentOwnerMarker, invalidateOwnerIndex, legacyAgentsRoot, managedAgentFolder, ownerIds } from "../agents/home";
+import { isAgentLocalStateAncestor, isAgentLocalStatePath, withoutAgentLocalState } from "../../shared/agent-local-state";
+import { AGENT_LOCAL_STATE_DIRECTORIES, AGENT_LOCAL_STATE_PATHS } from "../../shared/upload-scan-catalog.generated";
 import { sameFileIdentity } from "../../shared/file-identity";
 
 const JOURNAL_SCHEMA_VERSION = 1;
@@ -101,15 +104,12 @@ export function commitCloudRegistryPackage(input: CommitCloudRegistryPackageInpu
   };
 
   const transactionId = randomUUID();
-  const destinationDir = managedDestination(input.slug);
+  const destinationDir = cloudManagedFolder({ id: input.expectedRow.id, slug: input.slug });
   const previousRestoreMarker = fs.existsSync(destinationDir)
     ? readCloudAgentRestoreMarker(destinationDir)
     : null;
   const registrations = mergeRegistrations(previousRestoreMarker?.registrations, input.registration);
-  const backupDir = path.join(
-    agentsRoot(),
-    `.${path.basename(destinationDir)}.registry-backup-${transactionId}`,
-  );
+  const backupDir = siblingOf(destinationDir, "registry-backup", transactionId);
   const journalFile = path.join(journalRoot(), `${transactionId}.json`);
   const now = new Date().toISOString();
   const journal: CloudRegistryJournal = {
@@ -142,9 +142,11 @@ export function commitCloudRegistryPackage(input: CommitCloudRegistryPackageInpu
   writeJournal(journalFile, journal);
   try {
     if (journal.hadDestination) {
-      assertReplaceableManagedDirectory(destinationDir);
+      assertReplaceableManagedDirectory(destinationDir, { id: input.expectedRow.id, slug: input.slug });
+      closeLocalStores(destinationDir);
       fs.renameSync(destinationDir, backupDir);
-      fsyncDirectoryBestEffort(agentsRoot());
+      invalidateOwnerIndex();
+      fsyncDirectoryBestEffort(path.dirname(destinationDir));
     }
     updateJournal(journalFile, journal, "backup-created");
 
@@ -160,6 +162,13 @@ export function commitCloudRegistryPackage(input: CommitCloudRegistryPackageInpu
       // original by arriving without it.
       fork: input.package.fork ?? previousRestoreMarker?.fork,
     });
+    // What lives only on this computer (the owner marker, the agent's memory, its ledgers) is not part of the package and is never
+    // restored from it: it follows the folder from the copy that was moved aside. Without this an update replaced the folder and
+    // left that state in the backup, which the commit then deletes.
+    carryLocalState(backupDir, destinationDir);
+    carryLocalState(previousLocalFolder(journal), destinationDir);
+    // A package installed straight into the agent root names its agent, so the folder is found again by its marker (one agent, one folder).
+    if (path.dirname(destinationDir) === path.resolve(agentHomeRoot())) ensureAgentOwnerMarker(destinationDir, input.expectedRow.id);
     updateJournal(journalFile, journal, "assets-swapped");
     injectFailure("after-swap");
 
@@ -254,6 +263,26 @@ export function recoverCloudRegistryTransactionsForRead(): void {
       blockedJournals.set(file, { signature, at: now, reason });
     }
   }
+}
+
+/**
+ * The folders an unfinished transaction still owns (its destination and its backup). The folder move leaves these where they are
+ * until the journal is settled. Never throws: a journal that cannot be read counts as "everything it could name is busy" for the caller
+ * through `unreadable`.
+ */
+export function openCloudRegistryFolders(): { folders: string[]; unreadable: boolean } {
+  const folders: string[] = [];
+  let unreadable = false;
+  let files: string[] = [];
+  try { files = pendingJournalFiles(); } catch { return { folders, unreadable: true }; }
+  for (const file of files) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { destinationDir?: unknown };
+      if (typeof parsed.destinationDir === "string" && path.isAbsolute(parsed.destinationDir)) folders.push(path.resolve(parsed.destinationDir));
+      else unreadable = true;
+    } catch { unreadable = true; }
+  }
+  return { folders, unreadable };
 }
 
 const BLOCKED_JOURNAL_RETRY_MS = 60_000;
@@ -373,15 +402,17 @@ function restoreManagedDirectory(journal: CloudRegistryJournal): void {
   const destinationExists = fs.existsSync(journal.destinationDir);
   const backupExists = fs.existsSync(journal.backupDir);
 
+  const parent = path.dirname(journal.destinationDir);
   if (backupExists) {
     if (destinationExists) {
-      const orphan = path.join(
-        agentsRoot(),
-        `.${path.basename(journal.destinationDir)}.registry-orphan-${journal.transactionId}`,
-      );
+      const orphan = siblingOf(journal.destinationDir, "registry-orphan", journal.transactionId);
+      // The local state that already followed the new copy goes back with the previous one before the new copy is set aside.
+      closeLocalStores(journal.destinationDir);
+      carryLocalStateBack(journal, journal.backupDir);
       fs.renameSync(journal.destinationDir, orphan);
       fs.renameSync(journal.backupDir, journal.destinationDir);
-      fsyncDirectoryBestEffort(agentsRoot());
+      invalidateOwnerIndex();
+      fsyncDirectoryBestEffort(parent);
       // Preserve an unexpectedly edited post-swap copy instead of deleting user
       // work. Exact transaction output can be removed after the old live copy is
       // safely back in place.
@@ -392,7 +423,8 @@ function restoreManagedDirectory(journal: CloudRegistryJournal): void {
       }
     } else {
       fs.renameSync(journal.backupDir, journal.destinationDir);
-      fsyncDirectoryBestEffort(agentsRoot());
+      invalidateOwnerIndex();
+      fsyncDirectoryBestEffort(parent);
     }
     return;
   }
@@ -402,17 +434,18 @@ function restoreManagedDirectory(journal: CloudRegistryJournal): void {
   if (journal.phase === "prepared") return;
 
   if (!journal.hadDestination && destinationExists) {
+    closeLocalStores(journal.destinationDir);
+    carryLocalStateBack(journal, null);
     if (diskMatchesJournal(journal)) {
       fs.rmSync(journal.destinationDir, { recursive: true, force: true });
-      fsyncDirectoryBestEffort(agentsRoot());
+      invalidateOwnerIndex();
+      fsyncDirectoryBestEffort(parent);
       return;
     }
-    const orphan = path.join(
-      agentsRoot(),
-      `.${path.basename(journal.destinationDir)}.registry-orphan-${journal.transactionId}`,
-    );
+    const orphan = siblingOf(journal.destinationDir, "registry-orphan", journal.transactionId);
     fs.renameSync(journal.destinationDir, orphan);
-    fsyncDirectoryBestEffort(agentsRoot());
+    invalidateOwnerIndex();
+    fsyncDirectoryBestEffort(parent);
     console.warn(`[agent-cloud] preserved unrecognized recovery orphan at ${orphan}`);
     return;
   }
@@ -425,15 +458,22 @@ function restoreManagedDirectory(journal: CloudRegistryJournal): void {
 }
 
 function finalizeJournal(journalFile: string, journal: CloudRegistryJournal): void {
+  // A process that died between the restore and the carry-over left the local state where it was (the backup, or the agent's previous
+  // local folder): it is moved before the backup goes. Nothing happens when the installed package already holds its state.
+  if (fs.existsSync(journal.destinationDir)) {
+    carryLocalState(fs.existsSync(journal.backupDir) ? journal.backupDir : null, journal.destinationDir);
+    carryLocalState(previousLocalFolder(journal), journal.destinationDir);
+  }
   if (fs.existsSync(journal.backupDir)) {
     fs.rmSync(journal.backupDir, { recursive: true, force: true });
-    fsyncDirectoryBestEffort(agentsRoot());
+    invalidateOwnerIndex();
+    fsyncDirectoryBestEffort(path.dirname(journal.destinationDir));
   }
   removeFileDurably(journalFile);
 }
 
 function fsyncManagedTree(root: string): void {
-  const syncDirectory = (directory: string): void => {
+  const syncDirectory = (directory: string, relativeDirectory = ""): void => {
     const before = fs.lstatSync(directory);
     if (!before.isDirectory() || before.isSymbolicLink()) {
       throw new Error(`Cannot durably sync non-directory package path: ${directory}`);
@@ -441,11 +481,14 @@ function fsyncManagedTree(root: string): void {
     const entries = fs.readdirSync(directory, { withFileTypes: true });
     for (const entry of entries) {
       const target = path.join(directory, entry.name);
+      const relative = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      // 이 컴퓨터에만 있는 상태(기억 DB 등)는 패키지가 아니다 — 패키지 쪽 내구성 동기화가 읽지도 열지도 않는다.
+      if (isAgentLocalStatePath(relative)) continue;
       if (entry.isSymbolicLink()) {
         throw new Error(`Cannot durably sync symbolic-link package path: ${target}`);
       }
       if (entry.isDirectory()) {
-        syncDirectory(target);
+        syncDirectory(target, relative);
         continue;
       }
       if (!entry.isFile()) throw new Error(`Cannot durably sync special package path: ${target}`);
@@ -587,7 +630,7 @@ function validateInput(input: CommitCloudRegistryPackageInput): void {
   if (input.expectedRow.slug !== input.slug) {
     throw new Error("Agent Cloud registry row and package slugs do not match.");
   }
-  const destination = managedDestination(input.slug);
+  const destination = cloudManagedFolder({ id: input.expectedRow.id, slug: input.slug });
   if (path.resolve(input.expectedRoute.path) !== destination) {
     throw new Error("Agent Cloud registry route does not target the managed package directory.");
   }
@@ -612,15 +655,15 @@ function validateJournal(file: string, journal: CloudRegistryJournal): void {
   ) {
     throw new Error(`Invalid Agent Cloud registry transaction journal: ${file}`);
   }
-  const expectedDestination = managedDestination(journal.slug);
-  if (path.resolve(journal.destinationDir) !== expectedDestination) {
+  assertSafeSlug(journal.slug);
+  const expectedDestination = path.resolve(String(journal.destinationDir));
+  // The destination is a direct child of one of the two roots the app manages. A journal written before the folder move names
+  // userData/agents/<slug> (the name is the slug there); one written after it names the agent's folder in the agent root.
+  if (!isManagedLocation(expectedDestination)
+    || (path.dirname(expectedDestination) === legacyAgentsRoot() && path.basename(expectedDestination) !== journal.slug)) {
     throw new Error(`Agent Cloud registry journal has an unsafe destination: ${file}`);
   }
-  const expectedBackupPrefix = `.${path.basename(expectedDestination)}.registry-backup-`;
-  if (
-    path.dirname(path.resolve(journal.backupDir)) !== agentsRoot() ||
-    path.basename(journal.backupDir) !== `${expectedBackupPrefix}${journal.transactionId}`
-  ) {
+  if (path.resolve(String(journal.backupDir)) !== siblingOf(expectedDestination, "registry-backup", journal.transactionId)) {
     throw new Error(`Agent Cloud registry journal has an unsafe backup: ${file}`);
   }
   if (journal.agentId !== journal.expectedRow.id || journal.agentId !== journal.expectedRoute.agentId) {
@@ -725,9 +768,11 @@ function diskMatchesJournal(
     .filter((file) => file.executable)
     .map((file) => file.path)
     .sort();
-  const expected = new Map(journal.expectedFiles.map((file) => [file.path, file]));
+  // 디스크에는 상태 경로가 쓰이지 않으므로 파일·폴더·개수 대조는 상태를 뺀 목록으로(마커의 개수·실행 권한은 전체 목록 그대로).
+  const diskFiles = withoutAgentLocalState(journal.expectedFiles);
+  const expected = new Map(diskFiles.map((file) => [file.path, file]));
   const expectedDirectories = new Set<string>();
-  for (const file of journal.expectedFiles) {
+  for (const file of diskFiles) {
     const parts = file.path.split("/");
     for (let index = 1; index < parts.length; index += 1) {
       expectedDirectories.add(parts.slice(0, index).join("/"));
@@ -744,7 +789,8 @@ function diskMatchesJournal(
     return false;
   }
 
-  const walk = (directory: string, relativeDirectory: string): boolean => {
+  // stateAncestor: 패키지에는 없지만 로컬 상태의 윗길인 폴더(예: 패키지에 파일이 없는 `.agentlas`, 안에는 `ledgers` 만 있다). 앱이 만든 폴더라 복원 모드(0o700)를 요구하지 않는다.
+  const walk = (directory: string, relativeDirectory: string, stateAncestor = false): boolean => {
     let directoryBefore: fs.Stats;
     let directoryRealBefore: string;
     let entries: fs.Dirent[];
@@ -754,7 +800,7 @@ function diskMatchesJournal(
       if (
         !directoryBefore.isDirectory() ||
         directoryBefore.isSymbolicLink() ||
-        !directoryModeMatches(directoryBefore.mode) ||
+        (!stateAncestor && !directoryModeMatches(directoryBefore.mode)) ||
         !isInside(rootReal, directoryRealBefore)
       ) return false;
       entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -764,9 +810,13 @@ function diskMatchesJournal(
     for (const entry of entries) {
       const relative = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
       const absolute = path.join(directory, entry.name);
+      // 로컬 상태(`.agentlas-local`, `.agentlas/ledgers`)는 패키지의 일부가 아니므로 있어도 없어도 일치 판정에 들지 않는다.
+      if (isAgentLocalStatePath(relative)) continue;
       if (entry.isSymbolicLink()) return false;
       if (entry.isDirectory()) {
-        if (!expectedDirectories.has(relative) || !walk(absolute, relative)) return false;
+        if (expectedDirectories.has(relative)) { if (!walk(absolute, relative)) return false; }
+        else if (isAgentLocalStateAncestor(relative)) { if (!walk(absolute, relative, true)) return false; }
+        else return false;
         continue;
       }
       if (!entry.isFile()) return false;
@@ -998,7 +1048,7 @@ function directoryModeMatches(mode: number): boolean {
   return process.platform === "win32" || (mode & 0o777) === 0o700;
 }
 
-function managedDestination(slug: string): string {
+function assertSafeSlug(slug: unknown): asserts slug is string {
   if (
     typeof slug !== "string" ||
     !slug ||
@@ -1010,22 +1060,98 @@ function managedDestination(slug: string): string {
   ) {
     throw new Error(`Unsafe managed agent slug: ${String(slug)}`);
   }
-  const destination = path.resolve(agentsRoot(), slug);
-  if (path.dirname(destination) !== agentsRoot()) {
-    throw new Error(`Managed agent path escapes the agents directory: ${slug}`);
+}
+
+/** A direct, non-hidden child of the agent root or of the old userData/agents. */
+function isManagedLocation(folder: string): boolean {
+  const parent = path.dirname(folder);
+  const name = path.basename(folder);
+  return Boolean(name) && !name.startsWith(".") && (parent === path.resolve(agentHomeRoot()) || parent === legacyAgentsRoot());
+}
+
+function siblingOf(destination: string, kind: "registry-backup" | "registry-orphan", transactionId: string): string {
+  return path.join(path.dirname(destination), `.${path.basename(destination)}.${kind}-${transactionId}`);
+}
+
+/**
+ * The one folder a package installed by Agent Cloud or the Hub lives in — install, update, restore, the journal and the route all read
+ * this. An agent that already has an app folder keeps it (a package moved into the agent root is updated there, not re-created at the
+ * old place); a new one is created in the agent root (agents/home.ts managedAgentFolder).
+ */
+export function cloudManagedFolder(row: { id: string; slug: string }): string {
+  assertSafeSlug(row.slug);
+  const destination = managedAgentFolder(row, getRoute(row.id));
+  if (!isManagedLocation(destination)) {
+    throw new Error(`Managed agent path escapes the agents directory: ${row.slug}`);
+  }
+  // 설정된 에이전트 루트가 지금 없다(드라이브 분리): 내려앉은 기본 루트에 새 폴더를 만들지 않는다 — 돌아오면 같은 에이전트가 두 곳에 생긴다.
+  if (!fs.existsSync(destination) && path.dirname(destination) === path.resolve(agentHomeRoot()) && !agentHomeRootStatus().available) {
+    throw Object.assign(new Error("The agents folder is not available right now; reconnect it before installing or updating."), { code: "agent_root_unavailable" });
   }
   return destination;
 }
 
-function assertReplaceableManagedDirectory(directory: string): void {
+function assertReplaceableManagedDirectory(directory: string, row: { id: string; slug: string }): void {
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error("Agent Cloud managed destination must be a non-symbolic-link directory.");
   }
+  // In the agent root a folder is replaced only when it is provably this agent's: its owner marker names the agent, or it is the
+  // package restored for this slug. A neighbour's folder (another agent, something the owner made there) is never replaced.
+  if (path.dirname(directory) !== legacyAgentsRoot()
+    && !ownerIds(directory).includes(row.id) && readCloudAgentRestoreMarker(directory)?.slug !== row.slug) {
+    throw new Error("Agent Cloud managed destination belongs to something else.");
+  }
 }
 
-function agentsRoot(): string {
-  return path.resolve(userDataDir(), "agents");
+/**
+ * The agent's previous folder when it is NOT the destination: a local package in the agent root that the row's route named before this
+ * install (the same row receives a Cloud copy in a new folder; the local package itself is never replaced). Its local state — the owner
+ * marker and the agent's memory belong to the agent, not to that copy of the files — follows the agent into the installed package.
+ */
+function previousLocalFolder(journal: CloudRegistryJournal): string | null {
+  const previous = journal.previousRoute?.path;
+  if (!previous || path.resolve(previous) === path.resolve(journal.destinationDir)) return null;
+  const folder = path.resolve(previous);
+  return path.dirname(folder) === path.resolve(agentHomeRoot()) && !path.basename(folder).startsWith(".") ? folder : null;
+}
+
+/** Rollback: the state that followed the new copy returns to where it came from — the previous local folder when that has none, else the backup. */
+function carryLocalStateBack(journal: CloudRegistryJournal, backupDir: string | null): void {
+  const previous = previousLocalFolder(journal);
+  const previousHasState = previous ? fs.existsSync(path.join(previous, AGENT_LOCAL_STATE_DIRECTORIES[0])) : true;
+  if (previous && !previousHasState && fs.existsSync(previous)) carryLocalState(journal.destinationDir, previous);
+  else carryLocalState(journal.destinationDir, backupDir);
+}
+
+/** Open memory stores under a folder that is about to be renamed are closed first (an open handle blocks the rename on Windows). */
+function closeLocalStores(directory: string): void {
+  if (!fs.existsSync(path.join(directory, AGENT_LOCAL_STATE_DIRECTORIES[0], "memory"))) return;
+  try { (require("../memory/stores") as typeof import("../memory/stores")).closeAllStores(); } catch { /* nothing open */ } // eslint-disable-line @typescript-eslint/no-require-imports
+}
+
+/**
+ * Moves this computer's own state (`.agentlas-local`, `.agentlas/ledgers`) from one copy of the folder to the other, by rename. Nothing is
+ * overwritten: a state folder already present on the receiving side stays. Safe to call again. Throws when a rename fails, so the
+ * transaction rolls back instead of committing a folder without its state.
+ */
+function carryLocalState(fromDir: string | null, toDir: string | null): void {
+  if (!fromDir || !toDir) return;
+  const relatives = [...AGENT_LOCAL_STATE_DIRECTORIES, ...AGENT_LOCAL_STATE_PATHS];
+  let carried = false;
+  for (const relative of relatives) {
+    const from = path.join(fromDir, ...relative.split("/"));
+    const to = path.join(toDir, ...relative.split("/"));
+    try {
+      const stat = fs.lstatSync(from);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+    } catch { continue; }
+    if (fs.existsSync(to)) continue;
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.renameSync(from, to);
+    carried = true;
+  }
+  if (carried) invalidateOwnerIndex();
 }
 
 function journalRoot(): string {

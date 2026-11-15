@@ -3,7 +3,8 @@
 // 로컬 추론은 요청 1건이 이미 코어 대부분/GPU·통합메모리 대역폭을 쓰므로 같은 예산에
 // 섞으면 안 된다(getLocalInferenceConcurrency, concurrency.ts 참고).
 import { getLocalInferenceConcurrency } from "../store/concurrency";
-import { currentRunPriority, type RunPriority } from "./run-priority";
+import { currentRunPriority, memberQueueReporter, type RunPriority } from "./run-priority";
+import { createLendBudget } from "./run-slot-lease";
 
 let inUse = 0;
 let ownerInUse = 0;
@@ -32,6 +33,9 @@ function concurrencyLimit(): number {
     return 1;
   }
 }
+
+/** Same bound as run-slots.ts runSlotLendBudget: at most the limit of this pool's turns may have let their slot go while a person decides. */
+export const localInferenceLendBudget = createLendBudget(() => concurrencyLimit());
 
 function abortError(): Error {
   const e = new Error("local inference slot acquisition aborted");
@@ -90,8 +94,11 @@ export function acquireLocalInferenceSlot(
     : effectivePriority === "interactive" ? ownerQueue.length + interactiveQueue.length : queuedCount();
   if (ahead === 0 && canAdmit(effectivePriority)) return Promise.resolve(admit(effectivePriority));
   const queue = queueFor(effectivePriority);
+  // A member turn of a lead room says "waiting" / "let in" through its own scope, so its time limit does not run while it waits
+  // (the tool-need judgement's slot wait included - its status line is dropped, this is not).
+  const memberQueue = memberQueueReporter?.() ?? null;
   return new Promise<() => void>((resolve, reject) => {
-    const w: Waiter = { resolve, reject, signal };
+    const w: Waiter = { resolve: memberQueue ? (release) => { memberQueue(false); resolve(release); } : resolve, reject, signal };
     if (signal) {
       w.onAbort = () => {
         const i = queue.indexOf(w);
@@ -101,6 +108,7 @@ export function acquireLocalInferenceSlot(
       signal.addEventListener("abort", w.onAbort, { once: true });
     }
     queue.push(w);
+    memberQueue?.(true);
     try {
       onQueued?.(queuedCount());
     } catch {

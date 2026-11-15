@@ -60,18 +60,32 @@ export interface InvocationWorkFact {
   executionSource: string | null;
   workspaceSource: string | null;
   request: UpdateResumeRequest;
+  /** The turn was opened by a message of another conversation (its request carries a chain mark): harness/peer-turn-resume.ts continues it, inside its chain. */
+  peerChain?: boolean;
 }
 
 /** Classify one live invocation by who can continue it after the restart. */
-export function classifyInvocationWork(fact: InvocationWorkFact, opts: { title: string | null; teamChild: boolean }): UpdateWorkItem {
+export function classifyInvocationWork(fact: InvocationWorkFact, opts: { title: string | null; teamChild: boolean; leadRoomMember?: boolean; goalBound?: boolean }): UpdateWorkItem {
   const base = { runId: fact.runId, chatId: fact.chatId, title: opts.title };
+  // A member's turn in a group room belongs to the room's router, not to a chat of its own: started again after the restart in the
+  // member's hidden session it would answer to nobody. It is not resumed; the room says at start that the request was cut off
+  // (recoverInterruptedLeadRooms), and sending it again answers it in the room.
+  if (opts.leadRoomMember && !fact.automaticGoalId && !fact.executionSource) return { ...base, kind: "team", owner: "none" };
   if (fact.automaticGoalId) return { ...base, kind: "goal", owner: "goal-checkpoint" };
   if (fact.executionSource === "automation") return { ...base, kind: "automation", owner: "automation" };
   if (fact.executionSource === "alive") return { ...base, kind: "alive", owner: "alive" };
   if (fact.executionSource === "science" || fact.workspaceSource === "science") return { ...base, kind: "science", owner: "science" };
   if (fact.workspaceSource === "mobile-one") return { ...base, kind: "remote", owner: "mobile-recovery" };
   if (fact.executionSource || fact.workspaceSource) return { ...base, kind: "remote", owner: "none" };
-  return { ...base, kind: opts.teamChild ? "team" : "chat", owner: "update-resume", request: fact.request };
+  // A turn a peer message opened is continued once by the peer-turn recovery, inside its chain (a Stop of the chain reaches it); this ledger would
+  // continue it as an ordinary turn with the chain mark dropped. A teammate's session is continued by the team recovery 15 s after the
+  // start, which reads an update restart as a cut too: carrying it here as well made two continuations of one cut (G3).
+  if (fact.peerChain) return { ...base, kind: opts.teamChild ? "team" : "chat", owner: "none" };
+  if (opts.teamChild) return { ...base, kind: "team", owner: "none" };
+  // A conversation with a Goal that has not ended: the Goal's own resume (the startup checkpoint) continues it; this ledger's generic turn beside it
+  // made two continuations of one cut (G4).
+  if (opts.goalBound) return { ...base, kind: "goal", owner: "goal-checkpoint" };
+  return { ...base, kind: "chat", owner: "update-resume", request: fact.request };
 }
 
 const KIND_LABEL: Record<UpdateWorkKind, { ko: string; en: string }> = {
@@ -167,6 +181,8 @@ export interface ResumeEntryFacts {
   latestStatus: string | null;
   /** A person wrote in this chat after the update was armed: their new direction wins. */
   newerUserMessage: boolean;
+  /** The owner's send queue holds a message of this chat that is waiting or starting: the queue sends it again itself. */
+  sendQueueOwns?: boolean;
 }
 
 export type ResumeDecision = { resume: true } | { resume: false; reason: string };
@@ -181,6 +197,7 @@ export function decideUpdateResume(ledger: UpdateResumeLedger, item: UpdateWorkI
   if (facts.latestStatus === "completed") return { resume: false, reason: "finished-before-quit" };
   if (facts.latestStatus === "running" || facts.latestStatus === "cancelling") return { resume: false, reason: "receipt-not-settled" };
   if (facts.newerUserMessage) return { resume: false, reason: "newer-user-direction" };
+  if (facts.sendQueueOwns) return { resume: false, reason: "send-queue-owns" };
   return { resume: true };
 }
 

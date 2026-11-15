@@ -14,15 +14,28 @@
 
 const CODE_RE = /^[A-Za-z][A-Za-z0-9_.:-]{0,95}$/;
 const PREFIX_RE = /\[agentlas:code=([A-Za-z][A-Za-z0-9_.:-]{0,95})\]\s?/;
+/** The reason of a refusal that has one (`one_group_member_unavailable` names which of its causes), carried beside the code: `[agentlas:code=X][agentlas:reason=Y] sentence`. */
+const REASON_RE = /\[agentlas:reason=([A-Za-z][A-Za-z0-9_.:-]{0,95})\]\s?/;
 
 export function isIpcErrorCode(value: unknown): value is string {
   return typeof value === "string" && CODE_RE.test(value);
 }
 
 /** Main: message that carries the code across Electron IPC. Idempotent. */
-export function encodeIpcErrorMessage(code: string, message: string): string {
+export function encodeIpcErrorMessage(code: string, message: string, reason?: string): string {
   if (PREFIX_RE.test(message)) return message;
-  return `[agentlas:code=${code}] ${message}`;
+  return `[agentlas:code=${code}]${reason && CODE_RE.test(reason) ? `[agentlas:reason=${reason}]` : ""} ${message}`;
+}
+
+/** The `.reason` a refusal carried across IPC (desktop 3, Workspace §4.6 #5): own property first, then the message's `[agentlas:reason=…]`. */
+export function ipcErrorReason(error: unknown): string | undefined {
+  if (error && typeof error === "object") {
+    const own = (error as { reason?: unknown }).reason;
+    if (isIpcErrorCode(own)) return own;
+  }
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error
+    : error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string" ? (error as { message: string }).message : "";
+  return REASON_RE.exec(message)?.[1];
 }
 
 /** Own `.code` first (same-process errors), then the IPC prefix in the message. */
@@ -48,5 +61,6 @@ export function ipcErrorMessage(error: unknown): string {
     .replace(/^Error invoking remote method '[^']*':\s*/, "")
     .replace(/^(?:[A-Za-z]*Error:\s*)+/, "")
     .replace(PREFIX_RE, "")
+    .replace(REASON_RE, "")
     .trim();
 }

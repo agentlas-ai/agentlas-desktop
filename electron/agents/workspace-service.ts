@@ -7,11 +7,14 @@ import { userDataPath } from "../runtime-paths";
 import { hostRunChildrenEnded, spawnRegistryDirectory } from "../runtime/spawn-registry";
 import { ownProcessStartToken, processState, proveTerminalOwnerGone } from "../store/terminal-owner-liveness";
 import { getRoute } from "./routes";
-import { AGENT_SKILL_ROOTS, materializeAgentFiles, resolveAgentPackageDir } from "./files";
+import { AGENT_SKILL_ROOTS, materializeAgentFiles, resolveAgentPackageDir, skippedSkillsFor } from "./files";
 import { skillsLeftOut } from "./skill-candidates";
+import { refineCompilerChanges } from "./skill-format";
+import { evidencePointersOnly, redactPrivate } from "./skill-redact";
+import { collectKnownPrivateNames } from "./skill-known-names";
 import { agentRevisionOutcomes, compareRevisionOutcomes } from "./revision-outcomes";
-import { lessonEvidence, lessonRunIds } from "./learning-evidence";
-import { runEvidenceRef } from "../memory/run-evidence";
+import { agentStoreHandles, lessonEvidence, lessonRunIds } from "./learning-evidence";
+import { hasInstructionOrigin, runEvidenceRef } from "../memory/run-evidence";
 import { readAutoEvolutionEnabled, readAutoEvolutionLog } from "./auto-evolution-store";
 import { AGENT_LEARNING_POLICY, type LessonEvidence } from "../../shared/agent-learning-policy";
 import { ALWAYS_ON_INSTRUCTION_LIMITS, addedLines, alwaysOnInstructionChange, alwaysOnInstructionSize, learningTriggerAllowance, type AlwaysOnInstructionChange } from "../../shared/agent-instruction-limits";
@@ -19,7 +22,7 @@ import { readCanonicalPromptFromDirectory } from "./prompt-authority";
 import { agentWorkspaceStorePath, assertAgentWorkspaceActivationReady } from "./workspace-guard";
 import { readCloudAgentRestoreMarker, updateCloudAgentRegistrationBaseline } from "../cloud-agents/restore";
 import type { CloudAgentRevisionIdentity } from "../../shared/types";
-import { listMemoryEntriesForAgentUi } from "../memory/store";
+import { agentStoreRowCount, learningAgentIdsInStores, listMemoryEntriesForAgentUi, readEntryRowAnywhere, withAgentStoreRows } from "../memory/store";
 import { nativeTextsFor } from "../memory/native-text";
 import { assertMemoryWriteAllowed } from "../memory/revocations";
 import { capturePackageSourceOwner, assertOriginalPackageDeclaration, observeAdmittedPackageSources,
@@ -30,7 +33,7 @@ import { AgentWorkspaceError, snapshotAgentWorkspace, snapshotAgentWorkspaceForR
   decodeWorkspaceText, normalizeWorkspacePath, isWorkspaceAsset, workspaceFileRole, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_FILES,
   MAX_WORKSPACE_TOTAL_BYTES, type WorkspaceTree, type WorkspaceAsset, type WorkspaceUnverifiedEntry } from "./workspace-snapshot";
 import type { AgentWorkspaceSnapshot, AgentWorkspaceProposal, AgentWorkspaceRevision, AgentWorkspaceDiff,
-  AgentWorkspaceMemoryCandidate, AgentWorkspaceMemoryCounts, AgentWorkspaceReadFile, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceChangeSummary, AgentWorkspaceExperience } from "../../shared/agent-workspace";
+  AgentWorkspaceMemoryCandidate, AgentWorkspaceMemoryCounts, AgentWorkspaceReadFile, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceChangeSummary, AgentWorkspaceExperience, AgentWorkspaceSkillPromotion } from "../../shared/agent-workspace";
 import { sameFileIdentity } from "../../shared/file-identity";
 
 export const AGENT_WORKSPACE_CAPABILITY_VERSION = 2;
@@ -85,8 +88,15 @@ function acquireWriteLock(agentId: string): WorkspaceWriteLock {
   const dir = agentWorkspaceStorePath(agentId); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const lock = path.join(dir, "write.lock"); let fd: number | undefined, original: fs.Stats | undefined;
   if (fs.existsSync(lock)) {
-    const stat = fs.lstatSync(lock); const previous = readJson<{ pid: number }>(lock);
-    if (!processAlive(previous.pid) && fs.lstatSync(lock).ino === stat.ino) fs.unlinkSync(lock);
+    const stat = fs.lstatSync(lock);
+    // Audit 62 (first run B15): a lock is held only while one synchronous change runs (milliseconds). So a lock file is an orphan when its writer is gone (as before), OR when it is old (a pid is reused by
+    // other programs: ten minutes is more than any change takes), OR when it cannot be read as a lock (a writer that died between creating the file and writing it leaves it empty; a few seconds is
+    // more than that gap). An orphan is removed only while it is still the same file (the inode), as before. Before this the unreadable lock threw a SyntaxError out of every turn and every edit.
+    let previous: { pid?: unknown; createdAt?: unknown } | null = null;
+    try { previous = readJson<{ pid?: unknown; createdAt?: unknown }>(lock); } catch { previous = null; }
+    const age = Date.now() - stat.mtimeMs;
+    const orphan = previous === null || typeof previous.pid !== "number" ? age > 5_000 : (!processAlive(previous.pid) || age > 10 * 60_000);
+    if (orphan && fs.lstatSync(lock).ino === stat.ino) fs.unlinkSync(lock);
   }
   function sameFile(): boolean {
     try { const live = fs.lstatSync(lock); return !!original && !live.isSymbolicLink() && sameFileIdentity(live, original); }
@@ -252,7 +262,7 @@ function readHeldAppliedSnapshot(agentId: string,
   if (!mutationCall || mutationCall.agentId !== agentId || !/^awp_[a-f0-9-]{36}$/.test(input.proposalId)
     || !/^awa_[a-f0-9-]{36}$/.test(input.approvalReceiptId) || !/^[a-f0-9]{64}$/.test(input.reviewedHash)) fail();
   const db = getDb(), store = agentWorkspaceStorePath(agentId);
-  const noMemory = () => { if (db !== getDb() || db.prepare("SELECT id FROM memory_entries WHERE agent_id = ? LIMIT 1").get(agentId)) fail(); };
+  const noMemory = () => { if (db !== getDb() || db.prepare("SELECT id FROM memory_entries WHERE agent_id = ? LIMIT 1").get(agentId) || agentStoreRowCount(agentId, false) > 0) fail(); };
   noMemory(); // Association metadata precedes every stored or live file body.
   const row = db.prepare("SELECT slug, builtin, visibility FROM installed_agents WHERE id = ?").get(agentId) as { slug: string; builtin: number; visibility: string } | undefined;
   if (!row || row.builtin !== 0 || row.visibility !== "visible") fail();
@@ -369,6 +379,21 @@ function currentRevision(agentId: string, tree: WorkspaceTree): StoredRevision {
   }
   return createRevision(agentId, tree, "baseline", "Current files");
 }
+/**
+ * The files of one recorded revision, decoded and verified (the Build window's change list and per-file undo read the edit session's
+ * baseline from here: the folder as it was when the session started — no second copy is kept). null when the revision is not there.
+ */
+export function readAgentWorkspaceRevisionFiles(agentId: string, revisionId: string): Map<string, { bytes: Buffer; executable: boolean }> | null {
+  if (!/^awr_[a-f0-9-]{36}$/.test(revisionId)) return null;
+  try {
+    const revision = readJson<StoredRevision>(path.join(revisionsDir(agentId), `${revisionId}.json`));
+    if (revision.id !== revisionId || revision.agentId !== agentId) return null;
+    validateStoredTree(revision.tree);
+    return new Map(revision.tree.files.map((file) => [file.path, { bytes: Buffer.from(file.contentBase64, "base64"), executable: file.executable }]));
+  } catch { return null; }
+}
+/** The real path of an installed agent's folder as the workspace service resolves it (a refusal throws AgentWorkspaceError). */
+export function agentWorkspaceRootFor(agentId: string): { root: string; writable: boolean } { return rootFor(agentId); }
 export function listAgentWorkspaceRevisions(agentId: string): AgentWorkspaceRevision[] {
   const dir = revisionsDir(agentId);
   return (fs.existsSync(dir) ? fs.readdirSync(dir) : []).filter(file => /^awr_[a-f0-9-]{36}\.json$/.test(file)).map(file => {
@@ -406,7 +431,7 @@ function readExperience(agentId: string, revisionId: string): AgentWorkspaceExpe
 }
 function recordExperience(p: StoredProposal, revisionId: string): void {
   if (!p.memoryEntryIds.length || fs.existsSync(experienceFile(p.agentId, revisionId))) return;
-  const evidence = [...lessonRunIds(p.memoryEntryIds)].flatMap(id => id.startsWith("turn:") ? [] : runEvidenceRef(id)).slice(0, MAX_EXPERIENCE_EVIDENCE);
+  const evidence = [...lessonRunIds(p.memoryEntryIds, { agentId: p.agentId })].flatMap(id => id.startsWith("turn:") ? [] : runEvidenceRef(id)).slice(0, MAX_EXPERIENCE_EVIDENCE);
   if (!evidence.length) return;
   const experience: AgentWorkspaceExperience = { schemaVersion: EXPERIENCE_SCHEMA, revisionId, proposalId: p.id, baseRevisionId: p.baseRevisionId,
     appliedAt: p.appliedAt ?? iso(), cue: p.card?.situation ?? null, changed: p.changeSummary ?? [], lesson: p.card?.after ?? null, evidence };
@@ -419,7 +444,7 @@ function listProposals(agentId: string): StoredProposal[] {
 }
 function sourceMemories(agentId: string, ids: string[]): { candidates: AgentWorkspaceMemoryCandidate[]; hashes: Record<string, string> } {
   if (ids.length === 0) return { candidates: [], hashes: {} };
-  const all = listMemoryEntriesForAgentUi(agentId, 300); const natives = nativeTextsFor("memory_entry", all.map(entry => entry.id));
+  const all = listMemoryEntriesForAgentUi(agentId, 300); const natives = lessonNativeTexts(agentId, all.map(entry => entry.id));
   const candidates: AgentWorkspaceMemoryCandidate[] = []; const hashes: Record<string, string> = {};
   for (const id of [...new Set(ids)]) {
     const memory = all.find(item => item.id === id);
@@ -429,8 +454,10 @@ function sourceMemories(agentId: string, ids: string[]): { candidates: AgentWork
     assertMemoryWriteAllowed({ scope: memory.scope, kind: memory.kind, content: memory.content, agentId, projectId: memory.projectId, projectPath: memory.projectPath, chatId: memory.chatId });
     if (native) assertMemoryWriteAllowed({ scope: memory.scope, kind: memory.kind, content: native, agentId, projectId: memory.projectId, projectPath: memory.projectPath, chatId: memory.chatId });
     if (looksSecret(memory.content) || looksSecret(native ?? "")) throw new AgentWorkspaceError("memory_private", "This memory cannot be included in an agent file.");
-    candidates.push({ id, title: memory.content.slice(0, 90), content: memory.content, ...(native ? { contentNative: native } : {}), kind: memory.kind, scope: memory.scope, evidence: memory.evidence, state: "eligible" });
-    hashes[id] = workspaceHash(JSON.stringify([memory.content, native ?? null, memory.kind, memory.scope, memory.agentId, memory.projectId, memory.projectPath, memory.confidence, memory.sensitivity, memory.evidence]));
+    // The lesson's own wording is its original text when it has one, wherever that text is kept (the root, or the agent's store after the move).
+    const text = native ?? memory.content;
+    candidates.push({ id, title: text.slice(0, 90), content: text, ...(native ? { contentNative: native } : {}), kind: memory.kind, scope: memory.scope, evidence: memory.evidence, state: "eligible" });
+    hashes[id] = workspaceHash(JSON.stringify([text, native ?? null, memory.kind, memory.scope, memory.agentId, memory.projectId, memory.projectPath, memory.confidence, memory.sensitivity, memory.evidence]));
   }
   return { candidates, hashes };
 }
@@ -441,6 +468,16 @@ function verifySources(p: StoredProposal): void {
 /** 모델이 "근거가 더 필요하다"고 판정한 기억은 내용이 바뀔 때까지 반영 후보에서 뺀다(로컬 전용 기록). */
 function deferredFile(agentId: string): string { return path.join(agentWorkspaceStorePath(agentId), "deferred-memory.json"); }
 function deferFingerprint(content: string, native: string | undefined, evidence: string[]): string { return workspaceHash(JSON.stringify([content, native ?? null, evidence])); }
+/**
+ * An owner's "no" to a lesson stands for the lesson, not for one reading of it (E-5): the fingerprint above includes the evidence lines, so the same lesson seen again with one more
+ * run or written again by the curator under a new id looked new and was proposed again. The decline is therefore also recorded under the lesson's words alone, in the same file (`declined:<hash>`
+ * → the day it was declined; read by the candidate list, kept to the newest DECLINED_KEEP). The owner asking for that lesson to be turned into a change by hand is not affected: only the list and the proposer read it.
+ */
+const DECLINED_KEEP = 200;
+function declinedKey(content: string, native: string | undefined): string {
+  const flat = (text: string): string => text.replace(/\s+/g, " ").trim();
+  return `declined:${workspaceHash(JSON.stringify([flat(content), native ? flat(native) : null]))}`;
+}
 function readDeferred(agentId: string): Record<string, string> {
   try { const parsed: unknown = readJson<unknown>(deferredFile(agentId)); return parsed && typeof parsed === "object" ? parsed as Record<string, string> : {}; } catch { return {}; }
 }
@@ -468,13 +505,31 @@ function releaseRoomDeferrals(agentId: string, entryText?: string): void {
     if (changed) atomicJson(deferredFile(agentId), next);
   } catch { /* the lessons stay deferred; the next look tries again */ }
 }
+/** Original wording of lessons: the root's table first, then the agent's own store for the lessons that moved there (the rows and their native text move together). */
+function lessonNativeTexts(agentId: string, ids: readonly string[]): Map<string, string> {
+  const found = nativeTextsFor("memory_entry", ids);
+  const missing = [...new Set(ids)].filter(id => !found.has(id));
+  if (!missing.length) return found;
+  for (const sub of agentStoreHandles(agentId)) {
+    for (let offset = 0; offset < missing.length; offset += 400) {
+      const part = missing.slice(offset, offset + 400);
+      try {
+        for (const row of sub.prepare(`SELECT entry_id AS id, content_native AS text FROM memory_entry_native WHERE entry_id IN (${part.map(() => "?").join(",")})`).all(...part) as Array<{ id: string; text: string }>)
+          if (row.text && !found.has(row.id)) found.set(row.id, row.text);
+      } catch { /* a store without native text has none */ }
+    }
+  }
+  return found;
+}
 function memoryCandidates(agentId: string, proposals: StoredProposal[], options: { events?: boolean } = {}): AgentWorkspaceMemoryCandidate[] {
   // UI projections do not need embeddings. The general memory reader lazily
   // computes and writes legacy embeddings, so use a bounded read-only query.
-  const memories = getDb().prepare(`SELECT id, kind, scope, content, sensitivity, evidence_json FROM memory_entries
+  const rootMemories = getDb().prepare(`SELECT id, kind, scope, content, sensitivity, evidence_json, created_at FROM memory_entries
     WHERE superseded_at IS NULL AND agent_id = ? AND scope = 'agent_repo' AND project_id IS NULL AND project_path IS NULL
-    ORDER BY created_at DESC LIMIT 300`).all(agentId) as Array<{ id: string; kind: string; scope: string; content: string; sensitivity: string; evidence_json: string }>;
-  const natives = nativeTextsFor("memory_entry", memories.map(entry => entry.id)); const deferred = readDeferred(agentId);
+    ORDER BY created_at DESC LIMIT 300`).all(agentId) as Array<{ id: string; kind: string; scope: string; content: string; sensitivity: string; evidence_json: string; created_at: string }>;
+  // After the split the agent's own rows live in its folder's store: read them too (the switch off returns the root rows untouched).
+  const memories = withAgentStoreRows(rootMemories, agentId, 300);
+  const natives = lessonNativeTexts(agentId, memories.map(entry => entry.id)); const deferred = readDeferred(agentId);
   // A change auto-evolution took back no longer stands for its lessons: they are not "applied".
   const takenBack = new Set(readAutoEvolutionLog(agentId).filter(entry => entry.state === "rolled_back").map(entry => entry.proposalId));
   const candidates = memories.filter(memory => memory.sensitivity !== "secret" && !looksSecret(memory.content) && !looksSecret(natives.get(memory.id) ?? "")).map((memory): AgentWorkspaceMemoryCandidate => {
@@ -482,19 +537,29 @@ function memoryCandidates(agentId: string, proposals: StoredProposal[], options:
     try { const parsed: unknown = JSON.parse(memory.evidence_json); if (Array.isArray(parsed) && parsed.every(item => typeof item === "string" && item.trim())) evidence = parsed; } catch { /* Corrupt evidence is ineligible. */ }
     let state: AgentWorkspaceMemoryCandidate["state"] = evidence.length ? "eligible" : "needs_evidence";
     const linked = proposals.find(p => !takenBack.has(p.id) && p.memoryEntryIds.includes(memory.id) && ["review_ready", "applied"].includes(p.status));
-    if (state === "eligible" && deferred[memory.id] === deferFingerprint(memory.content, natives.get(memory.id) ?? undefined, evidence)) state = "needs_evidence";
+    if (state === "eligible" && (deferred[memory.id] === deferFingerprint(memory.content, natives.get(memory.id) ?? undefined, evidence) || deferred[declinedKey(memory.content, natives.get(memory.id) ?? undefined)])) state = "needs_evidence";
     if (linked) state = linked.status === "applied" ? "applied" : "proposed";
     const content = natives.get(memory.id) ?? memory.content;
     return { id: memory.id, title: content.slice(0, 90), content,
       ...(natives.get(memory.id) ? { contentNative: natives.get(memory.id)! } : {}), kind: memory.kind, scope: memory.scope, evidence, state,
       support: memorySupport(evidence), groupId: memory.id, groupSize: 1 };
   });
-  return applyPromotion(groupSimilarCandidates(candidates), options.events !== false);
+  return applyPromotion(withoutInstructionLessons(groupSimilarCandidates(candidates, agentId)), options.events !== false, agentId);
+}
+/**
+ * Agentlas 2.0 P2: a lesson whose lines include one that came from an instruction (`origin:instruction`, written by the curator with the workspace-rules switch on) is not a skill candidate: an
+ * instruction is true for the owner who gave it, and a skill can leave this computer. The whole lesson (every member of its group) goes out of the list, the count and the proposer; the owner
+ * can still turn a lesson into a change by hand (`prepareAgentWorkspaceFromMemory` reads `sourceMemories`, not this list). Read from the evidence strings and nothing else: no word decides it.
+ * Lines written before the marks existed carry none and stay candidates (the redaction and the approval chip remain their defence).
+ */
+function withoutInstructionLessons(candidates: AgentWorkspaceMemoryCandidate[]): AgentWorkspaceMemoryCandidate[] {
+  const marked = new Set(candidates.filter(candidate => hasInstructionOrigin(candidate.evidence)).map(candidate => candidate.groupId ?? candidate.id));
+  return marked.size ? candidates.filter(candidate => !marked.has(candidate.groupId ?? candidate.id)) : candidates;
 }
 /** Evidence lines a consolidation wrote about itself are provenance, not separate observations. */
 function memorySupport(evidence: string[]): NonNullable<AgentWorkspaceMemoryCandidate["support"]> {
   const absorbed = evidence.filter(line => /^supersedes:/i.test(line.trim())).length;
-  const records = evidence.filter(line => !/^(supersedes|dreaming|run|event):/i.test(line.trim())).length;
+  const records = evidence.filter(line => !/^(supersedes|dreaming|run|event|origin):/i.test(line.trim())).length;
   return { records, absorbed };
 }
 /**
@@ -502,13 +567,13 @@ function memorySupport(evidence: string[]): NonNullable<AgentWorkspaceMemoryCand
  * runs (learning-evidence.ts); it does not judge whether the lesson is portable or already covered, which stays with the
  * compiler model and the owner reading the diff. Learnings still short of the count are "watching", with how far they are.
  */
-function applyPromotion(candidates: AgentWorkspaceMemoryCandidate[], events: boolean): AgentWorkspaceMemoryCandidate[] {
+function applyPromotion(candidates: AgentWorkspaceMemoryCandidate[], events: boolean, agentId: string): AgentWorkspaceMemoryCandidate[] {
   const groups = new Map<string, AgentWorkspaceMemoryCandidate[]>();
   for (const candidate of candidates) groups.set(candidate.groupId ?? candidate.id, [...(groups.get(candidate.groupId ?? candidate.id) ?? []), candidate]);
   const promotion = new Map<string, NonNullable<AgentWorkspaceMemoryCandidate["promotion"]>>();
   for (const [key, members] of groups) {
     if (!members.some(member => member.state === "eligible")) continue;
-    const evidence = lessonEvidence(members.map(member => member.id), { events });
+    const evidence = lessonEvidence(members.map(member => member.id), { events, agentId });
     promotion.set(key, { runs: evidence.runs, needRuns: AGENT_LEARNING_POLICY.minRuns, ownerCorrections: evidence.ownerCorrections, failures: evidence.failures });
   }
   return candidates.map(candidate => {
@@ -523,7 +588,7 @@ function applyPromotion(candidates: AgentWorkspaceMemoryCandidate[], events: boo
  * threshold); no second similarity rule is introduced here. Candidates keep their order; a
  * group is named by its newest member.
  */
-function groupSimilarCandidates(candidates: AgentWorkspaceMemoryCandidate[]): AgentWorkspaceMemoryCandidate[] {
+function groupSimilarCandidates(candidates: AgentWorkspaceMemoryCandidate[], agentId: string): AgentWorkspaceMemoryCandidate[] {
   if (candidates.length < 2) return candidates;
   const index = new Map(candidates.map((candidate, position) => [candidate.id, position]));
   const parent = candidates.map((_candidate, position) => position);
@@ -531,8 +596,11 @@ function groupSimilarCandidates(candidates: AgentWorkspaceMemoryCandidate[]): Ag
   let edges: Array<{ a: string; b: string }> = [];
   try {
     const ids = candidates.map(candidate => candidate.id), marks = ids.map(() => "?").join(",");
-    edges = getDb().prepare(`SELECT from_memory_id AS a, to_memory_id AS b FROM memory_relation_edges
-      WHERE relation_type = 'similar_to' AND from_memory_id IN (${marks}) AND to_memory_id IN (${marks})`).all(...ids, ...ids) as Array<{ a: string; b: string }>;
+    const sql = `SELECT from_memory_id AS a, to_memory_id AS b FROM memory_relation_edges
+      WHERE relation_type = 'similar_to' AND from_memory_id IN (${marks}) AND to_memory_id IN (${marks})`;
+    edges = getDb().prepare(sql).all(...ids, ...ids) as Array<{ a: string; b: string }>;
+    // The edges of rows that moved into the agent's own store live there (an edge and both its rows are in one store): the same grouping as before the move.
+    for (const sub of agentStoreHandles(agentId)) { try { edges = edges.concat(sub.prepare(sql).all(...ids, ...ids) as Array<{ a: string; b: string }>); } catch { /* a store without the graph groups nothing */ } }
   } catch { return candidates; /* A store without the relation graph shows ungrouped learnings. */ }
   for (const edge of edges) {
     const a = index.get(edge.a), b = index.get(edge.b);
@@ -565,6 +633,49 @@ function sourcesRetired(proposal: StoredProposal): boolean {
   try { verifySources(proposal); return false; }
   catch (error) { return error instanceof AgentWorkspaceError && ["memory_changed", "memory_ineligible", "memory_private"].includes(error.code); }
 }
+/**
+ * Agentlas 2.0 P2: the skills an applied learning change made from these lessons, for the answer of "forget" (step 5). The skill text is never touched (the owner approved it as its own
+ * thing); this only says which skills the forgotten words went into. A change the owner or auto-evolution took back, a change not applied, and a skill whose file is no longer there are left out.
+ * Read only; throws like any workspace read, and the caller says "unknown" rather than "none" when it does.
+ */
+export function skillsDerivedFromMemories(agentId: string, memoryIds: readonly string[]): Array<{ agentId: string; skillName: string; proposalId: string }> {
+  const ids = new Set(memoryIds);
+  if (!ids.size) return [];
+  return appliedSkillSources(agentId, ids).map(({ memoryEntryIds: _ids, ...skill }) => skill);
+}
+/**
+ * The applied skill promotions of one agent, one entry per skill: the proposal and the lessons it was made from. A change the owner or auto-evolution took back, a change not applied and a skill whose file
+ * is no longer there are left out. The one place that decides "this skill was made from these lessons" (the forget answer and the list's `derivedSkills` both read it). Reads only; throws like any workspace read.
+ */
+export function appliedSkillSources(agentId: string, onlyFrom?: ReadonlySet<string>): Array<{ agentId: string; skillName: string; proposalId: string; memoryEntryIds: string[] }> {
+  // `onlyFrom`: only the changes made from one of these lessons (the folder and the log are not read for a change that is not one of them).
+  const proposals = listProposals(agentId).filter(proposal => proposal.status === "applied" && proposal.skillPromotion?.skills.length && (!onlyFrom || proposal.memoryEntryIds.some(id => onlyFrom.has(id))));
+  if (!proposals.length) return [];
+  const takenBack = new Set(readAutoEvolutionLog(agentId).filter(entry => entry.state === "rolled_back").map(entry => entry.proposalId));
+  const root = rootFor(agentId).root;
+  const out: Array<{ agentId: string; skillName: string; proposalId: string; memoryEntryIds: string[] }> = [];
+  for (const proposal of proposals) {
+    if (takenBack.has(proposal.id)) continue;
+    for (const skill of proposal.skillPromotion!.skills) {
+      let present = false;
+      try { present = fs.existsSync(path.join(root, normalizeWorkspacePath(skill.path))); } catch { present = false; }
+      if (present) out.push({ agentId, skillName: skill.name, proposalId: proposal.id, memoryEntryIds: proposal.memoryEntryIds });
+    }
+  }
+  return out;
+}
+/**
+ * Every installed agent's applied skill promotions, for the memory list (one pass per list, not one per line). An agent with no proposals folder costs one existence check. `complete: false` when an agent's
+ * proposals could not be read (its folder is missing): the list then says "unknown" for a line it found no skill for, never "none".
+ */
+export function allAppliedSkillSources(): { sources: Array<{ agentId: string; skillName: string; proposalId: string; memoryEntryIds: string[] }>; complete: boolean } {
+  const sources: Array<{ agentId: string; skillName: string; proposalId: string; memoryEntryIds: string[] }> = [];
+  let complete = true;
+  for (const row of getDb().prepare("SELECT id FROM installed_agents").all() as Array<{ id: string }>) {
+    try { sources.push(...appliedSkillSources(row.id)); } catch { complete = false; }
+  }
+  return { sources, complete };
+}
 /** True while a learning change waits for the owner, so the proposer does not stack another on top of it. */
 export function hasOpenLearningProposal(agentId: string): boolean {
   const open = listProposals(agentId).filter(proposal => proposal.status === "review_ready" && proposal.memoryEntryIds.length > 0);
@@ -589,21 +700,34 @@ export function hasOpenLearningProposal(agentId: string): boolean {
  * and what the host recorded in the runs they came from. Throws like any proposal read when a source memory is gone.
  */
 export function learningSourceFacts(agentId: string, memoryIds: string[]): { kinds: string[]; evidence: LessonEvidence } {
-  return { kinds: sourceMemories(agentId, memoryIds).candidates.map(candidate => candidate.kind), evidence: lessonEvidence(memoryIds) };
+  return { kinds: sourceMemories(agentId, memoryIds).candidates.map(candidate => candidate.kind), evidence: lessonEvidence(memoryIds, { agentId }) };
 }
 /** Takes lessons out of the candidate list until their content changes (the same record a "needs more evidence" answer writes). */
-export function deferAgentLearnings(agentId: string, memoryIds: string[]): void {
+export function deferAgentLearnings(agentId: string, memoryIds: string[], options: { declined?: boolean } = {}): void {
   if (!memoryIds.length) return;
   const marks = memoryIds.map(() => "?").join(",");
   const rows = getDb().prepare(`SELECT id, content, evidence_json FROM memory_entries WHERE agent_id = ? AND id IN (${marks})`).all(agentId, ...memoryIds) as
     Array<{ id: string; content: string; evidence_json: string }>;
-  const natives = nativeTextsFor("memory_entry", rows.map(row => row.id)), entries: Record<string, string> = {};
+  // The lessons the agent keeps in its own store (the layout switch OFF finds none there).
+  for (const id of memoryIds) {
+    if (rows.some((row) => row.id === id)) continue;
+    const stored = readEntryRowAnywhere(id, "id, agent_id, content, evidence_json") as { id: string; agent_id: string | null; content: string; evidence_json: string } | undefined;
+    if (stored && stored.agent_id === agentId) rows.push({ id: stored.id, content: stored.content, evidence_json: stored.evidence_json });
+  }
+  const natives = lessonNativeTexts(agentId, rows.map(row => row.id)), entries: Record<string, string> = {};
   for (const row of rows) {
     let evidence: string[] = [];
     try { const parsed: unknown = JSON.parse(row.evidence_json); if (Array.isArray(parsed)) evidence = parsed.filter((line): line is string => typeof line === "string"); } catch { /* fingerprint of no evidence */ }
     entries[row.id] = deferFingerprint(row.content, natives.get(row.id) ?? undefined, evidence);
+    if (options.declined) entries[declinedKey(row.content, natives.get(row.id) ?? undefined)] = iso().slice(0, 10);
   }
   recordDeferred(agentId, entries);
+  if (options.declined) {
+    // Keep the newest DECLINED_KEEP declines (the file is read on every candidate list).
+    const all = readDeferred(agentId);
+    const declined = Object.entries(all).filter(([key]) => key.startsWith("declined:")).sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+    if (declined.length > DECLINED_KEEP) { for (const [key] of declined.slice(0, declined.length - DECLINED_KEEP)) delete all[key]; atomicJson(deferredFile(agentId), all); }
+  }
 }
 /** Installed agents whose files this host edits (not built-in, not background). The auto-evolution pass filters these by its own records. */
 export function editableAgentIds(limit = 500): string[] {
@@ -614,7 +738,15 @@ export function editableAgentIds(limit = 500): string[] {
 export function learningAgentIds(limit = 250): string[] {
   const rows = getDb().prepare(`SELECT DISTINCT m.agent_id AS id FROM memory_entries m JOIN installed_agents a ON a.id = m.agent_id
     WHERE m.superseded_at IS NULL AND m.scope = 'agent_repo' AND m.project_id IS NULL AND m.project_path IS NULL AND a.builtin = 0 AND a.visibility <> 'background' LIMIT ?`).all(limit) as Array<{ id: string }>;
-  return rows.map(row => row.id);
+  const ids = rows.map(row => row.id);
+  // Agents whose learnings sit only in their own store (cached per store; the layout switch OFF adds nothing).
+  const inStores = learningAgentIdsInStores().filter(id => !ids.includes(id));
+  if (inStores.length && ids.length < limit) {
+    const marks = inStores.map(() => "?").join(",");
+    const eligible = getDb().prepare(`SELECT id FROM installed_agents WHERE builtin = 0 AND visibility <> 'background' AND id IN (${marks})`).all(...inStores) as Array<{ id: string }>;
+    for (const row of eligible) if (ids.length < limit) ids.push(row.id);
+  }
+  return ids;
 }
 /** Roster counts share the review eligibility rules without opening or writing agent files. */
 export function getAgentWorkspaceMemoryCounts(agentIds: string[]): AgentWorkspaceMemoryCounts {
@@ -686,7 +818,7 @@ export function initializeDedicatedBusinessWorkWorkspace(agentId: string, expect
     const store = agentWorkspaceStorePath(agentId), { root, writable } = rootFor(agentId);
     if (!row || row.lineage !== "explicit-work-materialization-acceptance" || row.state !== "materializing" || row.root_path !== root
       || row.store_path !== store || !writable || fs.existsSync(headFile(agentId)) || fs.existsSync(path.join(store,"operation.json"))
-      || db.prepare("SELECT id FROM memory_entries WHERE agent_id=? LIMIT 1").get(agentId) || hasRunLease(agentId,root))
+      || db.prepare("SELECT id FROM memory_entries WHERE agent_id=? LIMIT 1").get(agentId) || agentStoreRowCount(agentId, false) > 0 || hasRunLease(agentId,root))
       throw new AgentWorkspaceError("work_registration_changed", "The original WORK initialization is unavailable.");
     const tree = snapshotAgentWorkspace(root);
     if (tree.treeDigest !== expectedTreeDigest) throw new AgentWorkspaceError("work_registration_changed", "The reviewed WORK files changed.");
@@ -810,6 +942,60 @@ function hasRunLease(agentId: string, root: string): boolean {
     if (db.prepare("SELECT 1 FROM runs WHERE agent_id = ? AND status IN ('running','queued','paused') LIMIT 1").get(agentId)) return true;
   }
   return false;
+}
+/**
+ * Agent-folder move: why this agent's folder must stay where it is for now, or null when it may be renamed. Reads only and takes
+ * no lock; a run that starts later is stopped by the write lock `withAgentFolderMoveLocks` holds. An unreadable state counts as "busy":
+ * the move is retried at the next start, a wrong rename under a running agent is not.
+ */
+export function agentFolderMoveBlocker(agentId: string, root: string): string | null {
+  try {
+    const store = agentWorkspaceStorePath(agentId);
+    if (fs.existsSync(path.join(store, "operation.json"))) return "file-operation-open";
+    if (fs.existsSync(path.join(store, "pending-sync.json"))) return "pending-sync";
+    if (hasRunLease(agentId, root)) return "run-active";
+    return null;
+  } catch {
+    return "state-unreadable";
+  }
+}
+
+/**
+ * Holds the write lock of every listed agent while `action` runs (taken in sorted order, released in `finally`). A lock another change holds
+ * is not waited for: the answer is `{ busy: true }` and nothing ran. Synchronous on purpose, so nothing else in this process runs between the
+ * check and the rename.
+ */
+export function withAgentFolderMoveLocks<T>(agentIds: readonly string[], action: () => T): T | { busy: true } {
+  const held: WorkspaceWriteLock[] = [];
+  try {
+    for (const id of [...new Set(agentIds)].sort()) held.push(acquireWriteLock(id));
+  } catch {
+    for (const lock of held.reverse()) { try { lock.release(); } catch { /* released with the process */ } }
+    return { busy: true };
+  }
+  try { return action(); }
+  finally { for (const lock of held.reverse()) { try { lock.release(); } catch { /* a stale lock file is reclaimed by the next taker */ } } }
+}
+
+/**
+ * After the agent's folder moved: change proposals still pinned to the old root follow it (apply and recovery refuse a proposal whose root
+ * differs from the current one). Their digest does not cover `rootPath`, so nothing else changes. Returns how many were rewritten; a record
+ * that cannot be read or written is left (the owner prepares a new diff). `from`/`to` are real paths, the form `rootFor` pins.
+ */
+export function rebindAgentWorkspaceRoot(agentId: string, from: string, to: string): number {
+  let rewritten = 0;
+  let names: string[] = [];
+  try { names = fs.readdirSync(proposalsDir(agentId)).filter(name => /^awp_[a-f0-9-]{36}\.json$/.test(name)); } catch { return 0; }
+  for (const name of names) {
+    try {
+      const file = path.join(proposalsDir(agentId), name);
+      const proposal = readJson<StoredProposal>(file);
+      if (proposal.rootPath !== from) continue;
+      atomicJson(file, { ...proposal, rootPath: to });
+      rewritten += 1;
+    } catch { /* unreadable or unwritable: left as it is */ }
+  }
+  return rewritten;
 }
 const MAX_RECORDED_UNVERIFIED = 200;
 const reportedUnverified = new Map<string, string>();
@@ -960,7 +1146,8 @@ export function getAgentWorkspace(agentId: string): AgentWorkspaceSnapshot {
       proposals: proposals.map(uiProposal), history: withRevisionOutcomes(agentId, listAgentWorkspaceRevisions(agentId)), cloudId: marker?.registrations?.["owner-private"]?.cloudId ?? null,
       hubRef: marker?.registrations?.["hub-public"]?.slug ?? (getRoute(agentId)?.source === "hub" ? marker?.slug ?? null : null),
       activation: pending ? "recovery_required" : hasRunLease(agentId, root) ? "run_active" : "ready",
-      autoEvolution: { enabled: readAutoEvolutionEnabled(agentId) } };
+      autoEvolution: { enabled: readAutoEvolutionEnabled(agentId) },
+      ...(skippedSkillsFor(agentId).length ? { skippedSkills: skippedSkillsFor(agentId) } : {}) };
   });
 }
 export function listAgentWorkspaceFiles(agentId: string, relativeDir = ""): AgentWorkspaceFile[] {
@@ -997,6 +1184,23 @@ function skillFrontmatter(text: string): { name: string; description: string } |
   const read = (key: string) => new RegExp(`^${key}:\\s*(.+)$`, "m").exec(head)?.[1]?.trim().replace(/^["']|["']$/g, "") ?? "";
   const name = read("name"), description = read("description");
   return name || description ? { name: name.slice(0, 80), description: description.slice(0, 240) } : null;
+}
+/**
+ * The skills of an agent's folder (`skills/<name>/SKILL.md`, the list Manage agents' Skills tab draws) with the name and description each file
+ * declares: one read of the folder, in path order, at most `limit`. For the phone's skill list, which must not open every file through
+ * readAgentWorkspaceFile (that reads the whole folder each time). Reads only; the folder must exist (the caller checks its state first).
+ */
+export function listAgentWorkspaceSkillSummaries(agentId: string, limit = 300): Array<{ path: string; name: string; description: string }> {
+  const { root } = rootFor(agentId);
+  const tree = snapshotAgentWorkspace(root);
+  const out: Array<{ path: string; name: string; description: string }> = [];
+  for (const file of tree.files.filter(item => item.kind === "file" && /^skills\/[^/]+\/SKILL\.md$/i.test(item.path)).sort((a, b) => a.path.localeCompare(b.path))) {
+    if (out.length >= limit) break;
+    const folder = file.path.split("/")[1] ?? file.path;
+    const declared = file.binary ? null : skillFrontmatter(decodeWorkspaceText(Buffer.from(file.contentBase64, "base64")) ?? "");
+    out.push({ path: file.path, name: declared?.name || folder, description: declared?.description ?? "" });
+  }
+  return out;
 }
 function treeText(tree: WorkspaceTree, relative: string | null): string {
   const file = relative ? tree.files.find(item => item.path === relative) : undefined;
@@ -1047,7 +1251,7 @@ function validateAfter(tree: WorkspaceTree): void {
 }
 export function prepareAgentWorkspaceProposal(input: { agentId: string; memoryEntryIds?: string[];
   changes: Array<{ path: string; afterContent: string | null; afterContentBase64?: string; executable?: boolean }>;
-  summary?: string; card?: AgentWorkspaceLearningCard; expectedBaseTreeDigest?: string; expectedSourceHashes?: Record<string, string> }): AgentWorkspaceProposal {
+  summary?: string; card?: AgentWorkspaceLearningCard; skillPromotion?: AgentWorkspaceSkillPromotion; expectedBaseTreeDigest?: string; expectedSourceHashes?: Record<string, string> }): AgentWorkspaceProposal {
   const root = assertWritable(input.agentId);
   if (input.memoryEntryIds?.length && !semanticPreparations.has(input)) throw new AgentWorkspaceError("semantic_review_required", "Generate selected-memory changes through the memory review compiler.");
   semanticPreparations.delete(input);
@@ -1098,7 +1302,8 @@ export function prepareAgentWorkspaceProposal(input: { agentId: string; memoryEn
     const proposal: StoredProposal = { schemaVersion: "agentlas.workspace-proposal.v2", id, agentId: input.agentId, rootPath: root,
       summary: String(input.summary ?? "File change").slice(0, 240), status: "review_ready", baseRevisionId: base.id, baseTreeDigest: before.treeDigest,
       proposedTreeDigest: after.treeDigest, proposalDigest, changes, memoryEntryIds: source.candidates.map(candidate => candidate.id), sourceHashes: source.hashes,
-      before, after, ...(alwaysOn ? { alwaysOn } : {}), changeSummary, ...(input.card && source.candidates.length ? { card: input.card } : {}), createdAt: iso() };
+      before, after, ...(alwaysOn ? { alwaysOn } : {}), changeSummary, ...(input.card && source.candidates.length ? { card: input.card } : {}),
+      ...(input.skillPromotion?.skills.length && source.candidates.length ? { skillPromotion: input.skillPromotion } : {}), createdAt: iso() };
     const staging = path.join(agentWorkspaceStorePath(input.agentId), "staging", id); fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
     for (const file of after.files) { const target = workspaceTarget(staging, file.path, true); fs.writeFileSync(target, Buffer.from(file.contentBase64, "base64"), { flag: "wx", mode: file.executable ? 0o700 : 0o600 }); }
     if (snapshotAgentWorkspace(staging).treeDigest !== after.treeDigest) throw new AgentWorkspaceError("preview_mismatch", "The proposed files changed while preparing the diff.");
@@ -1115,17 +1320,23 @@ export async function prepareAgentWorkspaceFromMemory(input: { agentId: string; 
   if (selectedLessons.some(candidate => candidate.state === "watching")) {
     throw new AgentWorkspaceError("learning_not_recurring", "This lesson has not come back from enough separate runs yet; it stays memory until it does.");
   }
-  const lessonRecord = lessonEvidence(input.memoryEntryIds);
+  const lessonRecord = lessonEvidence(input.memoryEntryIds, { agentId: input.agentId });
   const file = before.files.find(item => item.path === target); const content = file ? decodeWorkspaceText(Buffer.from(file.contentBase64, "base64")) : "";
   if (content === null || Buffer.byteLength(content) > 60_000) throw new AgentWorkspaceError("compiler_limit", "Use the file editor to review this large or binary file.");
   // Composition order: fixed → variable (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.agents.workspace-service.evolution-compiler.input).
   const { callConnectedModel } = await import("../system-agents/judgment");
   const { currentUiLocale } = await import("../ui-locale");
   const entryText = before.canonicalEntry ? treeText(before, before.canonicalEntry) : "";
+  // The model is not shown the owner's own names, links, paths or amounts, and sees each memory's evidence as pointers and a count, not the quoted words
+  // (Agentlas 2.0 N-D01/N-D02). The same names then clean what it writes (skill-format.ts), so what it was never shown cannot come back.
+  const known = collectKnownPrivateNames();
+  const knownNames = known.names;
+  const modelMemory = candidates.map(candidate => ({ ...candidate, title: redactPrivate(candidate.title, { names: knownNames }).text, content: redactPrivate(candidate.content, { names: knownNames }).text,
+    ...(candidate.contentNative ? { contentNative: redactPrivate(candidate.contentNative, { names: knownNames }).text } : {}), evidence: evidencePointersOnly(candidate.evidence) }));
   const request = { locale: currentUiLocale(), target, files: before.files.map(({ path: relative, role }) => ({ path: relative, role })),
     alwaysOn: { path: before.canonicalEntry, ...alwaysOnInstructionSize(entryText), hardBytes: ALWAYS_ON_INSTRUCTION_LIMITS.hardBytes },
     manifest: treeText(before, before.files.some(item => item.path === "agentlas.json") ? "agentlas.json" : null) || null,
-    evidence: lessonRecord, memory: candidates, currentContent: content };
+    evidence: lessonRecord, memory: modelMemory, currentContent: content };
   const compile = async (validationError?: string) => {
     const text = await callConnectedModel({ requireNoTools: true, timeoutMs: 90_000, systemPrompt: EVOLUTION_COMPILER_SYSTEM,
       input: JSON.stringify(validationError ? { ...request, validationError } : request) });
@@ -1140,25 +1351,38 @@ export async function prepareAgentWorkspaceFromMemory(input: { agentId: string; 
     recordDeferred(input.agentId, deferredNow);
     if (!accepted.length || !Array.isArray(output.changes) || !output.changes.length) throw new AgentWorkspaceError("semantic_review_deferred", "These memories need more evidence or review before they can become agent instructions.");
     if (snapshotAgentWorkspace(root).treeDigest !== before.treeDigest) throw new AgentWorkspaceError("base_changed", "The agent changed during generation. Refresh and try again.");
-    const card = learningCard(output.card, candidates.filter(candidate => accepted.includes(candidate.id)), lessonRecord);
-    const prepared = { agentId: input.agentId, memoryEntryIds: accepted, changes: output.changes, summary: output.summary, ...(card ? { card } : {}),
+    // What the model wrote is put right by code before the owner sees it (skill-format.ts: form and private values). Nothing here asks the model again
+    // unless the form cannot be repaired by code (an empty skill, a credential, a name that carries an owner's own name): then the same one-round path as a refusal.
+    const refined = refineCompilerChanges({ changes: output.changes, roots: AGENT_SKILL_ROOTS, knownNames, looksSecret,
+      currentText: relative => { const file = before.files.find(item => item.path === relative); return file && !file.binary ? decodeWorkspaceText(Buffer.from(file.contentBase64, "base64")) : null; } });
+    if (refined.issues.length) throw new AgentWorkspaceError("skill_format", refined.issues.map(issue => `${issue.path}: ${issue.message}`).join(" "));
+    const rawCard = learningCard(output.card, candidates.filter(candidate => accepted.includes(candidate.id)), lessonRecord);
+    const card = rawCard ? Object.fromEntries(Object.entries(rawCard).map(([key, value]) => [key, redactPrivate(String(value), { names: knownNames }).text])) as unknown as AgentWorkspaceLearningCard : undefined;
+    const skillPromotion: AgentWorkspaceSkillPromotion | undefined = refined.skills.length
+      ? { skills: refined.skills, redactedCount: refined.redactedCount, redactedKinds: refined.redactedKinds, mayLeaveThisComputer: true, ...(known.incomplete ? { namesIncomplete: true as const } : {}) } : undefined;
+    const prepared = { agentId: input.agentId, memoryEntryIds: accepted, changes: refined.changes as Array<{ path: string; afterContent: string }>,
+      summary: typeof output.summary === "string" ? redactPrivate(output.summary, { names: knownNames }).text : output.summary, ...(card ? { card } : {}), ...(skillPromotion ? { skillPromotion } : {}),
       expectedBaseTreeDigest: before.treeDigest, expectedSourceHashes: Object.fromEntries(accepted.map(id => [id, hashes[id]])) };
     semanticPreparations.add(prepared); return prepareAgentWorkspaceProposal(prepared);
   };
   const noRoom = (error: unknown): error is AgentWorkspaceError => error instanceof AgentWorkspaceError && ["instruction_growth", "instruction_limit"].includes(error.code);
+  // A skill whose form code could not repair (skill-format.ts) is refused the same way and gets the same single round.
+  const badSkill = (error: unknown): error is AgentWorkspaceError => error instanceof AgentWorkspaceError && error.code === "skill_format";
   try { return prepare(await compile()); }
   catch (error) {
     // One repair round with the host's own refusal text (harness2: validation errors are the retry feedback).
-    if (!noRoom(error)) throw error;
+    if (!noRoom(error) && !badSkill(error)) throw error;
     try { return prepare(await compile(error.message)); }
     catch (second) {
-      if (!noRoom(second)) throw second;
+      if (!noRoom(second) && !badSkill(second)) throw second;
       // The second refusal is not a failure the owner has to read ("learning cannot lengthen instructions"): the lesson has no room in the
       // always-on file right now, so it stays memory, exactly as a lesson that needs more evidence does. The agent is unchanged, these
       // memories are not proposed again until they change, and the proposer counts it as a normal answer, not an error.
       const stays: Record<string, string> = {}, instructionDigest = workspaceHash(entryText);
-      for (const candidate of candidates) { stays[candidate.id] = deferFingerprint(candidate.content, candidate.contentNative, candidate.evidence); stays[`room:${candidate.id}`] = instructionDigest; }
+      for (const candidate of candidates) { stays[candidate.id] = deferFingerprint(candidate.content, candidate.contentNative, candidate.evidence); if (noRoom(second)) stays[`room:${candidate.id}`] = instructionDigest; }
       recordDeferred(input.agentId, stays);
+      // A skill that stayed malformed twice is not the owner's to repair either: the lessons stay memory, quietly (the proposer counts it as a normal answer).
+      if (badSkill(second)) throw new AgentWorkspaceError("skill_format", "The skill made from these lessons could not be put in a valid form, so the lessons stay memory. They are proposed again when they change.");
       throw new AgentWorkspaceError("learning_stays_memory", "These lessons have no room in the always-on instructions, so they stay memory. They are proposed again when the instructions are shorter or the lessons change.");
     }
   }
@@ -1172,7 +1396,7 @@ const EVOLUTION_COMPILER_SYSTEM = [
   "keep_base: no change is a valid answer; return eligibleMemoryIds [] when the records show no procedure reusable beyond one task",
   "evidence: input.evidence is what the host recorded for the runs behind these memories (distinct runs, owner messages sent while the runs worked, failures with codes); the card may state those numbers, as what happened in those runs and never as caused by the lesson, and no others besides the memories' own",
   "facts vs procedure: one task's facts (counts, versions, file names, dates, run state) stay memory; only procedure that holds for this agent's other work becomes a file change",
-  "placement, cheapest first: skill file skills/<name>/SKILL.md with name and description frontmatter (read only when its situation arises) → script or check → always-on entry file (read every run)",
+  "placement, cheapest first: skill file skills/<name>/SKILL.md with name and description frontmatter and the sections When to use, When not to use, Verify, Undo (read only when its situation arises) → script or check → always-on entry file (read every run)",
   "always-on: the host refuses a learning change that lengthens the entry file except one trigger line per new skill naming it (\"When <situation>, use the <name> skill.\"); shorten or merge existing lines to pay for anything else; validationError is the host's refusal of your previous answer",
   "output: JSON only {eligibleMemoryIds:string[],summary:string,changes:[{path:string,afterContent:string}],card:{situation:string,observed:string,before:string,after:string,limits:string}}",
   "card: owner-readable plain sentences in input.locale; situation = when it applies; observed = what the cited records show happened; before = what the agent does under the current files; after = what it does with this change; limits = when it should not apply; numbers only as written in the memory text",
@@ -1362,6 +1586,9 @@ export function rejectAgentWorkspaceProposal(proposalId: string): AgentWorkspace
     const p = getProposal(proposalId);
     if (p.status !== "review_ready" && p.status !== "stale") throw new AgentWorkspaceError("decision_state", "This change can no longer be rejected.");
     p.status = "rejected"; saveProposal(p);
+    // A rejected lesson is not offered again until its text or evidence changes (the same record "needs more evidence" writes); without it the next
+    // pass found the same lessons eligible again and made the same change, every day.
+    if (p.memoryEntryIds.length) { try { deferAgentLearnings(p.agentId, p.memoryEntryIds, { declined: true }); } catch { /* the lesson may come back; the owner can reject it again */ } }
     const approvals = path.join(agentWorkspaceStorePath(owner), "approvals");
     for (const file of fs.existsSync(approvals) ? fs.readdirSync(approvals) : []) {
       if (!/^awa_[a-f0-9-]{36}\.json$/.test(file)) continue; const receipt = readJson<ApprovalReceipt>(path.join(approvals, file));

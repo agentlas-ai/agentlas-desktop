@@ -10,8 +10,8 @@
  * user/workspace/requester/resource/permission binding 하나에만 매치한다.
  * 레거시 스코프 우선순위는 deny > allow, chat > agent > global을 그대로 둔다.
  *
- * 이 표로 뚫리지 않는 것(각 채널이 매번 확인): 결제, 브라우저 임의코드 실행.
- * 그 예외는 소비자(browser/connect.ts, 중재자)가 지킨다 — 여기서는 저장만 한다.
+ * 이 표로 뚫리지 않는 것: 돈(결제·송금)뿐이다(오너 보충). 브라우저 코드 실행은 예외가 아니다 —
+ * 항상 허용을 기억한다. 돈의 예외는 소비자(runtime/approval-rule.ts, browser/connect.ts)가 지킨다 — 여기서는 저장만 한다.
  */
 import { createHash } from "node:crypto";
 import { getDb } from "./db";
@@ -20,6 +20,7 @@ import { consentTransactionFacts } from "../runtime/tool-consent";
 import type {
   ToolApprovalConsentBinding,
 } from "../../shared/types";
+import { approvalScopeIdentity } from "../../shared/approval-card";
 
 export type CapabilityDecision = "allow" | "deny";
 
@@ -49,6 +50,8 @@ export interface CapabilityQuery {
   /** Main-owned exact identity. When present, matching first checks only this
    * binding; legacy rows are considered afterwards with their old scope. */
   consentBinding?: ToolApprovalConsentBinding;
+  /** Rows written by these sources are not read (a blanket allow the host gave a session is not the owner's answer to a card). */
+  excludeSources?: readonly string[];
 }
 
 export type CapabilityGrantPersistenceResult =
@@ -137,6 +140,35 @@ export function capabilityResourceIdentity(tool: string, detail?: string, callAr
   return hash.digest("hex");
 }
 
+/**
+ * The key one "always allow" is saved and read under (defect 4): the tool AND the server it comes from (Main's registry
+ * identity). The older key held the tool's name only, so a different server that took the same name (an installed copy, a hub agent's
+ * own server) inherited the answer. A call that carries no server identity (a runtime that only reports a name) has its own key and
+ * never reads a row that names a server, and the other way round: a missing identity asks again, it never hands an answer over.
+ */
+export function capabilityAlwaysAllowResource(tool: string, serverIdentity?: string | null): string {
+  return createHash("sha256")
+    .update("agentlas-always-allow-v2\u0000", "utf8")
+    .update(capabilityResourceIdentity(tool), "utf8")
+    .update("\u0000", "utf8")
+    .update(serverIdentity ? `server:${serverIdentity}` : "server:none", "utf8")
+    .digest("hex");
+}
+
+/**
+ * Rows saved under the older key (the tool's name alone) are never read again, but the owner can still see and switch them off
+ * (settings, project deletion). When the same answer is given again under the new key the old row of that tool in that unit is
+ * removed, so a tool never keeps two rows. Returns the number removed; never throws.
+ */
+export function removeSupersededAlwaysAllowRows(input: { workspaceIdentity: string; capability: string; tool: string }): number {
+  try {
+    const changes = Number(getDb().prepare("DELETE FROM capability_grants WHERE workspace_identity = ? AND capability = ? AND pattern = ?")
+      .run(input.workspaceIdentity, input.capability, capabilityResourceIdentity(input.tool)).changes);
+    if (changes > 0) emitDesktopStoreChange({ entity: "capability-grant" });
+    return changes;
+  } catch { return 0; }
+}
+
 const CONSENT_FLOOR_PREFIX = "capability-consent-revision:";
 
 /** Current consent revision of one resource (0 until it is first raised). */
@@ -205,7 +237,7 @@ export function getCapabilityDecision(q: CapabilityQuery): CapabilityDecision | 
   const keys = [q.capability, ...(q.tool ? [`tool:${q.tool}`] : []), "*"];
   const rows = getDb()
     .prepare(
-      `SELECT capability, pattern, decision, scope, binding_version, user_identity,
+      `SELECT capability, pattern, decision, scope, source, binding_version, user_identity,
               workspace_identity, requester_identity, resource_identity, permission_scope,
               expires_at, consent_revision
          FROM capability_grants
@@ -216,6 +248,7 @@ export function getCapabilityDecision(q: CapabilityQuery): CapabilityDecision | 
       pattern: string | null;
       decision: CapabilityDecision;
       scope: string;
+      source?: string | null;
       binding_version?: number | null;
       user_identity?: string | null;
       workspace_identity?: string | null;
@@ -225,6 +258,9 @@ export function getCapabilityDecision(q: CapabilityQuery): CapabilityDecision | 
       expires_at?: string | null;
       consent_revision?: number | null;
     }>;
+  if (q.excludeSources?.length) {
+    for (let index = rows.length - 1; index >= 0; index -= 1) if (q.excludeSources.includes(String(rows[index]!.source ?? ""))) rows.splice(index, 1);
+  }
   if (rows.length === 0) return null;
 
   // An exact row outranks every historical global/chat/agent rule.  This lets
@@ -429,6 +465,19 @@ export function revokeCapabilityGrant(id: number): boolean {
   return changed;
 }
 
+/**
+ * The "always allow" answers kept for one project (runtime/approval-scope.ts): deleted with the project, since nothing can read them
+ * afterwards. Returns the number removed. Never throws (an older store without the column has none).
+ */
+export function removeProjectApprovalGrants(projectId: string): number {
+  try {
+    const changes = Number(getDb().prepare("DELETE FROM capability_grants WHERE workspace_identity = ?")
+      .run(approvalScopeIdentity({ kind: "project", id: projectId })).changes);
+    if (changes > 0) emitDesktopStoreChange({ entity: "capability-grant" });
+    return changes;
+  } catch { return 0; }
+}
+
 export function listCapabilityGrants(scope?: string): CapabilityGrantRow[] {
   const rows = scope
     ? getDb().prepare("SELECT * FROM capability_grants WHERE scope = ? ORDER BY id").all(scope)
@@ -472,6 +521,16 @@ export function isChatAlwaysApproved(chatId: string): boolean {
   const row = getDb()
     .prepare(
       "SELECT decision FROM capability_grants WHERE capability = '*' AND scope = ? ORDER BY id DESC LIMIT 1",
+    )
+    .get(`chat:${chatId}`) as { decision?: string } | undefined;
+  return row?.decision === "allow";
+}
+
+/** Like isChatAlwaysApproved, but only an allow the owner gave (a card, the dropdown): a blanket the host gave a teammate session does not count. */
+export function isChatAlwaysApprovedByOwner(chatId: string): boolean {
+  const row = getDb()
+    .prepare(
+      "SELECT decision FROM capability_grants WHERE capability = '*' AND scope = ? AND COALESCE(source, '') <> 'one-delegation' ORDER BY id DESC LIMIT 1",
     )
     .get(`chat:${chatId}`) as { decision?: string } | undefined;
   return row?.decision === "allow";

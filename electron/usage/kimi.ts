@@ -1,5 +1,5 @@
 import type { ProviderUsage, UsageWindow } from "../../shared/types";
-import { fetchKimiMetadata, resolveKimiAuth } from "../runtime/kimi-auth";
+import { fetchKimiMetadata, kimiAccountFingerprint, kimiAuthFiles, resolveKimiAuth } from "../runtime/kimi-auth";
 import { toResetMs } from "./util";
 
 function object(value: unknown): Record<string, unknown> | null {
@@ -70,15 +70,34 @@ export function usageFromKimi(payload: unknown): Pick<ProviderUsage, "windows" |
   } };
 }
 
+/**
+ * The identity usage figures are stamped with (ProviderUsage.credentialFingerprint) and matched against: the signed-in
+ * managed account, while its token can be sent. It names the account, not the token, so a token refresh keeps the
+ * figures already read for that account.
+ */
 export function currentKimiUsageCredentialFingerprint(): string | undefined {
   const auth = resolveKimiAuth();
-  return auth.state === "resolved" && auth.managed ? auth.credentialFingerprint : undefined;
+  return auth.state === "resolved" && auth.managed ? auth.accountFingerprint : undefined;
+}
+
+/**
+ * The signed-in managed account for the account watch. Unlike the identity above it does not go away while the token is
+ * expired and waiting for the CLI to refresh it: only a sign-out or another account changes it.
+ */
+export function currentKimiUsageAccountFingerprint(): string | undefined {
+  const account = kimiAccountFingerprint();
+  return account?.managed ? account.fingerprint : undefined;
+}
+
+/** The files the account identity is read from. The account watch follows these exact paths. */
+export function kimiUsageIdentityFiles(): string[] {
+  return kimiAuthFiles();
 }
 
 export async function getKimiUsage(): Promise<ProviderUsage | null> {
   const auth = resolveKimiAuth();
   if (auth.state !== "resolved" || !auth.managed) return null;
-  const base = { provider: "kimi", backend: "kimi" as const, label: "Kimi Code", fetchedAt: Date.now(), credentialFingerprint: auth.credentialFingerprint };
+  const base = { provider: "kimi", backend: "kimi" as const, label: "Kimi Code", fetchedAt: Date.now(), credentialFingerprint: auth.accountFingerprint };
   const result = await fetchKimiMetadata(auth, "usages");
   if (!result.ok) return { ...base, status: "error", windows: [],
     error: result.status === 401 || result.status === 403 ? "auth_expired" : result.status === 429 ? "rate_limited" : result.status != null ? "provider_error" : "network_error" };

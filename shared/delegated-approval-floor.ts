@@ -75,6 +75,9 @@ export function delegationFloor(input: DelegationFloorInput): DelegationFloorCod
   if (CREDENTIAL_TOOL.test(tool) || looksSecret(detail) || CREDENTIAL_DETAIL.test(credentialText)) return "credential";
   if (input.transactionFacts === true) return "transaction_facts";
   const capability = typeof input.capability === "string" ? input.capability : "";
+  // The cards of the one approval rule (runtime/approval-rule.ts): the personal agent never passes these on for the owner.
+  if (capability === "money") return "payment";
+  if (capability === "send") return "external_send";
   if (capability === "delete" || DELETE_COMMAND.test(detail) || WINDOWS_DELETE_COMMAND.test(detail)) return "delete";
   if (!KNOWN_TOOL_CAPABILITIES.has(capability)) return "risk_unjudged";
   return null;

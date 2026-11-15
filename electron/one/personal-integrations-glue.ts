@@ -79,5 +79,7 @@ export function registerOnePersonalIntegrationIpc(input:{ipc:Pick<IpcMain,'handl
 export function createExistingPersonalOwnerWake(assertOwner:()=>void){const listeners=new Set<()=>void>();return {
   subscribeOwnerWake(listener:()=>void){listeners.add(listener);return ()=>{listeners.delete(listener);};},
   wakeFromExistingCheckin(){assertOwner();for(const listener of [...listeners]){try{assertOwner();listener();}catch{/* A listener's hold must not stop other current-owner observers. */}}},
+  /** The check-in timer keeps its 30 s beat only while someone listens (Gmail intake rides it). */
+  hasListeners(){return listeners.size>0;},
   close(){listeners.clear();},
 };}

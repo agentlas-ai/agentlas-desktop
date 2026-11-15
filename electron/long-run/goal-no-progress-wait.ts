@@ -2,6 +2,7 @@ import { getDb } from "../store/db";
 import { appendLongRunEvent, goalOwnerAnswerHold, getLongRun, longRunOwnerHold, nextBlockedGoalRetrySlot, noProgressRetryDelayMs, releaseGoalOwnerAnswerHold,
   RUNTIME_RETRY_CLEANUP_WINDOW_MS, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, liveLongRunAttemptCount, type BlockedGoalRetry, type LongRunRecord } from "../store/long-runs";
 import { NO_PROGRESS_RETRY_LIMIT, VERIFICATION_NO_PROGRESS_REASON } from "../../shared/long-run-checkpoint";
+import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { appendChatMessage, getChat } from "../store/chats";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
@@ -12,6 +13,9 @@ import { currentUiLocale } from "../ui-locale";
 import { latestTaskCheckpoint } from "./checkpoint";
 import { HOST_OWNER_CARD_POSTED_KIND, pendingHostOwnerCard } from "./goal-owner-card-decision";
 import { desktopAppInstanceId } from "./app-runtime-coordinator";
+import { closeGoal } from "../store/goal-close";
+import { getChatGoalRevision } from "../store/chat-goals";
+import { isAutoMessageGoalId } from "../../shared/auto-goal";
 
 /*
  * A Goal whose verification keeps finding the same outcome rests; it is neither parked as blocked nor woken by the minute. The host
@@ -73,6 +77,47 @@ export function releaseIdleStopCardHolds(options: { nowMs?: number; random?: () 
     } catch (error) { console.warn("[long-run] could not release an idle-stop card hold:", error); }
   }
   return moved;
+}
+
+/**
+ * A Goal the HOST admitted from a plain sentence (auto-message id, finite) does not rest on the no-progress timer: the owner never asked for
+ * a Goal, the host guessed it, so a result that keeps coming back means there is nothing more for it to do. It closes (cancelled, by the
+ * host, reason automatic_goal_no_progress) and says so; the conversation is an ordinary conversation again and the owner's next message is a
+ * new request. A Goal the owner started and an ongoing mandate keep the rest above. Desktop trial a one-reply "remember
+ * this" held a Goal on a 5-hour timer and put 3 main answers into every later ordinary question. Returns whether it closed.
+ */
+export function closeAutomaticGoalAtNoProgress(runId: string): boolean {
+  const run = getLongRun(runId);
+  if (!run || run.surface === "science" || !run.rootChatId || !isAutoMessageGoalId(run.goalId) || LONG_RUN_TERMINAL_STATUSES.has(run.status)
+    || getChatGoalRevision(run.goalId)?.lifecycle !== "finite" || longRunOwnerHold(run.id) || goalOwnerAnswerHold(run.id)) return false;
+  closeGoal(run.goalId, "cancelled", "cleanup", { reason: "automatic_goal_no_progress" });
+  try {
+    appendChatMessage(run.rootChatId, "assistant", currentUiLocale() === "ko"
+      ? "같은 결과가 반복돼 이 요청의 목표 추적을 닫았어요. 이어서 하실 일이 있으면 다시 말씀해 주세요."
+      : "The same result kept coming back, so I closed the goal tracking for this request. Tell me if there is more to do.",
+      { noGoalResult: true, hostNotice: { purpose: "host-status", runId: run.id, status: "goal-closed" } });
+  } catch (error) { console.warn("[long-run] automatic goal close notice failed:", error); }
+  return true;
+}
+
+/**
+ * Startup, once per store: an automatic Goal an earlier build left resting on the no-progress timer whose rest already delivered its result
+ * (settled) is closed the same way. Exact: the run is finite and auto-message, waits on its no-progress retry, and the rest of its newest
+ * outcome digest is delivered. A Goal with a live attempt, an owner hold or a different retry is left alone. Returns the number closed.
+ */
+export function closeSettledAutomaticNoProgressRests(): number {
+  const rows = getDb().prepare(`SELECT id FROM long_runs WHERE surface!='science' AND goal_id LIKE 'goal:auto-message:%'
+    AND status NOT IN ('completed','failed','cancelled')`).all() as { id: string }[];
+  let closed = 0;
+  for (const row of rows) {
+    try {
+      const retry = pendingBlockedGoalRetry(row.id);
+      if (!retry || retry.fromReason !== VERIFICATION_NO_PROGRESS_REASON || liveLongRunAttemptCount(row.id) > 0) continue;
+      if (!noProgressRestSettled(row.id, retry)) continue;
+      if (closeAutomaticGoalAtNoProgress(row.id)) closed += 1;
+    } catch (error) { console.warn("[long-run] could not close a settled automatic rest:", error); }
+  }
+  return closed;
 }
 
 /** Ledger fact: this outcome digest's result was shown to the owner (a chat message already did, or the host posted one). Once per digest. */

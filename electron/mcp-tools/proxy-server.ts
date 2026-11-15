@@ -21,6 +21,7 @@ import {
   type RuntimeToolPermissionAsk,
 } from "../runtime/tool-approval";
 import { secretEquals } from "../security/secret-equals";
+import { decideShellDelete } from "../runtime/shell-delete-gate";
 
 let server: http.Server | null = null;
 let boundPort = 0;
@@ -122,9 +123,10 @@ export function mcpToolIsMutating(input: {
   // agentlas-ui's tools return constant reference text: no input, no effect.
   // (Literal ids, as for the other reads here: gates lift this function out of the file.)
   const uiSchemaRead = input.catalogId === "agentlas-ui" && (input.toolName === "read_ui_schema" || input.toolName === "read_surface_protocol" || input.toolName === "read_automation_protocol");
-  // agentlas-turn memory_note only queues a note for the Memory Curator (ask_form a choice card for the person) in this run (Main re-checks the run capability and
-  // a read-permission turn discards it): no outward effect, so it needs no write approval.
-  const turnNoteRead = input.catalogId === "agentlas-turn" && (input.toolName === "memory_note" || input.toolName === "ask_form");
+  // agentlas-turn memory_ticket (and its old name memory_note) writes the owner's own memory on this computer only (ask_form a choice card for the person) in this run (Main re-checks the run capability and
+  // a read-permission turn answers every ticket not_here and writes nothing): no outward effect, so it needs no write approval.
+  // memory_search / memory_get (K4b) only read what the turn's own recall could read: no effect either.
+  const turnNoteRead = input.catalogId === "agentlas-turn" && (input.toolName === "memory_ticket" || input.toolName === "memory_note" || input.toolName === "ask_form" || input.toolName === "memory_search" || input.toolName === "memory_get");
   // harness_search / harness_describe are inert discovery (no install, login or run).
   const harnessRead = input.catalogId === "agentlas-turn" && (input.toolName === "harness_search" || input.toolName === "harness_describe");
   // Stopping an exact bound target stays reachable after permission drops, for any port that declares it
@@ -252,12 +254,26 @@ export function startMcpProxyApprovalServer(): Promise<number> {
   const pending = new Promise<number>((resolve) => {
     pendingResolve = resolve;
     const srv = http.createServer((req, res) => {
-      if (req.method !== "POST" || (!(req.url ?? "").startsWith("/approve") && !(req.url ?? "").startsWith("/bridge/"))) {
+      if (req.method !== "POST" || (!(req.url ?? "").startsWith("/approve") && !(req.url ?? "").startsWith("/bridge/") && !(req.url ?? "").startsWith("/shell-approve"))) {
         res.writeHead(404).end("not found");
         return;
       }
       if (!secretEquals(req.headers["authorization"] ?? "", `Bearer ${capabilityToken}`)) {
         res.writeHead(401).end("unauthorized");
+        return;
+      }
+      if ((req.url ?? "").startsWith("/shell-approve")) {
+        // A CLI's PreToolUse hook asks about one shell command (runtime/shell-delete-gate.ts). It names a handle Main minted for the run and the
+        // command, nothing else; the owner's card is withdrawn when the hook goes away (the CLI stopped it, its turn ended).
+        const gone = new AbortController();
+        res.on("close", () => { if (!res.writableEnded) gone.abort(); });
+        void readBody(req).then(async (body) => {
+          let parsed: { handle?: unknown; command?: unknown } = {};
+          try { parsed = JSON.parse(body) as typeof parsed; } catch { /* a request of an unknown shape is a refusal below */ }
+          const verdict = await decideShellDelete(parsed.handle, parsed.command, gone.signal).catch(() => ({ decision: "deny" as const, refusal: "" }));
+          if (res.destroyed) return;
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(verdict));
+        });
         return;
       }
       if ((req.url ?? "").startsWith("/bridge/")) {

@@ -299,7 +299,7 @@ export async function resumeMobileOneAutoRecovery(service: InvocationService): P
       receipt,
       oneMode: true,
       goal: goal.slice(0, 4_000),
-      workspaceBinding: captureMobileOneInvocationBinding(),
+      workspaceBinding: captureMobileOneInvocationBinding(chat.id),
     });
   }
 }

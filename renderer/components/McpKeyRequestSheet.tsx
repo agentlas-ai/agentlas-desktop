@@ -323,7 +323,7 @@ export function McpKeyRequestSheet({
         .mkr-actions .save {
           background: var(--popup-control-bg);
           color: var(--ink);
-          border-color: var(--line);
+          border-color: var(--paper-edge);
         }
         .mkr-one {
           width: auto;

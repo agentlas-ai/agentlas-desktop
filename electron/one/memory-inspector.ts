@@ -1,12 +1,17 @@
+import { decodeStoredVector } from "../memory/local-embedding";
+import { createHash } from "node:crypto";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { isAppControlEvent } from "../app-control/ipc-registry";
-import { getMemoryDb, getMemoryStoreInfo } from "../memory/database";
-import { currentMemoryOwnerRef, learningActor, memoryTargetRevision, ownedMemoryRecord, ownerMemorySelect,
+import { getMemoryDb, getMemoryStoreInfo, memoryRoot } from "../memory/database";
+import { layoutOf, openStore, rootClock } from "../memory/stores";
+import { readSet, setFingerprint, setStores } from "../memory/store-set";
+import { currentMemoryOwnerRef, learningActor, memoryTargetRevision, ownedMemoryRecord, ownerMemorySelect, recordStore,
   editOwnedMemory, forgetOwnedMemory, type OwnerMemoryRecord } from "../memory/owner-mutations";
 import { memoryAudienceKey } from "../memory/store";
 import { inspectAppMemorySharing, setAppMemorySharing } from "../memory/agent-app-memory";
 import { nativeTextsFor } from "../memory/native-text";
+import { derivedSkillsForRecords } from "../memory/derived-skills";
 import { projectMemoryEmbeddings } from "./memory-map";
 import { getAgentById } from "../mcp/registry";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
@@ -36,8 +41,11 @@ function entry(row: OwnerMemoryRecord,native: string | undefined): DesktopMemory
 }
 export function inspectMemoryDetail(input: { memoryId: string; ownerRef: string }): DesktopMemoryDetail {
   if (!id(input?.memoryId) || input.ownerRef !== currentMemoryOwnerRef()) throw new Error("memory_owner_custody_changed");
-  const row = ownedMemoryRecord(input.memoryId), db = getMemoryDb(), store = getMemoryStoreInfo();
-  const native = nativeTextsFor("memory_entry",[row.id]).get(row.id), app = applicability(row), base = entry(row,native);
+  const row = ownedMemoryRecord(input.memoryId), store = getMemoryStoreInfo();
+  // a row that lives in another store has its links there.
+  const rowStore = recordStore(row);
+  const db = (rowStore ? openStore(rowStore, store.ownerNamespace, getMemoryDb(), memoryRoot()).store?.db : null) ?? getMemoryDb();
+  const native = rowStore ? (()=>{ try { return (db.prepare("SELECT content_native FROM memory_entry_native WHERE entry_id=?").get(row.id) as {content_native:string}|undefined)?.content_native; } catch { return undefined; } })() : nativeTextsFor("memory_entry",[row.id]).get(row.id), app = applicability(row), base = entry(row,native);
   const origins = db.prepare("SELECT source_kind,source_id,source_revision FROM memory_origin_links WHERE memory_id=? ORDER BY source_kind,source_id,source_revision LIMIT 128").all(row.id) as Array<{source_kind:string;source_id:string;source_revision:string}>;
   const side = (()=>{ try { const values: unknown = JSON.parse(row.origin_refs_json ?? "[]"); return Array.isArray(values) ? values : []; } catch { return []; } })();
   const refs = new Map<string,{kind:string;id:string;revision:string|null}>();
@@ -58,8 +66,9 @@ export function inspectMemoryDetail(input: { memoryId: string; ownerRef: string 
       compatibilityScope:compatibility && typeof compatibility.scope === "string" ? {scope:safe(compatibility.scope),scopeRef:id(compatibility.scopeRef)} : null},
     audience:{declaration:app.audience && typeof app.audience === "object" ? "existing_scope" : "unknown",scope:row.scope,sensitivity:row.sensitivity,recallChannel:channel},
     curationActor:row.curation_actor ?? "legacy",policyVersion:row.policy_version,authorityRevision:store.revision,bindingRevision:row.binding_revision,
-    supersededAt:row.superseded_at,editable:base.status === "active" && memoryAudienceKey(row.id)!==null && Boolean(base.actorId) && row.sensitivity !== "secret" && !looksSecret(base.content) };
+    supersededAt:row.superseded_at,editable:base.status === "active" && !recordStore(row) && memoryAudienceKey(row.id)!==null && Boolean(base.actorId) && row.sensitivity !== "secret" && !looksSecret(base.content) };
 }
+let pickerCache: { key: string; actors: Array<[string|null,string]>; projects: Array<[string,string]> } | null = null;
 export function queryOwnedMemory(input: DesktopMemoryQuery = {}): DesktopMemoryQueryResult {
   if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(key=>!["actorId","projectId","scope","status","limit"].includes(key))) throw new Error("memory_inspector_query_invalid");
   if ((input.limit !== undefined && (typeof input.limit!=="number" || !Number.isFinite(input.limit))) || (input.actorId !== undefined && input.actorId !== null && !id(input.actorId)) || (input.projectId && !id(input.projectId))
@@ -68,11 +77,38 @@ export function queryOwnedMemory(input: DesktopMemoryQuery = {}): DesktopMemoryQ
   const owner = `(b.owner_namespace=? OR (b.owner_namespace IS NULL AND ?=1))`;
   const params = [store.ownerNamespace,store.ownerNamespace.startsWith("device-local:") ? 1 : 0];
   const actors = new Map<string|null,string>(), projectNames = new Map<string,string>();
-  const actorRows = db.prepare(`SELECT DISTINCT COALESCE(NULLIF(b.actor_id,''),m.agent_id) AS actor FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner}`).all(...params) as Array<{actor:string|null}>;
-  for (const row of actorRows) actors.set(isOneMemoryActor(row.actor)?BUILTIN_ONE_AGENT_ID:row.actor,actorName(row.actor));
-  const projectRows=db.prepare(`SELECT DISTINCT m.project_id AS id FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner} AND m.project_id IS NOT NULL
-    UNION SELECT DISTINCT p.project_id AS id FROM memory_project_links p JOIN memory_entries m ON m.id=p.memory_id LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner}`).all(...params,...params) as Array<{id:string}>;
-  for(const row of projectRows) projectNames.set(row.id,row.id);
+  // The two DISTINCT scans (about 23 ms on 50k rows) only feed the pickers. They read this one store, so they are reused while its revision, its
+  // epoch and SQLite's data_version (other connections' commits) are unchanged; one entry, replaced on change (item 10).
+  let dataVersion: unknown = null; try { dataVersion = db.pragma("data_version", { simple: true }); } catch { /* no key: always rescan */ }
+  // not OFF — the pickers also name the actors and projects that only live in other stores; the key then carries the stores' stat fingerprint (stat only).
+  const setContext = (() => { try { return layoutOf(db) === "central" ? null : { memoryRoot: memoryRoot(), owner: store.ownerNamespace, rootDb: db }; } catch { return null; } })();
+  const actorFilter = input.actorId === undefined ? BUILTIN_ONE_AGENT_ID : input.actorId;
+  const storeList = setContext ? setStores(setContext, actorFilter === null ? {} : { agentId: actorFilter }) : [];
+  const pickerStores = setContext ? setStores(setContext, {}) : [];
+  const fingerprint = setContext ? createHash("sha256").update(setFingerprint(pickerStores, rootClock(db))).digest("hex").slice(0, 16) : "";
+  const listKey = dataVersion === null ? null : `${store.ownerNamespace}:${store.revision}:${store.revocationEpoch}:${String(dataVersion)}${fingerprint ? `:s${fingerprint}` : ""}`;
+  if (listKey !== null && pickerCache?.key === listKey) {
+    for (const [key, name] of pickerCache.actors) actors.set(key, name);
+    for (const [key, name] of pickerCache.projects) projectNames.set(key, name);
+  } else {
+    const actorRows = db.prepare(`SELECT DISTINCT COALESCE(NULLIF(b.actor_id,''),m.agent_id) AS actor FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner}`).all(...params) as Array<{actor:string|null}>;
+    for (const row of actorRows) actors.set(isOneMemoryActor(row.actor)?BUILTIN_ONE_AGENT_ID:row.actor,actorName(row.actor));
+    const projectRows=db.prepare(`SELECT DISTINCT m.project_id AS id FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner} AND m.project_id IS NOT NULL
+      UNION SELECT DISTINCT p.project_id AS id FROM memory_project_links p JOIN memory_entries m ON m.id=p.memory_id LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner}`).all(...params,...params) as Array<{id:string}>;
+    for(const row of projectRows) projectNames.set(row.id,row.id);
+    if (setContext) {
+      const picked = readSet(setContext, pickerStores, "inspect-pickers", sub => ({
+        actors: (sub.prepare(`SELECT DISTINCT COALESCE(NULLIF(b.actor_id,''),m.agent_id) AS actor FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner}`).all(...params) as Array<{actor:string|null}>).map(row=>row.actor),
+        projects: (sub.prepare(`SELECT DISTINCT m.project_id AS id FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner} AND m.project_id IS NOT NULL
+          UNION SELECT DISTINCT p.project_id AS id FROM memory_project_links p JOIN memory_entries m ON m.id=p.memory_id LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${owner}`).all(...params,...params) as Array<{id:string}>).map(row=>row.id),
+      }), value => value.actors.length + value.projects.length);
+      for (const item of picked.results) {
+        for (const actor of item.value.actors) actors.set(isOneMemoryActor(actor)?BUILTIN_ONE_AGENT_ID:actor,actorName(actor));
+        for (const id of item.value.projects) projectNames.set(id,id);
+      }
+    }
+    if (listKey !== null) pickerCache = { key: listKey, actors: [...actors], projects: [...projectNames] };
+  }
   const filters=[owner], values: Array<string|number>=[...params];
   const actor=input.actorId===undefined?BUILTIN_ONE_AGENT_ID:input.actorId;
   if(actor!==null){const family=memoryActorIds(actor) as string[];filters.push(`COALESCE(NULLIF(b.actor_id,''),m.agent_id) IN (${family.map(()=>"?").join(",")})`);values.push(...family);}
@@ -84,14 +120,31 @@ export function queryOwnedMemory(input: DesktopMemoryQuery = {}): DesktopMemoryQ
   if(status==="superseded")filters.push("m.content<>'' AND m.superseded_at IS NOT NULL");
   if(status==="forgotten")filters.push("m.content=''");
   const where=filters.join(" AND ");
-  const total=Number((db.prepare(`SELECT COUNT(*) AS n FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${where}`).get(...values) as {n:number}).n);
+  const rootTotal=Number((db.prepare(`SELECT COUNT(*) AS n FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${where}`).get(...values) as {n:number}).n);
   const limit=Math.max(1,Math.min(1000,Math.floor(input.limit??1000)));if(!Number.isFinite(limit))throw new Error("memory_inspector_query_invalid");
-  const bounded=db.prepare(`${ownerMemorySelect} WHERE ${where} ORDER BY m.created_at DESC,m.id DESC LIMIT ?`).all(...values,limit) as OwnerMemoryRecord[];
-  const natives=nativeTextsFor("memory_entry",bounded.map(row=>row.id));
-  const entries=bounded.map(row=>entry(row,natives.get(row.id))), ids=new Set(bounded.map(row=>row.id));
-  const positions=projectMemoryEmbeddings(bounded.map(row=>{let embedding:number[]|null=null;try {const parsed=JSON.parse(row.embedding_json??"null");if(Array.isArray(parsed)) embedding=parsed;}catch{}return{id:row.id,embedding};}));
+  const rootBounded=db.prepare(`${ownerMemorySelect} WHERE ${where} ORDER BY m.created_at DESC,m.id DESC LIMIT ?`).all(...values,limit) as OwnerMemoryRecord[];
+  // the other stores' share of the same query (count, newest rows, original wording, edges) — only the stores that changed since the last call are opened.
+  const fromStores = setContext ? readSet(setContext, storeList, `inspect:${JSON.stringify([where,values,limit])}`, sub => {
+    const n=Number((sub.prepare(`SELECT COUNT(*) AS n FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE ${where}`).get(...values) as {n:number}).n);
+    const found=sub.prepare(`${ownerMemorySelect} WHERE ${where} ORDER BY m.created_at DESC,m.id DESC LIMIT ?`).all(...values,limit) as OwnerMemoryRecord[];
+    const nativeText=new Map<string,string>();
+    try { for (let at=0; at<found.length; at+=400) { const part=found.slice(at,at+400); for (const item of sub.prepare(`SELECT entry_id,content_native FROM memory_entry_native WHERE entry_id IN (${part.map(()=>"?").join(",")})`).all(...part.map(row=>row.id)) as Array<{entry_id:string;content_native:string}>) nativeText.set(item.entry_id,item.content_native); } } catch { /* this store has no original-wording table */ }
+    let edgeRows: Array<{from_memory_id:string;to_memory_id:string;relation_type:"similar_to"|"supersedes"|"contradicts";score:number|null}> = [];
+    try { edgeRows=found.length ? sub.prepare(`SELECT from_memory_id,to_memory_id,relation_type,score FROM memory_relation_edges WHERE from_memory_id IN (${found.map(()=>"?").join(",")}) LIMIT 4000`).all(...found.map(row=>row.id)) as typeof edgeRows : []; } catch { /* no edge table */ }
+    return { n, found, nativeText: [...nativeText], edgeRows };
+  }, value => value.found.length + value.edgeRows.length + 1) : null;
+  const total=rootTotal + (fromStores ? fromStores.results.reduce((sum,item)=>sum+item.value.n,0) : 0);
+  const bounded=fromStores ? [...rootBounded,...fromStores.results.flatMap(item=>item.value.found.map(row=>{ const copy={...row}; Object.defineProperty(copy,Symbol.for("agentlas.memory-store-of"),{value:item.ref,enumerable:false}); return copy; }))] // a copy: the store set's cache hands the same row object to every call, and a second tag on it threw (#1)
+    .sort((a,b)=>a.created_at<b.created_at?1:a.created_at>b.created_at?-1:a.id<b.id?1:a.id>b.id?-1:0).slice(0,limit) : rootBounded;
+  const natives=nativeTextsFor("memory_entry",rootBounded.map(row=>row.id));
+  if (fromStores) for (const item of fromStores.results) for (const [entryId,text] of item.value.nativeText) natives.set(entryId,text);
+  // Redesign backend C: the skills made from each line, one pass over the agents' skill promotions for the whole list (memory/derived-skills.ts); absent = not known.
+  const derived=derivedSkillsForRecords(bounded);
+  const entries=bounded.map(row=>{const line=entry(row,natives.get(row.id)),skills=derived.get(row.id);return skills===undefined?line:{...line,derivedSkills:skills};}), ids=new Set(bounded.map(row=>row.id));
+  const positions=projectMemoryEmbeddings(bounded.map(row=>{const embedding:number[]|null=decodeStoredVector(row.embedding_json);return{id:row.id,embedding};}));
   const edges=(bounded.length ? db.prepare(`SELECT from_memory_id,to_memory_id,relation_type,score FROM memory_relation_edges WHERE from_memory_id IN (${bounded.map(()=>"?").join(",")}) LIMIT 4000`).all(...bounded.map(row=>row.id)) : []) as Array<{from_memory_id:string;to_memory_id:string;relation_type:"similar_to"|"supersedes"|"contradicts";score:number|null}>;
-  const scopedEdges=edges.filter(row=>ids.has(row.from_memory_id)&&ids.has(row.to_memory_id));
+  const allEdges=fromStores ? [...edges,...fromStores.results.flatMap(item=>item.value.edgeRows)] : edges;
+  const scopedEdges=allEdges.filter(row=>ids.has(row.from_memory_id)&&ids.has(row.to_memory_id));
   const map={contractVersion:ONE_MEMORY_MAP_CONTRACT_VERSION,generatedAt:new Date().toISOString(),sourceRevision:`${ownerRef}:${store.revision}:${store.revocationEpoch}`,
     nodes:entries.map(row=>({id:row.memoryId,kind:(kinds.includes(row.kind)?row.kind:"hypothesis") as OneMemoryMapKind,scope:row.scope as OneMemoryMapScope,projectSlug:row.projectSlug,...(positions.get(row.memoryId)??{x:0.5,y:0.5}),density:0.5,relationCount:scopedEdges.filter(edge=>edge.from_memory_id===row.memoryId||edge.to_memory_id===row.memoryId).length,evidenceCount:0})),
     edges:scopedEdges.map(edge=>({from:edge.from_memory_id,to:edge.to_memory_id,relation:edge.relation_type,score:edge.score})),clusterCount:new Set(entries.map(row=>row.projectSlug??row.actorName)).size};

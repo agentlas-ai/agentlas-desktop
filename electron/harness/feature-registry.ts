@@ -59,7 +59,7 @@ export interface FeatureDomain {
     /**
      * The other host may run the domain only as a lease-fenced standby: it builds the clocks only while it holds the
      * named owner row (one owner at a time, never a second clock for a life). `companionClocks` run there regardless,
-     * because they belong to a domain that host owns (e.g. the AGI monitor beside Goal custody).
+     * because they belong to a domain that host owns.
      */
     /** Only this partition may be consumed by the other host, under its current explicit owner. */
     canonicalOwnerConsumers?: readonly FeatureCanonicalOwnerConsumer[];
@@ -123,8 +123,8 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
   },
   {
     featureId: "memory-receipt", semanticsVersion: 1, executorOwner: "agentlas-core", contextOwner: "per-executor",
-    requiredHostPorts: ["store", "invocation"], surfaces: ["memory_note", "## Memory Events turn_summary"],
-    connections: { "codex-app-server": MCP_TOOL("fake"), "claude-print": MCP_TOOL("fake"), acp: MCP_TOOL("fake"), antigravity: MCP_TOOL("fake"), "api-loop": IN_PROCESS_TEXT, "local-loop": IN_PROCESS_TEXT },
+    requiredHostPorts: ["store", "invocation"], surfaces: ["memory_ticket"],
+    connections: { "codex-app-server": MCP_TOOL("fake"), "claude-print": MCP_TOOL("fake"), acp: MCP_TOOL("fake"), antigravity: MCP_TOOL("fake"), "api-loop": HOST_EQ("memory_ticket is a tool of the run's MCP list; the loop calls it as the CLIs do (no text block is asked for)"), "local-loop": HOST_EQ("memory_ticket is a tool of the run's MCP list; a local model without tool calls writes nothing (the turn goes on)") },
   },
   {
     featureId: "goal-lifecycle", semanticsVersion: 1, executorOwner: "agentlas-core", contextOwner: "per-executor",
@@ -148,37 +148,6 @@ export const FEATURE_MODULES: readonly FeatureModule[] = [
       acceptance: [
         { gate: "goal-loop-contract.cjs", evidence: "fake" }, { gate: "goal-startup-continuity-contract.cjs", evidence: "fake" },
         { gate: "long-run-store-contract.cjs", evidence: "fake" }, { gate: "test-goal-wake-arbiter.cjs", evidence: "fake" },
-      ],
-    },
-  },
-  {
-    featureId: "alive", semanticsVersion: 1, executorOwner: "agentlas-core", contextOwner: "host",
-    requiredHostPorts: ["store", "clock", "invocation", "event", "owner"], surfaces: [],
-    connections: {
-      // A light wake runs the configured decision runtime through the same invocation path; the beat is host-owned.
-      "codex-app-server": { mode: "host-equivalent", evidence: "source", note: "host clock; decision run through the invocation service" },
-      "claude-print": { mode: "host-equivalent", evidence: "source" }, acp: { mode: "host-equivalent", evidence: "source" },
-      antigravity: { mode: "host-equivalent", evidence: "source" }, "api-loop": { mode: "host-equivalent", evidence: "source" },
-      "local-loop": { mode: "host-equivalent", evidence: "source" },
-    },
-    domain: {
-      version: "1", dependencies: ["goal-lifecycle", "store", "invocation"],
-      // NH21: the enrolled background service owns the organism clocks/store/wakes/actions (alive_domain_owner lease);
-      // the window process takes them only while no service holds the lease, and otherwise forwards owner edits to the
-      // service and executes the Goal actions it hands back (Goal custody stays in the window process).
-      lifecycle: { host: "daemon", start: ["startDaemonAliveOrganisms"],
-        clocks: ["desktopAliveClock work-organism", "desktopAliveClock one-organism"],
-        standby: { host: "main", start: ["startAliveOrganisms"], stop: ["stopAliveOrganisms"], leaseTable: "alive_domain_owner",
-          companionClocks: ["agi monitor", "bug-report flush 60s"] } },
-      operations: {
-        ipc: ["alive:getState", "alive:setEnabled", "alive:setTokenLimit", "alive:resumeUncertainWake"],
-        appControl: ["alive.getState", "alive.setEnabled", "alive.setTokenLimit", "alive.resumeUncertainWake", "agi.getTokenLimits", "agi.setTokenLimits"],
-      },
-      persistence: { tables: ["alive_agents", "alive_attachments", "alive_events", "alive_wakes", "alive_actions"] },
-      events: ["wake.reserved", "wake.settled", "action.dispatching", "action.forwarded", "alive_provider_attempt_started", "alive_provider_usage_observed"],
-      acceptance: [
-        { gate: "alive-decision-contract.cjs", evidence: "fake" }, { gate: "test-alive-stops-before-store-close.cjs", evidence: "fake" },
-        { gate: "test-agi-native-harness.cjs", evidence: "fake" }, { gate: "test-alive-domain-owner-handoff.cjs", evidence: "fake" },
       ],
     },
   },

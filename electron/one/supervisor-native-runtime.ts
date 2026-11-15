@@ -1,7 +1,9 @@
+import { noteTakeRoad } from './companion-take-roads';
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
+import { personalOnePhoneToolName } from "../../shared/one-phone-tools";
 import {retainHistoryWorkOrigin} from './history-work-dispatch';
 import { withOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
-import { getAuthenticatedActorIds } from "../auth";
+import { getAuthenticatedActorIds, getAuthenticatedSessionBinding, nativeReadSessionEpoch, sessionForDaemonHandoff } from "../auth";
 import { getDb, STORE_SCHEMA_VERSION } from "../store/db";
 import { ONE_SUPERVISOR_SCHEMA } from "../../shared/one-supervisor";
 import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, ONE_SUPERVISOR_EXTENSIONS_SCHEMA, sameSupervisorRuntimeCompatibility } from "../../shared/one-supervisor-runtime";
@@ -21,7 +23,7 @@ import type { OneSupervisorStore, SupervisorRequestRow } from "./supervisor-stor
 
 type NativeOwner = ReturnType<typeof createNativeGuiOwnerClient>;
 type Channel = object & { dispatch(method: string, input: unknown): Promise<unknown> };
-type Origin = { request: string; assert(): void; purpose?: SupervisorHostNoticePurpose };
+type Origin = { request: string; assert(): void; assertRead(): void; purpose?: SupervisorHostNoticePurpose };
 const origins = new WeakMap<object, Origin>();
 function fail(code: string): never { throw Object.assign(new Error(code),{code}); }
 /** Bootstrap-only callbacks. An object copied from JSON has no entry here. */
@@ -33,7 +35,32 @@ export function authorizeSupervisorNativeOrigin(origin: object, request: Readonl
 export async function dispatchSupervisorNativeCommand(origin:object,request:Readonly<McpInvocationRequest>,name:string,input:Record<string,unknown>):Promise<unknown> {
   authorizeSupervisorNativeOrigin(origin,request);
   if(!request.oneMode || !request.runId)fail('supervisor_native_personal_source_required');
-  return (await import('./team-control-server')).dispatchOneSupervisorTool({chatId:request.chatId,supervisorReplyRunId:request.runId,permission:effectiveInvocationPermission(request.permissions,request.planMode)},name,input);
+  const nativeReadPolicy = name.startsWith('__one_')
+    ? (await import('../harness/capability-ports')).oneNativeReadPolicies().find(policy => policy.admissionName === name) : undefined;
+  if (nativeReadPolicy) {
+    const keys = Object.keys(input), kind = input.kind;
+    if ((kind !== 'search' && kind !== 'call') || keys.some(key => key !== 'kind' && key !== 'operation')
+      || (kind === 'search' && keys.length !== 1) || (kind === 'call' && (keys.length !== 2 || input.operation !== nativeReadPolicy.operationId))) fail('supervisor_native_read_admission_invalid');
+    const supervisor = await import('./supervisor');
+    if (!supervisor.isPersonalSupervisorConversation(request.chatId)) fail('supervisor_native_personal_source_required');
+    const service = supervisor.supervisorRunsInDaemon() ? supervisor.oneSupervisor() : oneSupervisorEndpoint();
+    await service.assertConversation(request.chatId);
+    authorizeSupervisorNativeOrigin(origin, request); origins.get(origin)!.assertRead();
+    const proof = nativeReadSessionEpoch(), handoff = sessionForDaemonHandoff();
+    if (!proof || !handoff || handoff.userId !== proof.userId || handoff.workspaceId !== proof.workspaceId) fail('supervisor_native_read_session_unavailable');
+    const wireHandoff = Object.fromEntries(Object.entries(handoff).filter(([, value]) => value !== undefined));
+    return { version: 2, actor: { userId: proof.userId, workspaceId: proof.workspaceId }, epoch: proof.epoch, handoff: wireHandoff };
+  }
+  const result = await (await import('./team-control-server')).dispatchOneSupervisorTool({chatId:request.chatId,supervisorReplyRunId:request.runId,
+    ...(personalOnePhoneToolName(name) ? {turnRunId:request.runId} : {}),
+    permission:effectiveInvocationPermission(request.permissions,request.planMode)},name,input);
+  // Discovery is an effect-free read. Suppress its result if authority was
+  // lost in flight; command receipts must remain available for reconciliation.
+  if (name === 'one_app_operations') authorizeSupervisorNativeOrigin(origin,request);
+  // The native turn capability is in another process. Until its authenticated session handoff is bound,
+  // the Main catalog cannot claim that its read operations are available to this turn.
+  return name === 'one_app_operations' && result && typeof result === 'object' && !Array.isArray(result)
+    ? { ...result, harness_status: 'unavailable' } : result;
 }
 export function supervisorNativeNoticePurpose(origin: object, request: Readonly<McpInvocationRequest>): SupervisorHostNoticePurpose | undefined {
   authorizeSupervisorNativeOrigin(origin, request); return origins.get(origin)!.purpose;
@@ -48,6 +75,14 @@ export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: O
   oneId: string, request: McpInvocationRequest, purpose?: SupervisorHostNoticePurpose, assertOriginal?: () => void): object {
   assertOriginal?.();
   const token = owner.assert(oneId),actor=JSON.stringify(getAuthenticatedActorIds());
+  // Session generations are local to this Main process. Capture them here to
+  // fence an original command across sign-out and same-account sign-in; they
+  // are not proof that a separate daemon has adopted the same session.
+  const sessionIdentity = () => {
+    const session = getAuthenticatedSessionBinding();
+    return session ? JSON.stringify([session.workspaceId, session.userId, session.sessionId]) : null;
+  };
+  const originalSession = sessionIdentity();
   const rows = store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND state='dispatching'")
     .all(oneId, request.runId) as SupervisorRequestRow[];
   if (rows.length !== 1) fail("supervisor_native_exact_command_required");
@@ -61,12 +96,13 @@ export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: O
   origins.set(source, { request: canonicalInvocationRequestJson(request), purpose, assert() {
     assertOriginal?.();
     if(JSON.stringify(getAuthenticatedActorIds())!==actor)fail("supervisor_native_actor_changed");
+    if(sessionIdentity()!==originalSession)fail("supervisor_native_session_changed");
     owner.assertToken(token);
     const current = store.get(row.command_id);
     if (!current || current.one_id !== oneId || current.run_id !== request.runId || current.payload_json !== row.payload_json
       || current.payload_hash !== row.payload_hash || current.source_reply_run_id !== row.source_reply_run_id
       || !["dispatching", "accepted"].includes(current.state)) fail("supervisor_native_command_fenced");
-  } });
+  }, assertRead() { assertSupervisorStartNotStopped(store, row); } });
   retainHistoryWorkOrigin(source,request);
   return source;
 }
@@ -87,6 +123,8 @@ let bootstrap: SupervisorNativeRuntimeBootstrap | undefined;
 let mode:'local'|'handoff'|'daemon'='local';
 let handoffTimer:NodeJS.Timeout|undefined;
 let handoffBusy=false;
+/** The observation timers of the native runtimes built in this process: a channel that is configured later wakes them (they stop while there is no channel). */
+const observationWakers=new Set<()=>void>();
 let handoffProposal:{oneId:string;ownerEpoch:string;generation:number}|undefined;
 export function supervisorRuntimeMode(){return mode;}
 /** Positional arguments for the wire (JSON has no undefined): trailing undefined ones mean the same as absent. Both the supervisor proxy and the personal-data proxy send `{method,args}` here. */
@@ -96,7 +134,7 @@ function withWireArgs(input:unknown):unknown{
   const wire=args.slice();while(wire.length&&wire[wire.length-1]===undefined)wire.pop();
   return{...(input as object),args:wire};
 }
-export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer'|'personal.command',input?:unknown):Promise<any> {
+export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer'|'personal.command'|'companion.work.admit'|'companion.work.retireUnstarted'|'companion.credential.retry',input?:unknown):Promise<any> {
   const channel=bootstrap?.getChannel(),identity=channel && nativeGuiChannelIdentity(channel);
   if(!channel || !identity)fail('supervisor_native_channel_unavailable');
   const assertCurrent=()=>{if(nativeGuiChannelIdentity(channel)!==identity)fail('supervisor_native_channel_changed');};
@@ -117,15 +155,26 @@ async function tryHandoff():Promise<void>{
     if(!sameSupervisorRuntimeCompatibility(status?.compatibility,compatibility))fail('supervisor_daemon_version_mismatch');
     if(status.active && status.authorityCurrent && status.owner?.ownerEpoch===status.bootId && status.owner?.ownerKind==='work-daemon' && status.owner?.phase==='active'){
       if(status.owner.oneId!==(await import('../store/one-profile')).getOneProfile().oneId)fail('supervisor_daemon_identity_changed');
-      mode='daemon';if(handoffTimer)clearInterval(handoffTimer);bootstrap?.onHandoff?.();return;
+      mode='daemon';stopHandoffTimer();noteTakeRoad('daemon');bootstrap?.onHandoff?.();return;
     }
     if(!handoffProposal){const proposal=(await import('./supervisor')).prepareOneSupervisorDaemonHandoff();if(!proposal)return;handoffProposal=proposal;mode='handoff';}
     const adopted=await callOneSupervisorRuntime('adopt',{compatibility,...handoffProposal});
     if(!adopted?.adopted || adopted.bootId!==status.bootId || adopted.owner?.ownerEpoch!==status.bootId || adopted.owner?.ownerKind!=='work-daemon'
       || adopted.owner?.oneId!==handoffProposal.oneId || adopted.owner?.generation!==handoffProposal.generation+1 || adopted.owner?.phase!=='active')fail('supervisor_daemon_handoff_unconfirmed');
-    mode='daemon';if(handoffTimer)clearInterval(handoffTimer);bootstrap?.onHandoff?.();
+    mode='daemon';stopHandoffTimer();noteTakeRoad('daemon');bootstrap?.onHandoff?.();
   }catch(error){console.warn('[one-supervisor] daemon handoff deferred',error instanceof Error?error.message:'unknown');}
   finally{handoffBusy=false;}
+}
+function stopHandoffTimer():void{if(handoffTimer)clearInterval(handoffTimer);handoffTimer=undefined;}
+/**
+ * The hand-over is retried every 1.5 s only while there is a service channel to try it on (a deferred answer - work running here, an
+ * incompatible service - clears by itself). With no channel there is nothing to ask and nothing is armed: the attach that makes a channel
+ * (main.ts, after attachNativeGuiDaemon) calls wakeOneSupervisorHandoff(), and a tick that finds the channel gone stops the timer again.
+ */
+export function wakeOneSupervisorHandoff():void{
+  if(!bootstrap || mode==='daemon')return;
+  if(!handoffTimer){handoffTimer=setInterval(()=>{const channel=bootstrap?.getChannel();if(!channel || !nativeGuiChannelIdentity(channel)){stopHandoffTimer();return;}void tryHandoff();},1500);handoffTimer.unref?.();}
+  void tryHandoff();
 }
 export function oneSupervisorEndpoint():{[K in keyof OneSupervisorService]:OneSupervisorService[K] extends (...args:infer A)=>infer R ? (...args:A)=>Promise<Awaited<R>> : never} {
   return new Proxy({} as any,{get(_target,method:string){return async(...args:unknown[])=>{
@@ -140,8 +189,8 @@ export function oneSupervisorEndpoint():{[K in keyof OneSupervisorService]:OneSu
 export function configureOneSupervisorNativeRuntime(value: SupervisorNativeRuntimeBootstrap): void {
   if (bootstrap && bootstrap.owner !== value.owner) fail("supervisor_native_runtime_already_configured");
   bootstrap = value;
-  if(!handoffTimer){handoffTimer=setInterval(()=>{void tryHandoff();},1500);handoffTimer.unref?.();}
-  void tryHandoff();
+  for(const wake of [...observationWakers]){try{wake();}catch{/* the next start wakes it */}}
+  if(value.getChannel())wakeOneSupervisorHandoff();
 }
 export function oneSupervisorNativeRuntime() { return bootstrap; }
 
@@ -235,8 +284,38 @@ export function createSupervisorNativeRuntime(options: {
     return response.status!;
   }
 
-  const timer = setInterval(() => { try { poll(); } catch { /* Keep durable uncertain state until the next observation. */ } }, 750);
-  timer.unref?.();
+  /**
+   * The 750 ms observation runs only while a run this process started on the service can still end (P5-7): at creation (a run of an
+   * earlier launch may be open), at every start(), and until a pass finds nothing left to wait for. A start is the only way a run joins; with no
+   * open request there is no timer. A pass that cannot read keeps the timer (an unknown state is not an empty one).
+   */
+  let timer: NodeJS.Timeout | null = null, closed = false;
+  const stillWatching = (): boolean => {
+    try {
+      if (!bootstrap) return false; // nothing to observe with: configureOneSupervisorNativeRuntime wakes this again
+      if (pending.size) return true;
+      for (const row of options.store.pending(options.identity())) {
+        if (!row.run_id) continue;
+        const receipt = options.receipt(row.run_id);
+        const custody = receipt ? invocationRunOwners.getRunOwner(receipt.chatId, receipt.runId) : invocationRunOwners.getOwnerByRunId(row.run_id);
+        if (custody?.ownerKind !== "daemon") continue;
+        if (!receipt) return true; // the service holds it and its receipt is not written yet
+        const old = observed.get(receipt.runId);
+        if (!terminal(receipt) || custody.state !== "released" || old?.status !== receipt.status || old.updatedAt !== receipt.updatedAt) return true;
+      }
+      return false;
+    } catch { return true; }
+  };
+  const watch = (): void => {
+    if (closed || timer) return;
+    timer = setInterval(() => {
+      try { poll(); } catch { /* Keep durable uncertain state until the next observation. */ }
+      if (!stillWatching()) { if (timer) clearInterval(timer); timer = null; }
+    }, 750);
+    timer.unref?.();
+  };
+  observationWakers.add(watch);
+  watch();
   return {
     get pendingCount(){return pending.size;}, attach, poll, ownsPending:(runId:string)=>pending.has(runId),
     receipt(runId: string): InvocationRunReceipt | null {
@@ -265,6 +344,7 @@ export function createSupervisorNativeRuntime(options: {
       const origin = createSupervisorNativeOrigin(options.store, options.owner, options.identity(), request, purpose);
       const attempt={digest,refused:false};
       starts.set(request.runId,attempt); pending.set(request.runId, request.chatId);
+      watch();
       // Original owner has one admission and one actual start. A lost response
       // stays uncertain and is reconciled using exact durable custody/receipts.
       let actual: Promise<{ runId: string }>;
@@ -299,7 +379,7 @@ export function createSupervisorNativeRuntime(options: {
       return { queued: true, queuedRequestId: result.result.queuedRequestId, activeRunId: runId };
     },
     onSettled(listener: (event: { runId: string; chatId: string; receipt: InvocationRunReceipt }) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    close() { clearInterval(timer); listeners.clear(); },
+    close() { closed = true; observationWakers.delete(watch); if (timer) clearInterval(timer); timer = null; listeners.clear(); },
   };
 }
 

@@ -53,7 +53,7 @@
 
 /* Only this dialog's own buttons; the rows editor draws its buttons itself, and a blanket "button" rule here once squeezed its remove icon to a dot. */
 .dialog :is(.close, .attach, .previews button, .notice button, .extract button, .buttons button) {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 38px; padding: 0 14px; font: inherit; font-size: 13px; font-weight: 500;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 0 var(--agentlas-btn-pad-x); font: inherit; font-size: 13px; font-weight: 500;
   color: var(--ink); background: var(--paper); border: 1px solid var(--paper-edge-strong); border-radius: var(--radius-sm); cursor: pointer; transition: background-color .12s ease, opacity .12s ease;
 }
 .dialog :is(.close, .attach, .previews button, .notice button, .extract button, .buttons button):hover:not(:disabled) { background: var(--paper-3); }
@@ -80,3 +80,7 @@
 }
 
 .hint p{margin:0}.hint summary{cursor:pointer}
+
+.csv{composes:agentlas-btn from global;border:1px solid var(--paper-edge);background:var(--paper);color:var(--ink);font:inherit;font-size:12px;padding:6px var(--agentlas-btn-pad-x);border-radius:var(--radius-sm);cursor:pointer}
+.csv:disabled{opacity:.45;cursor:default}
+.btn{composes:agentlas-btn from global}

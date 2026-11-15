@@ -1,0 +1,37 @@
+/* The personal agent row: the same place and shape in every screen's left frame (F-D1). */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+  padding: 6px 8px 6px 6px;
+  border-radius: 9px;
+  color: var(--ink);
+  text-decoration: none;
+}
+.row:hover,
+.row:focus-visible { background: var(--fill-1); }
+.row[data-active="true"] { background: var(--fill-1); }
+.face { display: inline-flex; flex: 0 0 auto; }
+.face > span { width: 36px; height: 36px; }
+/* the picture has no status dot (F-D1 picture: one face, nothing on it) */
+.face > span > span { display: none; }
+.copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.name {
+  font-size: 13.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.role {
+  font-size: 11.5px;
+  font-weight: 450;
+  color: var(--muted-deep);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Collapsed rail (68px): the face only. */
+.compact { flex: 0 0 auto; padding: 4px; justify-content: center; }

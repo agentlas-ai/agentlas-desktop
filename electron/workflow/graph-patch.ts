@@ -1,4 +1,5 @@
 import { nodeDeclaresOutwardEffect } from "../../shared/graph-node-protocol";
+import { parseGraphCondition } from "../../shared/graph-condition";
 // Graph Architect 패치 계약 — 자연어로 그래프를 고칠 때 **모델이 그래프를 직접 쓰지 못하게** 막는다.
 //
 // 계약(설계 D8): 모델은 GraphPatch를 *제안*만 한다. 코드가 (1) 형태를 검증하고,
@@ -56,6 +57,31 @@ const OP_KINDS = new Set<string>([
 const ENDPOINT_KEYS = ["apiEndpoint", "url", "webhookUrl"];
 const VAULT_KEY_RE = /(token|secret|password|apikey|api_key|credential|vault)/i;
 
+/** Convert a supported expression edit to the form the runner actually reads. */
+function conditionPatch(node: WorkflowNode, patch: Record<string, unknown>): Record<string, unknown> | null {
+  if (node.type !== "condition") return patch;
+  const changed = (key: string) => Object.hasOwn(patch, key) && patch[key] !== node.config?.[key];
+  if (changed("condition")) return null; // The runner has no `condition` field.
+  if (!changed("expression")) {
+    if (Object.hasOwn(patch, "var") && !patch.var && (changed("op") || changed("value"))) return null;
+    if (!["var", "op", "value"].some(changed)) return patch;
+    const current = parseGraphCondition(node.config ?? {});
+    const legacy = !(typeof node.config?.var === "string" && node.config.var);
+    const effective = legacy && current.ok
+      ? { var: current.variable, op: current.op, value: current.value, ...patch }
+      : patch;
+    return effective;
+  }
+  // Parse the expression independently: a pre-existing variable must not shadow this edit.
+  const parsed = parseGraphCondition({ expression: patch.expression });
+  if (!parsed.ok) return null;
+  // Contradictory simultaneous typed edits cannot be resolved by silently choosing one.
+  const decoded: Record<string, unknown> = { var: parsed.variable, op: parsed.op, value: parsed.value };
+  if (["var", "op", "value"].some(key => Object.hasOwn(patch, key) && patch[key] !== decoded[key])) return null;
+  if ((typeof node.config?.var !== "string" || !node.config.var) && !["var", "op", "value"].some(key => Object.hasOwn(patch, key))) return patch;
+  return { ...patch, var: parsed.variable, op: parsed.op, value: parsed.value };
+}
+
 /**
  * 이 단계가 어떤 위험을 걸고 있는가. 모르는 형태는 위험 없음으로 치지 않는다.
  *
@@ -87,7 +113,7 @@ function configChangeRisks(node: WorkflowNode, config: Record<string, unknown>, 
   const outward = nodeDeclaresOutwardEffect(node);
   const localKeys = node.type === "code" && ["pure", "read"].includes(String(node.config?.effect))
     ? new Set(["code", "language"]) : node.type === "condition" && !graph.nodes.some(nodeDeclaresOutwardEffect)
-      ? new Set(["expression", "condition"]) : node.type === "agent" && !outward
+      ? new Set(["expression", "var", "op", "value"]) : node.type === "agent" && !outward
         ? new Set(["prompt"]) : new Set<string>();
   for (const [key] of changes) {
     if (node.type === "trigger" || ["cron", "schedule", "timezone", "scheduleSpec"].includes(key)) risks.add("cron");
@@ -107,10 +133,12 @@ export function graphPatchCanAutoApplyLocal(graph: WorkflowGraph, patch: GraphPa
     if (op.op !== "editNode" && op.op !== "setPolicy") return false;
     const node = graph.nodes.find(n => n.id === op.nodeId);
     if (!node || nodeDeclaresOutwardEffect(node)) return false;
+    const effectiveConfig = conditionPatch(node, op.config ?? {});
+    if (!effectiveConfig) return false;
     const allowed = node.type === "code" && ["pure", "read"].includes(String(node.config?.effect))
       ? new Set(["code", "language"]) : node.type === "condition" && !graph.nodes.some(nodeDeclaresOutwardEffect)
-        ? new Set(["expression", "condition"]) : new Set<string>();
-    return Object.entries(op.config ?? {}).every(([key,value]) =>
+        ? new Set(["expression", "var", "op", "value"]) : new Set<string>();
+    return Object.entries(effectiveConfig).every(([key,value]) =>
       JSON.stringify(node.config?.[key]) === JSON.stringify(value) || allowed.has(key));
   });
 }
@@ -158,8 +186,10 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
     } else if (op.op === "editNode") {
       const index = nodes.findIndex((n) => n.id === op.nodeId);
       if (index < 0) return fail("PATCH_NODE_MISSING", L(`고치려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, `The step to edit, "${op.nodeId}", was not found.`), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
-      const merged = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
-      for (const risk of configChangeRisks(nodes[index], op.config ?? {}, graph)) risks.add(risk);
+      const config = conditionPatch(nodes[index], op.config ?? {});
+      if (!config) return fail("PATCH_CONDITION_IGNORED", L("이 조건 변경을 해석할 수 없습니다.", "This condition change could not be interpreted."), L("변수와 연산자를 직접 수정하거나 지원되는 식을 사용하세요.", "Edit the variable and operator directly, or use a supported expression."));
+      const merged = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...config } };
+      for (const risk of configChangeRisks(nodes[index], config, graph)) risks.add(risk);
       const before = new Set(risksOfNode(nodes[index]));
       nodes[index] = merged;
       changed.push(merged.label || merged.id);
@@ -199,9 +229,11 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       // setPolicy
       const index = nodes.findIndex((n) => n.id === op.nodeId);
       if (index < 0) return fail("PATCH_NODE_MISSING", L(`설정을 바꾸려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, `The step whose settings should change, "${op.nodeId}", was not found.`), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
-      for (const risk of configChangeRisks(nodes[index], op.config ?? {}, graph)) risks.add(risk);
+      const config = conditionPatch(nodes[index], op.config ?? {});
+      if (!config) return fail("PATCH_CONDITION_IGNORED", L("이 조건 변경을 해석할 수 없습니다.", "This condition change could not be interpreted."), L("변수와 연산자를 직접 수정하거나 지원되는 식을 사용하세요.", "Edit the variable and operator directly, or use a supported expression."));
+      for (const risk of configChangeRisks(nodes[index], config, graph)) risks.add(risk);
       const policyBefore = new Set(risksOfNode(nodes[index]));
-      nodes[index] = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
+      nodes[index] = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...config } };
       changed.push(nodes[index].label || nodes[index].id);
       for (const risk of risksOfNode(nodes[index])) if (!policyBefore.has(risk)) risks.add(risk);
     }
@@ -222,6 +254,25 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
   for (const op of patch.ops) {
     if (op.op === "addNode" && op.node?.id) touchedNodeIds.add(op.node.id);
     if ((op.op === "editNode" || op.op === "setPolicy") && op.nodeId) touchedNodeIds.add(op.nodeId);
+  }
+
+  // Validate the final changed condition, not intermediate operations or untouched legacy nodes.
+  const conditionChanges = new Set<string>();
+  for (const op of patch.ops) {
+    if (op.op === "addNode" && op.node?.type === "condition") conditionChanges.add(op.node.id);
+    if ((op.op === "editNode" || op.op === "setPolicy") && op.nodeId
+      && ["var", "op", "value", "expression", "condition"].some(key => Object.hasOwn(op.config ?? {}, key))) conditionChanges.add(op.nodeId);
+  }
+  for (const node of nodes) {
+    if (node.type !== "condition" || !conditionChanges.has(node.id)) continue;
+    const previous = graph.nodes.find(item => item.id === node.id && item.type === "condition");
+    if (previous && ["var", "op", "value", "expression", "condition"].every(key =>
+      JSON.stringify(previous.config?.[key]) === JSON.stringify(node.config?.[key]))) continue;
+    const parsed = parseGraphCondition(node.config);
+    if (!parsed.ok || (["gt", "gte", "lt", "lte", "contains"].includes(parsed.op)
+      && parsed.value === undefined)) {
+      return fail("PATCH_CONDITION_IGNORED", L("조건의 변수, 연산자 또는 비교 값을 해석할 수 없습니다.", "The condition's variable, operator, or comparison value could not be interpreted."), L("변수와 지원되는 연산자 및 비교 값을 지정하세요.", "Specify a variable, supported operator, and comparison value."));
+    }
   }
 
   // 1. 이 패치가 추가한 갈림길 연결은 참/거짓을 선언해야 한다 (EDGE_CONDITION_UNRESOLVED 예방)

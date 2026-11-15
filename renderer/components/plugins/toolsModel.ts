@@ -145,7 +145,11 @@ export function connectorDisplayName(server: InstalledMcpServer, ko: boolean): s
   return base;
 }
 
-export type ConnectionState = "unknown" | "off" | "keys" | "login" | "ready" | "unverified" | "pending";
+/**
+ * `saved` / `rejected` / `down` (VD): the connection has keys, and what a real call proved about them is word for word the server's `keyVerdict` (electron/mcp-tools/key-verdict.ts). "ready" ("Connected") is for a connection
+ * whose keys the provider accepted (or that has none); a local program whose keys no call has used yet is `saved`, a refused key is `rejected`, a service that did not answer is `down` (the key is not blamed).
+ */
+export type ConnectionState = "unknown" | "off" | "keys" | "login" | "ready" | "unverified" | "pending" | "saved" | "rejected" | "down";
 
 /** Typed status only — prose errors are never classified. */
 export function connectionState(server: InstalledMcpServer, status: McpServerStatus | undefined, loadFailed: boolean): ConnectionState {
@@ -153,8 +157,10 @@ export function connectionState(server: InstalledMcpServer, status: McpServerSta
   if (!server.enabled) return "off";
   if (!status) return "pending";
   if (status.missingEnv.length > 0) return "keys";
+  if (status.keyVerdict === "rejected") return "rejected";
+  if (status.keyVerdict === "provider_down") return "down";
   if (status.failureCode === "authentication_required") return "login";
-  if (status.connected && status.tools.length > 0) return "ready";
+  if (status.connected && status.tools.length > 0) return status.keyVerdict === "saved" ? "saved" : "ready";
   return "unverified";
 }
 
@@ -166,6 +172,9 @@ export function connectionLabel(state: ConnectionState, ko: boolean): string {
     case "login": return ko ? "로그인 필요" : "Sign-in needed";
     case "ready": return ko ? "연결됨" : "Connected";
     case "pending": return ko ? "확인 전" : "Not checked";
+    case "saved": return ko ? "저장됨 · 첫 사용 뒤 연결됨" : "Saved · connected after first use";
+    case "rejected": return ko ? "키를 받아 주지 않았어요" : "Key was not accepted";
+    case "down": return ko ? "서비스가 응답하지 않아요 · 다시 확인해요" : "Service not answering · will check again";
     default: return ko ? "연결 확인 필요" : "Unverified";
   }
 }

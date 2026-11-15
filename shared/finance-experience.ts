@@ -11,7 +11,7 @@ export interface FinanceExperienceState {
   dashboardCustomized:boolean;
   sources:FinanceDataSourceOption[];
   enabledFeedIds?:import('./finance-feeds').FinanceFeedId[];
-  monitoring:{enabled:boolean;localTime:string;timezone:string;lastSentAt:string|null;nextRunAt:string|null;unconfirmedReview?:boolean};
+  monitoring:{enabled:boolean;localTime:string;timezone:string;lastSentAt:string|null;nextRunAt:string|null;unconfirmedReview?:boolean;/** Monitoring is on but not registered because this computer is not the personal agent's home right now (a machine code). Absent = not blocked by that. */registrationBlocked?:'one_sealed'|'one_away'};
   access:{plan:string|null;monitoringAllowed:boolean;status:'verified'|'unavailable'|'signed-out'};
   /** Transient receipt returned only for an owner-confirmed settings action. */
   cloudWatchlistTransfer?:{transferred:boolean};

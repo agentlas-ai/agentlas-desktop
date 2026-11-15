@@ -26,6 +26,8 @@ export interface LiveTyping { target: string; text: string }
 
 const AI_COLORS = ["#d97757", "#2a78d6", "#7a5bd1", "#2f9e72", "#c2417a"];
 const MAX_BACKLOG = 8;
+/** Net under liveDocument:changed (Main watches the journal directory): a missed push is read within this. */
+const LIVE_DOCUMENT_SAFETY_READ_MS = 60_000;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function colorFor(runId: string | undefined): string {
@@ -286,7 +288,8 @@ export function useLiveDocumentSession(sessionId: string | null) {
         void refresh("changed");
       }
     });
-    const timer = window.setInterval(() => void refresh("delta"), 2500);
+    // The journal watcher in Main pushes liveDocument:changed for every write by any process; the minute is only the net under it.
+    const timer = window.setInterval(() => void refresh("delta"), LIVE_DOCUMENT_SAFETY_READ_MS);
     return () => {
       disposed = true;
       if (refreshRef.current === refresh) refreshRef.current = null;

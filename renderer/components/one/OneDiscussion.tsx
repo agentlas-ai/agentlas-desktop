@@ -31,6 +31,8 @@ export interface OneDiscussionController {
 }
 
 const EMPTY_INDEX: DiscussionThreadIndex = { byId: new Map(), comments: new Map() };
+/** Net under the store:changed signals while a discussion runs. */
+const DISCUSSION_SAFETY_READ_MS = 60_000;
 
 /**
  * State of the room's discussion plus each speaker's streaming text. Streamed text comes from the speakers' own run
@@ -76,11 +78,12 @@ export function useOneDiscussion(input: { chatId: string | null; enabled: boolea
     };
   }, [chatId, enabled, load, refresh]);
 
-  // Safety net while a discussion runs: a missed change event never leaves the bar stale.
+  // Safety net while a discussion runs: a missed change event never leaves the bar stale for more than a minute. Every state change of
+  // the engine announces itself (room-discussion.ts emit -> store:changed chat), a taskforce edit as one-taskforce.
   const running = Boolean(state?.active);
   useEffect(() => {
     if (!running) { setStopping(false); return; }
-    const id = setInterval(() => { void load(); }, 2_000);
+    const id = setInterval(() => { void load(); }, DISCUSSION_SAFETY_READ_MS);
     return () => clearInterval(id);
   }, [running, load]);
 

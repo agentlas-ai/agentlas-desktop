@@ -54,7 +54,7 @@ import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { EMPTY_NO_TOOL_RAN_CODE, normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
 import {
-  serverFailure, serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, serverFailureResendLimit,
+  serverFailure, serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, serverFailureResendLimit, serverResendHintNote,
   streamErrorFrameBody, streamErrorFrameCode, waitForServerResend, type ServerFailureCode,
 } from "./provider-overload";
 import { fetchWithReconnect } from "./reconnecting-fetch";
@@ -745,7 +745,7 @@ async function runAnthropicMessagesInner(
         if (serverFailureResendable(serverCode) && serverResends < resendLimit
           && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
           serverResends += 1;
-          events.onStatus(serverResendStatus(req.locale, serverResends, resendLimit));
+          events.onStatus(serverResendStatus(req.locale, serverResends, resendLimit) + serverResendHintNote(req.locale, resp.headers.get("retry-after"), resendDelayMs));
           await waitForServerResend(resendDelayMs, req.signal);
           if (req.signal?.aborted) throw abortReasonError(req);
           turn -= 1; // the same request again, not a new tool turn
@@ -1584,7 +1584,7 @@ export const runGoogleByok: Runner = async (
         if (serverFailureResendable(serverCode) && serverResends < resendLimit
           && !ownerControl.hasPending() && !req.signal?.aborted && resendDelayMs !== null) {
           serverResends += 1;
-          events.onStatus(serverResendStatus(req.locale, serverResends, resendLimit));
+          events.onStatus(serverResendStatus(req.locale, serverResends, resendLimit) + serverResendHintNote(req.locale, resp.headers.get("retry-after"), resendDelayMs));
           await waitForServerResend(resendDelayMs, req.signal);
           if (req.signal?.aborted) throw abortReasonError(req);
           turn -= 1; // the same request again, not a new tool turn

@@ -7,7 +7,7 @@ import { orderPromptParts, registerDeclaredPromptModule, PROMPT_ORDER_REVISION, 
 /*
  * PromptModule registry — every always-on line of the shared system prompt is one registered module
  * (docs/2026-10-13-native-harness/13 §5). Owner 2026-10-13: prompts become `key: value` one-liners; anything a
- * typed tool can do is a tool (ask_form, read_ui_schema, memory_note, goal_*), and catalogs (plugins, skills,
+ * typed tool can do is a tool (ask_form, read_ui_schema, memory_ticket, goal_*), and catalogs (plugins, skills,
  * connectors) are name lists the model opens on its own.
  *
  * A module renders current host-owned facts (profile, locale, permission, runtime kind and versioned

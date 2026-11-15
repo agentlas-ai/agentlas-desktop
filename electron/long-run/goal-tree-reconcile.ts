@@ -2,7 +2,7 @@
  * Goal tree consistency pass (owner 2026-10-25: "nothing should get tangled because of harness defects, from the goal tree
  * through every step of the conversation").
  *
- * Runs at the start of every blocked-goal sweep (the startup pass after recovery, then each minute) and is idempotent: every
+ * Runs once at app start (Agentlas 2.0 N4: every close goes through closeGoal now, so this only heals what an older build left) and is idempotent: every
  * repair moves a row toward the state its ended run
  * already states, only for rows a terminal run owns, and writes one ledger event per repair. Nothing is deleted; the owner's
  * goal history stays. A second run finds nothing to do.
@@ -17,6 +17,7 @@
  */
 import { getDb } from "../store/db";
 import { appendLongRunEvent } from "../store/long-runs";
+import { closeGoal } from "../store/goal-close";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { LONG_RUN_OPEN_TASK_STATES } from "../../shared/long-run";
 
@@ -26,7 +27,6 @@ export interface GoalTreeRepair { runId: string; goalId: string; repair: "contra
 
 export function reconcileGoalTree(now = new Date()): GoalTreeRepair[] {
   const db = getDb();
-  const stamp = now.toISOString();
   const repairs: GoalTreeRepair[] = [];
   const touchedChats = new Set<string>();
 
@@ -38,16 +38,17 @@ export function reconcileGoalTree(now = new Date()): GoalTreeRepair[] {
   for (const row of contracts) {
     const to = row.runStatus === "completed" ? "completed" : "cancelled";
     const applied = db.transaction(() => {
-      const changed = db.prepare(`UPDATE chat_goal_contracts SET status = ?, completed_at = COALESCE(completed_at, ?), updated_at = ?
-        WHERE goal_id = ? AND status = ? AND updated_at = ?`).run(to, stamp, stamp, row.goalId, row.status, row.updatedAt);
-      if (changed.changes !== 1) return false;
+      const still = db.prepare("SELECT 1 FROM chat_goal_contracts WHERE goal_id = ? AND status = ? AND updated_at = ?").get(row.goalId, row.status, row.updatedAt);
+      if (!still) return false;
+      // The one close (store/goal-close.ts) gives the contract the run's outcome, clears the link and ends the open tasks.
+      const closed = closeGoal(row.goalId, to, "cleanup", { reason: "contract_follows_ended_run" });
+      if (!closed.contractEnded) return false;
       const wasBound = row.chatGoalId === row.goalId;
-      if (wasBound) db.prepare("UPDATE chats SET goal_id = NULL, continuous_mode = 0, updated_at = ? WHERE id = ? AND goal_id = ?").run(stamp, row.chatId, row.goalId);
       const detail = { from: row.status, to, runStatus: row.runStatus, chatId: row.chatId, chatWasBound: wasBound, previousUpdatedAt: row.updatedAt };
       appendLongRunEvent({ runId: row.runId, kind: GOAL_TREE_RECONCILED_KIND, actorKind: "host", payload: { repair: "contract_follows_ended_run", ...detail } });
       repairs.push({ runId: row.runId, goalId: row.goalId, repair: "contract_follows_ended_run", detail });
       return wasBound;
-    })();
+    }).immediate();
     if (applied) touchedChats.add(row.chatId);
   }
 
@@ -60,14 +61,12 @@ export function reconcileGoalTree(now = new Date()): GoalTreeRepair[] {
       const open = db.prepare(`SELECT id, state FROM long_run_tasks WHERE run_id = ? AND state IN (${states.map(() => "?").join(",")})`)
         .all(run.runId, ...states) as Array<{ id: string; state: string }>;
       if (!open.length) return;
-      db.prepare(`UPDATE long_run_tasks SET state = 'cancelled', updated_at = ?, completed_at = COALESCE(completed_at, ?)
-        WHERE run_id = ? AND state IN (${states.map(() => "?").join(",")})`).run(stamp, stamp, run.runId, ...states);
-      for (const task of open) appendLongRunEvent({ runId: run.runId, kind: "task.status_changed", actorKind: "host",
-        payload: { taskId: task.id, from: task.state, to: "cancelled", reason: "run_ended" } });
+      // The one close ends the open tasks (and repeats the rest idempotently): the run is already ended, only the leftovers move.
+      closeGoal(run.goalId, run.runStatus === "completed" ? "completed" : "cancelled", "cleanup", { reason: "tasks_follow_ended_run" });
       const detail = { runStatus: run.runStatus, tasks: open.map((task) => ({ id: task.id, from: task.state })) };
       appendLongRunEvent({ runId: run.runId, kind: GOAL_TREE_RECONCILED_KIND, actorKind: "host", payload: { repair: "tasks_follow_ended_run", ...detail } });
       repairs.push({ runId: run.runId, goalId: run.goalId, repair: "tasks_follow_ended_run", detail });
-    })();
+    }).immediate();
   }
   for (const chatId of touchedChats) emitDesktopStoreChange({ entity: "chat", id: chatId });
   return repairs;

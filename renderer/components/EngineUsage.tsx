@@ -1,27 +1,29 @@
-// 대시보드 "엔진 사용량" 카드 — 모든 엔진을 카탈로그로 보여준다.
-//   · 구독형(Claude·Codex): 연결 시 usage.snapshot()의 5시간/주간/일일 바.
-//   · Antigravity: agy 연결 상태와 런타임이 제공한 모델 목록을 기준으로 표시한다.
-//   · API키형(DeepSeek·GLM·Pi): 연결 시 "키 과금", 미연결 시 키 입력 팝업.
-//   · Grok CLI: 실제 402가 확인되면 소진 상태와 공식 Usage 이동 버튼.
-//   · 로컬(Agentlas Local): "무제한".
-// 미연결 엔진은 [연결] 버튼 — CLI는 자동설치+로그인창, API키는 인라인 입력 후 저장.
-// 연결 액션은 대시보드에서 항상 보여야 한다. 사용자가 예전에 접은 상태 때문에
-// "LLM 연결이 사라진" 것처럼 보이지 않도록 이 표면은 접지 않는다.
+// Dashboard "Connections and usage" card (Agentlas 2.0 F-D2): one row per connection, the shape of mockups/dashboard-final.
+//   - the seven subscription CLIs (claude-code, codex, antigravity, grok, kimi, cursor, github-copilot-cli): a dot, the name, the most used window as a bar with
+//     "42% · resets in 3h", or the state in words (Sign in again / Not set up / a usage error), and the one action (Sign in / Set up / Try again).
+//     A CLI that gives no usage numbers gets no bar: nothing is drawn that was not read.
+//   - Local models: one row (a loaded model, a detected local runtime, or Off / Set up).
+//   - API keys: the connected ones as rows ("Key billed"); the others behind "Show API keys".
+//   - AI credits (the same read as the sidebar balance) and the "Use automatically" switch (credits after a subscription limit).
+// Reads: usage on a signal (runtime change, a run settling, the window coming back), never an idle timer; credits and the local model on the same signals.
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
-import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
-import { LocalModelMiniCards, useLocalModelSnapshot } from "@/components/dashboard/LocalModelMiniCards";
+import { IconAlertTriangle, IconCircleDollar, IconCpu, IconKey, IconRefresh } from "@/components/Icon";
+import { COPY, pick } from "@/components/dashboard/dashboard-copy";
+import s from "@/components/dashboard/Dashboard.module.css";
+import type { LocalModelHubSnapshot } from "@shared/local-model-hub";
 import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 import { manualSetupFor, manualSetupShellLabel, manualSetupText, setupOsFromNavigator, type ManualSetupRuntime } from "@shared/runtime-manual-setup";
-import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow, providerHasUsableCredits } from "@shared/runtime-quota";
+import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow } from "@shared/runtime-quota";
 import type { ByokBackend } from "@shared/models";
 import type {
   CliRuntimeVersionStatus,
   EnvVarMeta,
+  HubCreditBalance,
   ProviderUsage,
   RuntimeStatus,
   UsageRetryProviderId,
@@ -29,11 +31,14 @@ import type {
   UsageWindow,
 } from "@/lib/types";
 
-// 사용량 %는 몇 분 단위로만 변하고, Main의 usage snapshot/어댑터 캐시가
-// 실제 공급자 호출을 막는다. 여기서는 Main 소유 `agy update`가 끝난 뒤
-// 카드가 오래된 "auto-update failed" 상태를 붙잡지 않도록 15초마다 같은
-// 캐시된 snapshot을 재확인한다(수동 새로고침만 force 조회).
-const POLL_MS = 15_000;
+// Usage is read on a signal, never on an idle timer: every usage:snapshot makes Main probe the installed CLIs
+// (its detect cache is 10 s), so a 15 s poll started CLI processes for as long as the Dashboard was open.
+// A read older than this is refreshed when the window comes back (this was the old poll interval).
+const USAGE_STALE_MS = 15_000;
+// While a CLI shows "checking", "update-available" or "updating", Main's background cycle is still running and ends
+// without a push unless the update succeeded. Only then the card looks again, this often and at most this many times.
+const UPDATE_FOLLOW_UP_MS = 15_000;
+const UPDATE_FOLLOW_UP_MAX = 20;
 const WARN_PCT = 80;
 type EngineAuth = "cli" | "apikey" | "local";
 interface EngineDef {
@@ -101,28 +106,13 @@ function formatReset(resetAt: number | null | undefined, ko: boolean): string {
   if (!resetAt) return "";
   const diff = resetAt - Date.now();
   // Owner 2026-10-13: "2% · 3m", "2% · 7d" — the unit letter is enough, no "resets in" words.
-  void ko;
-  if (diff <= 0) return "0m";
+  // The Korean picture (desktop-impl-gaps-1-ko B) spells the unit: "3시간 뒤 초기화".
+  if (diff <= 0) return ko ? "0분" : "0m";
   const mins = Math.round(diff / 60_000);
-  if (mins < 60) return `${mins}m`;
+  if (mins < 60) return ko ? `${mins}분` : `${mins}m`;
   const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h`;
-  return `${Math.round(hrs / 24)}d`;
-}
-
-// "12.4 / 50" 대신 통화코드가 오면 실제 통화로 — 청구액은 단위 없이 쓰면 안 된다.
-function formatCredits(used: number, limit: number, unit?: string | null): string {
-  const code = typeof unit === "string" && /^[A-Za-z]{3}$/.test(unit) ? unit.toUpperCase() : null;
-  if (code) {
-    try {
-      const fmt = new Intl.NumberFormat(undefined, { style: "currency", currency: code, maximumFractionDigits: 2 });
-      return `${fmt.format(used)} / ${fmt.format(limit)}`;
-    } catch {
-      // 알 수 없는 코드 — 아래 일반 표기로 폴백
-    }
-  }
-  const n = (v: number) => String(Math.round(v * 100) / 100);
-  return `${n(used)} / ${n(limit)} ${unit || "credits"}`;
+  if (hrs < 24) return ko ? `${hrs}시간` : `${hrs}h`;
+  return ko ? `${Math.round(hrs / 24)}일` : `${Math.round(hrs / 24)}d`;
 }
 
 function formatTokens(n: number): string {
@@ -130,159 +120,6 @@ function formatTokens(n: number): string {
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
   if (n >= 1e3) return `${Math.round(n / 1e3)}K`;
   return String(n);
-}
-
-/** 47244.8 → "47k", 3000 → "3k", 1500 → "1.5k", 200 → "200" (owner 2026-10-13). */
-function compactAmount(value: number): string {
-  const abs = Math.abs(value);
-  const trim = (n: number) => String(Math.round(n * 10) / 10).replace(/\.0$/, "");
-  if (abs >= 1e6) return `${trim(value / 1e6)}M`;
-  if (abs >= 1e4) return `${Math.round(value / 1e3)}k`;
-  if (abs >= 1e3) return `${trim(value / 1e3)}k`;
-  return String(Math.round(value));
-}
-
-/** Just the balance: the row and the card already say which provider and that it is credit. */
-function providerCreditsBalance(usage: ProviderUsage, ko: boolean): string | null {
-  const credits = usage.credits;
-  if (!credits) return null;
-  return credits.unlimited
-    ? ko ? "무제한" : "unlimited"
-    : typeof credits.balance === "number" && Number.isFinite(credits.balance)
-      ? credits.unit === "USD cents"
-        ? `$${compactAmount(credits.balance / 100)}`
-        : compactAmount(credits.balance)
-      : ko ? "잔액 확인 필요" : "balance unavailable";
-}
-
-function providerCreditsLabel(usage: ProviderUsage, ko: boolean): string | null {
-  const credits = usage.credits;
-  if (!credits) return null;
-  const balance = providerCreditsBalance(usage, ko);
-  const continuation = usage.allowPaidUsage !== false && !usage.stale && providerHasUsableCredits(usage)
-    ? ko ? " · 구독 한도 이후 사용" : " · usable after limit"
-    : "";
-  return `${usage.label} ${ko ? "크레딧" : "credits"} ${balance}${continuation}`;
-}
-
-function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
-  // 로컬 추정 창(unit="tokens", 서버 % 없음) — %바 대신 토큰 절대량을 보여준다.
-  const isLocalTokens = w.unit === "tokens" && w.used != null;
-  const pct = Math.max(0, Math.min(100, Math.round(w.usedPercent)));
-  if (isLocalTokens && pct === 0) {
-    return (
-      <div className="dashboard-usage-bar" data-local="true">
-        <span>{windowLabel(w, ko)}</span>
-        <div><div style={{ width: "0%" }} /></div>
-        <span title={ko ? "로컬 로그 기준 실사용 토큰(서버 리밋 조회 대기)" : "tokens from local logs (server limit pending)"}>
-          {formatTokens(w.used ?? 0)} {ko ? "토큰" : "tok"}
-        </span>
-        <span />
-      </div>
-    );
-  }
-  const warn = pct >= WARN_PCT;
-  const fill = warn ? "var(--red-deep, var(--danger))" : "var(--accent)";
-  // 월 크레딧(유료 초과분)엔 resets_at이 없어 마지막 칸이 늘 비어 있었다 —
-  // %만 남으면 "얼마가 청구되는지"가 사라지므로, 어댑터가 계산해 둔
-  // used/limit/통화를 그 칸에 그대로 보여준다.
-  const money = w.kind === "monthly" && w.used != null && w.limit != null
-    ? formatCredits(w.used, w.limit, w.unit)
-    : null;
-  return (
-    <div className="dashboard-usage-bar">
-      <span>{windowLabel(w, ko)}</span>
-      <div role="progressbar" aria-label={`${windowLabel(w, ko)} ${ko ? "사용량" : "usage"}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
-        <div style={{ width: `${pct}%`, background: fill }} />
-      </div>
-      <span data-warn={warn ? "true" : "false"}>{`${pct}%`}</span>
-      <span title={money ?? undefined}>{money ?? formatReset(w.resetAt, ko)}</span>
-    </div>
-  );
-}
-
-/** A wallet has no known total: show its balance without inventing a percent. */
-function ProviderCreditBar({ usage, ko }: { usage: ProviderUsage; ko: boolean }) {
-  // Owner 2026-10-13: a coin icon and the short balance only; a provider without a credit balance (Claude Code's
-  // extra usage) shows no row at all. The full sentence stays in the tooltip.
-  const label = providerCreditsLabel(usage, ko);
-  const shown = providerCreditsBalance(usage, ko);
-  if (!label || !shown) return null;
-  return <div className="dashboard-usage-bar" data-credit-balance="true" title={label}>
-    <span aria-label={ko ? "크레딧" : "Credits"} style={{ display: "inline-flex", alignItems: "center" }}>
-      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><ellipse cx="8" cy="5" rx="5.5" ry="2.5" stroke="currentColor" strokeWidth="1.3" /><path d="M2.5 5v6c0 1.4 2.5 2.5 5.5 2.5s5.5-1.1 5.5-2.5V5" stroke="currentColor" strokeWidth="1.3" /><path d="M2.5 8c0 1.4 2.5 2.5 5.5 2.5s5.5-1.1 5.5-2.5" stroke="currentColor" strokeWidth="1.3" /></svg>
-    </span>
-    <div aria-hidden="true" />
-    <span style={{ gridColumn: "3 / 5", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shown}</span>
-  </div>;
-}
-
-function ModelRoleUsage({ value, ko }: {
-  value: UsageSnapshot["modelRoleUsage"];
-  ko: boolean;
-}) {
-  if (!value) return null;
-  // A cached snapshot may have been written by a pre-model-breakdown build.
-  // Keep that old card renderable while the next Main snapshot backfills the
-  // new exact model/effort rows.
-  const modelBuckets = value.byModel ?? [];
-  const workerPct = value.workerSharePercent;
-  const orchestratorPct = value.totalObservedTokens > 0 ? 100 - workerPct : 0;
-  const measurementLabel = value.measurement === "output-only"
-    ? ko ? "관측 출력 토큰" : "observed output tokens"
-    : ko ? "관측 전체 토큰" : "observed total tokens";
-  return (
-    <section className="dashboard-role-usage" aria-label={ko ? "모델 역할별 사용량" : "Model usage by role"}>
-      <div className="dashboard-role-usage-head">
-        <span>{ko ? "모델 역할 사용량 · 7일" : "Model role usage · 7d"}</span>
-        <strong>{value.totalObservedTokens > 0
-          ? ko ? `워커 ${workerPct}%` : `${workerPct}% worker`
-          : ko ? "관측 데이터 없음" : "No observed usage"}</strong>
-      </div>
-      <div
-        className="dashboard-role-usage-track"
-        role="img"
-        aria-label={
-          value.totalObservedTokens > 0
-            ? ko
-              ? `오케스트레이터 ${orchestratorPct}%, 워커 ${workerPct}%`
-              : `${orchestratorPct}% orchestrator, ${workerPct}% worker`
-            : ko ? "관측된 모델 사용량 없음" : "No observed model usage"
-        }
-      >
-        <span data-role="orchestrator" style={{ width: `${orchestratorPct}%` }} />
-        <span data-role="worker" style={{ width: `${workerPct}%` }} />
-      </div>
-      <div className="dashboard-role-usage-legend">
-        <span><i data-role="orchestrator" />Orch {formatTokens(value.orchestrator.observedTokens)} · {value.orchestrator.invocationCount}</span>
-        <span><i data-role="worker" />Worker {formatTokens(value.worker.observedTokens)} · {value.worker.invocationCount}</span>
-        <small>{measurementLabel}</small>
-      </div>
-      {modelBuckets.length > 0 && (
-        <div className="dashboard-role-usage-models" aria-label={ko ? "모델·작업량별 관측 사용량" : "Observed usage by model and effort"}>
-          {modelBuckets.map((entry) => {
-            /*
-             * ★칩 문구는 **들어갈 폭까지** 맞아야 한다. 정식 명칭("오케스트레이터")은 이
-             *   한 줄(`Orch · anthropic · 모델 미상 · 기본/미상 · 2K · 3`)을 밀어내므로
-             *   두 글자로 줄인다. 뜻은 옆의 title 이 온전히 말한다.
-             */
-            const role = entry.role === "orchestrator" ? (ko ? "지휘" : "Orch") : (ko ? "작업" : "Worker");
-            const model = entry.model ?? (ko ? "모델 미상" : "unknown model");
-            const effort = entry.effort ?? (ko ? "기본/미상" : "default/unknown");
-            return (
-              <span
-                key={`${entry.role}:${entry.provider}:${entry.model ?? ""}:${entry.effort ?? ""}`}
-                data-model-role-usage-row
-                title={`${entry.provider} · ${model} · ${effort}`}
-              >
-                <b>{role}</b> · {entry.provider} · {model} · {effort} · {formatTokens(entry.observedTokens)} · {entry.invocationCount}
-              </span>
-            );
-          })}
-        </div>
-      )}
-    </section>
-  );
 }
 
 export function EngineUsage() {
@@ -306,11 +143,12 @@ export function EngineUsage() {
   const [notice, setNotice] = useState<{ id: string; text: string; command?: string; commandLabel?: string; note?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
-  // 접이식 그룹(구독형·CLI / API 키 / 로컬). 기본 펼침.
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const usageRequestGen = useRef(0);
+  const usageReadAt = useRef(0);
+  const updateFollowUps = useRef(0);
 
   const loadUsage = useCallback(async (force = false) => {
+    usageReadAt.current = Date.now();
     const requestId = ++usageRequestGen.current;
     const api = ipc();
     if (!api) {
@@ -375,11 +213,13 @@ export function EngineUsage() {
     }
   }, [loadConnections]);
 
-  // 초기 1회 load(usage+connections)는 유지, 주기 폴링(60s)은 loadUsage만 탭 보일 때 — useVisibleInterval이 hidden 시 정지.
+  // One read of usage and connections on mount. After that, signals only (below).
   useEffect(() => {
     void loadConnections();
-  }, [loadConnections]);
+    void loadUsage();
+  }, [loadConnections, loadUsage]);
 
+  // Signal: Main reports a runtime change (sign-in or sign-out, install, a finished CLI update).
   useEffect(() => {
     const events = ipcEvents();
     if (!events?.onStoreChanged) return;
@@ -387,13 +227,62 @@ export function EngineUsage() {
       if (change.entity === "runtime") {
         void loadConnections(true);
         void refreshAuth();
+        void loadUsage();
       }
     });
-  }, [loadConnections, refreshAuth]);
-  useVisibleInterval(() => loadUsage(), POLL_MS, { initial: loadUsage });
-  // 로컬 묶음은 엔진 카드가 아니라 설치된 모델 카드(한 행 두 장)를 그린다 — 2026-09-13.
-  const localModels = useLocalModelSnapshot();
+  }, [loadConnections, refreshAuth, loadUsage]);
 
+  // Signals: a run finished (it spent quota, and a CLI update that waited for runs can start), and the window
+  // coming back after the figures are older than the old poll interval.
+  useEffect(() => {
+    let active: ReadonlySet<string> | null = null;
+    const offActive = ipcEvents()?.onActiveChats?.((chatIds) => {
+      const next = new Set(chatIds);
+      const settled = active !== null && [...active].some((chatId) => !next.has(chatId));
+      active = next;
+      if (settled) void loadUsage();
+    });
+    const whenStale = () => {
+      if (document.visibilityState !== "hidden" && Date.now() - usageReadAt.current >= USAGE_STALE_MS) void loadUsage();
+    };
+    window.addEventListener("focus", whenStale);
+    document.addEventListener("visibilitychange", whenStale);
+    return () => {
+      offActive?.();
+      window.removeEventListener("focus", whenStale);
+      document.removeEventListener("visibilitychange", whenStale);
+    };
+  }, [loadUsage]);
+
+  // Bounded follow-up, only while a CLI version check or update is in progress. A settled card schedules nothing.
+  useEffect(() => {
+    const inProgress = snap?.runtimeVersions?.some((version) => (
+      version.state === "checking" || version.state === "update-available" || version.state === "updating"
+    ));
+    if (!inProgress) { updateFollowUps.current = 0; return; }
+    if (updateFollowUps.current >= UPDATE_FOLLOW_UP_MAX) return;
+    const timer = window.setTimeout(() => {
+      // Hidden: the visibility signal above reads when the window comes back.
+      if (document.visibilityState === "hidden") return;
+      updateFollowUps.current += 1;
+      void loadUsage();
+    }, UPDATE_FOLLOW_UP_MS);
+    return () => window.clearTimeout(timer);
+  }, [snap, loadUsage]);
+  // A quota window's reset is a known time: one read just after the earliest one, so a focused Dashboard does not keep
+  // showing "limit reached" past the reset. A reset already in the past schedules nothing.
+  useEffect(() => {
+    const now = Date.now();
+    const resets = (snap?.providers ?? []).flatMap((provider) => provider.windows ?? [])
+      .map((usageWindow) => usageWindow.resetAt ?? 0).filter((at) => at > now);
+    if (resets.length === 0) return;
+    const wait = Math.min(Math.max(USAGE_STALE_MS, Math.min(...resets) - now + 5_000), 2_147_000_000);
+    const timer = window.setTimeout(() => {
+      // Hidden: the visibility signal above reads when the window comes back.
+      if (document.visibilityState !== "hidden") void loadUsage();
+    }, wait);
+    return () => window.clearTimeout(timer);
+  }, [snap, loadUsage]);
   useEffect(() => () => {
     usageRequestGen.current++; // 늦게 끝난 snapshot이 unmount 뒤 상태를 덮지 않게 한다.
   }, []);
@@ -484,10 +373,6 @@ export function EngineUsage() {
     }
   }
 
-  function busyLabel(): string {
-    return ko ? "연결 중…" : "Connecting…";
-  }
-
   // 기본 엔진 선택 — 연결/사용량과 "기본으로 쓸 엔진" 상태를 분리해 표시한다.
   function runtimeFor(e: EngineDef): RuntimeStatus | undefined {
     if (e.auth === "cli") {
@@ -562,115 +447,118 @@ export function EngineUsage() {
     return ko ? "연결됨" : "connected";
   }
 
-  const renderEngineCard = (e: EngineDef) => {
+  /** The one window that says the most: the most used subscription window. The others stay in the tooltip. */
+  function mostUsed(windows: UsageWindow[]): UsageWindow | null {
+    let best: UsageWindow | null = null;
+    for (const w of windows) if (!best || w.usedPercent > best.usedPercent) best = w;
+    return best;
+  }
+  function usageText(w: UsageWindow): string {
+    const isLocalTokens = w.unit === "tokens" && w.used != null && Math.round(w.usedPercent) === 0;
+    if (isLocalTokens) return `${formatTokens(w.used ?? 0)} ${ko ? "토큰" : "tok"}`;
+    const pct = `${Math.max(0, Math.min(100, Math.round(w.usedPercent)))}%`;
+    const reset = formatReset(w.resetAt, ko);
+    return reset ? `${pct} · ${ko ? `${reset} 뒤 초기화` : `resets in ${reset}`}` : pct;
+  }
+
+  const [apiOpen, setApiOpen] = useState(false);
+  const [localSnap, setLocalSnap] = useState<LocalModelHubSnapshot | null>(null);
+  const [credits, setCredits] = useState<HubCreditBalance | null>(() => readViewData<HubCreditBalance>("shell.credit-balance")?.value ?? null);
+  const [creditsFailed, setCreditsFailed] = useState(false);
+
+  const loadCredits = useCallback(async (force = false) => {
+    const api = ipc();
+    if (!api?.billing) return;
+    try {
+      // The same read and the same cache key as the sidebar's balance: one answer for both.
+      const next = await loadViewData("shell.credit-balance", () => (force ? api.billing.getCredits({ force: true }) : api.billing.getCredits()), { maxAgeMs: 60_000, force });
+      setCredits((prev) => (prev && next.authenticated && typeof next.remainingCredits !== "number" ? prev : next));
+      setCreditsFailed(false);
+    } catch { setCreditsFailed(true); }
+  }, []);
+  const loadLocal = useCallback(async () => {
+    try { const value = await ipc()?.localModelHub?.snapshot(); if (value) setLocalSnap(value); }
+    catch { /* a failed read is not "no model": the row keeps what it had */ }
+  }, []);
+  // Credits and the local model follow the same signals as usage (run settled, runtime change, window back, mount).
+  useEffect(() => {
+    void loadCredits(); void loadLocal();
+    const onAuth = () => void loadCredits(true);
+    window.addEventListener("agentlas:auth-changed", onAuth);
+    const off = ipcEvents()?.onStoreChanged?.((change) => { if (change.entity === "runtime") { void loadLocal(); void loadCredits(); } });
+    const whenBack = () => { if (document.visibilityState !== "hidden") { void loadLocal(); void loadCredits(); } };
+    window.addEventListener("focus", whenBack);
+    return () => { window.removeEventListener("agentlas:auth-changed", onAuth); off?.(); window.removeEventListener("focus", whenBack); };
+  }, [loadCredits, loadLocal]);
+
+  const cliEngines = ENGINES.filter((e) => e.auth === "cli");
+  const apiEngines = ENGINES.filter((e) => e.auth === "apikey");
+  const rowLabel = (e: EngineDef) => (e.auth === "apikey" ? `${e.label.replace(/^\(API\)\s*/, "")} API` : e.label);
+
+  const renderRow = (e: EngineDef) => {
     const u = usageFor(e.id);
-    const visibleWindows = u?.windows.filter(window => isSupportedProviderUsageWindow(window, e.id)) ?? [];
-    const subscriptionWindows = visibleWindows.filter(window => !isPaidOverageUsageWindow(window, e.id));
-    const creditWindows = visibleWindows.filter(window => isPaidOverageUsageWindow(window, e.id));
+    const visibleWindows = u?.windows.filter((window) => isSupportedProviderUsageWindow(window, e.id)) ?? [];
+    const subscriptionWindows = visibleWindows.filter((window) => !isPaidOverageUsageWindow(window, e.id));
     const connected = isConnected(e);
     const rt = runtimeFor(e);
-    const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
-    const hasBars = connected && (visibleWindows.length > 0 || !!u?.credits || !!u?.extraUsage);
-    const terminalError = connected && isTerminalProviderError(u);
-    const retryableError = connected && u?.status === "error" && !isRateLimited(u);
-    // The default-engine status and the "use as default" action belong at the
-    // top-right of the card (compact), not in the action foot.
-    const activeRoles = connected
-      ? rt?.activeRoles ?? (rt?.active ? ["orchestrator"] : [])
-      : [];
-    // Owner 2026-10-13: no "연결됨 · v… · 최신" or "구독 · 미연결" lines. A Connect button already says "not
-    // connected"; a working card needs no words. Only a problem the owner must act on keeps a line.
-    const statusProblem = connected && (terminalError || u?.status === "error" || u?.error === "keychain_blocked");
-    const statusLine = connected ? `${statusText(e, u)}${runtimeVersionLabel ? ` · ${runtimeVersionLabel}` : ""}` : "";
-    const actions = terminalError ? (
-      <button onClick={() => openProviderHelp(e)} className="titlebar-nodrag" title={e.id === "grok" ? (ko ? "Grok Settings에서 사용량 확인" : "Open Grok usage settings") : (ko ? "Antigravity 안내 열기" : "Open Antigravity")}>
-        {e.id === "grok" ? (ko ? "Usage 열기" : "Open usage") : (ko ? "Antigravity" : "Antigravity")}
-      </button>
+    const isApi = e.auth === "apikey";
+    const terminalError = connected && !isApi && isTerminalProviderError(u);
+    const retryableError = connected && !isApi && u?.status === "error" && !isRateLimited(u);
+    const problem = connected && !isApi && (terminalError || u?.status === "error" || u?.error === "keychain_blocked");
+    const authKind = e.cliKind ?? e.detectKind;
+    const authState = authKind ? runtimeAuth[authKind]?.state : undefined;
+    // Sign in again: the CLI is there but not signed in, or Main saw a login failure on it that has not been followed by a success (RuntimeStatus.signInRequired).
+    const installedNotSignedIn = !isApi && !!rt && (!connected || !!rt.signInRequired);
+    const best = connected && !problem && !isApi && !installedNotSignedIn ? mostUsed(subscriptionWindows) : null;
+    const tipParts = [
+      runtimeVersionText(runtimeVersionFor(e)),
+      ...subscriptionWindows.map((w) => `${windowLabel(w, ko)} ${Math.round(w.usedPercent)}%${w.resetAt ? ` · ${formatReset(w.resetAt, ko)}` : ""}`),
+      u ? `${ko ? "마지막 확인" : "Last checked"} ${new Date(u.fetchedAt).toLocaleString(ko ? "ko-KR" : "en-US")}` : "",
+    ].filter(Boolean);
+    const dotTone = problem || installedNotSignedIn ? "warn" : connected ? "ok" : "idle";
+    const setUpAction = () => (e.apiBackend === "custom" ? navigate("/settings") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e));
+    let mid: ReactNode;
+    if (connected && isApi) mid = <span className={s.cstate}>{pick(ko, COPY.keyBilled)}</span>;
+    else if (problem) mid = <span className={s.cstate} data-tone={u?.status === "error" ? "error" : "warn"} title={tipParts.join(" · ")}>{statusText(e, u)}</span>;
+    else if (installedNotSignedIn) mid = <span className={s.cstate} data-tone="warn"><IconAlertTriangle size={14} />{pick(ko, authState === "unknown" && !rt?.signInRequired ? COPY.statusUnknown : COPY.signInAgain)}</span>;
+    else if (best) {
+      const pct = Math.max(0, Math.min(100, Math.round(best.usedPercent)));
+      mid = <div className={s.cmid} title={tipParts.join("\n")}>
+        <div className={s.bar} role="progressbar" aria-label={`${windowLabel(best, ko)} ${ko ? "사용량" : "usage"}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} data-hot={pct >= WARN_PCT ? "true" : "false"}><i style={{ width: `${pct}%` }} /></div>
+        <span className={s.num} data-warn={pct >= WARN_PCT ? "true" : "false"}>{usageText(best)}</span>
+      </div>;
+    } else if (connected) mid = <span className={s.cstate} title={tipParts.join(" · ")}>{statusText(e, u)}</span>;
+    else if (installedNotSignedIn) mid = <span className={s.cstate} data-tone="warn"><IconAlertTriangle size={14} />{pick(ko, authState === "unknown" ? COPY.statusUnknown : COPY.signInAgain)}</span>;
+    else mid = <span className={s.cstate}>{pick(ko, COPY.notSetUp)}</span>;
+    const act = terminalError ? (
+      <button type="button" className={s.cact} onClick={() => openProviderHelp(e)}>{e.id === "grok" ? pick(ko, COPY.openUsage) : "Antigravity"}</button>
     ) : retryableError ? (
-      <>
-        <button onClick={() => { if (e.retryProviderId) void retryProviderUsage(e.retryProviderId); }} disabled={busy === e.id} className="titlebar-nodrag" title={ko ? "사용량 조회 다시 시도" : "Retry usage fetch"}>
-          {ko ? "다시 시도" : "Retry"}
-        </button>
-        {e.auth === "cli" && (
-          <button onClick={() => void connectCli(e)} disabled={busy === e.id} className="titlebar-nodrag" title={ko ? "CLI 재로그인" : "Re-login CLI"}>
-            {busy === e.id ? busyLabel() : ko ? "재로그인" : "Re-login"}
-          </button>
-        )}
-      </>
-    ) : !connected ? (
-      <button onClick={() => (e.auth === "local" ? navigate("/local-models") : e.apiBackend === "custom" ? navigate("/settings") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
-        {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
+      <span className={s.cacts}>
+        <button type="button" className={s.cact} disabled={busy === e.id} onClick={() => { if (e.retryProviderId) void retryProviderUsage(e.retryProviderId); }}>{pick(ko, COPY.retry)}</button>
+        {e.auth === "cli" && <button type="button" className={s.cact} disabled={busy === e.id} onClick={() => void connectCli(e)}>{busy === e.id ? pick(ko, COPY.connecting) : pick(ko, COPY.signIn)}</button>}
+      </span>
+    ) : !connected || installedNotSignedIn ? (
+      <button type="button" className={s.cact} disabled={busy === e.id} onClick={setUpAction}>
+        {busy === e.id ? pick(ko, COPY.connecting) : installedNotSignedIn ? pick(ko, COPY.signIn) : pick(ko, COPY.setUp)}
       </button>
-    ) : null;
+    ) : <span />;
     return (
-      <div key={e.id} className="dashboard-engine-card" data-provider={e.id} data-connected={connected ? "true" : "false"}>
-        <div className="dashboard-engine-card-head">
-          <span className="dashboard-engine-logo" aria-hidden="true"><img src={e.logoSrc} alt="" /></span>
-          <span className="sr-only">{e.logoAlt}</span>
-          <span className="dashboard-engine-card-name">{e.label}</span>
-          <span className="dashboard-engine-head-right" style={{ marginLeft: "auto" }}>
-            {activeRoles.length > 0 ? (
-              <>
-                {activeRoles.map((role) => (
-                  <span
-                    className="dashboard-engine-default"
-                    key={role}
-                    title={
-                      role === "orchestrator"
-                        ? ko
-                          ? "오케스트레이터 기본 엔진"
-                          : "Orchestrator default engine"
-                        : ko
-                          ? "워커 기본 엔진"
-                          : "Worker default engine"
-                    }
-                  >
-                    {role === "orchestrator" ? (ko ? "지휘" : "Orch") : (ko ? "작업" : "Worker")}
-                  </span>
-                ))}
-              </>
-            ) : !connected && actions ? (
-              // Not connected: the Connect button sits on the title row so the card stays one row tall.
-              <span className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</span>
-            ) : null}
-          </span>
-        </div>
-        {statusProblem && <div
-          className="dashboard-engine-card-status"
-          data-terminal-state={terminalError ? "true" : undefined}
-          style={connected && u?.status === "error" ? { color: "var(--dash-red)" } : undefined}
-          title={`${statusLine}${u ? ` · ${ko ? "마지막 확인" : "Last checked"} ${new Date(u.fetchedAt).toLocaleString(ko ? "ko-KR" : "en-US")}` : ""}`}
-        >
-          {statusLine}
-        </div>}
-        {hasBars && (
-          <div className="dashboard-engine-card-body">
-            {/* 알려진 창은 모두 그린다. 이전 캐시의 알 수 없는 Claude 창은 제외한다.
-                예전 slice(0, 3) 상한은 창이 5개인
-                Claude Max에서 유료 초과분(extra_usage)과 Sonnet 7일을 조용히
-                잘라내, 실제로 청구되는 금액을 앱에서 볼 방법이 없게 만들었다.
-                카드는 flex column이라 창 수만큼 자연히 늘어난다. */}
-            {subscriptionWindows.slice(0, 2).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
-            {creditWindows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
-            {u && creditWindows.length === 0 && <ProviderCreditBar usage={u} ko={ko} />}
-            {subscriptionWindows.slice(2).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
-          </div>
-        )}
-        {connected && actions && (
-          <div className="dashboard-engine-card-foot">
-            {actions ? <div className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</div> : <span />}
-          </div>
-        )}
+      <div key={e.id} className={s.crow} data-provider={e.id} data-connected={connected ? "true" : "false"} data-state={dotTone}>
+        <i className={s.statusDot} data-tone={dotTone === "ok" ? "ok" : dotTone === "warn" ? "warn" : "idle"} aria-hidden="true" />
+        <img src={e.logoSrc} alt="" />
+        <span className={s.cname}>{rowLabel(e)}</span>
+        {mid}
+        {act}
         {keyFor === e.id && !connected && (
-          <div className="dashboard-key-editor">
-            <input type="password" autoFocus value={keyVal} onChange={(ev) => setKeyVal(ev.target.value)} onKeyDown={(ev) => ev.key === "Enter" && void saveKey(e)} placeholder={e.keyEnv} className="titlebar-nodrag" />
-            <button onClick={() => void saveKey(e)} disabled={busy === e.id || !keyVal.trim()} className="titlebar-nodrag">{ko ? "저장" : "Save"}</button>
+          <div className={s.keyEdit}>
+            <input type="password" autoFocus value={keyVal} onChange={(ev) => setKeyVal(ev.target.value)} onKeyDown={(ev) => ev.key === "Enter" && void saveKey(e)} placeholder={e.keyEnv} aria-label={`${rowLabel(e)} API key`} />
+            <button type="button" className={s.btn} onClick={() => void saveKey(e)} disabled={busy === e.id || !keyVal.trim()}>{pick(ko, COPY.save)}</button>
           </div>
         )}
         {notice?.id === e.id && (
-          <div role="alert" style={{ fontSize: 11, lineHeight: 1.5, color: "var(--dash-red)", background: "var(--paper)", border: "1px solid var(--paper-edge)", borderRadius: 8, padding: "6px 9px", overflowWrap: "anywhere" }}>
+          <div role="alert" className={s.cnote}>
             {notice.text}
-            {notice.command && (<> {notice.commandLabel ?? (ko ? "터미널에서 직접 실행:" : "Run manually:")} <code style={{ display: "block", whiteSpace: "pre-wrap", marginTop: 2 }}>{notice.command}</code></>)}
+            {notice.command && (<> {notice.commandLabel ?? (ko ? "터미널에서 직접 실행:" : "Run manually:")} <code>{notice.command}</code></>)}
             {notice.note && <><br />{notice.note}</>}
           </div>
         )}
@@ -678,20 +566,36 @@ export function EngineUsage() {
     );
   };
 
-  const engineGroups = [
-    { key: "cli", label: ko ? "구독형 · CLI" : "Subscription · CLI", engines: ENGINES.filter((e) => e.auth === "cli") },
-    { key: "apikey", label: ko ? "API 키" : "API key", engines: ENGINES.filter((e) => e.auth === "apikey") },
-    { key: "local", label: ko ? "로컬" : "Local", engines: ENGINES.filter((e) => e.auth === "local") },
-  ].filter((g) => g.engines.length > 0);
+  // The local row: a loaded model, a detected local runtime, or nothing. It says only what was read.
+  const localKinds = new Set(["agentlas-local", "ollama", "lmstudio", "mlx"]);
+  const localRuntimes = runtimes.filter((runtime) => localKinds.has(runtime.kind));
+  const installedCount = localSnap?.modelInstallations.length ?? 0;
+  const resident = localSnap?.resident ?? null;
+  const residentName = resident ? localSnap?.modelInstallations.find((item) => item.installationId === resident.installationId)?.fileName.replace(/\.gguf$/i, "") ?? "" : "";
+  const otherLocal = localRuntimes.filter((runtime) => runtime.kind !== "agentlas-local").map((runtime) => (runtime.kind === "lmstudio" ? "LM Studio" : runtime.kind === "mlx" ? "MLX" : "Ollama"));
+  const localOn = Boolean(resident) || otherLocal.length > 0;
+  const localState = resident ? `${pick(ko, COPY.on)}${residentName ? ` · ${residentName}` : ""}` : otherLocal.length > 0 ? `${pick(ko, COPY.ready)} · ${otherLocal.join(", ")}` : pick(ko, COPY.off);
+  const renderLocalRow = () => (
+    <div key="local" className={s.crow} data-provider="local-models" data-connected={localOn ? "true" : "false"}>
+      <i className={s.statusDot} data-tone={localOn ? "ok" : "idle"} aria-hidden="true" />
+      <IconCpu size={16} />
+      <span className={s.cname}>{pick(ko, COPY.localModels)}</span>
+      <span className={s.cstate} title={localSnap?.unavailableReason ? String(localSnap.unavailableReason) : undefined}>{localState}</span>
+      <button type="button" className={s.cact} onClick={() => navigate("/local-models")}>{installedCount === 0 && otherLocal.length === 0 ? pick(ko, COPY.setUp) : pick(ko, COPY.manage)}</button>
+    </div>
+  );
 
   if (snap?.collection?.status === "suppressed") {
-    return <div className="dashboard-engine-usage" role="status">
-      {ko ? "이 개발 실행에서는 엔진 연결과 사용량을 조회하지 않습니다." : "Engine connections and usage are not collected in this development session."}
-    </div>;
+    return <section className={s.card} role="status" data-tour-id="dashboard.llm"><p className={s.emptyBody}>{pick(ko, COPY.devNoCollect)}</p></section>;
   }
 
+  const creditsKnown = credits?.authenticated === true && typeof credits.remainingCredits === "number";
+  const unconnectedApi = apiEngines.filter((e) => !isConnected(e));
+  const connectedApi = apiEngines.filter((e) => isConnected(e));
+  // A key "needs a look" when its runtime says the stored key could not be read back (keychain unavailable / read failed): it is in the count, never silently "not set".
+  const apiKeysNeedLook = unconnectedApi.filter((e) => runtimeFor(e)?.credentialAccess?.status === "unavailable").length;
   return (
-    <div className="dashboard-engine-usage">
+    <section className={s.card} data-tour-id="dashboard.llm" aria-labelledby="dashboard-connections-title">
       {connectSpec && <RuntimeConnectPopup
         spec={connectSpec}
         copy={connectCopy(ko)}
@@ -703,69 +607,51 @@ export function EngineUsage() {
           void loadUsage(true);
         }}
       />}
-      <div className="dashboard-module-head" data-collapsed="false">
-        <span>{ko ? "LLM 연결 · 사용량" : "LLM connections · usage"}</span>
-        <button type="button" role="switch" aria-checked={snap?.subscriptionCreditUse === true}
-          aria-label={ko ? "구독 한도 후 크레딧 자동 사용" : "Use credits after subscription limits"}
-          disabled={!snap || creditPreferencePending || !ipc()?.usage.setSubscriptionCreditUse}
-          onClick={() => void toggleSubscriptionCredits()} className="dashboard-runtime-row-switch titlebar-nodrag"
-          style={{ marginLeft: "auto" }} title={ko
-            ? "구독 한도 소진이 확인된 후 크레딧으로 새 작업을 시작할지 선택합니다. API 키 과금은 별도이며, 이미 시작된 CLI의 과금은 공급자 설정을 따릅니다."
-            : "Allow new runs on credits after observed subscription exhaustion. API billing is separate; spending in an already started CLI follows provider settings."}>
-          <span className="dashboard-runtime-row-switch-track" aria-hidden="true"><span /></span>
-          {ko ? "크레딧 자동 사용" : "Use credits"}
+      <div className={s.cardHead}>
+        <h2 className={s.h} id="dashboard-connections-title">{pick(ko, COPY.connections)}</h2>
+        <button type="button" className={s.iconBtn} aria-label={pick(ko, COPY.refresh)} title={pick(ko, COPY.refresh)}
+          onClick={() => { void loadUsage(true); void loadConnections(true); void refreshAuth(); void loadLocal(); void loadCredits(true); }}>
+          <IconRefresh size={15} />
         </button>
-        <button onClick={() => void loadUsage(true)} className="titlebar-nodrag dashboard-refresh-button" title={ko ? "새로고침" : "Refresh"}>↻</button>
       </div>
-      {creditPreferenceError && <div className="dashboard-usage-load-error" role="alert">
-        {ko ? "크레딧 자동 사용 설정을 저장하지 못했습니다." : "Could not save the credit-use preference."}
-      </div>}
-
-      {connectionsLoadError && (
-        <div className="dashboard-usage-load-error" role="alert">
-          {ko
-            ? "연결 목록을 불러오지 못했습니다. 연결이 없는 것이 아니라 읽지 못한 것입니다."
-            : "The connection list could not be loaded. Nothing was disconnected — the read failed."}
-        </div>
-      )}
-      {usageLoadError && (
-        <div className="dashboard-usage-load-error" role="alert">
-          <span>{ko ? "사용량 상태를 읽지 못함" : "Could not load usage status"}</span>
-          <span aria-hidden="true">·</span>
-          <button type="button" className="titlebar-nodrag" onClick={() => void loadUsage(true)}>{ko ? "다시 시도" : "Retry"}</button>
-        </div>
-      )}
-
-      <ModelRoleUsage value={snap?.modelRoleUsage} ko={ko} />
-
-      <div className="dashboard-engine-groups">
-        {engineGroups.map((group) => {
-          const collapsed = !!collapsedGroups[group.key];
-          const connectedCount = group.engines.filter((e) => isConnected(e)).length;
-          return (
-            <section key={group.key} className="dashboard-engine-group" data-collapsed={collapsed ? "true" : "false"}>
-              <button
-                type="button"
-                className="dashboard-engine-group-head titlebar-nodrag"
-                aria-expanded={!collapsed}
-                onClick={() => setCollapsedGroups((prev) => ({ ...prev, [group.key]: !collapsed }))}
-              >
-                <span className="dashboard-engine-group-chevron" data-collapsed={collapsed ? "true" : "false"} aria-hidden="true">▾</span>
-                <span className="dashboard-engine-group-label">{group.label}</span>
-                <span className="dashboard-engine-group-count" title={group.key === "local" ? (ko ? "사용 중 / 설치됨" : "in use / installed") : undefined}>{group.key === "local"
-                  ? `${localModels.snapshot?.resident ? 1 : 0}/${localModels.snapshot?.modelInstallations.length ?? 0}`
-                  : `${connectedCount}/${group.engines.length}`}</span>
-              </button>
-              {!collapsed && (group.key === "local"
-                ? <LocalModelMiniCards ko={ko} snapshot={localModels.snapshot} refresh={localModels.refresh} />
-                : <div className="dashboard-engine-grid">
-                  {group.engines.map((e) => renderEngineCard(e))}
-                </div>
-              )}
-            </section>
-          );
-        })}
+      {connectionsLoadError && <p className={s.inlineError} role="alert">{pick(ko, COPY.connectionsFailed)}<button type="button" className={s.btn} onClick={() => void loadConnections(true)}>{pick(ko, COPY.retry)}</button></p>}
+      {usageLoadError && <p className={s.inlineError} role="alert">{pick(ko, COPY.usageFailed)}<button type="button" className={s.btn} onClick={() => void loadUsage(true)}>{pick(ko, COPY.retry)}</button></p>}
+      <div className={s.conn}>
+        {cliEngines.map((e) => renderRow(e))}
+        {renderLocalRow()}
+        {connectedApi.map((e) => renderRow(e))}
+        {unconnectedApi.length > 0 && (
+          // F-D2b E: one row, "N API keys", with "N need a look" only when a key has a problem (a key the keychain would not give back).
+          <div className={s.crow} data-provider="api-keys" data-testid="api-keys-row" data-problem={apiKeysNeedLook > 0 ? "true" : "false"}>
+            <i aria-hidden="true" />
+            <IconKey size={16} />
+            <span className={s.cname}>{ko ? `API 키 ${unconnectedApi.length}개` : `${unconnectedApi.length} API key${unconnectedApi.length === 1 ? "" : "s"}`}</span>
+            {apiKeysNeedLook > 0
+              ? <span className={s.cstate} data-tone="warn"><IconAlertTriangle size={14} />{ko ? `${apiKeysNeedLook}개 확인 필요` : `${apiKeysNeedLook} need${apiKeysNeedLook === 1 ? "s" : ""} a look`}</span>
+              : <span />}
+            <button type="button" className={s.cact} aria-expanded={apiOpen} onClick={() => setApiOpen((open) => !open)}>
+              {apiOpen ? pick(ko, COPY.hide) : pick(ko, COPY.view)}
+            </button>
+          </div>
+        )}
+        {apiOpen && unconnectedApi.map((e) => renderRow(e))}
       </div>
-    </div>
+      {creditPreferenceError && <p className={s.inlineError} role="alert">{pick(ko, COPY.creditsSaveFailed)}</p>}
+      <div className={s.toggleRow} data-testid="credits-row">
+        <IconCircleDollar size={16} />
+        {creditsKnown
+          ? <span><b>{(credits?.remainingCredits ?? 0).toLocaleString()}</b> {pick(ko, COPY.aiCredits)}</span>
+          : creditsFailed
+            ? <span>{pick(ko, COPY.creditsUnread)} <button type="button" className={s.cact} onClick={() => void loadCredits(true)}>{pick(ko, COPY.retry)}</button></span>
+            : credits && !credits.authenticated
+              ? <span>{pick(ko, COPY.creditsSignedOut)}</span>
+              : <span>{pick(ko, COPY.aiCredits)}</span>}
+        <span className={s.tglLabel}>{pick(ko, COPY.useAutomatically)}</span>
+        <button type="button" role="switch" className={s.tgl} aria-checked={snap?.subscriptionCreditUse === true}
+          aria-label={pick(ko, COPY.useAutomatically)} title={pick(ko, COPY.creditsHint)}
+          disabled={!snap || creditPreferencePending || !ipc()?.usage.setSubscriptionCreditUse}
+          onClick={() => void toggleSubscriptionCredits()} />
+      </div>
+    </section>
   );
 }

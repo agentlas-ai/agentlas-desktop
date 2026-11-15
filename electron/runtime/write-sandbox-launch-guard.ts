@@ -23,3 +23,19 @@ export function writeSandboxLaunchGuardHook(): PreToolUseHookEntry | null {
   if (!fs.existsSync(script)) return null;
   return { matcher: writeSandboxLaunchGuardMatcher(), hooks: [nodeHookHandler(script)] };
 }
+
+export function shellDeleteGateScriptPath(): string {
+  return path.join(__dirname, "shell-delete-gate-hook.js");
+}
+
+/**
+ * The delete gate of a write run's shell (shell-delete-gate-hook.ts): the same shell tools as the launch guard, with a timeout that outlasts an
+ * owner's card (the card closes unanswered after five minutes). Null when the script is missing - the run then does not start (never a gate that is
+ * only said to be there).
+ */
+export function shellDeleteGateHook(): PreToolUseHookEntry | null {
+  const script = shellDeleteGateScriptPath();
+  if (!fs.existsSync(script)) return null;
+  const handler = nodeHookHandler(script);
+  return { matcher: writeSandboxLaunchGuardMatcher(), hooks: [{ ...handler, timeout: 340 }] };
+}

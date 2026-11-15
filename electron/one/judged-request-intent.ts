@@ -64,14 +64,37 @@ export async function resolveOneRequestIntent(
     : fallback(verdict.reason);
 }
 
+/**
+ * Does the start path read this turn's verdict? invocation/service.ts reads it in one place (`judgedTaskIntent`), and not for the personal
+ * agent's own conversation (`personalSupervisor`: its reply turn is system-written, taskIntent "conversation", and the verdict decided
+ * nothing there), except for a companion-front turn, which is not counted as that conversation. This is that same condition, so a turn the
+ * start never reads is not asked: it was one model call per personal-agent reply whose answer nobody read (scripts/test-one-request-intent-read-once.cjs
+ * holds both sites). Unknown (no chat or run id, an unreadable store) is "read": the call is made as before.
+ */
+export async function startReadsRequestIntent(request: { chatId?: string; runId?: string }): Promise<boolean> {
+  if (typeof request.chatId !== "string" || !request.chatId || typeof request.runId !== "string" || !request.runId) return true;
+  try {
+    const { getDb } = await import("../store/db");
+    const db = getDb();
+    const { personalSupervisorConversationInDb } = await import("./supervisor-store");
+    const { getOneProfile } = await import("../store/one-profile");
+    if (!personalSupervisorConversationInDb(db, getOneProfile().oneId, request.chatId)) return true;
+    const { isCompanionFrontOwnLane } = await import("./companion-front-inbox");
+    return isCompanionFrontOwnLane(db, request.runId, request.chatId);
+  } catch {
+    return true;
+  }
+}
+
 /** Warm the cache for a One conversation-shaped turn before the sync start path runs. */
 export async function prejudgeOneRequestIntent(
-  request: { oneMode?: boolean; taskIntent?: string; userPrompt?: string; runtimeSelection?: RuntimeSelection },
+  request: { chatId?: string; runId?: string; oneMode?: boolean; taskIntent?: string; userPrompt?: string; runtimeSelection?: RuntimeSelection },
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<void> {
   if (request.oneMode !== true) return;
   if (request.taskIntent !== undefined && request.taskIntent !== "conversation") return;
   if (typeof request.userPrompt !== "string" || !request.userPrompt.trim()) return;
+  if (!(await startReadsRequestIntent(request))) return;
   try {
     await resolveOneRequestIntent(request.userPrompt, { ...opts, runtimeSelection: request.runtimeSelection });
   } catch {

@@ -28,6 +28,8 @@ interface Props {
   describe?: (id: string) => { label: string; text: string } | null;
   /** Desktop actor views must not label private unprojected memory as One shared. */
   unassignedProjectLabel?: string;
+  /** Whose memories the map shows. Default "One"; the Agents screen passes the agent's name so the map never says "One" for another agent. */
+  ownerLabel?: string;
 }
 
 /** Kind colours, muted so a crowded map stays calm. */
@@ -111,7 +113,7 @@ function clusterCenters(nodes: OneMemoryMapPlacedNode[]): Map<string, { x: numbe
   }]));
 }
 
-function OneMemoryMapComponent({ snapshot, locale, height, colorByKind = false, selectedId, onSelect, describe, unassignedProjectLabel }: Props) {
+function OneMemoryMapComponent({ snapshot, locale, height, colorByKind = false, selectedId, onSelect, describe, unassignedProjectLabel, ownerLabel = "One" }: Props) {
   const copy = COPY[locale];
   const rootRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -288,7 +290,7 @@ function OneMemoryMapComponent({ snapshot, locale, height, colorByKind = false, 
         className={styles.canvas}
         role="img"
         tabIndex={0}
-        aria-label={`One. ${copy.keyboard}`}
+        aria-label={`${ownerLabel}. ${copy.keyboard}`}
         aria-describedby={activeNode ? "one-memory-map-tooltip" : undefined}
         onPointerMove={handlePointerMove}
         onPointerLeave={() => setHoveredId(null)}
@@ -304,7 +306,7 @@ function OneMemoryMapComponent({ snapshot, locale, height, colorByKind = false, 
           {described ? <div className={styles.described}><strong>{described.label}</strong><p>{described.text}</p></div> : <dl>
             <div><dt>{copy.kind}</dt><dd>{activeNode.kind}</dd></div>
             <div><dt>{copy.project}</dt><dd>{activeNode.projectSlug ?? unassignedProjectLabel ?? copy.shared}</dd></div>
-            <div><dt>{copy.scope}</dt><dd>One / {activeNode.scope}</dd></div>
+            <div><dt>{copy.scope}</dt><dd>{ownerLabel} / {activeNode.scope}</dd></div>
             <div><dt>{copy.relations}</dt><dd>{activeNode.relationCount}</dd></div>
             <div><dt>{copy.evidence}</dt><dd>{activeNode.evidenceCount}</dd></div>
           </dl>}

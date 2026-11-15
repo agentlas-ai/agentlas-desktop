@@ -42,9 +42,17 @@ import {
 } from "./replay";
 import { mobileBridgeJsonBytes } from "./sanitize";
 import { mobileBridgeMailReplayMayRerun } from "./mail-replay-policy";
-import { mobileBridgeIsOwnerMessage, mobileBridgeOrphanMayRerun } from "./orphan-rerun-policy";
+import { mobileBridgeIsOwnerMessage, mobileBridgeOrphanMayRerun, mobileBridgeTransientReplayMayRerun } from "./orphan-rerun-policy";
 import { isTransientSendRefusalCode, sendRefusalCode, isStoreBusyRefusedBeforeDispatch, transientSendBackoffMs } from "../../shared/transient-send-refusal";
 import { MobileBridgeNotReady, mobileBridgeSpecificRefusal } from "../../shared/mobile-bridge-refusal";
+import {
+  LONG_OPS_ACK_MS,
+  LONG_OPS_MAX_RECEIVED_PER_DEVICE,
+  MOBILE_BRIDGE_DEFAULT_REQUEST_TIMEOUT_MS,
+  buildLongOpsV1,
+  longOpWriteMaxMs,
+  type RequestAcceptedPayload,
+} from "./long-ops";
 
 /**
  * A phone write the Desktop refused only because the chat (or its channel) was not ready yet: the codes of
@@ -107,13 +115,15 @@ interface WsModule {
   }) => BridgeWebSocketServer;
 }
 
+/** The turn-starting doors that refuse with the personal agent's home state (`one_sealed` / `one_away`) besides the `one.supervisor.*` family. */
+const ONE_HOME_TURN_METHODS: ReadonlySet<string> = new Set(["one.invoke.start", "invoke.start", "invoke.steer"]);
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { WebSocketServer } = require("ws") as WsModule;
 
 const WS_OPEN = 1;
 const DEFAULT_PATH = "/v1/mobile";
 const DEFAULT_PING_INTERVAL_MS = 30_000;
-const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = MOBILE_BRIDGE_DEFAULT_REQUEST_TIMEOUT_MS;
 const MAX_INFLIGHT_REQUESTS = 32;
 const MAX_BUFFERED_BYTES = 4 * MOBILE_BRIDGE_MAX_MESSAGE_BYTES;
 const MAX_CONNECTIONS = 24;
@@ -135,7 +145,18 @@ const RETRY_LATER_CLOSE_CODE = 1013;
 const DEFAULT_READ_NOT_READY_WAIT_MS = 20_000;
 // A refused-because-signed-out upgrade is retried by every open phone; log it at most this often.
 const SIGNED_OUT_REFUSAL_LOG_INTERVAL_MS = 60_000;
+/*
+ * 분당 요청 한도 (Agentlas 2.0 desktop values S3, audit 가-11).
+ * 전에는 301번째 요청에서 소켓을 1008 "request rate exceeded"로 닫았다 — 폰 이후 빌드는 그 낱말을 백오프 재연결로 읽지만
+ * (web_socket_desktop_transport.dart:226-230, 1905-1921) 그 이전 빌드는 1008을 영구 거절로 읽어 오너가 다시 누를 때까지 연결을 포기한다.
+ * 지금은 한도를 넘은 요청에 **그 요청 하나**를 "재시도 가능한 거절"(`too_many_requests`, retryable — 폰이 이미 아는 모양: 동시 32개 초과·영상 청크 예산이 쓰는
+ * 같은 응답, reply_failure_copy.dart:100·app_controller.dart:4475)으로 답하고 소켓은 닫지 않는다. 아무것도 실행하지 않는다. 다음 60초 창이 열리면 스스로 다시 된다.
+ * 값 300: **정한 값 — 근거 없음**. 짝 시험대 2차 로그(evidence/pair-rig/round2/logs)에는 폰이 보낸 요청 수 기록이 없어 폰의 실제 분당 최대를 세지 못했다
+ * (데스크탑의 request-timing 로그도 느린 요청만 남긴다). 정상 사용에서 닿았다는 보고는 없다.
+ * 한도의 두 배(600)를 넘는 폭주는 거절 응답이 또 다른 폭주가 되지 않게 1013(RETRY_LATER)으로 닫는다 — 1013은 모든 폰 빌드가 재연결로 읽는다. 600도 정한 값 — 근거 없음.
+ */
 const MAX_REQUESTS_PER_MINUTE = 300;
+const MAX_REQUESTS_PER_MINUTE_HARD = 2 * MAX_REQUESTS_PER_MINUTE;
 // Video and attachment chunks wait (retryable) past this many requests in a minute; the rest of the 300 stays for Stop and approvals.
 const MOBILE_CHUNK_REQUEST_BUDGET = 240;
 const MAX_PAIR_ATTEMPTS_PER_MINUTE = 10;
@@ -259,6 +280,8 @@ export interface AgentlasMobileBridgeServerOptions {
   readNotReadyWaitMs?: number;
   relayPairingInfo?: () => { endpoint: string; secret: string } | null;
   onError?: (error: Error) => void;
+  /** A paired non-bootstrap phone completed the authenticated ready snapshot. */
+  onPairedDeviceReady?: (deviceId: string) => void;
 }
 
 export interface AgentlasMobileBridgeServerAddress {
@@ -285,6 +308,27 @@ interface ConnectionState {
   visualFrameInFlight: boolean;
   /** The socket's transport failed (EPIPE, reset): reported once, nothing more is written to it. */
   transportFailed: boolean;
+}
+
+/**
+ * L1 (contracts/phone-long-ops.md): a ledgered write of a phone that announced `longOps.v1`. It lives in memory from the moment the write starts until its
+ * answer is sent. The phone may hold several request ids on it (the first send and every later send of the same key, C5). It is not the ledger: the ledger
+ * is what survives a restart; this only remembers which request ids still wait for the answer and whether they were told "received".
+ */
+interface LongJob {
+  deviceId: string;
+  key: string;
+  fingerprint: string;
+  maxMs: number;
+  waiters: Map<string, { accepted: boolean; onAccepted?: () => void }>;
+  /** The "received" moment has passed: later requests of this key are told at once. */
+  accepted: boolean;
+  ackTimer: NodeJS.Timeout | null;
+  finished: boolean;
+}
+
+function longJobKey(deviceId: string, key: string, fingerprint: string): string {
+  return `${deviceId}\0${key}\0${fingerprint}`;
 }
 
 interface UpgradeIdentity {
@@ -410,8 +454,10 @@ export class AgentlasMobileBridgeServer {
   private signedOutRefusalLoggedAt = 0;
   private readonly relayPairingInfo?: () => { endpoint: string; secret: string } | null;
   private readonly onError: (error: Error) => void;
+  private readonly onPairedDeviceReady?: (deviceId: string) => void;
   private readonly onePhoneOwners = new WeakMap<ConnectionState,OneMobileSocketOwner>();
   private readonly clients = new Set<ConnectionState>();
+  private readonly longJobs = new Map<string, LongJob>();
   private readonly upgradeIdentities = new WeakMap<http.IncomingMessage, UpgradeIdentity>();
   private readonly webSocketServer: BridgeWebSocketServer;
   private readonly pairAttemptsByAddress = new Map<string, number[]>();
@@ -454,6 +500,7 @@ export class AgentlasMobileBridgeServer {
     this.readNotReadyWaitMs = Math.max(0, options.readNotReadyWaitMs ?? DEFAULT_READ_NOT_READY_WAIT_MS);
     this.relayPairingInfo = options.relayPairingInfo;
     this.onError = options.onError ?? ((error) => console.error("[mobile-bridge]", error.message));
+    this.onPairedDeviceReady = options.onPairedDeviceReady;
     this.webSocketServer = new WebSocketServer({
       noServer: true,
       maxPayload: MOBILE_BRIDGE_MAX_MESSAGE_BYTES,
@@ -968,6 +1015,11 @@ export class AgentlasMobileBridgeServer {
             ? authorityCapabilities
             : {}),
           ...(this.replayStore ? { requestStatusV1: this.replayStore.capability() } : {}),
+          // Additive (L1): how long the phone waits for each read, and when a running write is "received". A phone that does not know the key ignores it.
+          ...(this.replayStore ? { longOpsV1: buildLongOpsV1({
+            notReadyWaitMs: Math.min(this.readNotReadyWaitMs, Math.floor(this.requestTimeoutMs / 2)),
+            bridgeBoundMs: this.requestTimeoutMs,
+          }) as unknown as MobileBridgeJsonValue } : {}),
         },
         ...(relay ? { relay } : {}),
       });
@@ -979,6 +1031,9 @@ export class AgentlasMobileBridgeServer {
       const pending = state.pendingAuthorityEvents.splice(0);
       state.pendingAuthorityBytes = 0;
       state.initialized = true;
+      if (!state.context.devBootstrap) {
+        try { this.onPairedDeviceReady?.(state.context.deviceId); } catch { /* observer only */ }
+      }
       for (const event of pending) {
         this.sendEvent(state, event.event, event.payload, event.occurredAt);
         if (state.socket.readyState !== WS_OPEN) break;
@@ -1005,10 +1060,12 @@ export class AgentlasMobileBridgeServer {
       state.requestCount = 0;
     }
     state.requestCount += 1;
-    if (state.requestCount > MAX_REQUESTS_PER_MINUTE) {
-      state.socket.close(1008, "request rate exceeded");
+    if (state.requestCount > MAX_REQUESTS_PER_MINUTE_HARD) {
+      state.socket.close(RETRY_LATER_CLOSE_CODE, "request rate exceeded");
       return;
     }
+    const overRequestRate = state.requestCount > MAX_REQUESTS_PER_MINUTE;
+    if (state.requestCount === MAX_REQUESTS_PER_MINUTE + 1) this.onError(new Error("mobile_request_rate_exceeded"));
     if (isBinary) {
       state.socket.close(1003, "text messages only");
       return;
@@ -1033,6 +1090,12 @@ export class AgentlasMobileBridgeServer {
     const parsed = parseMobileBridgeRequest(decoded);
     if (!parsed.ok) {
       this.send(state, parsed.error);
+      return;
+    }
+    if (overRequestRate) {
+      // Nothing was started; the answer says so and that it can be sent again (the phone keeps the word for its retry).
+      this.send(state, mobileBridgeFailure(parsed.value.id, "too_many_requests",
+        "Too many requests in this minute; nothing was run. It can be sent again shortly.", true));
       return;
     }
     // Reserve this connection's request budget for cancellation and control.
@@ -1128,6 +1191,9 @@ export class AgentlasMobileBridgeServer {
           return;
         }
         if (replay.kind !== "execute") {
+          // C5: the same key again while the work is alive in this process: a phone that holds long operations attaches to it (it is told "received" again
+          // and gets the answer for this request id too). Any other phone, and a key whose work lives in another process, gets the answer it always got.
+          if (replay.kind === "in-progress" && this.attachToLongJob(state, request, replayKey, replayFingerprint)) return;
           const response = replay.kind === "conflict"
             ? mobileBridgeFailure(
                 request.id,
@@ -1165,11 +1231,23 @@ export class AgentlasMobileBridgeServer {
 
     if (selfRevocation) this.markDeviceRevocationPending(state.context.deviceId);
     // Writes are refused-and-queued by the phone (desktop_not_ready below); a read waits here instead (readWhenReady).
+    // L1: a write of a phone that holds long operations is bounded by its own operation's bound (C3), not by the bridge's 120 s, and is "received" after 8 s.
+    const writeMaxMs = ledgered ? longOpWriteMaxMs(request.method, this.requestTimeoutMs) : this.requestTimeoutMs;
+    const job = ledgered && !selfRevocation && !secureRequest && replayFingerprint
+      ? this.startLongJob(state, request, replayKey, replayFingerprint, writeMaxMs)
+      : null;
     const authorityPromise = writeRequest || secureRequest || selfRevocation
       ? this.authority.request(request, state.context)
       : this.readWhenReady(state, request);
+    // Every answer of this request goes through here: to the socket it came on, or (a received job) to every request id waiting on the key, on the device's live socket.
+    const answer = (response: MobileBridgeReplayResponse | ReturnType<typeof mobileBridgeFailure>): void => {
+      if (job) { this.finishLongJob(job, response as MobileBridgeReplayResponse); return; }
+      if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
+      this.send(state, response as MobileBridgeServerMessage);
+    };
+    const settle = async (): Promise<void> => {
     try {
-      const result = await withTimeout(authorityPromise, this.requestTimeoutMs);
+      const result = await withTimeout(authorityPromise, job ? writeMaxMs : this.requestTimeoutMs);
       let response = this.responseFromAuthority(request.id, result);
       if (writeRequest && this.replayStore && replayFingerprint) {
         response = this.settleReplay(
@@ -1184,24 +1262,41 @@ export class AgentlasMobileBridgeServer {
         this.sendSelfRevocationAckAndDisconnect(state, response);
         return;
       }
-      if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
-      this.send(state, response);
+      answer(response);
     } catch (error) {
       const normalized = errorOf(error);
       this.onError(secureRequest ? new Error("secure_route_unavailable") : normalized);
       if (selfRevocation) this.clearDeviceRevocationPending(state.context.deviceId);
-      const timeout = normalized.message === "Mobile Bridge authority request timed out";
+      // L1 D4: an operation that was cut off by a bound of its own (the Cloud registration request) says so with a machine marker: the outcome is unknown, and
+      // the ledger stays "unknown" - the operation has ended, so there is no late answer to wait for.
+      const outcomeUnknown = (error as { code?: unknown } | null)?.code === "outcome_unknown";
+      const timeout = normalized.message === "Mobile Bridge authority request timed out" || outcomeUnknown;
       if (timeout && writeRequest && this.replayStore && replayFingerprint) {
-        try {
-          this.replayStore.markUncertain(state.context.deviceId, replayKey, replayFingerprint);
-        } catch (ledgerError) {
-          this.onError(errorOf(ledgerError));
+        // C3: the bridge's 120 s ends the phone's wait, not the work. A phone that holds long operations is bounded by the operation's own bound (above); any
+        // other phone is answered "unknown" at 120 s as before, but the ledger keeps saying "in progress" until the operation's own bound if it is longer.
+        const keepPendingMs = !job && !outcomeUnknown ? Math.max(0, writeMaxMs - this.requestTimeoutMs) : 0;
+        let lateSettled = false;
+        let uncertainTimer: NodeJS.Timeout | null = null;
+        const markUncertainNow = (): void => {
+          try {
+            this.replayStore?.markUncertain(state.context.deviceId, replayKey, replayFingerprint);
+          } catch (ledgerError) {
+            this.onError(errorOf(ledgerError));
+          }
+        };
+        if (keepPendingMs > 0) {
+          uncertainTimer = setTimeout(() => { uncertainTimer = null; if (!lateSettled) markUncertainNow(); }, keepPendingMs);
+          uncertainTimer.unref?.();
+        } else {
+          markUncertainNow();
         }
         // The authority promise is deliberately not cancelled. If it eventually
         // settles in this process, apply that method's replay policy. A crash
         // leaves the write-ahead entry uncertain and future retries fail closed.
-        void authorityPromise.then(
+        if (!outcomeUnknown) void authorityPromise.then(
           (result) => {
+            lateSettled = true;
+            if (uncertainTimer) { clearTimeout(uncertainTimer); uncertainTimer = null; }
             const response = this.responseFromAuthority(request.id, result);
             this.settleReplay(
               request,
@@ -1212,6 +1307,8 @@ export class AgentlasMobileBridgeServer {
             );
           },
           () => {
+            lateSettled = true;
+            if (uncertainTimer) { clearTimeout(uncertainTimer); uncertainTimer = null; }
             this.completeReplay(
               state.context.deviceId,
               replayKey,
@@ -1225,8 +1322,7 @@ export class AgentlasMobileBridgeServer {
       const notReady = !timeout && !secureRequest ? mobileBridgeNotReadyRefusal(error) : null;
       if (notReady && !writeRequest && !selfRevocation) {
         // A read that stayed not ready for its whole wait: still not a verdict. Retryable, nothing to release (reads have no ledger entry).
-        if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
-        this.send(state, mobileBridgeFailure(request.id, MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE,
+        answer(mobileBridgeFailure(request.id, MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE,
           "Desktop was not ready to answer this yet. It can be asked again.", true));
         return;
       }
@@ -1237,8 +1333,7 @@ export class AgentlasMobileBridgeServer {
           catch (ledgerError) { this.onError(errorOf(ledgerError)); }
         }
         if (released) {
-          if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
-          this.send(state, mobileBridgeFailure(request.id, MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE,
+          answer(mobileBridgeFailure(request.id, MOBILE_BRIDGE_DESKTOP_NOT_READY_CODE,
             "Desktop was not ready to take this yet; nothing was run. It can be sent again.", true));
           return;
         }
@@ -1251,9 +1346,21 @@ export class AgentlasMobileBridgeServer {
       const specific = !timeout && !secureRequest && !personalAgentRoom && !request.method.startsWith("one.supervisor.")
         && this.authority.clientHasCapability?.(state.context.deviceId, "refusal.specific.v1") === true
         ? mobileBridgeSpecificRefusal(error) : null;
+      // Audit 59 B10: a word sent while the personal agent's home is moving (`one_sealed`, this computer is packing) or has moved (`one_away`) is not a final refusal: a phone that announced `oneHome.v1` gets the code itself and keeps the word
+      // for the new home. A phone that did not (the store versions 168 and 170 decode any code string - web_socket_desktop_transport.dart:2419-2441 at mobile fc30087 - but have no handling for these two) keeps `authority_error`, byte for byte as before.
+      // Audit 62 (bridge B6): the ledger entry of a word refused for the home's STATE is released whether or not the phone knows the code (an older phone keeps `authority_error`, byte for byte, but its repeat must run once the home is
+      // open again - not read the stored refusal for 24 hours). `oneHomeStateRefusal` decides the release; the capability decides only which code the phone is told.
+      // Desktop repair 11: the three doors that start or steer a turn in a One conversation answer the same two codes (authority.ts assertPersonalAgentHomeWritable).
+      const oneHomeStateRefusal = !timeout && !secureRequest && !personalAgentRoom && (request.method.startsWith("one.supervisor.") || ONE_HOME_TURN_METHODS.has(request.method))
+        && ((error as { code?: unknown } | null)?.code === "one_sealed" || (error as { code?: unknown } | null)?.code === "one_away");
+      const oneHomeRefusal = oneHomeStateRefusal && this.authority.clientHasCapability?.(state.context.deviceId, "oneHome.v1") === true
+        ? (error as { code: "one_sealed" | "one_away" }).code : null;
       let response: MobileBridgeReplayResponse = personalAgentRoom
         ? mobileBridgeFailure(request.id, "supervised_room_read_only",
           "This room is run by your personal agent. Talk to the personal agent instead.", false)
+        : oneHomeRefusal
+        ? mobileBridgeFailure(request.id, oneHomeRefusal,
+          oneHomeRefusal === "one_sealed" ? "Your personal agent is moving to another computer; nothing was run." : "Your personal agent now lives on another computer; nothing was run.", false)
         : specific
         ? mobileBridgeFailure(request.id, specific.code, specific.message, false)
         : mobileBridgeFailure(
@@ -1268,7 +1375,14 @@ export class AgentlasMobileBridgeServer {
             : "Desktop rejected the request",
         timeout && !ledgered && !secureRequest,
       );
-      if (!timeout && ledgered && this.replayStore && replayFingerprint) {
+      // Audit 61 B10 (a): `one_sealed` / `one_away` are a state of this computer, not the command's final word. A move that is cancelled or expires makes this computer the home again; the phone sends the same command id again and it must RUN then, not
+      // get the stored refusal for 24 hours (the window in which a word is delivered). Like a not-ready refusal the entry is released and nothing is stored; a release that fails falls back to the old ledgered answer (never an entry left pending).
+      let oneHomeReleased = false;
+      if (oneHomeStateRefusal && ledgered && this.replayStore && replayFingerprint) {
+        try { this.replayStore.release(state.context.deviceId, replayKey, replayFingerprint); oneHomeReleased = true; }
+        catch (ledgerError) { this.onError(errorOf(ledgerError)); }
+      }
+      if (!timeout && ledgered && this.replayStore && replayFingerprint && !oneHomeReleased) {
         response = this.completeReplay(
           state.context.deviceId,
           replayKey,
@@ -1277,10 +1391,117 @@ export class AgentlasMobileBridgeServer {
           request.id,
         );
       }
-      if (state.revoked || state.revocationPending || !this.clients.has(state)) return;
-      this.send(state, response);
+      answer(response);
     }
+    };
+    if (!job) {
+      await settle();
+      return;
+    }
+    // A received job: this request ends here once the Desktop has told the phone it holds the write (the in-flight slot is free again), or once it is answered.
+    const waiter = job.waiters.get(request.id);
+    const received = new Promise<void>((resolve) => { if (waiter) waiter.onAccepted = resolve; else resolve(); });
+    const settling = settle().catch((error) => {
+      this.onError(errorOf(error));
+      if (!job.finished) this.finishLongJob(job, mobileBridgeFailure(request.id, "authority_error", "Desktop rejected the request"));
+    });
+    await Promise.race([settling, received]);
   }
+
+  /** Whether this device announced `longOps.v1` and still has room for another received write (32 per device, memory only). */
+  private longOpsAvailableFor(deviceId: string): boolean {
+    if (this.authority.clientHasCapability?.(deviceId, "longOps.v1") !== true) return false;
+    let waiting = 0;
+    for (const job of this.longJobs.values()) if (job.deviceId === deviceId) waiting += job.waiters.size;
+    return waiting < LONG_OPS_MAX_RECEIVED_PER_DEVICE;
+  }
+
+  private startLongJob(
+    state: ConnectionState,
+    request: MobileBridgeRpcRequest,
+    key: string,
+    fingerprint: string,
+    maxMs: number,
+  ): LongJob | null {
+    const deviceId = state.context.deviceId;
+    if (!this.longOpsAvailableFor(deviceId)) return null;
+    const job: LongJob = {
+      deviceId,
+      key,
+      fingerprint,
+      maxMs,
+      waiters: new Map([[request.id, { accepted: false }]]),
+      accepted: false,
+      ackTimer: null,
+      finished: false,
+    };
+    // One timer per running write of a long-ops phone, ended with the write: this is the "received" moment, not polling.
+    job.ackTimer = setTimeout(() => { job.ackTimer = null; this.acceptLongJob(job); }, LONG_OPS_ACK_MS);
+    job.ackTimer.unref?.();
+    this.longJobs.set(longJobKey(deviceId, key, fingerprint), job);
+    return job;
+  }
+
+  /** C5: the same key again while the work is alive here. */
+  private attachToLongJob(state: ConnectionState, request: MobileBridgeRpcRequest, key: string, fingerprint: string): boolean {
+    const deviceId = state.context.deviceId;
+    const job = this.longJobs.get(longJobKey(deviceId, key, fingerprint));
+    if (!job || job.finished) return false;
+    if (!job.waiters.has(request.id)) {
+      if (!this.longOpsAvailableFor(deviceId)) return false;
+      job.waiters.set(request.id, { accepted: false });
+    } else if (this.authority.clientHasCapability?.(deviceId, "longOps.v1") !== true) {
+      return false;
+    } else if (job.accepted) {
+      // The phone sent the very same request id again (its socket was replaced): it is told "received" again.
+      const waiter = job.waiters.get(request.id);
+      if (waiter) waiter.accepted = false;
+    }
+    if (job.accepted) this.sendAccepted(job, request.id);
+    return true;
+  }
+
+  private acceptLongJob(job: LongJob): void {
+    if (job.finished) return;
+    job.accepted = true;
+    for (const requestId of [...job.waiters.keys()]) this.sendAccepted(job, requestId);
+  }
+
+  private sendAccepted(job: LongJob, requestId: string): void {
+    const waiter = job.waiters.get(requestId);
+    if (!waiter || waiter.accepted) return;
+    waiter.accepted = true;
+    const live = this.liveStateOf(job.deviceId);
+    if (live) {
+      const payload: RequestAcceptedPayload = { requestId, maxMs: job.maxMs };
+      this.sendEvent(live, "request.accepted", payload as unknown as MobileBridgeJsonValue);
+    }
+    // The request that started the job stops holding an in-flight slot even if its socket is gone; the answer is the job's.
+    waiter.onAccepted?.();
+  }
+
+  /** The device's current initialized socket (one per device), or null. */
+  private liveStateOf(deviceId: string): ConnectionState | null {
+    for (const state of this.clients) {
+      if (state.context.deviceId === deviceId && state.initialized && !state.revoked && !state.revocationPending && !state.transportFailed && state.socket.readyState === WS_OPEN) return state;
+    }
+    return null;
+  }
+
+  /** C2: the ordinary response, for the original request id (and every later request id of the same key), on the device's socket as it is now. */
+  private finishLongJob(job: LongJob, response: MobileBridgeReplayResponse): void {
+    if (job.finished) return;
+    job.finished = true;
+    if (job.ackTimer) { clearTimeout(job.ackTimer); job.ackTimer = null; }
+    this.longJobs.delete(longJobKey(job.deviceId, job.key, job.fingerprint));
+    const live = this.liveStateOf(job.deviceId);
+    for (const [requestId, waiter] of job.waiters) {
+      if (live) this.send(live, responseForRequest(response, requestId));
+      waiter.onAccepted?.();
+    }
+    job.waiters.clear();
+  }
+
 
   /** A signed-out Desktop is retried by every open phone (answered 503): log it once a minute, not on every attempt. */
   private signedOutRefusalLogDue(): boolean {
@@ -1558,7 +1779,7 @@ export class AgentlasMobileBridgeServer {
       !Array.isArray(result) &&
       result.ok === false &&
       typeof result.code === "string" &&
-      mobileBridgeMailReplayMayRerun(request.method, result.code)
+      (mobileBridgeMailReplayMayRerun(request.method, result.code) || mobileBridgeTransientReplayMayRerun(request.method, result.code))
     ) {
       // Undecided mail answer: never the command's final word (M1, M7).
       if (!this.replayStore) return response;
@@ -1903,6 +2124,8 @@ export class AgentlasMobileBridgeServer {
       state.socket.terminate();
     }
     this.clients.clear();
+    for (const job of this.longJobs.values()) { if (job.ackTimer) clearTimeout(job.ackTimer); job.ackTimer = null; }
+    this.longJobs.clear();
     this.pairAttemptsByAddress.clear();
 
     const webSocketClose = new Promise<void>((resolve) => {

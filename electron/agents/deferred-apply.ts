@@ -1,6 +1,7 @@
 import { agentWorkspaceProposalHeldByRun, applyAgentWorkspaceProposal, issueAgentWorkspaceApprovalReceipt, noteDroppedAgentWorkspaceApproval, onAgentWorkspaceRunLeaseReleased } from "./workspace-service";
 import { AgentWorkspaceError } from "./workspace-snapshot";
 import { currentUiLocale } from "../ui-locale";
+import { emitDesktopStoreChange } from "../store/change-bus";
 
 /**
  * The owner approved a reviewed change while a run held the agent's files. A long run (a video render) can hold them for hours,
@@ -24,6 +25,8 @@ export function deferOwnerApproval(proposalId: string, reviewedHash: string): vo
   if (!stopListening) stopListening = onAgentWorkspaceRunLeaseReleased(() => { applyDeferredApprovals(); });
 }
 export function hasDeferredApproval(proposalId: string): boolean { return waiting.has(proposalId); }
+/** Tells the screens and the phone (the store change bus: the bridge re-reads its snapshot) that a waiting approval was applied or dropped. Never throws. */
+function announceSettled(): void { try { emitDesktopStoreChange({ entity: "agent" }); } catch { /* no window or listener here */ } }
 
 function droppedApprovalLine(): string {
   return currentUiLocale() === "ko"
@@ -42,11 +45,13 @@ export function applyDeferredApprovals(): string[] {
       const result = applyAgentWorkspaceProposal({ proposalId, reviewedHash, approvalReceiptId });
       waiting.delete(proposalId);
       if (result.status === "applied") applied.push(proposalId);
+      announceSettled();   // (bridge B12): the phone that was told "applied when the run ends" re-reads: the change is applied now
     } catch (error) {
       if (error instanceof AgentWorkspaceError && error.code === "run_active") continue; // a run began between the check and the apply: try again
       waiting.delete(proposalId); // moved, applied elsewhere, rejected, or the files changed: the owner reads it again
       console.warn("[agent-workspace] a waiting approval was dropped", { proposalId, code: error instanceof AgentWorkspaceError ? error.code : "failed" });
       noteDroppedAgentWorkspaceApproval(proposalId, droppedApprovalLine());
+      announceSettled();   // (bridge B12):... or dropped: the phone's "queued" mark (`queued: false` now) and the change's own line say so
     }
   }
   if (!waiting.size) {

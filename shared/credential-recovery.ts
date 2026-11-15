@@ -1,7 +1,7 @@
 /** Value-free Main-owned recovery handles. A renderer cannot choose a service or account. */
 export interface CredentialRecoveryFailure {
   retryToken: string;
-  kind: "api" | "api-metadata" | "env" | "secret";
+  kind: "api" | "api-metadata" | "env" | "secret" | "native-one";
   operation: "read" | "list";
   name: string | null;
   status: "unavailable" | "retrying";

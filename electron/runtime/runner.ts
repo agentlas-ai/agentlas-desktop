@@ -30,7 +30,7 @@ import {
   runnerRefusedBeforeDispatch as preDispatchRunnerRefused,
   runnerResultRefusedBeforeDispatch as preDispatchRunnerResultRefused,
 } from "./runner-pre-dispatch";
-import { EMPTY_NO_TOOL_RAN_CODES, innermostTypedCode, isTypedCode } from "../../shared/turn-settlement";
+import { EMPTY_NO_TOOL_RAN_CODES, innermostTypedCode, isTypedCode, networkFailureCode } from "../../shared/turn-settlement";
 import { HOST_FAILURE_CODE_CLASSES } from "../../shared/run-failure-notice";
 
 /** Main-only delivery boundary; never serialized into a provider request. */
@@ -792,7 +792,11 @@ export interface RunnerFailure {
   providerCode?: string;
   /** Exact child exit status when the runner observed one; null/unknown is omitted. */
   exitCode?: number;
-  /** 한도 리셋 시각 등 — 표식에 실려 오면 그대로. For "rate_limit", the provider's Retry-After (ISO time or "in 30s"). */
+  /**
+   * 한도 리셋 시각 등 — 표식에 실려 오면 그대로. For "rate_limit", the provider's Retry-After (ISO time or "in 30s"). The provider's time is
+   * believed as given: runtime-cooldown.ts keeps a "quota" runtime out for exactly that long (no 60-minute cut), and a busy server's
+   * (5xx / 529) Retry-After up to 60 s is waited out inline before one resend (provider-overload.ts); a longer one comes here unchanged.
+   */
   retryAfterHint?: string;
   /** Host-private admission fact; mobile failure projection keeps its existing keys. */
   retryBudgetExhausted?: true;
@@ -834,6 +838,10 @@ export interface RunnerResult {
   contextWindowTokens?: number;
   /** Exact effort explicitly applied by the runner; null means no explicit effort was sent. */
   appliedEffort?: string | null;
+  /** Codex only: the turn's non-empty agentMessages by the phase the app-server stated (final-answer-turns.ts). Diagnostics, never a decision input. */
+  agentMessages?: { commentary: number; partialAnswer: number; finalAnswer: number; unmarked: number };
+  /** Codex only: where the answer starts inside `text` (final-answer-turns.ts AnswerMark; at 0 = the whole text). Absent: the host decides by the last tool call. */
+  answerStart?: { at: number; tailHash: number };
   /**
    * 이번 실행이 **실제로 쓴 모델 id**. 우리가 보낸 값이 벤더 별칭일 때만 의미가 있다
    * (claude-code 는 모델 목록 명령이 없어 `opus|sonnet|haiku` 별칭만 보낼 수 있다).
@@ -1168,7 +1176,22 @@ export function runnerFailureFromError(error: unknown, runtime: string): RunnerF
   // A thrown error's own machine code (its innermost typed code, or a message that is itself a code) is its cause, kept as
   // providerCode; prose is read only for an error that carries none (R-054, docs 31 W1).
   const typedCode = refusalCode(error);
+  // The API runners' silence guard (api-silence-fetch.ts) throws the CLIs' own closed word: it ends the same way a silent CLI does,
+  // with the same sentence (runtimeSilentTimeoutFailure), not as a generic exit. The window is read from the error's own field.
+  if (typedCode === RUNTIME_SILENT_TIMEOUT_CODE) {
+    let windowMs: number | undefined;
+    for (let current: unknown = error, depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+      const value = (current as { windowMs?: unknown }).windowMs;
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) { windowMs = value; break; }
+      current = (current as { cause?: unknown }).cause;
+    }
+    return runtimeSilentTimeoutFailure(runtime, windowMs);
+  }
   if (typedCode) return { kind: "exit", message: message.slice(0, 2_000), runtime, source: "exit", providerCode: typedCode };
+  // Desktop repair 11 (N6): a socket-level failure of the request (the errno / undici `code` in the cause chain, never the words) is "the computer could not reach the provider",
+  // told as a connection failure that the app waits out, not read below as a refusal or an unknown exit. A target on this computer (a local model server that is off) is not.
+  const unreachable = networkFailureCode(error);
+  if (unreachable) return { kind: "exit", message: message.slice(0, 2_000), runtime, source: "exit", providerCode: unreachable };
   // Prose is a guess (source "exit"; runtime-cooldown never records it). The words below must name an account allowance or a login
   // outright: bare "reset"/"credit"/"login"/"authentication" also appear in ECONNRESET, "preset", "login shell", "authentication
   // plugin", so they are not signals.

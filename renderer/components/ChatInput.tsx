@@ -15,7 +15,6 @@ import { requestGoalPanelOpen } from "./goal/GoalPanel";
 import { ComposerDecisionSlot } from "./ComposerDecisionPortal";
 import { PopupSteps } from "./Popup";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
-import { AliveComposerButton } from "./alive/AliveComposerButton";
 import { ContextBreakdown } from "./ContextBreakdown";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
@@ -46,6 +45,7 @@ import { formatChatFileSize, type ChatFileDraft } from "@/lib/chat-files";
 import { MediaStrip, mediaKindOf, type MediaStripItem } from "./media/MediaStrip";
 import { useComposerEnter } from "@/lib/use-composer-enter";
 import { useToolbarFit } from "@/lib/use-toolbar-fit";
+import { useWorkspacePane } from "./space/pane-context";
 
 type ModelOption = { id: string; label: string; tag?: string };
 
@@ -253,7 +253,7 @@ type AppGenerateChoice = "dedicated" | "chat";
 // Optional per-turn preferences. An untouched toggle is deliberately omitted:
 // One/the task controller keeps its own judgment instead of receiving OFF.
 type HepToggleId = "stormbreaker" | "recommend";
-type ChatInputLayer = "plus" | "permission" | "model" | "context" | "agent-picker" | "apps-question";
+type ChatInputLayer = "plus" | "permission" | "model" | "context" | "agent-picker" | "apps-question" | "hep";
 
 const HEP_TOGGLES: Array<{
   id: HepToggleId;
@@ -273,12 +273,12 @@ const HEP_TOGGLES: Array<{
     id: "stormbreaker",
     labelKo: "Stormbreaker",
     labelEn: "Stormbreaker",
-    titleKo: "Stormbreaker 견고-실행: 검증·복구 루프로 끝까지 (계속 켜둘 수 있음)",
-    titleEn: "Stormbreaker robust run: verify/repair loop to completion (stays on)",
+    titleKo: "Stormbreaker 견고-실행: 검증·복구 루프로 끝까지",
+    titleEn: "Stormbreaker robust run: verify/repair loop to completion",
   },
 ];
 
-// Stormbreaker 워닝 버블 — 토글을 OFF→ON 할 때 1회만. per-device 선호라 localStorage(설정 스토어 아님).
+// Stormbreaker 워닝 버블 — 처음 Stormbreaker 로 보낼 때 1회만(보내기는 막지 않는다). per-device 선호라 localStorage(설정 스토어 아님).
 const STORM_WARNING_DISMISSED_KEY = "agentlas.stormbreaker.warning.dismissed";
 function isStormWarningDismissed(): boolean {
   try {
@@ -332,6 +332,7 @@ function ChatInputComponent({
   runtimeControls,
   tokensUsage,
   activeAgentId,
+  activeProjectId,
   stopRequested = false,
   showModeToggles = false,
   continuousMode = false,
@@ -503,12 +504,14 @@ function ChatInputComponent({
   const modelOpen = activeLayer === "model";
   const contextMenuOpen = activeLayer === "context";
   const appsGenerateQuestionOpen = activeLayer === "apps-question";
+  const hepOpen = activeLayer === "hep";
   const setPlusOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("plus", next);
   const setAgentPickerOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("agent-picker", next);
   const setPermOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("permission", next);
   const setModelOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("model", next);
   const setContextMenuOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("context", next);
   const setAppsGenerateQuestionOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("apps-question", next);
+  const setHepOpen = (next: boolean | ((open: boolean) => boolean)) => setLayerOpen("hep", next);
 
   // 외부 프리필 — 입력창이 비어있을 때만 채운다(입력 중 내용 덮어쓰기 금지).
   useEffect(() => {
@@ -531,7 +534,9 @@ function ChatInputComponent({
     else setGoalMode(next);
   };
   // 다중선택·지속 모드 토글(에이전트 찾기/Stormbreaker). 전송해도 유지된다.
-  const [hepToggles, setHepToggles] = useState<Set<HepToggleId>>(() => new Set());
+  // "▾ HEP로 실행": a choice applies to the one message it sends and leaves nothing behind (no chip, no standing mode).
+  const hepOnceRef = useRef<HepToggleId | null>(null);
+  const heldHepRef = useRef<HepToggleId | null>(null);
   // Stormbreaker를 처음 켤 때 뜨는 비용/시간 경고 버블. dismiss하면 다시 안 뜸.
   const [showStormWarning, setShowStormWarning] = useState(false);
   // 자동 라우팅(알아서 에이전트 부르기) — 묻지 않고 바로 라우팅한다(codex hep-network 동작과 동일).
@@ -563,6 +568,8 @@ function ChatInputComponent({
   // 하단 툴바는 늘 한 줄이다 — 넘치면 칩 글자를 우선순위대로 접는다(globals.css [data-fit]).
   const toolbarRef = useRef<HTMLDivElement>(null);
   useToolbarFit(toolbarRef);
+  // Drawn in a Workspace pane (F-D5): the pane's one composer shape and its one placeholder. Outside a pane this is null and nothing below changes.
+  const workspacePane = useWorkspacePane();
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const dragDepthRef = useRef(0);
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
@@ -612,7 +619,6 @@ function ChatInputComponent({
     lastChatIdRef.current = activeChatId;
     setAutoRouting(false);
     setGateSheet(null);
-    setHepToggles(new Set());
     setPlanMode(false);
     setGoalMode(false);
     setAppsGenerateMode(false);
@@ -664,13 +670,6 @@ function ChatInputComponent({
       : disabled
       ? (disabledReason ?? (locale === "ko" ? "지금은 이 대화에 보낼 수 없습니다." : "This conversation cannot accept messages right now."))
       : (locale === "ko" ? "중지를 요청했습니다. 멈춘 뒤에 보낼 수 있습니다." : "Stop was requested. You can send once it has stopped.");
-  const hepHint = [...hepToggles]
-    .map((id) => {
-      const toggle = HEP_TOGGLES.find((t) => t.id === id);
-      return toggle ? (locale === "ko" ? toggle.labelKo : toggle.labelEn) : null;
-    })
-    .filter(Boolean)
-    .join(" + ");
   const contextTokenLabel = tokensUsage
     ? tokensUsage.current >= 1_000_000
       ? `~${(tokensUsage.current / 1_000_000).toFixed(1)}M`
@@ -812,12 +811,6 @@ function ChatInputComponent({
     }
     expectedAgentChangesRef.current.clear();
     setGateSheet(null);
-    setHepToggles((prev) => {
-      if (!prev.has("recommend")) return prev;
-      const next = new Set(prev);
-      next.delete("recommend");
-      return next;
-    });
   }, [activeAgentId]);
 
   // fillOnly=true(Tab): 실행/전환 없이 텍스트만 자동완성해 넣는다(절대 전송 안 함).
@@ -833,11 +826,6 @@ function ChatInputComponent({
         setInput(`${before}${after}`.trimStart());
         setTrigger(null);
         setGateSheet(null);
-        setHepToggles((prev) => {
-          const next = new Set(prev);
-          next.delete("recommend");
-          return next;
-        });
         setTurnCalls((current) => current.some((call) => call.key === opt.key)
           ? current
           : [...current, { key: opt.key, label: opt.title, target: opt.target as OrchestrationTarget }]);
@@ -874,7 +862,7 @@ function ChatInputComponent({
       appsGenerateMode: appsGenerateMode || undefined,
       taskForceTargets: turnCalls.length ? turnCalls.map((call) => call.target) : undefined,
       sessionRouting: projectOrchestration || undefined,
-      stormbreakerMode: hepToggles.has("stormbreaker") || undefined,
+      stormbreakerMode: hepOnceRef.current === "stormbreaker" || undefined,
     };
   }
 
@@ -897,6 +885,9 @@ function ChatInputComponent({
   }
   function submit() {
     if (nothingToSend || disabled || (busy && stopRequested)) return;
+    // A send that waits for the model pick keeps its one-shot HEP choice until the held send runs.
+    if (!skipHoldRef.current) heldHepRef.current = hepOnceRef.current;
+    else { hepOnceRef.current = heldHepRef.current; heldHepRef.current = null; }
     const text = withAttachmentContext(input.trim());
     /*
      * 앱 슬래시 명령(/site, /document-studio, /startup …).
@@ -951,8 +942,8 @@ function ChatInputComponent({
     // 세션 팀 자동 보강은 매 턴 전역 검색을 하지 않는다. 현재 채팅에 붙은
     // 에이전트/팀을 먼저 실행하고, 런타임 LLM이 실제 역량 공백을 판단한 경우에만
     // Agent Hub·Cloud 보강 도구를 사용한다.
-    if (!projectOrchestration && hepToggles.has("recommend") && text) {
-      void autoRouteAndSend(text);
+    if (!projectOrchestration && hepOnceRef.current === "recommend" && text) {
+      void autoRouteAndSend(text); // reads the send options before its first await
       return;
     }
     onSend(text, currentSendOptions());
@@ -961,11 +952,18 @@ function ChatInputComponent({
     setFileGrants([]);
     setPastedTexts([]);
     setTurnCalls([]);
-    // 모드 토글(에이전트 찾기/Stormbreaker)은 리셋하지 않는다 — 계속 켜둘 수 있음.
     setTrigger(null);
   }
 
   submitRef.current = submit;
+  /** "▾ HEP로 실행": send this one message with the chosen mode, then leave nothing on. Stormbreaker explains its cost the first time. */
+  function sendWithHep(id: HepToggleId) {
+    setHepOpen(false);
+    // The first Stormbreaker send still goes out: the cost note appears beside it (and is remembered), it never replaces the send.
+    if (id === "stormbreaker" && !isStormWarningDismissed()) { dismissStormWarning(); setShowStormWarning(true); }
+    hepOnceRef.current = id;
+    try { submit(); } finally { hepOnceRef.current = null; }
+  }
   useEffect(() => () => { heldSubmitCancelRef.current?.(); heldSubmitCancelRef.current = null; }, []);
 
   function sendStagedSteering() {
@@ -1272,37 +1270,11 @@ function ChatInputComponent({
           setPlanMode={setPlanMode}
           goalMode={effectiveGoalMode}
           setGoalMode={toggleGoalMode}
+          goalBlockedReason={activeProjectId === null && !effectiveGoalMode
+            ? (locale === "ko" ? "목표는 프로젝트 안의 세션에서만 쓸 수 있어요" : "Goals work only in a session inside a project")
+            : undefined}
           appsGenerateMode={appsGenerateMode}
           onToggleAppsGenerate={requestAppsGenerateMode}
-          onInsertMention={() => {
-            // This is a programmatic insertion, so React will not call
-            // onInputChange for us. Keep the mention trigger in sync or the
-            // user sees an @ but never gets the real agent/team autocomplete.
-            const next = `${input}${input.endsWith(" ") || input === "" ? "" : " "}@`;
-            setInput(next);
-            setTrigger({ kind: "mention", query: "", startIndex: next.length - 1 });
-            setPlusOpen(false);
-            setPlusSubmenu(null);
-            setTimeout(() => {
-              textareaRef.current?.focus();
-              textareaRef.current?.setSelectionRange(next.length, next.length);
-            }, 0);
-          }}
-          hepToggles={hepToggles}
-          onToggleHep={(id) => {
-            // Stormbreaker OFF→ON 전환 감지 — 첫 활성화 시 비용/시간 경고 버블.
-            const turningStormOn = id === "stormbreaker" && !hepToggles.has("stormbreaker");
-            setHepToggles((prev) => {
-              const next = new Set(prev);
-              if (next.has(id)) next.delete(id);
-              else next.add(id);
-              return next;
-            });
-            if (id === "stormbreaker") {
-              setShowStormWarning(turningStormOn && !isStormWarningDismissed());
-            }
-            setTimeout(() => textareaRef.current?.focus(), 0);
-          }}
           locale={locale}
           projectOrchestration={projectOrchestration}
           showModeToggles={showModeToggles}
@@ -1316,6 +1288,7 @@ function ChatInputComponent({
             onToggleSwarm?.();
             setTimeout(() => textareaRef.current?.focus(), 0);
           }}
+          paneShape={Boolean(workspacePane)}
           t={t}
         />
       )}
@@ -1336,11 +1309,6 @@ function ChatInputComponent({
             });
           }}
           onConfirm={() => {
-            setHepToggles((prev) => {
-              const next = new Set(prev);
-              next.delete("recommend");
-              return next;
-            });
             const nextCalls = [...selectedAgentIds].map((id) => {
               if (id.startsWith("hub:")) {
                 const slug = id.slice("hub:".length);
@@ -1380,6 +1348,22 @@ function ChatInputComponent({
           locale={locale}
           alwaysApproval={alwaysApproval}
         />
+      )}
+
+      {/* HEP로 실행 popover — 이번 전송에만 적용 */}
+      {hepOpen && (
+        <Popover dataKind="hep" role="menu" compact align="right" ariaLabel={locale === "ko" ? "HEP로 실행" : "Run with HEP"}>
+          {HEP_TOGGLES.filter((tg) => !projectOrchestration || tg.id !== "recommend").map((tg) => (
+            <Row
+              key={tg.id}
+              onClick={() => sendWithHep(tg.id)}
+              icon={tg.id === "recommend" ? <IconUsers size={14} aria-hidden /> : <IconShield size={14} aria-hidden />}
+              title={locale === "ko" ? tg.labelKo : tg.labelEn}
+              subtitle={locale === "ko" ? `이번 메시지만 · ${tg.titleKo}` : `This message only · ${tg.titleEn}`}
+              compact
+            />
+          ))}
+        </Popover>
       )}
 
       {/* 모델·작업량 popover */}
@@ -1569,6 +1553,7 @@ function ChatInputComponent({
       <div
         ref={shellRef}
         className="chat-input-shell"
+        data-pane-composer={workspacePane ? "true" : undefined}
         data-has-progress={queuedCount > 0 || (effectiveGoalMode && goalBarPlacement === "composer") ? "true" : "false"}
         style={{
           position: "relative",
@@ -1786,9 +1771,7 @@ function ChatInputComponent({
               ? t("chatinput.placeholder_disabled")
               : busy
                 ? t("chatinput.placeholder_steering")
-              : hepHint
-                ? `${hepHint} · ${locale === "ko" ? "요청을 입력하세요" : "describe the request"}`
-              : placeholder ?? t("chatinput.placeholder_rich")
+              : workspacePane ? t("chatinput.placeholder_pane") : placeholder ?? t("chatinput.placeholder_rich")
           }
           rows={1}
           disabled={disabled}
@@ -1835,42 +1818,10 @@ function ChatInputComponent({
               <IconPlus size={15} />
             </button>
 
-            {/* AGI(Alive) — "+" 와 같은 모양의 작은 단추. 좁은 작성창에서 글자 칩이 먼저 줄도록 칩들보다 앞에 둔다. */}
-            <AliveComposerButton
-              surface="work"
-              chatId={activeChatId}
-              locale={locale === "ko" ? "ko" : "en"}
-              triggerStyle={toolBtnStyle}
-              disabled={disabled}
-            />
-
             {/* 활성 실행 모드는 하나의 상태 그룹으로 묶는다. 설정은 + 메뉴에서 찾고,
                 이곳에서는 현재 켜진 모드를 확인하거나 바로 끌 수 있다. */}
-            {(HEP_TOGGLES.some((tg) => hepToggles.has(tg.id) && (!projectOrchestration || tg.id !== "recommend")) ||
-              (showModeToggles && !projectOrchestration && (continuousMode || swarmMode))) && (
+            {(showModeToggles && !projectOrchestration && (continuousMode || swarmMode)) && (
               <div className="chat-input-hep-toggle-group" role="group" aria-label={locale === "ko" ? "활성 실행 모드" : "Active run modes"}>
-                {HEP_TOGGLES.filter((tg) => hepToggles.has(tg.id) && (!projectOrchestration || tg.id !== "recommend")).map((tg) => (
-                  <button
-                    key={tg.id}
-                    type="button"
-                    className="chat-input-hep-chip active"
-                    data-hep-toggle-id={tg.id}
-                    onClick={() => {
-                      setHepToggles((prev) => {
-                        const next = new Set(prev);
-                        next.delete(tg.id);
-                        return next;
-                      });
-                      setTimeout(() => textareaRef.current?.focus(), 0);
-                    }}
-                    disabled={disabled}
-                    title={`${locale === "ko" ? tg.labelKo : tg.labelEn} — ${locale === "ko" ? "끄기" : "turn off"}`}
-                    aria-pressed={true}
-                  >
-                    <span className="chat-input-hep-dot" aria-hidden />
-                    <span className="chat-input-hep-label">{locale === "ko" ? tg.labelKo : tg.labelEn}</span>
-                  </button>
-                ))}
                 {showModeToggles && !projectOrchestration && continuousMode && <button
                   type="button"
                   className="chat-input-hep-chip active"
@@ -2124,6 +2075,19 @@ function ChatInputComponent({
                   <span className="chat-input-voice">
                     <OneVoiceInputHelp locale={locale === "ko" ? "ko" : "en"} composerRef={textareaRef} disabled={disabled} surface="work" />
                   </span>
+                  <button
+                    type="button"
+                    className="chat-input-hep-caret"
+                    data-popover-trigger="hep"
+                    aria-haspopup="menu"
+                    aria-expanded={hepOpen}
+                    aria-label={locale === "ko" ? "HEP로 실행" : "Run with HEP"}
+                    title={locale === "ko" ? "HEP로 실행 — 이번 메시지만" : "Run with HEP — this message only"}
+                    disabled={submitDisabled || busy}
+                    onClick={() => setHepOpen((v) => !v)}
+                  >
+                    <IconChevronDown size={13} aria-hidden />
+                  </button>
                   <button
                     type="button"
                     className="chat-input-send-button"
@@ -2803,7 +2767,7 @@ function AutoRouteGateSheet({
           onClick={onBuild}
           style={{
             ...buttonBase,
-            border: "1px solid var(--line)",
+            border: "1px solid var(--paper-edge)",
             background: "var(--popup-control-bg)",
             color: "var(--ink)",
             fontWeight: 700,
@@ -3040,11 +3004,9 @@ function PlusMenu({
   setPlanMode,
   goalMode,
   setGoalMode,
+  goalBlockedReason,
   appsGenerateMode,
   onToggleAppsGenerate,
-  onInsertMention,
-  hepToggles,
-  onToggleHep,
   locale,
   projectOrchestration,
   showModeToggles,
@@ -3052,6 +3014,7 @@ function PlusMenu({
   swarmMode,
   onToggleContinuous,
   onToggleSwarm,
+  paneShape,
   t,
 }: {
   submenu: PlusSubmenu;
@@ -3066,14 +3029,10 @@ function PlusMenu({
   setPlanMode: (v: boolean) => void;
   goalMode: boolean;
   setGoalMode: (v: boolean) => void;
+  /** Set while a goal cannot be started here (a session with no project): the row is off and says why. */
+  goalBlockedReason?: string;
   appsGenerateMode: boolean;
   onToggleAppsGenerate: (v: boolean) => void;
-  /** "@" 에이전트 부르기 삽입. */
-  onInsertMention: () => void;
-  /** 현재 켜진 Hephaestus 모드들(다중선택). */
-  hepToggles: Set<HepToggleId>;
-  /** Hephaestus 모드 토글(스톰브레이커 경고·포커스 등은 부모가 처리). */
-  onToggleHep: (id: HepToggleId) => void;
   locale: string;
   projectOrchestration: boolean;
   /** 실행 모드 토글(계속 라이브로·스웜) 노출 여부. */
@@ -3082,8 +3041,12 @@ function PlusMenu({
   swarmMode: boolean;
   onToggleContinuous: () => void;
   onToggleSwarm: () => void;
+  /** Drawn in a Workspace pane (F-D5,): the "+" holds what is added (files, folder, plugins), Plan / Goal and the one-turn Agent; Apps, Keep-going-live and Swarm rows are not drawn. */
+  paneShape?: boolean;
   t: TFunction;
 }) {
+  // A surface that registers its own submenu is not a work session: files and its submenu only; Plan and Goal belong to work sessions.
+  const extensionShape = extensions.length > 0;
   const extension = typeof submenu === "string" && submenu.startsWith("ext:") ? extensions.find((item) => `ext:${item.id}` === submenu) : undefined;
   if (extension) return <ExtensionSubmenu extension={extension} onBack={() => setSubmenu(null)} onPick={onInsertItem} locale={locale} />;
   if (submenu === "plugins") {
@@ -3131,19 +3094,23 @@ function PlusMenu({
         title={t("chatinput.plus.attach")}
         compact
       />
-      <Row
-        onClick={onAddFolder}
-        icon={<IconFolder size={14} />}
-        title={t("chatinput.plus.attach_folder")}
-        compact
-      />
-      <Row
-        onClick={() => setSubmenu("plugins")}
-        icon={<IconLayers size={14} style={{ color: "var(--accent)" }} />}
-        title={t("chatinput.plus.plugins")}
-        right={<IconChevronRight size={11} style={{ color: "var(--muted)" }} />}
-        compact
-      />
+      {!extensionShape && (
+        <>
+          <Row
+            onClick={onAddFolder}
+            icon={<IconFolder size={14} />}
+            title={t("chatinput.plus.attach_folder")}
+            compact
+          />
+          <Row
+            onClick={() => setSubmenu("plugins")}
+            icon={<IconLayers size={14} style={{ color: "var(--accent)" }} />}
+            title={t("chatinput.plus.plugins")}
+            right={<IconChevronRight size={11} style={{ color: "var(--muted)" }} />}
+            compact
+          />
+        </>
+      )}
       {extensions.map((item) => (
         <Row
           key={item.id}
@@ -3154,6 +3121,7 @@ function PlusMenu({
           compact
         />
       ))}
+      {!extensionShape && (<>
       <Divider />
       <ToggleRow
         icon={<IconRoute size={14} />}
@@ -3165,18 +3133,21 @@ function PlusMenu({
       <ToggleRow
         icon={<IconTarget size={14} />}
         title={t("chatinput.goal_mode")}
+        subtitle={goalBlockedReason}
+        disabled={Boolean(goalBlockedReason)}
         on={goalMode}
         onChange={setGoalMode}
         compact
       />
-      {!projectOrchestration && <ToggleRow
+      </>)}
+      {!projectOrchestration && !paneShape && !extensionShape && <ToggleRow
           icon={<IconApps size={14} />}
           title={t("chatinput.apps_generate_mode")}
           on={appsGenerateMode}
           onChange={onToggleAppsGenerate}
           compact
         />}
-      {!projectOrchestration && showModeToggles && (
+      {!projectOrchestration && !paneShape && !extensionShape && showModeToggles && (
         <>
           <Divider />
           <ToggleRow
@@ -3205,27 +3176,6 @@ function PlusMenu({
           />
         </>
       )}
-      {!projectOrchestration && <Divider />}
-      {!projectOrchestration && HEP_TOGGLES.map((tg) => (
-        <ToggleRow
-          key={tg.id}
-          hepToggleId={tg.id}
-          icon={tg.id === "recommend" ? <IconUsers size={14} aria-hidden /> : <IconShield size={14} aria-hidden />}
-          title={locale === "ko" ? tg.labelKo : tg.labelEn}
-          subtitle={locale === "ko" ? tg.titleKo : tg.titleEn}
-          on={hepToggles.has(tg.id)}
-          onChange={() => onToggleHep(tg.id)}
-          compact
-        />
-      ))}
-      <Divider />
-      <Row
-        onClick={onInsertMention}
-        icon={<IconAtSign size={14} />}
-        title={locale === "ko" ? "에이전트" : "Agent"}
-        subtitle={locale === "ko" ? "이 턴에만 수동으로 추가" : "One-turn manual override"}
-        compact
-      />
     </Popover>
   );
 }
@@ -3671,23 +3621,24 @@ function ToggleRow({
   subtitle,
   on,
   onChange,
-  hepToggleId,
   compact = false,
+  disabled = false,
 }: {
   icon: React.ReactNode;
   title: string;
   subtitle?: string;
   on: boolean;
   onChange: (v: boolean) => void;
-  /** Locale-independent hook for Hephaestus mode controls and release QA. */
-  hepToggleId?: HepToggleId;
   compact?: boolean;
+  /** Off, with the subtitle shown as the reason (not hidden like a normal compact subtitle). */
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={() => onChange(!on)}
-      data-hep-toggle-id={hepToggleId}
+      disabled={disabled}
+      aria-disabled={disabled || undefined}
       data-compact-menu-row={compact ? "true" : undefined}
       title={compact ? subtitle : undefined}
       aria-label={compact && subtitle ? `${title}. ${subtitle}` : undefined}
@@ -3704,6 +3655,8 @@ function ToggleRow({
         borderRadius: 8,
         background: "transparent",
         border: "none",
+        opacity: disabled ? 0.55 : 1,
+        cursor: disabled ? "not-allowed" : undefined,
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.background = "var(--fill-1)";
@@ -3718,7 +3671,7 @@ function ToggleRow({
           {title}
         </span>
         {subtitle && (
-          <span className={compact ? "sr-only" : undefined} style={{ display: "block", marginTop: 2, fontSize: 11, lineHeight: 1.35, color: "var(--muted-deep)" }}>
+          <span className={compact && !disabled ? "sr-only" : undefined} style={{ display: "block", marginTop: 2, fontSize: 11, lineHeight: 1.35, color: "var(--muted-deep)" }}>
             {subtitle}
           </span>
         )}
@@ -3988,16 +3941,15 @@ function AgentPickerPopup({
                       icon={<IconBuilding size={14} style={{ color: "var(--accent)" }} />}
                       name={loc.name}
                       tagline={loc.tagline}
-                      badge={locale === "en" ? "Team" : "팀"}
                     />
                   );
                 })}
               </>
             )}
-            {/* 싱글 에이전트 섹션 */}
+            {/* 에이전트 섹션 — 한 목록(첫 머리글만 보인다) */}
             {filteredAgents.length > 0 && (
               <>
-                <div
+                {filteredFirms.length === 0 && <div
                   style={{
                     padding: "8px 10px 4px",
                     fontSize: 10,
@@ -4008,7 +3960,7 @@ function AgentPickerPopup({
                   }}
                 >
                   {t("chatinput.agent_picker.singles")}
-                </div>
+                </div>}
                 {filteredAgents.map((a) => {
                   const loc = pickLocalized(a, locale);
                   const checked = selected.has(a.id);

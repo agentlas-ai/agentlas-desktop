@@ -90,18 +90,18 @@ export function armChatGoalContract(input: { goalId: string; chatId: string }): 
     // An explicit new ON owns this chat. If a crash cleared the chat binding
     // before terminalising an older local contract, retire that orphan first;
     // otherwise the one-active-goal index would turn recovery into a dead end.
-    db.prepare(
-      `UPDATE chat_goal_contracts
-       SET status = 'cancelled', updated_at = ?, completed_at = ?
-       WHERE chat_id = ? AND goal_id <> ? AND status = 'active'`,
-    ).run(now, now, chatId, goalId);
+    // The one close (store/goal-close.ts): the orphan's run (if it has one), its tasks and due line end with its contract.
+    for (const orphan of db.prepare("SELECT goal_id FROM chat_goal_contracts WHERE chat_id = ? AND goal_id <> ? AND status = 'active'")
+      .all(chatId, goalId) as Array<{ goal_id: string }>) {
+      require("./goal-close").closeGoal(orphan.goal_id, "cancelled", "replaced", { reason: "replaced_by_new_goal" }); // eslint-disable-line @typescript-eslint/no-require-imports
+    }
     db.prepare(
       `INSERT INTO chat_goal_contracts
         (goal_id, chat_id, objective, acceptance_criteria_json, status, created_at, updated_at, completed_at)
        VALUES (?, ?, NULL, '[]', 'active', ?, ?, NULL)
        ON CONFLICT(goal_id) DO NOTHING`,
     ).run(goalId, chatId, now, now);
-  })();
+  }).immediate();
 }
 
 /** Main-owned durable source of truth. A missing objective means "armed". */
@@ -141,34 +141,6 @@ export function defineChatGoalContract(input: {
        AND (objective IS NULL OR TRIM(objective) = '')`,
   ).run(objective, JSON.stringify(criteria), new Date().toISOString(), goalId, chatId);
   return getChatGoalContract(goalId);
-}
-
-/**
- * Terminalize the local contract before clearing the chat binding. Contracts
- * are retained for audit/recovery; a future ON receives a new goal id.
- */
-export function completeChatGoalContract(
-  goalId: string,
-  status: Extract<GoalStatus, "blocked" | "completed" | "cancelled">,
-): ChatGoalContext | null {
-  const normalized = goalId.trim();
-  if (!normalized) return null;
-  // Episode success cannot terminalize the user's ongoing mandate. User cancel
-  // and blocked/pause handling remain available independently of this guard.
-  if (status === "completed" && getChatGoalRevision(normalized)?.lifecycle === "ongoing") {
-    throw new Error("goal_ongoing_cannot_complete");
-  }
-  if (status === "completed" && require("./long-runs").getLongRunByGoalId(normalized)?.status !== "completed"
-    && !require("../long-run/goal-obligation-context").currentGoalObligationsSatisfied(normalized)) {
-    throw new Error("goal_execution_obligations_unmet");
-  }
-  const now = new Date().toISOString();
-  getDb().prepare(
-    `UPDATE chat_goal_contracts
-     SET status = ?, updated_at = ?, completed_at = ?
-     WHERE goal_id = ? AND (status = 'active' OR (? = 'cancelled' AND status = 'blocked'))`,
-  ).run(status, now, now, normalized, status);
-  return toContext(readRow(normalized));
 }
 
 /** A bound but undefined campaign is distinguishable from a missing row. */
@@ -384,9 +356,7 @@ export function createStoredAutomaticGoal(input: Parameters<typeof createAutomat
       const binding = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(revision.chatId) as
         { goal_id: string | null } | undefined;
       if (binding?.goal_id === orphan.goal_id) throw new Error("auto_goal_chat_already_bound");
-      const now = new Date().toISOString();
-      getDb().prepare("UPDATE chat_goal_contracts SET status = 'cancelled', updated_at = ?, completed_at = ? WHERE goal_id = ? AND status = 'active'")
-        .run(now, now, orphan.goal_id);
+      require("./goal-close").closeGoal(orphan.goal_id, "cancelled", "replaced", { reason: "replaced_by_new_goal" }); // eslint-disable-line @typescript-eslint/no-require-imports
     }
     getDb().prepare(`INSERT INTO chat_goal_contracts
       (goal_id, chat_id, objective, acceptance_criteria_json, status, created_at, updated_at, completed_at)
@@ -450,19 +420,14 @@ export function reconcileAbandonedGoalContracts(now = new Date()): string[] {
     chat_goal_id: string | null; continuous_mode: number | null }>;
   const closed: string[] = [];
   const touchedChats: string[] = [];
-  const stamp = now.toISOString();
   const tx = db.transaction(() => {
     for (const row of rows) {
-      const changed = db.prepare(
-        `UPDATE chat_goal_contracts SET status = 'cancelled', completed_at = ?, updated_at = ?
-          WHERE goal_id = ? AND status = ? AND updated_at = ?`,
-      ).run(stamp, stamp, row.goal_id, row.status, row.updated_at);
-      if (changed.changes !== 1) continue;
+      // Still the row that was selected (nothing wrote to the contract since): then the one close ends it (store/goal-close.ts).
+      const still = db.prepare("SELECT 1 FROM chat_goal_contracts WHERE goal_id = ? AND status = ? AND updated_at = ?").get(row.goal_id, row.status, row.updated_at);
+      if (!still) continue;
+      const closedNow = (require("./goal-close") as typeof import("./goal-close")).closeGoal(row.goal_id, "cancelled", "cleanup", { reason: "active_contract_without_run" }); // eslint-disable-line @typescript-eslint/no-require-imports
+      if (!closedNow.contractEnded) continue;
       const wasBound = row.chat_goal_id === row.goal_id;
-      if (wasBound) {
-        db.prepare("UPDATE chats SET goal_id = NULL, continuous_mode = 0, updated_at = ? WHERE id = ? AND goal_id = ?")
-          .run(stamp, row.chat_id, row.goal_id);
-      }
       recordRunEvent({
         runId: `goal-reconcile:${row.goal_id}`,
         kind: GOAL_CONTRACT_RECONCILED_EVENT,
@@ -476,7 +441,7 @@ export function reconcileAbandonedGoalContracts(now = new Date()): string[] {
       touchedChats.push(row.chat_id);
     }
   });
-  tx();
+  tx.immediate();
   for (const chatId of touchedChats) emitDesktopStoreChange({ entity: "chat", id: chatId });
   return closed;
 }

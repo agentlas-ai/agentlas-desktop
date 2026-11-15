@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { powerMonitor } from "electron";
 import { runSlotStats } from "../runtime/run-slots";
+import { onMemoryWritten } from "../memory/memory-written-signal";
+import { createIdleJob, idleSecondsOrAppQuiet, type IdleJob } from "../memory/idle-job";
+import { withModelCallScope } from "../runtime/model-call-ledger";
 import { agentWorkspaceStorePath } from "./workspace-guard";
 import { AGENT_LEARNING_POLICY } from "../../shared/agent-learning-policy";
 import { autoApplyLearningProposal, runAutoEvolutionPass } from "./auto-evolution";
@@ -18,7 +21,14 @@ import { hasOpenLearningProposal, learningAgentIds, prepareAgentWorkspaceFromMem
  * Cost limits: Main process only, idle machine, free run slots, at most AGENT_LEARNING_POLICY.proposalsPerAgentPerDay
  * attempts per agent per day (an attempt counts even when the compiler answers "no change"), and nothing while a learning
  * change already waits for review.
+ *
+ * When it runs: a lesson becomes ready when memory is written (it is counted on read, nothing marks it), so a pass is opened
+ * by a signal that memory may have changed: curateEvents committed memory in this process (the producer of lessons; the
+ * automatic curator ends in it too), a run freed its slot, a chat changed (turns hosted by the background service), or the app
+ * started. There is no periodic timer; with no signal nothing runs. Lessons the background service wrote reach this process
+ * through the chat change of the turn that wrote them.
  */
+/** Spacing between passes while more agents wait than one pass takes (AGENTS_PER_TICK), or after an attempt that is tried again. */
 const TICK_MS = 30 * 60 * 1000;
 const IDLE_REQUIRED_SEC = 120;
 const AGENTS_PER_TICK = 2;
@@ -42,8 +52,12 @@ const MEMORY_MOVED_ON_CODES: ReadonlySet<string> = new Set(["memory_ineligible",
 const TRANSIENT_FAILURE_CODES: ReadonlySet<string> = new Set(["compiler_unavailable", "base_changed", "update_busy", "proposal_failed"]);
 /** Attempts a day are given back this many times, so a lesson that really is ineligible cannot spend the model all day. */
 const GIVE_BACK_RETRIES_PER_DAY = 3;
-let timer: NodeJS.Timeout | null = null;
+let job: IdleJob | null = null;
 let running = false;
+/** A signal arrived since the last pass that looked at every agent. Starts true: the start-up pass. */
+let dirty = true;
+/** The earliest start of the next pass while agents are left over. */
+let notBefore = 0;
 
 function stateFile(agentId: string): string { return path.join(agentWorkspaceStorePath(agentId), "learning-proposer.json"); }
 function today(now: Date): string { return now.toISOString().slice(0, 10); }
@@ -51,8 +65,12 @@ function readState(agentId: string): ProposerState | null {
   try { const value = JSON.parse(fs.readFileSync(stateFile(agentId), "utf8")) as Partial<ProposerState>; return typeof value.day === "string" && Number.isSafeInteger(value.attempts) ? value as ProposerState : null; }
   catch { return null; }
 }
+/** When a pass of this process last finished (or the process started): after six hours without one, the app's own quiet counts as idle (idle-job.ts idleSecondsOrAppQuiet; desktop 3, B3). */
+let lastPassAt = Date.now();
 function idleSeconds(): number {
-  try { return powerMonitor.getSystemIdleTime(); } catch { return 0; /* Not knowing counts as not idle. */ }
+  let system = 0;
+  try { system = powerMonitor.getSystemIdleTime(); } catch { system = 0; /* Not knowing counts as not idle. */ }
+  return idleSecondsOrAppQuiet(system, lastPassAt);
 }
 
 /** One agent: record the attempt first (a crash must not retry in a loop), then ask the compiler. */
@@ -66,7 +84,8 @@ export async function proposeLearningsForAgent(agentId: string, now = new Date()
   if (!memoryIds.length) return { outcome: "skipped", code: "no_ready_lesson" };
   writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts: attempts + 1, lastCode: null } satisfies ProposerState);
   try {
-    const proposal = await prepareAgentWorkspaceFromMemory({ agentId, memoryEntryIds: memoryIds });
+    // The ledger names this call by its own job (it used to be written under whatever scope the waking signal came from: first-run-labels, trial repair 8 R2).
+    const proposal = await withModelCallScope({ role: "curator", phase: "learning-proposer" }, () => prepareAgentWorkspaceFromMemory({ agentId, memoryEntryIds: memoryIds }));
     // Off by default: the call answers "auto_evolution_off" and the change waits for the owner's diff review.
     const auto = autoApplyLearningProposal(proposal.id);
     return { outcome: "proposed", proposalId: proposal.id, ...(auto.applied ? { autoApplied: true } : {}) };
@@ -81,38 +100,66 @@ export async function proposeLearningsForAgent(agentId: string, now = new Date()
     }
     try { writeAgentWorkspaceRecord(stateFile(agentId), { day, attempts: attempts + 1, lastCode: code, ...(movedOn ? { movedOn } : {}) } satisfies ProposerState); } catch { /* The attempt was already counted. */ }
     // "No change" and "needs more evidence" are normal answers, not failures worth reporting.
-    return { outcome: ["semantic_review_deferred", "learning_not_recurring", "learning_stays_memory"].includes(code) ? "skipped" : "failed", code };
+    return { outcome: ["semantic_review_deferred", "learning_not_recurring", "learning_stays_memory", "skill_format"].includes(code) ? "skipped" : "failed", code };
   }
 }
 
-async function tick(): Promise<void> {
-  if (running) return;
-  if (idleSeconds() < IDLE_REQUIRED_SEC) return;
+/**
+ * One pass over the agents, if the machine is idle and no run is active. True when it looked at them (what is left is in
+ * `dirty` and `notBefore`), false when it could not start.
+ */
+export async function runLearningProposerPass(): Promise<boolean> {
+  if (running) return false;
+  if (idleSeconds() < IDLE_REQUIRED_SEC) return false;
   const slots = runSlotStats();
-  if (slots.inUse > 0 || slots.queued > 0) return;
+  if (slots.inUse > 0 || slots.queued > 0) return false;
   running = true;
+  // Signals from here on belong to the next pass.
+  dirty = false;
+  let leftOver = false;
   try {
     // Host-only work first (no model): settle changes being watched, retry one that waited on a busy run.
     for (const pass of runAutoEvolutionPass()) console.log(`[auto-evolution] ${pass.evaluated.map(item => `${item.result}:${item.reason}`).join(" ")}${pass.applied ? " applied" : ""}`);
     let tried = 0;
     for (const agentId of learningAgentIds()) {
-      if (tried >= AGENTS_PER_TICK) break;
+      if (tried >= AGENTS_PER_TICK) { leftOver = true; break; }
       let result: Awaited<ReturnType<typeof proposeLearningsForAgent>>;
       try { result = await proposeLearningsForAgent(agentId); } catch { continue; /* One agent's missing folder must not stop the rest. */ }
       if (result.outcome === "skipped" && ["daily_limit", "review_pending", "no_ready_lesson"].includes(result.code ?? "")) continue;
       tried += 1;
       console.log(`[learning-proposer] ${result.outcome}${result.code ? ` ${result.code}` : ""}`);
-      if (idleSeconds() < IDLE_REQUIRED_SEC) break; // The owner came back; stop spending their model slot.
+      // An attempt that was given back is tried again from the current lessons, a bounded number of times a day (proposeLearningsForAgent).
+      if (result.outcome === "skipped" && (result.code === "memory_moved_on" || result.code === "attempt_given_back")) leftOver = true;
+      if (idleSeconds() < IDLE_REQUIRED_SEC) { leftOver = true; break; } // The owner came back; stop spending their model slot.
     }
+  } catch (error) {
+    // The pass did not finish: keep the signal and let the job retry on its bounded ladder.
+    dirty = true;
+    console.warn("[learning-proposer] pass failed:", error instanceof Error ? error.message : error);
+    throw error;
   } finally { running = false; }
+  lastPassAt = Date.now();
+  if (leftOver) { dirty = true; notBefore = Date.now() + TICK_MS; }
+  return true;
 }
 
 export function startLearningProposer(): void {
-  if (timer) return;
-  timer = setInterval(() => { void tick().catch(error => console.warn("[learning-proposer] tick failed:", error instanceof Error ? error.message : error)); }, TICK_MS);
-  timer.unref?.();
+  if (job) return;
+  lastPassAt = Date.now(); // the six hours of "no pass" are counted from the proposer's start or its last pass
+  dirty = true;
+  notBefore = 0;
+  job = createIdleJob({
+    // Nothing is read here: with no signal since the last full pass there is nothing to do and no timer.
+    due: () => dirty ? (notBefore > Date.now() ? notBefore : 0) : null,
+    waitMs: () => { const idle = idleSeconds(); return idle < IDLE_REQUIRED_SEC ? Math.max(1_000, (IDLE_REQUIRED_SEC - idle) * 1_000) : 0; },
+    pass: runLearningProposerPass,
+    // Each signal marks the agents as worth one more look.
+    signals: [onMemoryWritten],
+    onSignal: () => { dirty = true; },
+  });
+  job.start(TICK_MS);
 }
 export function stopLearningProposer(): void {
-  if (timer) clearInterval(timer);
-  timer = null;
+  job?.stop();
+  job = null;
 }

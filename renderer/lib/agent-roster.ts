@@ -1,6 +1,7 @@
 import type { InstalledAgent, InstalledFirm } from "./types";
 import { isUserFacingAgentText } from "./agent-visibility";
 import { classifyInstalledAgent } from "./agent-entity-kind";
+import { isSpecialHiddenAgentSlug } from "@shared/special-agents";
 
 export type RosterEntityKind = "single" | "multi";
 
@@ -35,6 +36,11 @@ export function isRosterVisibleAgent(agent: InstalledAgent): boolean {
 
 export function visibleRosterAgents(agents: InstalledAgent[]): InstalledAgent[] {
   return dedupeAgentsById(agents).filter(isRosterVisibleAgent);
+}
+
+/** The owner's Agents list and the Dashboard cards: the visible roster minus the special agents that have their own screen (Science, Finance). */
+export function ownerListedAgents(agents: InstalledAgent[]): InstalledAgent[] {
+  return visibleRosterAgents(agents).filter((agent) => !isSpecialHiddenAgentSlug(agent.slug));
 }
 
 export function buildAgentRoster(agents: InstalledAgent[], firms: InstalledFirm[]): AgentRosterModel {

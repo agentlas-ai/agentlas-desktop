@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { getMemoryDb as getDb } from "../memory/database";
+import { readEntryRowAnywhere } from "../memory/store";
 import { tryRecordFailureEvent } from "../store/run-events";
 import { readSkillCatalogAsset } from "../hephaestus/skill-catalog";
 import { assertMemoryWriteAllowed, MemoryRevokedError } from "../memory/revocations";
@@ -231,10 +232,12 @@ function validateMemorySources(
     throw new EvolutionSourceError("ids_invalid");
   }
   const ids = [...new Set(rawIds.map((value) => String(value).trim()).filter(Boolean))];
-  const getMemory = getDb().prepare(
+  const rootMemory = getDb().prepare(
     `SELECT id, agent_id, scope, kind, content, project_id, project_path, chat_id, superseded_at
      FROM memory_entries WHERE id = ?`,
   );
+  // A lesson may sit in the agent's own store (layout switch not OFF): same columns, found by id there when the root has no such row.
+  const getMemory = { get: (id: string) => rootMemory.get(id) ?? readEntryRowAnywhere(id, "id, agent_id, scope, kind, content, project_id, project_path, chat_id, superseded_at") };
   const natives = nativeTextsFor("memory_entry", ids);
   const captured = source._agentlasMemorySourceContentHashes;
   if (!captureFingerprints && captured !== undefined

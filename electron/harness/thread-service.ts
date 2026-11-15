@@ -141,6 +141,14 @@ export async function turnStart(args: Record<string, unknown>, ctx: Ctx): Promis
   if ((chat as { originSurface?: string }).originSurface === "one") {
     return { status: "refused", reason: "one_thread_owner_entry", next: "One threads start from the One composer (daemon-owned) or mobile one.invoke.start" };
   }
+  // Desktop repair 11: the owner-input gate every other route runs before a turn - a room the personal agent runs takes no owner-typed message, and a
+  // one-to-one room whose agent was deleted has nobody to answer. (A group room under the lead model has originSurface "one" and is refused above, so the lead router
+  // is not needed here.) The line is the owner's own (`ownerSpoke`): only the owner surface ("ui", checked above) reaches this point.
+  const [{ assertOwnerMayWriteRoom }, { markOwnerSpoke }, { currentUiLocale }] = await Promise.all([
+    import("../one/personal-agent-rooms"), import("../invocation/owner-spoke"), import("../ui-locale"),
+  ]);
+  try { assertOwnerMayWriteRoom(threadId); }
+  catch (error) { return { status: "refused", reason: typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "room_not_writable", next: "talk to the personal agent, or start a new conversation" }; }
   const service = await invocation();
   if (!service) return { status: "unavailable", reason: "invocation_service_unavailable", next: "turns start in the app's main process" };
   if (service.activeChatIds().includes(threadId)) return { status: "refused", reason: "turn_running", next: "wait, or Stop it with turn.interrupt" };
@@ -148,11 +156,11 @@ export async function turnStart(args: Record<string, unknown>, ctx: Ctx): Promis
   const latest = service.latestOwnerReceipt(threadId) as { executionPermission?: string } | null;
   const permissions = args.permissions === "read" || args.permissions === "write" || args.permissions === "full"
     ? args.permissions : latest?.executionPermission === "write" || latest?.executionPermission === "full" ? latest.executionPermission : "read";
-  const [{ currentUiLocale }, { admitMainInvocation }, { randomUUID }] = await Promise.all([
-    import("../ui-locale"), import("../runtime/scheduled-root-context"), import("node:crypto"),
+  const [{ admitMainInvocation }, { randomUUID }] = await Promise.all([
+    import("../runtime/scheduled-root-context"), import("node:crypto"),
   ]);
   const runId = randomUUID();
-  const started = service.start({ runId, chatId: threadId, userPrompt: text, locale: currentUiLocale(), permissions },
-    undefined, undefined, undefined, undefined, admitMainInvocation(threadId, runId));
+  const started = service.start(markOwnerSpoke({ runId, chatId: threadId, userPrompt: text, locale: currentUiLocale(), permissions } as never),
+    undefined, ctx.runId.startsWith("mobile:") ? {source:"mobile"} : undefined, undefined, undefined, admitMainInvocation(threadId, runId));
   return { status: "ok", data: { threadId, runId: started.runId, permissions } };
 }

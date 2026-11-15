@@ -9,6 +9,7 @@ import {
   type ContinuityVerification,
 } from "./controller";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
+import { movedFolders, relocatedPath, type MovedFolder } from "../agents/home-relocation";
 import {
   OPENCRAB_CATALOG_ID,
   OPENCRAB_CREDENTIAL_PATTERN,
@@ -140,6 +141,34 @@ function copyAgentAssets(sourceRoot: string, backupRoot: string): Record<string,
     throw new Error("Agent asset recovery copy does not match the live assets");
   }
   return sourceHashes;
+}
+
+/** 옛 `userData/agents/<이름>` 이 지금 어디에 있나(폴더 이동 뒤): 새 폴더 또는 null. */
+function relocatedAgentFolder(userDataPath: string, name: string, moved: readonly MovedFolder[]): string | null {
+  return relocatedPath(path.join(path.resolve(userDataPath), "agents", name), moved);
+}
+
+/**
+ * 라우트 파일 해시가 달라졌을 때: 옛 스냅샷의 모든 라우트가 지금도 같은 에이전트·같은 종류·같은 출처·같은 패키지 해시이고, 경로가 같거나 폴더 이동으로
+ * 새 경로가 된 것이면 "바뀌지 않았다". 새로 생긴 라우트는 허용한다. 읽지 못하면 바뀐 것으로 본다(기존 동작).
+ */
+function routesSemanticallyUnchanged(backupPath: string | null, currentPath: string, moved: readonly MovedFolder[]): boolean {
+  if (!backupPath) return false;
+  try {
+    const before = JSON.parse(fs.readFileSync(backupPath, "utf8").replace(/^﻿/, "")) as Record<string, { path?: string; kind?: string; source?: string; packageHash?: string }>;
+    const after = JSON.parse(fs.readFileSync(currentPath, "utf8").replace(/^﻿/, "")) as typeof before;
+    for (const [agentId, route] of Object.entries(before)) {
+      const next = after[agentId];
+      if (!next || next.kind !== route.kind || (next.source ?? "local-import") !== (route.source ?? "local-import") || next.packageHash !== route.packageHash) return false;
+      if (typeof route.path !== "string" || typeof next.path !== "string") return false;
+      if (path.resolve(route.path) === path.resolve(next.path)) continue;
+      const relocated = relocatedPath(route.path, moved);
+      if (!relocated || path.resolve(relocated) !== path.resolve(next.path)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function topLevelAgentDirectories(userDataPath: string): string[] {
@@ -1188,14 +1217,31 @@ export async function verifyUpdaterContinuity(input: {
     backupDb?.close();
   }
 
+  // 폴더 이동 뒤에는 `userData/agents/<이름>` 이 에이전트 루트로 옮겨져 있을 수 있다. 이름 → 지금 위치를 풀어 같은 파일을 비교한다 — 옮겨진 것을
+  // 사라진 것·바뀐 것으로 오판하지 않는다. 진짜 삭제·수정은 여전히 위반이다. 옮겨진 폴더가 하나도 없으면 아래는 예전과 똑같이 동작한다.
+  let movedList: MovedFolder[] | null = null;
+  const moved = (): MovedFolder[] => (movedList ??= movedFolders());
   const currentAgents = new Set(topLevelAgentDirectories(input.currentUserDataPath));
   for (const agentDirectory of input.snapshot.agentDirectoryNames) {
-    if (!currentAgents.has(agentDirectory)) violations.push(`agent-directory-missing:${agentDirectory}`);
+    if (!currentAgents.has(agentDirectory) && !relocatedAgentFolder(input.currentUserDataPath, agentDirectory, moved())) violations.push(`agent-directory-missing:${agentDirectory}`);
   }
   try {
     const currentAssetHashes = assetFingerprint(path.join(input.currentUserDataPath, "agents"));
+    const relocatedHashes = new Map<string, Record<string, string> | null>();
     for (const [relativePath, expectedHash] of Object.entries(input.snapshot.agentAssetHashes)) {
-      if (currentAssetHashes[relativePath] !== expectedHash) violations.push(`agent-asset-changed:${relativePath}`);
+      if (currentAssetHashes[relativePath] === expectedHash) continue;
+      const name = relativePath.split("/")[0];
+      if (!currentAgents.has(name)) {
+        if (!relocatedHashes.has(name)) {
+          const folder = relocatedAgentFolder(input.currentUserDataPath, name, moved());
+          let hashes: Record<string, string> | null = null;
+          try { hashes = folder ? assetFingerprint(folder) : null; } catch { hashes = null; }
+          relocatedHashes.set(name, hashes);
+        }
+        const there = relocatedHashes.get(name);
+        if (there && there[relativePath.slice(name.length + 1)] === expectedHash) continue;
+      }
+      violations.push(`agent-asset-changed:${relativePath}`);
     }
   } catch {
     violations.push("agent-assets-unavailable");
@@ -1218,7 +1264,8 @@ export async function verifyUpdaterContinuity(input: {
     const currentRoutePath = path.join(input.currentUserDataPath, "agent-routes.json");
     if (!fs.existsSync(currentRoutePath)) {
       violations.push("agent-routes-missing");
-    } else if (input.snapshot.routeFileHash && hashFile(currentRoutePath) !== input.snapshot.routeFileHash) {
+    } else if (input.snapshot.routeFileHash && hashFile(currentRoutePath) !== input.snapshot.routeFileHash
+      && !routesSemanticallyUnchanged(input.snapshot.routeBackupPath, currentRoutePath, moved())) {
       violations.push("agent-routes-changed");
     }
   }

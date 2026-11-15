@@ -187,6 +187,7 @@ export function assertDevelopmentIpcAllowed(channel: string, args: readonly unkn
  *   문자열 code 를 message 접두어로 싣는다(shared/ipc-error-code). 화면은 ipcErrorCode() 로 읽는다.
  *   로그에는 채널과 코드만 남긴다(사용자 내용 없음).
  */
+const REASON_CARRYING_CODES: ReadonlySet<string> = new Set(["one_group_member_unavailable", "agent_chat_read_only"]);
 function codedIpcError(channel: string, error: unknown): unknown {
   if (!error || typeof error !== "object") return error;
   const code = (error as { code?: unknown }).code;
@@ -202,7 +203,10 @@ function codedIpcError(channel: string, error: unknown): unknown {
     return error;
   }
   const message = error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
-  const encoded = encodeIpcErrorMessage(code, message);
+  // Only the refusals whose `.reason` the screen words carry it (desktop 3, Workspace §4.6 #5): the code alone said "cannot join" for six different causes.
+  const reasonOf = (error as { reason?: unknown }).reason;
+  const reason = REASON_CARRYING_CODES.has(code) && isIpcErrorCode(reasonOf) ? reasonOf : undefined;
+  const encoded = encodeIpcErrorMessage(code, message, reason);
   const detail = (error as { detail?: unknown }).detail;
   const detailText = typeof detail === "string" && /^[A-Za-z0-9_=,.:-]{1,300}$/.test(detail) ? ` ${detail}` : "";
   console.warn(`[ipc] refused channel=${channel.slice(0, 96)} code=${code}${detailText}`);

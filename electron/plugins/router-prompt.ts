@@ -220,7 +220,8 @@ export function selectedPluginRouterPrompt(selected: ReadonlyArray<{ slug: strin
   const blocks: string[] = [];
   for (const choice of selected) {
     const plugin = bySlug.get(choice.slug);
-    if (!plugin || mentioned(userPrompt, plugin)) continue;
+    if (!plugin) continue;
+    if (mentioned(userPrompt, plugin) && !(choice.workflow && installedPluginWorkflowPath(plugin.slug, choice.workflow))) continue;
     // A workflow the owner asked for from a button or menu (owner-capability-request.ts) is pointed at directly instead of the router,
     // and its skill text travels with this turn: the owner already chose it, so the model does not have to open it first (real app
     // 2026-10-28, claude-haiku-5-5: with the pointer alone it wrote the draft as prose 5/5). Only this one owner-chosen workflow,

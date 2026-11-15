@@ -70,10 +70,10 @@ const allocation = {
 };
 export const WORK_SESSION_TOOL_DEFINITIONS = [
   { name: "work_session_agents", annotations: read,
-    description: "Read bounded inventory pages. Default section agents lists available project specialists; sessions lists assignment summaries without result bodies. Section runtimes returns lossless JSON text pages of exact runtime/model profiles: continue next_offset with snapshot_id. Availability never requires delegation. Answer or do simple work yourself.",
+    description: "Read bounded inventory pages. Default section agents lists available project agents; sessions lists assignment summaries without result bodies. Section runtimes returns lossless JSON text pages of exact runtime/model profiles: continue next_offset with snapshot_id. Availability never requires delegation. Answer or do simple work yourself.",
     inputSchema: { type: "object", properties: {section:{type:"string",enum:["agents","runtimes","sessions"]},...paging}, additionalProperties: false } },
   { name: "work_session_delegate", annotations: act,
-    description: "Assign a bounded independent task to one exact available specialist. Returns a durable handle immediately; completion returns to this main conversation. Keep the same request_id and payload after an uncertain response. End your turn while the task works; receive owner messages normally. Do not poll or duplicate the assigned work.",
+    description: "Assign a bounded independent task to one exact available agent. Returns a durable handle immediately; completion returns to this main conversation. Keep the same request_id and payload after an uncertain response. End your turn while the task works; receive owner messages normally. Do not poll or duplicate the assigned work.",
     inputSchema: { type: "object", properties: {
       request_id: handle, target: { type: "string", minLength: 1, maxLength: 300, description: "Exact target key from work_session_agents." },
       brief: { type: "string", minLength: 1, maxLength: 12000, description: "Purpose, bounded work and observable completion criteria." }, allocation,

@@ -91,7 +91,10 @@ export function unconfirmedRunShouldBeSentAgain(
   if (receipt.status !== "failed" || receipt.interruptionCause === "steering") return false;
   // Failed with no outside cause named, so the effect is unknown: an unfinished turn, or the app's own unexpected exception after the
   // turn was dispatched (the exception's class rides on the receipt, hostInternalFailure; a provider's own failure never does).
-  return (receipt.errorCode === UNSETTLED_TURN_CODE && !receipt.runtimeFailure?.cause)
+  // A model program the computer's memory shortage ended (machine fact, runtime/child-death.ts) is not an outside cause that "waits for its own remedy": its memory is free again
+  // the moment it dies, so the one resend below stays (decision: make it work first, then say why). Any other typed cause still blocks it.
+  const memoryDeath = (receipt.runtimeFailure?.cause as { providerCode?: unknown } | undefined)?.providerCode === "runtime_out_of_memory";
+  return (receipt.errorCode === UNSETTLED_TURN_CODE && (!receipt.runtimeFailure?.cause || memoryDeath))
     || (receipt.hostInternalFailure === true && !receipt.runtimeFailure);
 }
 

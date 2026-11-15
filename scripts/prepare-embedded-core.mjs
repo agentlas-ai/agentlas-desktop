@@ -137,6 +137,18 @@ function transformActivation(filePath) {
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
 }
 
+// The embedded Core is the closed, retired-runtime form of the engine: it never starts a detached background process. Agentlas OS 1.2.97 and
+// later let a command end by starting a detached project-index ingest (`_spawn_detached_ingest`); the embedded copy keeps the index it wrote
+// and starts nothing (the release gate runs the embedded Core with every external effect denied).
+function transformBackstop(filePath) {
+  let source = fs.readFileSync(filePath, "utf8");
+  source = replaceExactly(source,
+    "                           private_digest: str | None = None) -> None:\n    runtime_root = Path(__file__).resolve().parent.parent\n",
+    "                           private_digest: str | None = None) -> None:\n    return  # embedded Core: no detached background ingest\n    runtime_root = Path(__file__).resolve().parent.parent\n",
+    "embedded Core detached ingest");
+  fs.writeFileSync(filePath, source);
+}
+
 function transformGrounding(filePath) {
   transformTextFile(filePath, (source) => source
     .replaceAll("the super ontology", "the local semantic ontology")
@@ -186,13 +198,18 @@ function transformRuntimeInstructions(files) {
       }
       source = source.slice(0, start) + replacement + source.slice(end);
     }
-    // Agentlas OS 1.2.73 ships the runtime form of this file itself (the contributor constitution, release allowlist and
+    // Agentlas OS 1.2.73 and later ship the runtime form of this file themselves (the contributor constitution, release allowlist and
     // commit-language paragraphs are gone upstream). Only its maintainer-only ontology source gate (item 18) is omitted here,
-    // the same span the 1.2.72 branch below removes. Any other upstream text is a new review, not a silent pass.
-    if (digest === "0918ab63d97d94e36df9533d5be23c94c1ef571660330b305d56decf236da763") {
+    // the same span the 1.2.72 branch below removes. Each reviewed upstream text is pinned by its checksum together with the
+    // checksum of the projected output; any other upstream text is a new review, not a silent pass.
+    const runtimeForm = new Map([
+      ["0918ab63d97d94e36df9533d5be23c94c1ef571660330b305d56decf236da763", "80e5fd45f87cb327cc6b74b21926cd0068f42d50559b8f413deb8e6f862f7f72"],
+      ["ac70bfd9db20dee13052ae81e5eb86058d1c604b65544c5bbb4cfb1a8122895e", "fb25c0735e5f5cef26d7c6bca7b3ba151a7db444033caa970854ecd3a7437f02"],
+    ]);
+    if (runtimeForm.has(digest)) {
       replaceSpan("18. For development changes to the engine ontology runtime, run\n", "19. For long-running or multi-file execution work", "");
-      const outputDigest73 = require("node:crypto").createHash("sha256").update(source).digest("hex");
-      if (outputDigest73 !== "80e5fd45f87cb327cc6b74b21926cd0068f42d50559b8f413deb8e6f862f7f72") throw new Error("embedded Core projected instruction checksum mismatch");
+      const projectedDigest = require("node:crypto").createHash("sha256").update(source).digest("hex");
+      if (projectedDigest !== runtimeForm.get(digest)) throw new Error("embedded Core projected instruction checksum mismatch");
       fs.writeFileSync(file, source);
       continue;
     }
@@ -253,6 +270,7 @@ function transformPreparedTree() {
     else if (base === "package-contract.json") transformPackageContract(filePath);
     else if (base === "activation.json.tpl") transformActivation(filePath);
     else if (/\/agentlas_cloud\/networking\/(?:hub_invocation|policy|router)\.py$/.test(normalized)) transformGrounding(filePath);
+    else if (normalized.endsWith("/agentlas_cloud/project_index_backstop.py")) transformBackstop(filePath);
   }
 
   const retired = contract.scanRetiredRuntime(temporaryRoot);

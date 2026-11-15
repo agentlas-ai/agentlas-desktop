@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type Database from "better-sqlite3";
+import { agentlasHomeDir } from "../agents/home";
 import { getDb, openedStorePath } from "../store/db";
 import { MEMORY_STORE_SCHEMA_SQL } from "./schema";
+import { ensureK1Columns } from "./store-columns";
 
 const SCHEMA = "agentlas_memory";
 const VERSION = 1;
+/** 2 = the root the 2.0 first-run `tidy` converted (engine first_run_tidy.py raises it so an engine that knows only 1 steps back). Both are read and written the same; an open never lowers a 2. */
+const ACCEPTED_VERSIONS: ReadonlySet<number> = new Set([1, 2]);
 const OWNER_KEY = "agentlas.memory.owner.v1";
 const states = new WeakMap<Database.Database, StoreState>();
 
@@ -35,13 +38,37 @@ export function memoryRoot(): string {
   // memory beside the explicitly selected fixture database as well.
   const fixtureStore = process.env.AGENTLAS_E2E === "1" ? process.env.AGENTLAS_STORE_PATH?.trim() : undefined;
   const fixtureRoot = fixtureStore && path.isAbsolute(fixtureStore) ? path.join(path.dirname(fixtureStore), "agentlas-memory") : undefined;
-  const root = override || fixtureRoot || path.join(process.env.AGENTLAS_HOME?.trim() || path.join(os.homedir(), ".agentlas"), "memory");
+  // 홈은 에이전트 폴더와 같은 한 함수에서 온다: 값을 준 `AGENTLAS_HOME` 은 그대로(상대 경로면 예전처럼 거절), 없으면 `agentlasHomeDir()` — userData 만 임시로 옮긴 시험이
+  // 실제 `~/.agentlas/memory` 에 쓰지 않는다(정식 실행은 `~/.agentlas` 그대로).
+  const envHome = process.env.AGENTLAS_HOME?.trim();
+  const root = override || fixtureRoot || path.join(envHome || agentlasHomeDir(), "memory");
   if (!path.isAbsolute(root)) throw new Error("memory_root_must_be_absolute");
   return path.resolve(root);
 }
 
+/**
+ * One synchronous span that reads the account identity once (resource minimum: a pass of reads used to re-read the account marker and the custody file for every
+ * statement). Open it around a function that has NO await in it; it closes when that function returns or throws, so there is no timer, no age and no entry that outlives
+ * the call. Nothing in this process can change the signed-in account in the middle of a synchronous function, so the value is what a read at each statement would have
+ * returned; the next span (and every statement outside one) reads fresh, so a sign-out or an account switch is seen at the next one exactly as before. Nested: the outer span holds.
+ * Never pass an async function: only its part before the first await would be inside.
+ */
+let ownerNamespaceSpan: { value: string | null } | null = null;
+export function withOwnerNamespaceSpan<T>(fn: () => T): T {
+  if (ownerNamespaceSpan) return fn();
+  ownerNamespaceSpan = { value: null };
+  try { return fn(); } finally { ownerNamespaceSpan = null; }
+}
+
 /** Identity comes from the host's existing account custody, never model output. */
 export function activeMemoryOwnerNamespace(): string {
+  const span = ownerNamespaceSpan;
+  if (!span) return readActiveMemoryOwnerNamespace();
+  if (span.value === null) span.value = readActiveMemoryOwnerNamespace();   // a read that throws leaves it unset: the next call reads again, as without a span
+  return span.value;
+}
+
+function readActiveMemoryOwnerNamespace(): string {
   const { oneScopedMetaKey } = require("../store/one-profile") as typeof import("../store/one-profile");
   const slot = oneScopedMetaKey(OWNER_KEY);
   const custody = deviceMemoryCustodyId();
@@ -120,13 +147,28 @@ function routeSql(sql: string): string {
   }).join("").replace(/^\s*PRAGMA\s+table_info\((memory_\w+)\)/i, `PRAGMA ${SCHEMA}.table_info($1)`);
 }
 
+/**
+ * Has this app database's memory already been cut over to a canonical store? The mark is `memory-store-cutover:<hash of the app DB's absolute path>` in the app DB's own `meta`.
+ * That key made a moved profile (a backup restored elsewhere, a renamed user folder, a new Mac) look like "never cut over": the old tables were copied in again and collided with the
+ * rows already in the store (`memory_migration_source_collision`, the memory store would not open; trial D4). The mark travels with the database, so a mark under ANY path hash
+ * says this database was cut over: the old tables are frozen by the cutover triggers and nothing is imported again. A database with no mark at all is imported as before, and a real
+ * collision there is still refused. Nothing is written: no new key per path.
+ */
+function cutoverRecorded(product: Database.Database, marker: string): boolean {
+  if (product.prepare("SELECT 1 FROM main.meta WHERE key=?").get(marker)) return true;
+  return Boolean(product.prepare("SELECT 1 FROM main.meta WHERE key LIKE 'memory-store-cutover:%' LIMIT 1").get());
+}
+
 function createStore(product: Database.Database, ownerNamespace: string, file: string): void {
   product.prepare(`ATTACH DATABASE ? AS ${SCHEMA}`).run(file);
+  // 잊은 글이 떠난 페이지를 덮어쓴다(#6): 뿌리는 로그(WAL)가 아니라 지우기 저널 방식이라 체크포인트로는 빈 페이지의 옛 글자가 안 없어진다. 이 이름의 DB 에만 건다 —
+  // 제품 DB(`main`)의 삭제 비용은 그대로다. 소유자 전환으로 다시 붙일 때마다 여기를 지나므로 새로 붙인 파일에도 걸린다. 데몬도 같은 `getMemoryDb` 로 연다.
+  try { product.pragma(`${SCHEMA}.secure_delete=ON`); } catch { /* 그래도 기억 저장은 계속된다 */ }
   const hasMetadata = product.prepare(`SELECT 1 FROM ${SCHEMA}.sqlite_master WHERE type='table' AND name='memory_store_meta'`).get();
   if (hasMetadata) {
     const existingVersion = product.prepare(`SELECT value FROM ${SCHEMA}.memory_store_meta WHERE key='schema_version'`).get() as { value: string } | undefined;
     const existingOwner = product.prepare(`SELECT value FROM ${SCHEMA}.memory_store_meta WHERE key='owner_namespace'`).get() as { value: string } | undefined;
-    if (existingVersion && Number(existingVersion.value) !== VERSION) throw new Error("memory_store_schema_incompatible");
+    if (existingVersion && !ACCEPTED_VERSIONS.has(Number(existingVersion.value))) throw new Error("memory_store_schema_incompatible");
     if (existingOwner && existingOwner.value !== ownerNamespace) throw new Error("memory_owner_mismatch");
   }
   product.exec(`CREATE TABLE IF NOT EXISTS ${SCHEMA}.memory_store_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -135,12 +177,12 @@ function createStore(product: Database.Database, ownerNamespace: string, file: s
       target_id TEXT NOT NULL, source_digest TEXT NOT NULL, state TEXT NOT NULL,
       PRIMARY KEY(source_store,target_table,source_id));`);
   const oldVersion = product.prepare(`SELECT value FROM ${SCHEMA}.memory_store_meta WHERE key='schema_version'`).get() as { value: string } | undefined;
-  if (oldVersion && Number(oldVersion.value) !== VERSION) throw new Error("memory_store_schema_incompatible");
+  if (oldVersion && !ACCEPTED_VERSIONS.has(Number(oldVersion.value))) throw new Error("memory_store_schema_incompatible");
   const owner = product.prepare(`SELECT value FROM ${SCHEMA}.memory_store_meta WHERE key='owner_namespace'`).get() as { value: string } | undefined;
   if (owner && owner.value !== ownerNamespace) throw new Error("memory_owner_mismatch");
   const sourceId = createHash("sha256").update(path.resolve(product.name)).digest("hex");
   const marker = `memory-store-cutover:${sourceId}`;
-  const cutover = product.prepare("SELECT value FROM main.meta WHERE key=?").get(marker) as { value: string } | undefined;
+  const cutover = cutoverRecorded(product, marker);
   const tables = product.prepare("SELECT name,sql FROM main.sqlite_master WHERE type='table' AND name LIKE 'memory_%' ORDER BY name").all() as Array<{ name: string; sql: string }>;
   const migrate = product.transaction(() => {
     product.pragma("defer_foreign_keys=ON");
@@ -190,9 +232,12 @@ function createStore(product: Database.Database, ownerNamespace: string, file: s
       CREATE TRIGGER IF NOT EXISTS ${SCHEMA}.memory_revision_insert AFTER INSERT ON memory_entries BEGIN UPDATE memory_store_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'; END;
       CREATE TRIGGER IF NOT EXISTS ${SCHEMA}.memory_revision_update AFTER UPDATE OF content,scope,kind,project_id,project_path,agent_id,chat_id,superseded_at ON memory_entries BEGIN UPDATE memory_store_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'; END;
       CREATE TRIGGER IF NOT EXISTS ${SCHEMA}.memory_revision_delete AFTER DELETE ON memory_entries BEGIN UPDATE memory_store_meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision'; END;`);
-    product.prepare(`INSERT OR REPLACE INTO ${SCHEMA}.memory_store_meta(key,value) VALUES ('schema_version',?),('owner_namespace',?),('migration_epoch','1')`).run(String(VERSION), ownerNamespace);
+    product.prepare(`INSERT OR REPLACE INTO ${SCHEMA}.memory_store_meta(key,value) VALUES ('schema_version',?),('owner_namespace',?),('migration_epoch','1')`).run(oldVersion && Number(oldVersion.value) === 2 ? "2" : String(VERSION), ownerNamespace);
   });
   migrate.immediate();
+  // 2.0 K1 (-1,2): a root made before the four nullable columns gets them once, marked in its own meta (`store_columns`); a marked root costs this one meta read and nothing else.
+  // A root the engine already did is `present`; a lock or any SQLite error leaves it for the next open (never a failure of opening the store). Nothing reads a new column yet.
+  try { ensureK1Columns(product, SCHEMA); } catch { /* the next open does it */ }
 }
 
 export function getMemoryDb(): Database.Database {
@@ -209,7 +254,7 @@ export function getMemoryDb(): Database.Database {
   try {
     if (!ownerNamespace.startsWith("device-local:")) {
       const sourceId = createHash("sha256").update(path.resolve(product.name)).digest("hex");
-      const already = product.prepare("SELECT 1 FROM main.meta WHERE key=?").get(`memory-store-cutover:${sourceId}`);
+      const already = cutoverRecorded(product, `memory-store-cutover:${sourceId}`);
       if (!already) {
         const deviceNamespace = `device-local:${deviceMemoryCustodyId()}`;
         const deviceFile = memoryStorePath(deviceNamespace);
@@ -312,7 +357,11 @@ export function purgeLegacyMemoryCopies(memoryIds: readonly string[], ticketIds:
   for (const id of new Set(memoryIds)) {
     const mapping = canonical.prepare(`SELECT 1 FROM memory_source_mappings
       WHERE source_store=? AND target_table='memory_entries' AND target_id=? AND state='migrated'`).get(sourceId, JSON.stringify([id]));
-    if (mapping) accepted.push(id);
+    // K5': the per-row receipts are tidied away by the first-run migration (68,113 rows on one store, read by nothing else). The frozen copy itself says the same thing:
+    // the cutover guards stop every insert and update of `main.memory_entries`, so a row that is there is by construction a migrated copy. A receipt still counts as before.
+    let frozen: unknown = null;
+    if (!mapping) { try { frozen = product.prepare("SELECT 1 FROM main.memory_entries WHERE id=?").get(id); } catch { frozen = null; } }   // no frozen table: nothing to scrub
+    if (mapping || frozen) accepted.push(id);
   }
   if (!accepted.length) return;
   const has = (name: string) => Boolean(product.prepare("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name=?").get(name));

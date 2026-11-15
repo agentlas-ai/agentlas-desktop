@@ -14,6 +14,7 @@ import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { ipc } from "@/lib/ipc";
 import { ONE_CHARACTER_OPTIONS, type OneCharacterId } from "@/lib/one-characters";
 import type { CreateOneTeamAgentResult, OneOrgCollaborationStyle } from "@shared/one-org";
+import { nameSaveAllowed, nextNameInput } from "@shared/one-agent-name";
 import type { RuntimeSelection, RuntimeStatus } from "@shared/types";
 import { readStoredRuntimeSelection, runtimeSupportsAgentOverride, selectionForRuntime } from "@shared/runtime-selection";
 import { runtimeUsesEngineModelSetting } from "@shared/models";
@@ -311,6 +312,8 @@ export function OneCreateAgentDialog({
   const [oneTab, setOneTab] = useState<OneEditTab>("profile");
   const [characterId, setCharacterId] = useState<OneCharacterId>(EMPTY_DRAFT.characterId);
   const [name, setName] = useState(EMPTY_DRAFT.name);
+  // The personal agent's name: a changed name must be one the server takes (12 characters); the name it already has is always allowed.
+  const oneNameBlocked = Boolean(editOne) && !nameSaveAllowed(name.replace(/\s+/g, " ").trim(), editOne?.displayName ?? "");
   const [title, setTitle] = useState(EMPTY_DRAFT.title);
   const [description, setDescription] = useState(EMPTY_DRAFT.description);
   const [generatePrompt, setGeneratePrompt] = useState(EMPTY_DRAFT.generatePrompt);
@@ -737,7 +740,7 @@ export function OneCreateAgentDialog({
     if (!cleanName || !avatarReady || creating) return;
     const api = ipc();
     if (!api?.oneOrg?.update) {
-      setError(ko ? "One Team 저장 기능을 불러오지 못했습니다. 앱을 다시 열어 주세요." : "One Team storage is unavailable. Reopen the app and try again.");
+      setError(ko ? "에이전트 저장 기능을 불러오지 못했습니다. 앱을 다시 열어 주세요." : "Agent storage is unavailable. Reopen the app and try again.");
       return;
     }
     setCreating(true);
@@ -771,7 +774,7 @@ export function OneCreateAgentDialog({
     if (!cleanName || !avatarReady || creating) return;
     const api = ipc();
     if (!api?.oneOrg?.createAgent) {
-      setError(ko ? "One Team 저장 기능을 불러오지 못했습니다. 앱을 다시 열어 주세요." : "One Team storage is unavailable. Reopen the app and try again.");
+      setError(ko ? "에이전트 저장 기능을 불러오지 못했습니다. 앱을 다시 열어 주세요." : "Agent storage is unavailable. Reopen the app and try again.");
       return;
     }
     setCreating(true);
@@ -841,11 +844,11 @@ export function OneCreateAgentDialog({
     toolbar={editOne && !identityOnly ? <OneEditTabs locale={ko ? "ko" : "en"} value={oneTab} onChange={setOneTab} /> : undefined}
     footer={editOne ? <div className={styles.footerActions}>
       <button type="button" disabled={creating} onClick={requestDismiss}>{oneTab === "profile" ? (ko ? "취소" : "Cancel") : (ko ? "닫기" : "Close")}</button>
-      {oneTab === "profile" && <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void updateOne()} data-one-edit-save>{creating ? (ko ? "저장 중…" : "Saving…") : (ko ? "저장" : "Save")}</button>}
+      {oneTab === "profile" && <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating || oneNameBlocked} onClick={() => void updateOne()} data-one-edit-save>{creating ? (ko ? "저장 중…" : "Saving…") : (ko ? "저장" : "Save")}</button>}
     </div> : undefined}
     panelClassName={editOne ? [styles.dialog, styles.oneEdit, identityOnly ? styles.identityOnly : oneTab === "profile" ? styles.oneEditWide : styles.oneEditNarrow].join(" ") : styles.dialog}
     bodyClassName={editOne ? [styles.body, styles.oneEditBody].join(" ") : styles.body}
-    eyebrow={editOne ? "One" : "One Team"}
+    eyebrow={editOne ? "One" : (ko ? "에이전트" : "Agents")}
     title={editOne ? (ko ? "One 편집" : "Edit One") : edit ? (ko ? "팀원 편집" : "Edit Teammate") : (ko ? "새 에이전트" : "New Agent")}
     titleId="one-create-agent-title"
     ariaLabelledBy="one-create-agent-title"
@@ -903,7 +906,7 @@ export function OneCreateAgentDialog({
 
       <section className={styles.fields}>
         {/* 라벨 ko 표기는 웹 New Agent 폼과 통일(D-9) — 이름/제목/설명. */}
-        <label>{ko ? "이름" : "Name"}<input value={name} onChange={(event) => setName(event.target.value)} maxLength={editOne ? 64 : 80} placeholder={ko ? "예: 메일비서" : "inbox-triage"} autoFocus /></label>
+        <label>{ko ? "이름" : "Name"}<input value={name} onChange={(event) => setName(editOne ? nextNameInput(name, event.target.value) : event.target.value)} maxLength={editOne ? 64 : 80} placeholder={ko ? "예: 메일비서" : "inbox-triage"} autoFocus />{editOne && <small data-one-name-limit style={{ display: "block", marginTop: 4, color: "var(--muted-deep)", fontSize: 11 }}>{ko ? "최대 12자" : "Up to 12 characters"}</small>}</label>
         {/* 만들 때와 고칠 때가 같은 칸을 쓴다. 편집이면 지금 값이 이미 적혀 있고, 그것이 곧 수정이다. */}
         {!identityOnly && (!edit || edit.identityEditable) && <label>{editOne ? (ko ? "역할" : "Role") : (ko ? "제목" : "Title")}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={editOne ? 120 : 100} placeholder={editOne ? "Agentlas One" : (ko ? "예: 메일 분류 담당" : "e.g. Inbox Triage")} /></label>}
         {!identityOnly && (!edit || edit.identityEditable) && <label>{editOne ? (ko ? "말투·성격과 내 선호" : "Voice, personality, and preferences") : (ko ? "설명" : "Description")}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={editOne ? 4_000 : 1_200} placeholder={ko ? (editOne ? "예: 핵심을 간결하게 말하고, 내가 결정할 것이 있으면 먼저 알려 줘." : "이 에이전트에게 말투와 성격, 영혼을 부여하세요.") : (editOne ? "e.g. Be concise and tell me what needs my decision." : "Give this agent a voice, personality, and soul.")} /></label>}
@@ -972,10 +975,10 @@ export function OneCreateAgentDialog({
               : (ko ? "자동 임시저장됨 · 창을 닫아도 이어집니다." : "Draft saved automatically · close and continue later.")}
         </p>}
         {error && <p className={styles.error} role="alert">{error}</p>}
-        {creating && !editOne && !edit && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "One Team에 팀원을 만들고 있어요" : "Creating your One Team teammate"}</strong><small>{ko ? "로컬 정체성, 팀원 등록, 독립 채팅을 함께 저장합니다." : "Saving its local identity, teammate entry, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
+        {creating && !editOne && !edit && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "에이전트를 만들고 있어요" : "Creating your agent"}</strong><small>{ko ? "로컬 정체성, 팀원 등록, 독립 채팅을 함께 저장합니다." : "Saving its local identity, teammate entry, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
         {!editOne && <div className={styles.actions}>
           <button type="button" disabled={creating} onClick={requestDismiss}>{ko ? "취소" : "Cancel"}</button>
-          <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void (editOne ? updateOne() : edit ? updateMember() : createAgent())}>{creating
+          <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating || oneNameBlocked} onClick={() => void (editOne ? updateOne() : edit ? updateMember() : createAgent())}>{creating
             ? (editOne || edit ? (ko ? "저장 중…" : "Saving…") : (ko ? "만드는 중…" : "Creating…"))
             : (editOne || edit ? (ko ? "저장" : "Save") : (ko ? "만들고 채팅 열기" : "Create & open chat"))}</button>
         </div>}

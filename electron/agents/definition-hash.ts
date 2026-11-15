@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { TEAM_CONTAINER_DIRS } from "./folder-scan";
+import { isAgentLocalStatePath } from "../../shared/agent-local-state";
 
 // v2: the fingerprint now covers the member bodies. Under v1 it walked only 8 of
 // the 12 roster containers the scanner accepts and never entered `.claude` or
@@ -46,6 +47,7 @@ function normalizedRelative(root: string, absolute: string): string {
 }
 
 function isDefinitionPath(relative: string): boolean {
+  if (isAgentLocalStatePath(relative)) return false;
   const parts = relative.split("/");
   if (parts.length === 1) return ROOT_DEFINITION_FILE_RE.test(parts[0]);
   if (DEFINITION_DIRS.has(parts[0])) return true;
@@ -60,6 +62,8 @@ function isDocumentationOnlyPath(relative: string): boolean {
 }
 
 function shouldEnterDirectory(relative: string): boolean {
+  // 이 컴퓨터에만 있는 상태(`.agentlas-local`, `.agentlas/ledgers`)는 어느 깊이에서든 정의가 아니다. 팀 구성원 폴더(`agents/<m>/.agentlas-local`)도 `agents/` 아래라 허용 목록에 걸렸다.
+  if (isAgentLocalStatePath(relative)) return false;
   const parts = relative.split("/");
   if (EXCLUDED_DIRS.has(parts.at(-1) ?? "")) return false;
   if (parts[0] === ".agentlas") return parts.length === 1 || parts[1] === "skills";
@@ -119,6 +123,7 @@ export function computeLocalAgentDefinitionHash(rootPath: string): string {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const absolute = path.join(directory, entry.name);
       const relative = normalizedRelative(root, absolute);
+      if (isAgentLocalStatePath(relative)) continue;
       if (entry.isSymbolicLink()) {
         if (isDefinitionPath(relative) || shouldEnterDirectory(relative)) {
           throw new Error("Symbolic links are not allowed in local AgentDefinition assets.");

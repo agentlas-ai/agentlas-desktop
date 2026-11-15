@@ -65,7 +65,7 @@ export function HubBorrowRoom() {
       setMessage("");
     } catch {
       setResults([]);
-      setMessage(koRef.current ? "허브 검색을 불러오지 못했습니다. 설치된 에이전트에는 영향이 없습니다." : "Hub search could not be loaded. Installed agents were not changed.");
+      setMessage(koRef.current ? "허브 검색을 불러오지 못했어요. 설치된 에이전트는 그대로예요." : "Hub search could not be loaded. Installed agents were not changed.");
     }
   }, []);
 
@@ -84,6 +84,16 @@ export function HubBorrowRoom() {
       if (bookmarkGenerationRef.current === generation) bookmarkGenerationRef.current += 1;
     };
   }, [search]);
+
+  // The first search has an end: a Hub that never answers becomes the failure line, not "Loading…" for ever.
+  useEffect(() => {
+    if (results !== null) return undefined;
+    const timer = setTimeout(() => {
+      setResults([]);
+      setMessage(koRef.current ? "허브 검색을 불러오지 못했어요. 설치된 에이전트는 그대로예요." : "Hub search could not be loaded. Installed agents were not changed.");
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, [results]);
 
   useEffect(() => {
     if (debounce.current) clearTimeout(debounce.current);
@@ -128,9 +138,9 @@ export function HubBorrowRoom() {
       bookmarkGenerationRef.current += 1;
       setBookmarked((prev) => new Set(prev).add(hubBookmarkIdentityKey(bookmark)));
       announceHubBookmarkChange({ action: "added", bookmark });
-      setMessage(ko ? "Hub 북마크에 추가했습니다." : "Added to Hub bookmarks.");
+      setMessage(ko ? "Hub 북마크에 추가했어요." : "Added to Hub bookmarks.");
     } catch {
-      setMessage(ko ? "북마크하지 못했습니다. Hub 연결 상태를 확인한 뒤 다시 시도하세요." : "Could not bookmark it. Check the Hub connection, then try again.");
+      setMessage(ko ? "북마크하지 못했어요. Hub 연결 상태를 확인한 뒤 다시 시도해 주세요." : "Could not bookmark it. Check the Hub connection, then try again.");
     } finally {
       setBusy(null);
     }
@@ -160,7 +170,7 @@ export function HubBorrowRoom() {
           onChange={(e) => setQuery(e.target.value)}
           placeholder={
             ko
-              ? "검증된 에이전트 검색 — 하려는 일을 문장으로 입력 (예: API 백엔드 만들어줘)"
+              ? "검증된 에이전트 검색 — 하려는 작업을 문장으로 입력 (예: API 백엔드 만들어줘)"
               : "Search verified agents — describe the outcome you need"
           }
         />
@@ -174,12 +184,16 @@ export function HubBorrowRoom() {
         </div>
       ) : (
         <div className="hub-borrow-carousel" role="list">
-          {visibleResults.slice(0, 6).map((r) => {
+          {visibleResults.slice(0, 4).map((r) => {
             const entityClass = classifyHubEntity(r);
             const listingIdentity = hubListingIdentityKey(r);
             const isBookmarked = bookmarked.has(listingIdentity);
             const callable = isCallableHubListing(r);
-            const verificationFacts = hubVerificationFacts(r, locale).slice(0, 2);
+            // Two chips as in the confirmed picture: callable or install-only, then one measured word - "Verified" (server-counted successes) or the security grade.
+            // The full measured facts (counts, last success, failure rate) stay in the tooltip.
+            const allFacts = hubVerificationFacts(r, locale);
+            const verifiedWord = (Number(r.verifiedInvocations) || 0) > 0 ? (ko ? "검증됨" : "Verified")
+              : r.trustGrade === "A" || r.trustGrade === "B" || r.trustGrade === "C" ? (ko ? `등급 ${r.trustGrade}` : `Grade ${r.trustGrade}`) : null;
             return (
               <div
                 key={listingIdentity}
@@ -211,11 +225,11 @@ export function HubBorrowRoom() {
                 >
                   {(ko ? r.tagline : r.taglineEn || r.tagline) || ""}
                 </div>
-                <div className="hub-borrow-card-facts" aria-label={ko ? "검증 사실" : "Verification facts"}>
+                <div className="hub-borrow-card-facts" aria-label={ko ? "검증 정보" : "Verification facts"} title={allFacts.join(" · ") || undefined}>
                   <span data-callable={callable ? "true" : "false"}>
                     {callable ? (ko ? "Hub 호출 가능" : "Hub callable") : (ko ? "설치 전용" : "Install only")}
                   </span>
-                  {verificationFacts.map((fact) => <span key={fact}>{fact}</span>)}
+                  {verifiedWord ? <span>{verifiedWord}</span> : null}
                 </div>
                 <div className="hub-borrow-card-foot">
                   {isBookmarked ? (

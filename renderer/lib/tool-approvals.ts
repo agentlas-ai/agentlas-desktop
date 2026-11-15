@@ -33,6 +33,7 @@ import {
   toolApprovalActionId,
   type ToolApprovalDecisionResult,
 } from "@shared/tool-approval-action";
+import { approvalNeedsOwnerAnswer, approvalScopeStep } from "@shared/approval-card";
 import { readChatAlwaysApproval } from "./always-approved-chats";
 import { clearApprovalNoteDraft, cleanApprovalNote } from "./approval-note-drafts";
 
@@ -71,7 +72,11 @@ function emit(): void {
 async function upsert(next: ToolApprovalRequestEvent): Promise<void> {
   if (next.mode !== "live") return; // 사후 고지는 카드가 아니다.
   if (decided.has(next.id) || queue.some((item) => item.id === next.id)) return;
-  const alwaysApproved = await readChatAlwaysApproval(next.chatId);
+  // A money / delete / sending-out card is the owner's to answer (shared/approval-card.ts): Main applied the owner's own
+  // "always allow" before it made the card, so it is drawn, never settled here. This used to answer it "allow" for every
+  // conversation marked always-approved - and a room teammate's hidden session carries that mark from the host, so a teammate's
+  // transfer ran with no card on any permission mode (real app rows 01-04).
+  const alwaysApproved = approvalNeedsOwnerAnswer(next) ? false : await readChatAlwaysApproval(next.chatId);
   if (decided.has(next.id) || queue.some((item) => item.id === next.id)) return;
   /*
    * 이 대화에 이미 "항상 승인"을 준 사용자에게는 카드를 만들지 않는다.
@@ -169,6 +174,25 @@ function subscribe(fn: () => void): () => void {
 const SERVER: Snapshot = { queue: [], visible: new Set(), actions: new Map() };
 function snapshot(): Snapshot {
   return current;
+}
+
+/**
+ * What one "always allow" on a card of this conversation covers (decision; Main: runtime/approval-scope.ts): its project,
+ * or the conversation itself when it has none (a room's hidden member session counts as its room). The same step function as Main.
+ * null when the bridge cannot say: the card then names no unit.
+ */
+export async function approvalUnitOfChat(chatId: string): Promise<"project" | "chat" | null> {
+  const api = ipc();
+  if (!api?.chats?.get) return null;
+  try {
+    let id = chatId;
+    for (let hop = 0; hop < 4; hop += 1) {
+      const step = approvalScopeStep(id, await api.chats.get(id));
+      if ("scope" in step) return step.scope.kind;
+      id = step.parent;
+    }
+    return "chat";
+  } catch { return null; }
 }
 
 /** 훅 밖(전역 주의 저장소 lib/attention)에서 같은 큐를 구독한다. */

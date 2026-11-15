@@ -45,6 +45,7 @@ import {
 import { GOAL_OWNER_ANSWER_REQUIRED, GOAL_OWNER_HOLD_BLOCKED_REASONS, goalHeldForOwnerAnswer, goalHeldForOwnerGrant } from "../../shared/goal-display-state";
 import { NO_PROGRESS_RETRY_LIMIT, VERIFICATION_NO_PROGRESS_REASON } from "../../shared/long-run-checkpoint";
 import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
+import { claimHarnessDue, clearHarnessDueInDb, harnessDueFor, upsertHarnessDueInDb } from "./harness-due";
 import { getDb } from "./db";
 import { createRuntimeRetryStore, RUNTIME_RETRY_REOPEN_AFTER_MS } from "./runtime-retry";
 import { onRuntimeSignal } from "../runtime/runtime-signals";
@@ -877,6 +878,16 @@ export function transitionLongRun(input: {
     && ["paused", "blocked", "waiting_tool"].includes(current.status) && longRunOwnerHold(current.id)) {
     throw new Error(LONG_RUN_OWNER_HOLD_CODE);
   }
+  // An end state is written by the one close (store/goal-close.ts), never here: the legal-transition and version checks above still apply,
+  // then the close writes the end state with the contract, the chat link, the open tasks and the due line in one transaction. A Science
+  // run is a projection of Science's own state and keeps this function's own write.
+  if (LONG_RUN_TERMINAL_STATUSES.has(input.to) && current.surface !== "science" && !skipped) {
+    (require("./goal-close") as typeof import("./goal-close")).closeGoal(current.goalId, input.to as "completed" | "cancelled" | "failed", "transition", // eslint-disable-line @typescript-eslint/no-require-imports
+      { reason: input.reason ?? input.to, actorKind: input.actorKind === "user" ? "user" : "host" });
+    const ended = getLongRun(current.id);
+    if (!ended) throw new Error("long_run_transition_readback_failed");
+    return ended;
+  }
   const now = new Date().toISOString();
   const pausedAt = input.to === "paused" ? now : null;
   const completedAt = LONG_RUN_TERMINAL_STATUSES.has(input.to) ? now : null;
@@ -914,11 +925,54 @@ export function transitionLongRun(input: {
       payload: { requestedStatus: requestedTo, status: input.to, reason: input.reason ?? null,
         outcome: "unknown", continueIndependentWork: true, replayUncertainEffects: false }, at: now });
     if (input.to === "cancelled" || input.to === "failed") closeOpenTasksOfEndedRun(current.id, now);
+    settleHarnessDueForStatus(db, current.rootChatId, input.to, input.to === "paused" ? (isLongRunPauseReason(input.reason) ? input.reason : "user") : null);
   }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: current.id });
   const next = getLongRun(current.id);
   if (!next) throw new Error("long_run_transition_readback_failed");
   return next;
+}
+
+/**
+ * The run half of closeGoal (store/goal-close.ts), inside its transaction: moves a run that is not ended to completed / cancelled /
+ * failed from whatever state it is in (the state machine of transitionLongRun is for the steps a live Goal takes; a close is not a
+ * step) and writes the one ledger event. False when the run had already ended (another
+ * process closed it first): nothing is written then. Never for a Science run (the caller checks).
+ */
+export function endLongRunInTransaction(input: { runId: string; from: LongRunStatus; to: "completed" | "cancelled" | "failed"; by: string; reason: string;
+  actorKind: "host" | "user"; at: string }): boolean {
+  const db = getDb();
+  const changed = db.prepare(
+    `UPDATE long_runs SET status = ?, pause_reason = NULL, blocked_reason = NULL, paused_at = NULL, completed_at = ?, updated_at = ?, version = version + 1
+     WHERE id = ? AND status NOT IN ('completed','failed','cancelled') AND surface <> 'science'`,
+  ).run(input.to, input.at, input.at, input.runId);
+  if (changed.changes !== 1) return false;
+  appendEventInDb({ runId: input.runId, kind: "run.status_changed", actorKind: input.actorKind,
+    payload: { from: input.from, to: input.to, reason: input.reason, closedBy: input.by }, at: input.at });
+  return true; // the conversation's harness_due line is closeGoal's to clear (it knows whether another live Goal of the conversation keeps it)
+}
+
+/** Ends the open tasks of a run (any outcome) and writes one ledger event per task; returns how many. Inside the caller's transaction. */
+export function endOpenTasksOfRun(runId: string, now: string): number {
+  const states = [...LONG_RUN_OPEN_TASK_STATES];
+  const before = Number((getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_tasks WHERE run_id = ? AND state IN (${states.map(() => "?").join(",")})`)
+    .get(runId, ...states) as { n: number }).n);
+  if (before > 0) closeOpenTasksOfEndedRun(runId, now);
+  return before;
+}
+
+/**
+ * What a status change does to the conversation's harness_due line (store/harness-due.ts): a finished Goal, an owner stop or a wait for
+ * the owner leaves no next look (the line is deleted); a Goal that starts again only empties due_at (the line is taken, the turn that
+ * ends overwrites or deletes it); a host pause (app closed, crash) and a wait keep the schedule they carry.
+ */
+function settleHarnessDueForStatus(db: ReturnType<typeof getDb>, chatId: string | null, to: LongRunStatus, pauseReason: string | null): void {
+  if (!chatId) return;
+  if (LONG_RUN_TERMINAL_STATUSES.has(to) || to === "cancelling" || (to === "paused" && ["user", "budget", "approval_required"].includes(pauseReason ?? ""))) {
+    clearHarnessDueInDb(db, chatId);
+  } else if (["queued", "running", "verifying"].includes(to)) {
+    db.prepare("UPDATE harness_due SET due_at = NULL WHERE chat_id = ? AND due_at IS NOT NULL").run(chatId);
+  }
 }
 
 /**
@@ -1025,8 +1079,9 @@ export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null 
   // The owner-answer hold replaces the retry it was taken over (holdGoalForOwnerAnswer): nothing wakes a held Goal, so every
   // reader (next-wake line, Alive, the wait poller, the sweep) sees what it saw for a Goal held from `running`.
   if (goalHeldForOwnerAnswer(run)) return null;
-  const row = getDb().prepare(`SELECT seq, payload_json FROM long_run_events WHERE run_id = ? AND kind = ?
-    ORDER BY seq DESC LIMIT 1`).get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { seq: number; payload_json: string } | undefined;
+  // One statement: the newest schedule event and the conversation's harness_due line (store/harness-due.ts), the next look's one home.
+  const row = getDb().prepare(`SELECT seq, payload_json, (SELECT due_at FROM harness_due WHERE chat_id = ?) AS due_at FROM long_run_events
+    WHERE run_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1`).get(run.rootChatId ?? "", runId, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { seq: number; payload_json: string; due_at: string | null } | undefined;
   if (!row) return null;
   const superseded = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ? AND seq > ? AND (
       (kind = 'run.status_changed' AND json_extract(payload_json, '$.to') NOT IN ('waiting_tool','paused'))
@@ -1036,8 +1091,11 @@ export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null 
     const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
     if (payload.action !== "retry_scheduled" || (payload.kind !== "observe" && payload.kind !== "resume")
       || typeof payload.nextAt !== "string" || !Number.isSafeInteger(payload.retryIndex)) return null;
+    // The next look is the conversation's harness_due line (the one place that holds it). A store the line was never written for
+    // (events of a build before the table) or whose line was taken reads the event's own time, which is the same value.
+    const nextAt = row.due_at && Number.isFinite(Date.parse(row.due_at)) ? row.due_at : payload.nextAt;
     return { seq: row.seq, fromReason: typeof payload.fromReason === "string" ? payload.fromReason : null,
-      kind: payload.kind, retryIndex: Number(payload.retryIndex), nextAt: payload.nextAt,
+      kind: payload.kind, retryIndex: Number(payload.retryIndex), nextAt,
       requestedBy: payload.requestedBy === "model" ? "model" : "host" };
   } catch { return null; }
 }
@@ -1098,6 +1156,8 @@ export function scheduleBlockedGoalRetry(input: {
         detail: input.detail.slice(0, 120), trigger: input.trigger.slice(0, 80),
         appInstanceId: input.appInstanceId ?? null,
         ...(input.requestedBy === "model" ? { requestedBy: "model" } : {}) }, at: now });
+    // The conversation's one next-look line (store/harness-due.ts), written with the event that carries the rest of the schedule.
+    if (current.rootChatId) upsertHarnessDueInDb(db, { chatId: current.rootChatId, dueAt: nextAt, cause: input.fromReason ?? input.detail, now });
   }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const next = getLongRun(input.runId);
@@ -1169,6 +1229,8 @@ export function holdGoalForOwnerAnswer(input: { runId: string; expectedVersion?:
       payload: { from: "running", to: "waiting_tool", reason: GOAL_OWNER_ANSWER_REQUIRED }, at: now });
     appendEventInDb({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host",
       payload: { reason: GOAL_OWNER_ANSWER_REQUIRED, ...(input.invocationRunId ? { invocationRunId: input.invocationRunId } : {}) }, at: now });
+    // Nothing wakes a Goal that waits for the owner's answer: it has no next look.
+    clearHarnessDueInDb(db, current.rootChatId);
   }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const next = getLongRun(input.runId);
@@ -1289,6 +1351,10 @@ export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number
       paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status=? AND version=?`)
       .run(now, runId, current.status, expectedVersion);
     if (changed.changes !== 1) throw new Error("blocked_goal_retry_state_changed");
+    // The line is taken by the one who starts: the changed-row count is the answer, so two processes that read the same due time start once.
+    // A conversation without a line (events of an older build) has nothing to take; the version check above is its only fence.
+    const line = current.rootChatId ? harnessDueFor(current.rootChatId) : null;
+    if (current.rootChatId && line?.dueAt && !claimHarnessDue(db, current.rootChatId, line.dueAt)) throw new Error("blocked_goal_retry_state_changed");
     appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
       payload: { from: current.status, to: "queued", skippedStatus: "blocked", reason, retryDue: true, retryIndex: retry.retryIndex }, at: now });
   }).immediate();
@@ -1636,7 +1702,8 @@ export function addLongRunTask(input: {
   attemptLimit?: number | null;
   sortOrder?: number;
 }): LongRunTaskRecord {
-  if (!getLongRun(input.runId)) throw new Error(`long_run_not_found:${input.runId}`);
+  const runForTask = getLongRun(input.runId);
+  if (!runForTask) throw new Error(`long_run_not_found:${input.runId}`);
   const id = input.id?.trim() || `task_${randomUUID()}`;
   const title = requiredText(input.title, "long_run_task_title_required", 240);
   const objective = requiredContent(input.objective, "long_run_task_objective_required");
@@ -1679,6 +1746,10 @@ export function addLongRunTask(input: {
       now,
       now,
     );
+    // A turn that was still writing when the Goal closed (store/goal-close.ts) must not leave open work behind a closed run.
+    if (runForTask.surface !== "science" && LONG_RUN_TERMINAL_STATUSES.has(getLongRun(input.runId)?.status ?? runForTask.status)) {
+      db.prepare("UPDATE long_run_tasks SET state = 'cancelled', completed_at = ? WHERE run_id = ? AND id = ?").run(now, input.runId, id);
+    }
     appendEventInDb({
       runId: input.runId,
       kind: "task.created",
@@ -1726,6 +1797,9 @@ export function setLongRunTaskState(input: {
   if (!current) throw new Error(`long_run_task_not_found:${input.taskId}`);
   const now = new Date().toISOString();
   db.transaction(() => {
+    // A late writer after the Goal closed (store/goal-close.ts) cannot reopen a task of the ended run.
+    const endedRun = run.surface !== "science" && LONG_RUN_TERMINAL_STATUSES.has(getLongRun(input.runId)?.status ?? run.status);
+    if (endedRun && LONG_RUN_OPEN_TASK_STATES.has(input.state)) input = { ...input, state: "cancelled" };
     db.prepare(
       `UPDATE long_run_tasks
        SET state = ?, evidence_ref = ?, blocked_reason = ?,
@@ -2722,7 +2796,8 @@ export function settleVerifiedLongRun(runId: string, options?: { background?: bo
       return "cycle_completed";
     }
     if (run.status !== "verifying") transitionLongRun({ runId, to: "verifying", actorKind: "host", reason: "background-verification-settled" });
-    transitionLongRun({ runId, to: "completed", actorKind: "host", reason: "all-criteria-verified" });
+    // The one close (store/goal-close.ts): the end state, the contract, the chat link, the open tasks and the due line in this transaction.
+    (require("./goal-close") as typeof import("./goal-close")).closeGoal(run.goalId, "completed", "verifier", { reason: "all-criteria-verified" }); // eslint-disable-line @typescript-eslint/no-require-imports
     return "completed";
   }).immediate();
 }
@@ -3031,17 +3106,16 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
         `UPDATE long_run_workers SET state = 'interrupted', updated_at = ?
          WHERE run_id = ? AND state IN ('provisioning','idle','running','waiting')`,
       ).run(now, row.id);
-      db.prepare(
-        `UPDATE long_runs
-         SET status = ?, pause_reason = ?, paused_at = ?, completed_at = ?, updated_at = ?,
-             app_instance_id = COALESCE(?, app_instance_id), version = version + 1
-         WHERE id = ?`,
-      ).run(userDelete ? "cancelled" : "paused", userDelete ? null : userPause ? "user" : reason === "app-quit" ? "app_closed" : "crash_recovery",
-        userDelete ? null : now, userDelete ? now : null, now, appInstanceId ?? null, row.id);
       if (userDelete) {
-        closeOpenTasksOfEndedRun(row.id, now);
-        db.prepare("UPDATE chat_goal_contracts SET status = 'cancelled', completed_at = ?, updated_at = ? WHERE goal_id = (SELECT goal_id FROM long_runs WHERE id = ?) AND status IN ('active','blocked')").run(now, now, row.id);
-        db.prepare("UPDATE chats SET goal_id = NULL, continuous_mode = 0, updated_at = ? WHERE goal_id = (SELECT goal_id FROM long_runs WHERE id = ?)").run(now, row.id);
+        // An owner Delete that was still `cancelling` when the app ended: the one close finishes it (store/goal-close.ts).
+        (require("./goal-close") as typeof import("./goal-close")).closeGoal(row.goalId, "cancelled", "owner-stop", { reason: "user" }); // eslint-disable-line @typescript-eslint/no-require-imports
+      } else {
+        db.prepare(
+          `UPDATE long_runs
+           SET status = 'paused', pause_reason = ?, paused_at = ?, completed_at = NULL, updated_at = ?,
+               app_instance_id = COALESCE(?, app_instance_id), version = version + 1
+           WHERE id = ?`,
+        ).run(userPause ? "user" : reason === "app-quit" ? "app_closed" : "crash_recovery", now, now, appInstanceId ?? null, row.id);
       }
       appendEventInDb({
         runId: row.id,

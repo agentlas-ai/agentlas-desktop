@@ -12,7 +12,7 @@ export const ONE_SUPERVISOR_FOLLOW_UP_LIMIT = 2;
 export type SupervisorRequestState = "stored" | "dispatching" | "accepted" | "completed" | "cancelled" | "failed" | "held";
 export interface SupervisorCommandReceipt {
   commandId: string;
-  kind: "reply" | "work" | "science" | "steer" | "cancel" | "stop-reply" | "appearance" | "follow-up" | "checkin" | "chat-send";
+  kind: "reply" | "work" | "science" | "steer" | "cancel" | "stop-reply" | "appearance" | "follow-up" | "checkin" | "chat-send" | "reconfirmation";
   state: SupervisorRequestState;
   taskId: string | null;
   runId: string | null;

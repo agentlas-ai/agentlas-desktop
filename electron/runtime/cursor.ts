@@ -1,4 +1,5 @@
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { memoryDeathCause } from "./child-death";
 // Cursor Agent CLI runtime. The official headless contract is
 // `cursor-agent --print --output-format stream-json --model <model> <prompt>`.
 //
@@ -79,9 +80,10 @@ async function hasCursorAgentSignature(candidate: string): Promise<boolean> {
       try { child.kill(); } catch { /* best effort */ }
       finish(false);
     }, 2_500);
-    const collect = (chunk: Buffer) => { output = (output + chunk.toString("utf8")).slice(0, 16_000); };
-    child.stdout?.on("data", collect);
-    child.stderr?.on("data", collect);
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => { output = (output + stdoutDecoder.write(chunk)).slice(0, 16_000); });
+    child.stderr?.on("data", (chunk: Buffer) => { output = (output + stderrDecoder.write(chunk)).slice(0, 16_000); });
     child.on("error", () => finish(false));
     child.on("close", () => finish(/cursor\s+agent|cursor\.com/i.test(output)));
   });
@@ -389,6 +391,9 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
         return resolve({ text: text.trim(), ownerControlTerminal: "uncertain",
           failure: runtimeSilentTimeoutFailure("cursor", silence.trippedWith?.limitMs ?? silenceLimitMs) });
       }
+      // Desktop R part 2 (DD sibling of claude-code, codex and ACP): a child the computer's memory shortage ended (a machine fact, runtime/child-death.ts) is that turn's typed cause; any other ending keeps what it had.
+      const memoryCause = !terminalCompleted ? memoryDeathCause(child, "cursor") : undefined;
+      if (memoryCause) return resolve({ text: text.trim(), ownerControlTerminal: "uncertain", failure: memoryCause });
       if (code !== 0) return reject(new Error(`Cursor Agent CLI exit ${code}${stderr ? `\n${stderr}` : ""}`));
       if (recognizedEvents === 0 && !text.trim()) {
         // Exit 0 with not one recognized stream-json event: a typed failure, never the "returned no text" placeholder.

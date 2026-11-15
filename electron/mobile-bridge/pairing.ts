@@ -15,6 +15,7 @@ import {
   type MobileBridgeConsumedPairingAssertion,
   type MobileBridgeDesktopAccountProof,
 } from "./account-pairing";
+import { screenCaptureSince, screenControlActive } from "../one/screen-control";
 
 const BRIDGE_DIR = "mobile-bridge";
 const HOST_IDENTITY_FILE = "identity.json";
@@ -75,8 +76,21 @@ export interface MobileBridgePairingChallenge {
   accountAuthorityOrigin: string;
 }
 
+/**
+ * How a phone's pairing record came to be (Agentlas 2.0 O-M3a, contracts/one-home-desktop.md §5.3). Only "screen-qr" and
+ * "owner-confirmed" let this computer vouch for the phone's key. Never sent to the server. A record written by this version ALWAYS has a value:
+ * "unstamped" when the challenge carried no usable stamp (it can never be raised by the owner's press; scan the QR again). A record WITHOUT a
+ * value is one an older build wrote (and is "old" only if it is older than the legacy cutoff, one/home.ts): only the owner's own press
+ * (confirmOwnerTrust) can give it "owner-confirmed".
+ */
+export type MobileBridgePairedVia = "screen-qr" | "screen-during-control" | "managed" | "owner-confirmed" | "unstamped";
+export type MobileBridgePairingOrigin = "screen" | "managed";
+const PAIRED_VIA_VALUES: readonly string[] = ["screen-qr", "screen-during-control", "managed", "owner-confirmed", "unstamped"];
+
 interface StoredMobileBridgeDevice {
   deviceId: string;
+  /** Absent on a record from before 2.0 (not eligible until the owner presses). Read only through pairedViaOfRecord(). */
+  pairedVia?: MobileBridgePairedVia;
   tokenHash: string;
   name: string;
   platform: "ios" | "android";
@@ -96,6 +110,12 @@ interface StoredMobileBridgeDevice {
    * failing to prove who it is (TTL expiry, signed-out boot, outage).
    */
   workspaceId?: string;
+  /**
+   * The phone's one-home device key line (`kid`, the first 22 base64url characters of sha-256 of the public key - a public value), written when the phone
+   * proves the key to this computer (one/home.ts). Read by the trusted-devices list and by [Disconnect], which cuts this record and that key together.
+   * Lives and goes with the record: `revokeDevice` removes it. A record without it is a phone whose key this computer has not seen (nothing is guessed).
+   */
+  keyKid?: string;
 }
 
 interface StoredMobileBridgeDevices {
@@ -280,7 +300,8 @@ function ensurePrivateDirectory(dir: string): void {
   if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
 }
 
-function writePrivateJsonAtomic(target: string, value: unknown): void {
+/** Also used by one/home-key-store.ts (the one-home key file lives beside this bridge's identity). */
+export function writePrivateJsonAtomic(target: string, value: unknown): void {
   const dir = path.dirname(target);
   ensurePrivateDirectory(dir);
   const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
@@ -448,6 +469,16 @@ function readDevices(userDataPath: string): StoredMobileBridgeDevices {
   }
   if (process.platform !== "win32") fs.chmodSync(target, 0o600);
   return parsed as unknown as StoredMobileBridgeDevices;
+}
+
+const KEY_KID_RE = /^[A-Za-z0-9_-]{22}$/;
+/** Read leniently on purpose: a value that does not look like a `kid` is "no key seen", never a store failure (a rolled-back build must still read the file). */
+function keyKidOfRecord(record: StoredMobileBridgeDevice): string | null {
+  return typeof record.keyKid === "string" && KEY_KID_RE.test(record.keyKid) ? record.keyKid : null;
+}
+
+function pairedViaOfRecord(record: StoredMobileBridgeDevice): MobileBridgePairedVia | null {
+  return typeof record.pairedVia === "string" && PAIRED_VIA_VALUES.includes(record.pairedVia) ? record.pairedVia : null;
 }
 
 function writeDevices(userDataPath: string, store: StoredMobileBridgeDevices): void {
@@ -710,7 +741,7 @@ export class MobileBridgePairingManager {
    * DESKTOP_MOBILE_BRIDGE: Returns the raw 128-bit nonce exactly once to an
    * explicit pairing UI. Only its SHA-256 hash remains in memory.
    */
-  issueChallenge(accountProof: MobileBridgeDesktopAccountProof): MobileBridgePairingChallenge {
+  issueChallenge(accountProof: MobileBridgeDesktopAccountProof, origin: MobileBridgePairingOrigin): MobileBridgePairingChallenge {
     if (!this.consumePairingAssertion) {
       throw new MobileBridgePairingError(
         "account_authority_unavailable",
@@ -745,6 +776,8 @@ export class MobileBridgePairingManager {
       ownerUserId: this.desktopUserId?.() ?? null,
     };
     this.activeChallenge = challenge;
+    // The stamp is made in this same synchronous step as the challenge (F4): where it comes from, and what was operating the window right now.
+    this.challengeStamp = { pairingAttemptId: challenge.pairingAttemptId, origin, controlAtIssue: screenControlActive(nowMs).active, issuedAtMs: nowMs };
     this.activeChallengeTimer = setTimeout(() => {
       if (this.activeChallenge !== challenge) return;
       this.activeChallenge = null;
@@ -880,6 +913,7 @@ export class MobileBridgePairingManager {
       ...(ownerUserId ? { ownerUserId } : {}),
       ...(this.desktopWorkspaceId?.() ? { workspaceId: this.desktopWorkspaceId()! } : {}),
     };
+    record.pairedVia = this.pairedViaForChallenge(challenge.pairingAttemptId);
     const store = readDevices(this.userDataPath);
     store.devices.push(record);
     try {
@@ -1064,10 +1098,10 @@ export class MobileBridgePairingManager {
   }
 
   /** Internal admission binding only. No bearer, token hash or stable subject enters a mobile DTO. */
-  deviceAccountBinding(deviceId: string): { workspaceId: string | null; accountSubject: string; accountAuthorityOrigin: string; ownerUserId: string | null } | null {
+  deviceAccountBinding(deviceId: string): { workspaceId: string | null; accountSubject: string; accountAuthorityOrigin: string; ownerUserId: string | null; issuedAt: string } | null {
     const record = readDevices(this.userDataPath).devices.find(device => device.deviceId === deviceId && device.revokedAt === null);
     return record?.accountSubject && record.accountAuthorityOrigin
-      ? { workspaceId: record.workspaceId ?? null, accountSubject: record.accountSubject, accountAuthorityOrigin: record.accountAuthorityOrigin, ownerUserId: record.ownerUserId ?? null }
+      ? { workspaceId: record.workspaceId ?? null, accountSubject: record.accountSubject, accountAuthorityOrigin: record.accountAuthorityOrigin, ownerUserId: record.ownerUserId ?? null, issuedAt: record.issuedAt }
       : null;
   }
 
@@ -1090,6 +1124,72 @@ export class MobileBridgePairingManager {
     return readDevices(this.userDataPath).devices.map((record) => this.publicMetadata(record));
   }
 
+  /*
+   * ── O-M3a: how a phone was paired (see MobileBridgePairedVia) ──
+   * The caller that issues a challenge says where it comes from; the origin and "was screen control alive" are kept in memory
+   * for that one challenge only (a new challenge replaces them, a restart drops them: the challenge itself is memory-only too).
+   * A challenge nobody stamped, or one made by a process with no screen (the background service), is simply not eligible.
+   */
+  private challengeStamp: { pairingAttemptId: string; origin: MobileBridgePairingOrigin; controlAtIssue: boolean; issuedAtMs: number } | null = null;
+
+  private pairedViaForChallenge(pairingAttemptId: string): MobileBridgePairedVia {
+    const stamp = this.challengeStamp;
+    this.challengeStamp = null;
+    // A stamp that is missing or belongs to another challenge is not "an old record": the record is new, and it says so.
+    if (!stamp || stamp.pairingAttemptId !== pairingAttemptId) return "unstamped";
+    if (stamp.origin === "managed") return "managed";
+    // Judged twice: when the QR was made and when it was used. Operating the window at either moment, or any capture of the screen or of this
+    // window between the two (a capture cannot click, but it can read the QR), makes the record unfit to vouch (F5).
+    const nowMs = this.now().getTime();
+    return stamp.controlAtIssue || screenControlActive(nowMs).active || screenCaptureSince(stamp.issuedAtMs) ? "screen-during-control" : "screen-qr";
+  }
+
+  /** The pairing record of a live (unrevoked) phone: `pairedVia` null = an old record. null result = no such live record. */
+  phoneTrustRecord(deviceId: string): { deviceId: string; name: string; pairedVia: MobileBridgePairedVia | null; issuedAt: string; keyKid: string | null } | null {
+    const record = readDevices(this.userDataPath).devices.find((device) => device.deviceId === deviceId && device.revokedAt === null);
+    if (!record) return null;
+    return { deviceId: record.deviceId, name: record.name, pairedVia: pairedViaOfRecord(record), issuedAt: record.issuedAt, keyKid: keyKidOfRecord(record) };
+  }
+
+  listPhoneTrust(): Array<{ deviceId: string; name: string; pairedVia: MobileBridgePairedVia | null; issuedAt: string; keyKid: string | null }> {
+    return readDevices(this.userDataPath).devices.filter((device) => device.revokedAt === null)
+      .map((record) => ({ deviceId: record.deviceId, name: record.name, pairedVia: pairedViaOfRecord(record), issuedAt: record.issuedAt, keyKid: keyKidOfRecord(record) }));
+  }
+
+  /**
+   * The phone proved its one-home key to this computer: remember which key line is this phone's. Written once per key (nothing is written when the value is the same).
+   * Only a live record takes it; a malformed `kid` is refused. Returns whether the record now carries exactly this value.
+   */
+  rememberPhoneKeyKid(deviceId: string, kid: string): boolean {
+    if (!KEY_KID_RE.test(kid)) return false;
+    const store = readDevices(this.userDataPath);
+    const record = store.devices.find((device) => device.deviceId === deviceId && device.revokedAt === null);
+    if (!record) return false;
+    if (record.keyKid === kid) return true;
+    record.keyKid = kid;
+    writeDevices(this.userDataPath, store);
+    return true;
+  }
+
+  /**
+   * The owner's press of "trust this phone" on an old record: the one value change that is allowed (no value -> "owner-confirmed").
+   * The caller (one/home.ts) has already refused while screen control is alive and checked the confirmation number.
+   * "screen-during-control" and "managed" never become "owner-confirmed": those phones are paired again by QR.
+   */
+  confirmOwnerTrust(deviceId: string, legacyCutoffIso: string): "confirmed" | "already" | "not_found" | "not_eligible" {
+    const store = readDevices(this.userDataPath);
+    const record = store.devices.find((device) => device.deviceId === deviceId && device.revokedAt === null);
+    if (!record) return "not_found";
+    const current = pairedViaOfRecord(record);
+    if (current === "screen-qr" || current === "owner-confirmed") return "already";
+    if (current) return "not_eligible";
+    // Only a record an older build wrote (no value, issued before this version first ran). A newer record always has a value.
+    if (!(Date.parse(record.issuedAt) < Date.parse(legacyCutoffIso))) return "not_eligible";
+    record.pairedVia = "owner-confirmed";
+    writeDevices(this.userDataPath, store);
+    return "confirmed";
+  }
+
   /**
    * @param cause 왜 폐기하는가. 폐기는 **영구적이고 QR 재스캔을 강제**하므로
    *   반드시 기록된다 — 실측(2026-08-08): 40대가 전부 폐기됐는데 `main.log`에
@@ -1100,6 +1200,7 @@ export class MobileBridgePairingManager {
     const record = store.devices.find((device) => device.deviceId === deviceId && device.revokedAt === null);
     if (!record) return false;
     record.revokedAt = this.now().toISOString();
+    delete record.keyKid;   // the link to the server's key line goes with the credential (the key line itself is cut by the caller)
     writeDevices(this.userDataPath, store);
     logMobileBridgeRevocation(cause, 1, [deviceId]);
     this.emitChanged("device-revoked");

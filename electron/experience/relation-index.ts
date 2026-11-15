@@ -10,6 +10,7 @@ import type {
 } from "../../shared/types";
 import { EXPERIENCE_RELATION_LEDGER_FILE } from "../architecture/manifest";
 import { getMemoryDb as getDb } from "../memory/database";
+import { tasteDraftsWithLineInAgentStore } from "../memory/store";
 import { isCanonicalTaskId } from "./taxonomy";
 import {
   autoLocalEmbedding,
@@ -1406,6 +1407,9 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
         AND memory.superseded_at IS NULL
       ORDER BY draft.id ASC`,
   ).all(agentId) as TasteDraftGraphRow[];
+  // Layout switch on: drafts whose line moved to the agent's own store have no root row to JOIN (#11). Switch off: nothing is added and the order is the query's.
+  const moved = tasteDraftsWithLineInAgentStore<TasteDraftGraphRow & { source_memory_id: string }>(agentId, "d.id, d.axis_candidates_json, d.task_signatures_json, d.source_memory_id", "AND d.status = 'observation'", 5_000);
+  if (moved.length) { tasteDrafts.push(...moved); tasteDrafts.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)); }
   for (const row of tasteDrafts) {
     const draftRef = valueFreeGraphId(row.id);
     if (!draftRef) continue;

@@ -12,8 +12,8 @@
  *  2. service: ask Main over the device bridge (the existing service -> Main request path). Main is away: durable marker.
  *     Both are run events (`automatic_goal_intake_forwarded` / `_deferred`) that carry what Main needs to redo the work.
  *  3. Main: validate against durable rows (a real owner message of that chat, a daemon-owned run of that chat), answer at
- *     once, then run prepareInvocationAutomaticGoal itself in the background (the native channel closes for good on a request
- *     that outlives 10 s, and classification is a model call). `automatic_goal_intake_completed` ends a marker.
+ *     once, then run prepareInvocationAutomaticGoal itself in the background (a request that outlives the channel's 10 s reply bound fails
+ *     alone with native_auth_reply_timeout, and classification is a model call). `automatic_goal_intake_completed` ends a marker.
  *  4. Main drains unfinished markers on every attach.
  * Idempotent per source message: the Goal id is `goal:auto-message:<messageId>`, in-flight work is keyed by chat+message, and
  * a terminal completed event ends the marker. Once the chat is bound to a live Goal, ownerTurnStartsOnDesktop routes the next

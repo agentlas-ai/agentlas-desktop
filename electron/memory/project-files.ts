@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { agentlasHomeDir } from "../agents/home";
 import { createHash, randomUUID } from "node:crypto";
 import { TextDecoder } from "node:util";
 import Database from "better-sqlite3";
@@ -1113,14 +1114,6 @@ export function ensureProjectMemory(
   }
 }
 
-export function readProjectSoul(projectPath: string): string | null {
-  try {
-    return fs.readFileSync(path.join(projectMemoryDir(projectPath), PROJECT_SOUL_FILE), "utf8");
-  } catch {
-    return null;
-  }
-}
-
 export function readSitemap(projectPath: string): unknown | null {
   try {
     const raw = fs.readFileSync(path.join(projectMemoryDir(projectPath), SITEMAP_FILE), "utf8");
@@ -2114,10 +2107,15 @@ function confidenceValue(value: AgentNestExperienceItem["confidence"]): number {
  * This projection is a private rebuildable cache: Desktop Memory remains the
  * owner, and semantic edges never manufacture supersedes/contradicts.
  */
+const HUB_AGENTS_KEEP_NO_MEMORY = true;
+
 export function appendAgentNestExperienceMemory(
   slug: string,
   items: AgentNestExperienceItem[],
 ): boolean {
+  // decision: 호출 전용 허브 에이전트 서랍에는 새로 쓰지 않는다(이미 쌓인 것은 그대로 두고 읽지도 않는다).
+  // 합치기(dreaming)도 이 함수가 false 를 돌려주면 옛 행을 접지 않는다.
+  if (HUB_AGENTS_KEEP_NO_MEMORY) return false;
   if (items.length === 0) return false;
   const normalizedSlug = normalizedHubAgentSlug(slug);
   if (!normalizedSlug) return false;
@@ -2605,7 +2603,7 @@ export function forgetAgentNestExperienceMemoryForOwnerScope(
 ): AgentNestForgetScanResult {
   const sourceId = sourceMemoryId.trim();
   if (!sourceId) return { complete: false, scannedDatabases: 0, matchedRows: 0, nextCursor: afterSlug };
-  const agentRoot = path.join(os.homedir(), ".agentlas", "networking", "hub-agents");
+  const agentRoot = path.join(agentlasHomeDir(), "networking", "hub-agents");
   let entries: fs.Dirent[];
   try {
     const stat = fs.lstatSync(agentRoot);
@@ -2714,7 +2712,7 @@ export function agentNestExperienceOwnership(
   const sourceIds = [...new Set(sourceMemoryIds.map((id) => id.trim()).filter(Boolean))];
   const ownership = Object.fromEntries(sourceIds.map((id) => [id, [] as string[]]));
   if (sourceIds.length === 0) return ownership;
-  const root = path.join(os.homedir(), ".agentlas", "networking", "hub-agents");
+  const root = path.join(agentlasHomeDir(), "networking", "hub-agents");
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });

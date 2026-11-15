@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.0 — 2026-11-15
+
+- Memory: memory is kept in four places (personal, agent, project and session). A one-time step on first launch sorts what earlier versions stored, using the engine that ships inside the app, so it also goes ahead without an internet connection. If you quit in the middle it carries on at the next start and it never runs again once finished. It removes only empty turn records, memory that no screen could read, and tables nothing uses any more.
+- Personal conversation: a preference or a fact you tell your personal agent in your own words, in the app, on the phone or in Telegram, is saved as yours, and "forget it" is carried out. When a memory cannot be saved, the answer says in one sentence that nothing was stored.
+- Approvals: when an agent running on claude-code, Antigravity or codex is about to delete files from a shell command, the app asks you first with an approval card.
+- Screens: Work sessions, agent chats and group chats share one conversation screen with up to four panes, and the personal agent has a fixed bar at the top of every screen. The + menus of the input box, the New chat start and the pane menu follow the confirmed design. A group chat's title menu lists its members with the lead and has Add member and Change lead. The Memory tab has Forget all. Build shows a preview of the saved window and opens it in Manage agents. Every agent has its own folder under `~/.agentlas/agents`.
+- Quit: quitting, logging out and shutting down the computer no longer wait 30 seconds.
+- Phone: the 2.0 phone app gets the values it shows from this computer, such as a new chat without a project, the always-allowed rules and the minutes into a session.
+- Fixes: hidden rooms left by deleted group chats are cleaned up at start, and failure messages say what happened in plain words.
+
+This release binds Agentlas OS v1.2.98 at 85c15a292effd2c9a9063e6d677608a438c66853; public runtime asset `agentlas-os-runtime-v1.2.98.tar.gz` is pinned at SHA-256 `f141e34e6bf5420cf4b2458126ccdf3dbe6c9a7948f3a2b7402bbb69d7c7e7d5`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.139 — 2026-11-10
 
 - Models and runtimes: an explicit "no tools" or "no images" flag on a model is honored when a model is chosen, and an explicit "yes" satisfies a required capability; the phone and the desktop apply the same availability rule to local models; an Ollama alias matches its single tagged model; concurrent Anthropic capability lookups no longer cancel each other.

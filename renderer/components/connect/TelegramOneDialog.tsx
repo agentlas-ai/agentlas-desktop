@@ -335,8 +335,8 @@ export default function TelegramOneDialog() {
         <div className={styles.scroll}>
         <h2 id="tgone-title" className={styles.title}>{t("tgone.title", { name: oneName })}</h2>
         <p id="tgone-subtitle" className={styles.subtitle}>{t("tgone.subtitle", { name: oneName })}</p>
-        <p className={styles.notice}>{locale === "ko" ? "이 목록은 이 컴퓨터의 텔레그램 연결입니다. 계정별 소유 여부는 확인되지 않았습니다." : "These are Telegram connections on this computer. Their account ownership is not confirmed."}</p>
-        {unconfirmed && <p className={styles.notice} role="status">{locale === "ko" ? "계정이 바뀌는 동안 진행된 연결 작업의 결과는 확인되지 않았습니다. 다시 시도하기 전에 이 컴퓨터의 연결을 확인하세요." : "The outcome of a connection operation during an account change is unconfirmed. Review this computer's connections before trying again."} <button type="button" onClick={() => void refresh()}>{locale === "ko" ? "이 컴퓨터의 연결 다시 확인" : "Review this computer's connections"}</button></p>}
+        <p className={styles.notice}>{locale === "ko" ? "이 목록은 이 데스크탑의 텔레그램 연결입니다. 계정별 소유 여부는 확인되지 않았습니다." : "These are Telegram connections on this computer. Their account ownership is not confirmed."}</p>
+        {unconfirmed && <p className={styles.notice} role="status">{locale === "ko" ? "계정이 바뀌는 동안 진행된 연결 작업의 결과는 확인되지 않았습니다. 다시 시도하기 전에 이 데스크탑의 연결을 확인하세요." : "The outcome of a connection operation during an account change is unconfirmed. Review this computer's connections before trying again."} <button type="button" onClick={() => void refresh()}>{locale === "ko" ? "이 데스크탑의 연결 다시 확인" : "Review this computer's connections"}</button></p>}
 
         <details className={styles.details}><summary>{locale === "ko" ? "기존 연결 안내" : "Existing connection details"}</summary><p className={styles.notice}>{t("tgone.migration.notice", { name: oneName })}</p></details>
 

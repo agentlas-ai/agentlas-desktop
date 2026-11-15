@@ -1,4 +1,3 @@
-import { transferMobileBuildInterviewWitness } from "../hephaestus/mobile-interview-witness";
 // DESKTOP_MOBILE_BRIDGE: Cloud-action and build adapters for the Mobile Bridge
 // authority.
 //
@@ -7,18 +6,24 @@ import { transferMobileBuildInterviewWitness } from "../hephaestus/mobile-interv
 //   - registered uploads  → cloud-agents/registered-upload + packageAndReviewCloudAgent
 //     (the `cloudAgents:saveRegisteredPrivate` path, pinned to private-link/static-only)
 //   - cloud delete → the authenticated cargo.* McpSource client
-//   - remote build → hephaestus/builder runHephaestusBuild with an explicit
-//     empty MCP consent (Mobile never auto-attaches MCP servers)
+//   - remote build → the same tracked Build turn the Build window runs (build-turns.ts
+//     -> hephaestus/build-turn-tracked.ts), with an explicit empty MCP consent (Mobile
+//     never auto-attaches MCP servers)
 // Tests inject fakes through MobileBridgeAuthority options; production omits
 // the option and gets these defaults.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { agentlasHomeDir } from "../agents/home";
 import { UPLOAD_SKIP_DIRECTORIES } from "../../shared/upload-scan-catalog.generated";
 import { randomUUID } from "node:crypto";
 import { fetchWithHubSession, getSessionCookieHeader, webBaseUrl } from "../auth";
 import { readOwnerCloudFiles, type OwnerCloudFilesInput } from "./cloud-files";
 import { getCargoSource, invalidateMyAgentsCache } from "../marketplace";
 import { registeredUploadOptions, registeredUploadRoot } from "../cloud-agents/registered-upload";
+import { createPhoneBuildTurns, type PhoneBuildContinueRefusal, type PhoneBuildTurns } from "./build-turns";
+import { buildTurnRefusal, buildWorkbenchAvailable, phoneBuildTurnEnv } from "../hephaestus/build-workbench-ipc";
+import { trackedBuildDepsOrNull } from "../hephaestus/build-turn-tracked";
 import type {
   CloudAgentDeleteResult,
   CloudAgentPackageResult,
@@ -88,6 +93,8 @@ export interface MobileBridgeBuildRunInput {
   attachments?: Array<{ path: string; name: string }>;
   /** remote-build-options-v1: the same choice as the Desktop Build screen's mode; absent = the engine decides. */
   mode?: "single" | "team" | "package";
+  /** PB-D (contracts/phone-build2.md): continue this saved Build with `goal` (the phone's `build.start { buildKey, seenUpdatedAt }`). */
+  continueBuild?: { buildKey: string; seenUpdatedAt: string };
 }
 
 export interface MobileBridgeBuildApprovalInput {
@@ -109,6 +116,24 @@ export interface MobileBridgeBuildActions {
    * progress flows exclusively through `sink`.
    */
   run(input: MobileBridgeBuildRunInput): Promise<void>;
+  /**
+   * PB-D, Main only (absent = this process cannot continue a saved Build): the word that refuses a continuation of a saved Build NOW, or null when it may start. Nothing is started or
+   * recorded by asking. The order of the words is fixed in build-turns.ts.
+   */
+  precheckContinue?(input: { buildKey: string; seenUpdatedAt: string }): Promise<PhoneBuildContinueRefusal | null>;
+  /** PB-D, Main only: a Build turn of the Build window or of a phone is running (a new phone Build must not start beside it). */
+  anyBuildActive?(): boolean;
+  /**
+   * PB-D, Main only: this paired phone needs no approval window on this computer for a Build. True only for a phone whose pairing record was made at this computer's screen (QR) or
+   * confirmed by the owner (`phoneVouch === "eligible"`, trust-root.md section 1) - a phone that works on this computer without a window already. Any other phone: the window.
+   */
+  waivesApproval?(deviceId: string, vouch: string | null): boolean;
+}
+
+/** What a gate may replace; production passes nothing. */
+export interface DesktopBuildActionsOptions {
+  turns?: PhoneBuildTurns;
+  workbenchAvailable?: () => boolean;
 }
 
 function countCandidateFiles(root: string): number {
@@ -186,21 +211,40 @@ export function createDesktopMobileBridgeCloudAgentActions(): MobileBridgeCloudA
   };
 }
 
+/**
+ * Repair R1 / T1-7: where the phone's Builds are made. The person's own computer keeps `Documents/Agentlas Mobile Builds` (unchanged: the folder the person already knows, and the Builds already in it stay where they are). A run whose Agentlas home is not the
+ * account's own `~/.agentlas` - a test or QA run that isolated it with `AGENTLAS_HOME` or a temporary userData folder (agents/home.ts `agentlasHomeDir`, the one rule every other folder of the product follows) - makes its Builds under that home, so
+ * nothing of an isolated run is written into the real Documents folder (Electron's `documents` path ignores `HOME`).
+ */
+export function mobileBuildsParent(documents: () => string): string {
+  const home = agentlasHomeDir();
+  return home === path.join(os.homedir(), ".agentlas") ? path.join(documents(), "Agentlas Mobile Builds") : path.join(home, "mobile-builds");
+}
+
 async function createMobileBuildWorkspace(): Promise<string> {
   // Lazy electron import keeps this module loadable by plain-node tooling that
   // injects fake build actions and never calls the desktop default.
   const { app } = await import("electron");
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const workspace = path.join(
-    app.getPath("documents"),
-    "Agentlas Mobile Builds",
+    mobileBuildsParent(() => app.getPath("documents")),
     `build-${stamp}-${randomUUID().slice(0, 8)}`,
   );
   fs.mkdirSync(workspace, { recursive: true });
   return workspace;
 }
 
-export function createDesktopMobileBridgeBuildActions(): MobileBridgeBuildActions {
+export function createDesktopMobileBridgeBuildActions(options: DesktopBuildActionsOptions = {}): MobileBridgeBuildActions {
+  // Every phone Build turn is a tracked Build turn, the same function the Build window runs (build-turns.ts). It needs the window's backend: only Main has it.
+  const turns = options.turns ?? createPhoneBuildTurns({
+    turnEnv: () => phoneBuildTurnEnv(),
+    trackedDeps: () => trackedBuildDepsOrNull(),
+    agentBusy: (folder) => buildTurnRefusal(folder),
+    createWorkspace: () => createMobileBuildWorkspace(),
+    grantFolder: (folder) => { const { grantPath } = require("../fs/access") as typeof import("../fs/access"); return grantPath(folder, { durable: false }); },
+    grantFile: (file) => { const { grantPath } = require("../fs/access") as typeof import("../fs/access"); return grantPath(file, { durable: false, exactFile: true }); },
+    newId: () => randomUUID(),
+  });
   return {
     async requestLocalApproval(input) {
       // Reuse Desktop's native warning-dialog approval pattern. No Mobile RPC
@@ -240,39 +284,11 @@ export function createDesktopMobileBridgeBuildActions(): MobileBridgeBuildAction
         ? { approved: true }
         : { approved: false, code: "desktop_approval_denied" };
     },
-    async run(input) {
-      const workspace = input.workspace ?? await createMobileBuildWorkspace();
-      // Mobile builds never auto-connect MCP servers: consent is the reviewed
-      // empty fallback plan, the same shape a renderer without a reachable
-      // recommendation service submits.
-      const applied = input.runtimeSessionId || input.history?.length
-        ? null
-        : await (async () => {
-            const { applyMcpBuildConsent } = await import("../mcp-tools/build-plan");
-            return applyMcpBuildConsent({
-              request: input.goal,
-              consent: {
-                planId: `renderer-mcp-unavailable-mobile-${randomUUID()}`,
-                selectedCandidateIds: [],
-                fallbackReason: "recommendation_unavailable",
-              },
-            });
-          })();
-      const { runHephaestusBuild } = await import("../hephaestus/builder");
-      const request = {
-        request: input.goal,
-        workspace,
-        runtimePinned: false,
-        ...(applied?.runtime ? { runtime: applied.runtime } : {}),
-        mcpAttachment: applied?.attachment,
-        ...(input.runtimeSessionId ? { runtimeSessionId: input.runtimeSessionId } : {}),
-        ...(input.history?.length ? { history: input.history } : {}),
-        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-        ...(input.mode ? { mode: input.mode } : {}),
-        locale: input.locale,
-      };
-      transferMobileBuildInterviewWitness(input, request);
-      await runHephaestusBuild(input.runId, request, input.sink, input.signal, input.locale);
+    run: (input) => turns.run(input),
+    precheckContinue: (input) => turns.precheckContinue(input),
+    anyBuildActive: () => turns.anyBuildActive(),
+    waivesApproval(_deviceId, vouch) {
+      return (options.workbenchAvailable ?? buildWorkbenchAvailable)() && vouch === "eligible";
     },
   };
 }

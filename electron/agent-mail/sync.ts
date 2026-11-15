@@ -70,6 +70,17 @@ const HANDLED_KEEP = 500;
 /** Offline: double the wait per failed pass, never longer than this. */
 const MAX_BACKOFF_MS = 5 * 60_000;
 /**
+ * Quiet mailbox: while pass after pass brings nothing new, the wait grows from the server's hint (30 s) to 1, 2, 4 min
+ * after the first quiet pass and stops at this ceiling. Never shorter than the server's hint. The owner looking at mail, the window coming back,
+ * waking from sleep, any change or a mail action puts it back to the hint at once (agentMailUserAttention / syncNow).
+ * It never applies while one of our windows has the focus or while automatic draft/reply is on (quietDelay).
+ */
+const IDLE_MAX_MS = 5 * 60_000;
+let idleStreak = 0;
+/** The hint the last good pass waited by, and when that pass ended: a wake counts the time already waited. */
+let lastHintMs = 0;
+let lastPassEndedAt = 0;
+/**
  * The server says this account has no mailbox (none, deleted, or provisioning failed): check again this rarely.
  * Perf review MP-10 (2026-10-17): every signed-in Desktop asked every 60 s, 1,440 GETs a day per install, though
  * none of those states turns active without the owner issuing a mailbox (afterChange → sync now) or a status read
@@ -341,8 +352,50 @@ export function agentMailSyncNow(): void {
   if (stopped) return;
   // A pass is running: its own schedule() would replace this timer and the
   // request would be lost. Run once more as soon as it finishes instead.
+  idleStreak = 0;
   if (running) { syncNowQueued = true; return; }
   schedule(1_000);
+}
+
+/**
+ * The owner is looking at mail (mailbox screen read, the phone's mail read, window focus, wake from sleep): leave the quiet
+ * slowdown now. The next pass is the server's hint after the last one, never sooner (D1: a read every 5 s used
+ * to cost a GET /changes every 5 s); after a long quiet spell the hint has long passed, so it is still 1 s.
+ */
+export function agentMailUserAttention(): void {
+  if (stopped || idleStreak === 0) return;
+  idleStreak = 0;
+  // A running pass ends with the hint (its streak starts again from 0) and asks the server right now anyway.
+  if (running) return;
+  schedule(Math.max(1_000, lastHintMs - (Date.now() - lastPassEndedAt)));
+}
+
+/** A window of ours has the keyboard focus: the owner is in front of the app, so mail is not "quiet" in the sense of unwatched. */
+function appWindowInFront(): boolean {
+  try {
+    const { BrowserWindow } = require("electron") as typeof import("electron");
+    return BrowserWindow.getAllWindows().some((window) => !window.isDestroyed() && window.isFocused());
+  } catch {
+    return false; // No Electron (contract runs).
+  }
+}
+
+/** Automatic draft or reply is on for the mailbox or for any sender: an incoming mail starts work, so a late pass is a late answer. */
+function inboundWorkIsAutomatic(): boolean {
+  const mailbox = agentMailLastKnownMailbox();
+  if (!mailbox) return false;
+  return (mailbox.inboundMode ?? "notify") !== "notify" || (mailbox.senderRules ?? []).some((rule) => rule.mode !== "notify");
+}
+
+/** Next wait after a good pass: the hint while mail moves, longer and longer while it does not. */
+function quietDelay(base: number, changed: boolean): number {
+  lastHintMs = base;
+  // The slowdown is for a mailbox nobody is watching and nothing acts on: with the window in front or automatic
+  // drafts/replies on, the server's hint is the interval (defect 2).
+  if (changed || appWindowInFront() || inboundWorkIsAutomatic()) { idleStreak = 0; return base; }
+  idleStreak = Math.min(idleStreak + 1, 9);
+  // The first quiet pass keeps the hint (also the pass an owner action just asked for); then 2x, 4x, 8x ...
+  return Math.max(base, Math.min(base * 2 ** (idleStreak - 1), IDLE_MAX_MS));
 }
 
 function pollDelay(pollAfterMs: number | null): number {
@@ -394,6 +447,7 @@ async function tick(): Promise<void> {
     next = backoffDelay();
   } finally {
     running = false;
+    lastPassEndedAt = Date.now();
     const again = syncNowQueued;
     syncNowQueued = false;
     schedule(again ? 1_000 : next);
@@ -506,7 +560,8 @@ async function pullScoped(scope: AgentMailExecutionScope): Promise<number> {
     mailboxChanged = true;
   }
   if (!scopeStillSelected(scope)) throw Error("organization_mail_scope_changed");
-  if (threads.size || deleted.size || received.length || mailboxChanged || contactsChanged || (unread && unread.inbox !== lastUnread?.inbox)) {
+  const moved = Boolean(threads.size || deleted.size || received.length || mailboxChanged || contactsChanged || (unread && unread.inbox !== lastUnread?.inbox));
+  if (moved) {
     emit({
       reason: mailboxChanged && !threads.size && !deleted.size ? "mailbox" : "changes",
       threadIds: [...threads.keys()],
@@ -520,7 +575,7 @@ async function pullScoped(scope: AgentMailExecutionScope): Promise<number> {
   }
   if (received.length) notifyNewMail(received, threads);
   if (received.length || saved.pending?.length) await handleInbound(received);
-  return pollDelay(pollAfterMs);
+  return quietDelay(pollDelay(pollAfterMs), moved || Boolean(saved.pending?.length));
 }
 
 function legacyOrRetry(res: { code: string }): number {
@@ -1093,12 +1148,25 @@ export function startAgentMailSync(): void {
   } catch {
     // Client without mailbox listeners (contract runs).
   }
+  // Looking at the app again ends the quiet slowdown. Electron is absent in contract runs.
+  try {
+    const { app, powerMonitor } = require("electron") as typeof import("electron");
+    const attention = () => agentMailUserAttention();
+    app.on("browser-window-focus", attention);
+    powerMonitor.on("resume", attention);
+    disposers.push(() => { app.removeListener("browser-window-focus", attention); powerMonitor.removeListener("resume", attention); });
+  } catch {
+    // No window or power events here: the status read and the timer remain.
+  }
   disposers.push(onHostShutdown(stopAgentMailSync));
   schedule(5_000);
 }
 
 export function stopAgentMailSync(): void {
   stopped = true;
+  idleStreak = 0;
+  lastHintMs = 0;
+  lastPassEndedAt = 0;
   if (timer) clearTimeout(timer);
   timer = null;
   for (const dispose of disposers.splice(0)) {

@@ -227,14 +227,14 @@ export function HuggingFaceModelBrowser({ ko, onInstalled, onOperationStarted }:
         <button type="button" role="radio" aria-checked={sort === "popular"} onClick={() => setSort("popular")}>{ko ? "인기순" : "Popular"}</button>
         <button type="button" role="radio" aria-checked={sort === "fit"} onClick={() => setSort("fit")}>{ko ? "추천순" : "Best fit"}</button>
       </div>
-      <span className={styles.hardware} title={ko ? "이 컴퓨터의 총 메모리와 엔진이 감지한 GPU. 추천은 총 메모리 기준입니다." : "This computer's total memory and the GPU the engine reported. Fit is judged against total memory."}>{hardwareLine}</span>
+      <span className={styles.hardware} title={ko ? "이 데스크탑의 총 메모리와 엔진이 감지한 GPU. 추천은 총 메모리 기준입니다." : "This computer's total memory and the GPU the engine reported. Fit is judged against total memory."}>{hardwareLine}</span>
     </div>
     {error && !selected && <p className={styles.error} role="alert">{error}</p>}
     <table className={styles.table} data-hf-table aria-busy={loading}>
       <thead><tr>
         <th>{ko ? "모델" : "Model"}</th><th>{ko ? "역할" : "Role"}</th><th>{ko ? "크기" : "Size"}</th>
         <th title={ko ? "모델 파일 + 실행 예비량. 이름에서 추정한 값은 파일 팝업에서 정확히 다시 잽니다." : "Model file plus runtime reserve. Name-based estimates are re-measured per file in the popup."}>{ko ? "필요 메모리" : "Memory"}</th>
-        <th title={ko ? "이 컴퓨터 총 메모리·GPU 기준. 원활 / 주의 / 위험" : "Against this computer's total memory and GPU. Smooth / Caution / Risky"}>{ko ? "추천" : "Fit"}</th>
+        <th title={ko ? "이 데스크탑 총 메모리·GPU 기준. 원활 / 주의 / 위험" : "Against this computer's total memory and GPU. Smooth / Caution / Risky"}>{ko ? "추천" : "Fit"}</th>
         <th><span className="sr-only">{ko ? "다운로드" : "Download"}</span></th>
       </tr></thead>
       <tbody>

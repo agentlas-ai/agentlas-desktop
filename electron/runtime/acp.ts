@@ -50,6 +50,7 @@ import {
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { acpUsageRefusalKind } from "./usage-refusal";
 import { ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, type CliSilenceGuard, wrapSystemPrompt, RuntimeTurnUnsettledError, unsettledTurnError, runnerFailureFromError, markRefusedBeforeDispatch, preDispatchRefusal, runnerRefusedBeforeDispatch, type RunnerFailure } from "./runner";
+import { memoryDeathCause } from "./child-death";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -74,6 +75,7 @@ import {
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
 import { resolveAgentResidencySource, isResidencyExemptAgent, isAgentResidencyCapacityRefusal, AGENT_RESIDENCY_CAPACITY_CODE } from "./agent-residency";
 import { classifyDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
+import { failedDiscoveryRetryWaitMs } from "./failed-discovery-retry";
 import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 import { composeDeclaredPrompt } from "./prompt-order";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
@@ -431,6 +433,11 @@ export class AcpSessionClient {
           tool: String(params?.toolCall?.title ?? kind),
           kind,
           detail: typeof params?.toolCall?.rawInput === "string" ? params.toolCall.rawInput : undefined,
+          // An execute call's command line, for the approval rule to read by what it runs (approval-rule.ts shellCommandDeletes;).
+          ...((rawInput) => {
+            const line = typeof rawInput === "string" ? rawInput : typeof rawInput?.command === "string" ? rawInput.command : Array.isArray(rawInput?.command) ? rawInput.command.join(" ") : "";
+            return kind === "execute" && line ? { command: String(line).slice(0, 20_000) } : {};
+          })(params?.toolCall?.rawInput),
           // Structured input binds recipient/amount into the consent identity (docs native-harness 07 G04).
           ...(params?.toolCall?.rawInput && typeof params.toolCall.rawInput === "object" ? { arguments: params.toolCall.rawInput } : {}),
           cwd: this.approval.cwd,
@@ -913,15 +920,16 @@ function stableAcpErrorData(data: unknown): unknown {
 const acpProbeCache = new Map<string, { at: number; outcome: DiscoveryOutcome & { init?: any }; failures: number }>();
 const acpProbeInFlight = new Map<string, Promise<DiscoveryOutcome & { init?: any }>>();
 export const ACP_PROBE_TTL_MS = 10 * 60 * 1000;
-export const ACP_FAILED_PROBE_MAX_RETRY_MS = 30 * 60 * 1000;
 
 /**
  * Cached ACP discovery for detect(): spawning a full agent per 10s detect tick
  * would be far too heavy, so one probe per (spec, command) is reused for 10
- * minutes. A failed probe is retried after 1 minute, doubling per consecutive
- * failure up to 30 minutes — a denied account stays denied, and every retry
- * spawns the agent (`npx -y @github/copilot` for Copilot). Concurrent detect()
- * calls share one probe instead of spawning one each.
+ * minutes. A failed probe is retried after 1, 2, 4, 8 and 16 minutes and then
+ * no more until a person's act clears it (failed-discovery-retry.ts): a denied
+ * account stays denied, and every retry spawns the agent (`npx -y
+ * @github/copilot` for Copilot). An agent that answered "no model option"
+ * (status unsupported) gave a settled answer, not a failure: it is not asked
+ * again until then either. Concurrent detect() calls share one probe.
  */
 export async function probeAcpModelsCached(
   spec: AcpAgentSpec,
@@ -931,7 +939,9 @@ export async function probeAcpModelsCached(
   const now = opts?.now ?? Date.now();
   const hit = acpProbeCache.get(key);
   if (hit) {
-    const ttl = hit.outcome.status === "ok" ? ACP_PROBE_TTL_MS : Math.min(60_000 * 2 ** Math.max(0, hit.failures - 1), ACP_FAILED_PROBE_MAX_RETRY_MS);
+    const ttl = hit.outcome.status === "ok" ? ACP_PROBE_TTL_MS
+      : hit.outcome.status === "unsupported" ? Number.POSITIVE_INFINITY
+        : failedDiscoveryRetryWaitMs(hit.failures);
     if (now - hit.at < ttl) return hit.outcome;
   }
   const pending = acpProbeInFlight.get(key);
@@ -1918,8 +1928,10 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         // typed cause too: an allowance the agent says is used up, or a throttle, reads as that (source "heuristic", the same
         // reading the pre-work refusal above uses), never as "no completion receipt"; any other error is the standard cause.
         const spentKind = err instanceof AcpRpcError ? acpUsageRefusalKind(acpRpcErrorText(err)) : null;
+        // Desktop R part 2: an agent the computer's memory shortage ended (machine fact, runtime/child-death.ts) is the typed cause; the agent's own final error and a spent allowance keep their place.
         const cause: unknown = spentKind
-          ? { kind: spentKind, message: acpRpcErrorText(err).slice(0, 2000), runtime: spec.id, source: "heuristic" } satisfies RunnerFailure : err;
+          ? { kind: spentKind, message: acpRpcErrorText(err).slice(0, 2000), runtime: spec.id, source: "heuristic" } satisfies RunnerFailure
+          : (err instanceof AcpRpcError ? undefined : memoryDeathCause(session?.child, spec.id)) ?? err;
         throw unsettledTurnError({ runtimeKind: spec.id, locale, sessionId: session?.acpSessionId, cause,
           providerReason: err instanceof Error ? err.message : null });
       }

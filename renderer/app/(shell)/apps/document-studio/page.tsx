@@ -507,7 +507,7 @@ export default function DocumentStudioPage() {
       // 깔린 사람에게 "없다"고 말하면 그건 그냥 거짓말이다.
       const note =
         res.degraded === "toolchain-missing"
-          ? locale === "en" ? " · no LaTeX toolchain here" : " · 이 컴퓨터에 LaTeX 툴체인 없음"
+          ? locale === "en" ? " · no LaTeX toolchain here" : " · 이 데스크탑에 LaTeX 툴체인 없음"
           : res.degraded === "typeset-failed"
             ? (locale === "en" ? " · LaTeX typesetting failed: " : " · LaTeX 조판 실패: ")
               + (res.degradedReason?.split("\n")[0]?.slice(0, 120) ?? "unknown")
@@ -529,7 +529,7 @@ export default function DocumentStudioPage() {
     >
       <style>{RESPONSIVE_CSS}</style>
       <header className="titlebar-drag document-studio-toolbar" style={topToolbar}>
-        <Link href="/workspace" className="titlebar-nodrag" style={toolbarIconButton} aria-label={locale === "ko" ? "작업공간으로 돌아가기" : "Back to workspace"} title={locale === "ko" ? "작업공간으로 돌아가기" : "Back to workspace"}>
+        <Link href="/workspace" className="titlebar-nodrag" style={toolbarIconButton} aria-label={locale === "ko" ? "홈으로 돌아가기" : "Back to Home"} title={locale === "ko" ? "홈으로 돌아가기" : "Back to Home"}>
           <IconApps size={15} />
         </Link>
         <button

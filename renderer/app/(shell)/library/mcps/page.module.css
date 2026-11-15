@@ -78,7 +78,6 @@
 .customTitle { margin: 0 0 16px; font-size: 20px; line-height: 28px; font-weight: 600; }
 .customCard { display: flex; flex-direction: column; gap: 10px; padding: 16px; border: 1px solid var(--tl-line); border-radius: 14px; background: var(--paper); }
 .input { width: 100%; height: 34px; padding: 6px 12px; border: 1px solid var(--tl-line); border-radius: 8px; background: var(--paper); color: var(--ink); font-size: 13px; outline: none; }
-.input:focus { border-color: color-mix(in srgb, var(--ink) 30%, var(--tl-line)); }
 .mono { font-family: var(--font-mono); font-size: 12.5px; }
 .inputRow { display: flex; gap: 8px; flex-wrap: wrap; }
 .segment { display: flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--paper-3); }

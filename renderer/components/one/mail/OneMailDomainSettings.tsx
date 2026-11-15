@@ -265,7 +265,7 @@ function DomainCard({
         <div className={styles.settingsRow}>
           <span>{copy.domainPickAddress}</span>
           <div className={styles.pickRow}>
-            <input value={localPart} onChange={(event) => setLocalPart(event.target.value.replace(/\s+/g, "").toLowerCase())} maxLength={rule?.maxLength ?? 64} autoComplete="off" spellCheck={false} />
+            <input value={localPart} aria-label={copy.domainPickAddress} onChange={(event) => setLocalPart(event.target.value.replace(/\s+/g, "").toLowerCase())} maxLength={rule?.maxLength ?? 64} autoComplete="off" spellCheck={false} />
             <span>@{domain.domain}</span>
             <button
               type="button"

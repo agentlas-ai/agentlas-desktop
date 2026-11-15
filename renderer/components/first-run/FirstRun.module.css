@@ -168,17 +168,23 @@
   margin-left: auto;
 }
 
+/* Button rule (globals.css "Button rule — the ONE place"): nowrap, keep-all, min height, padding floor, ellipsis. */
+.primary { composes: agentlas-btn from global; }
+.secondary { composes: agentlas-btn from global; }
+.ghost { composes: agentlas-btn from global; }
+.quiet { composes: agentlas-btn from global; }
+
 .primary,
 .secondary,
-.ghost {
+.ghost,
+.quiet {
   min-height: 38px;
-  padding: 0 18px;
+  padding: 0 max(18px, var(--agentlas-btn-pad-x));
   border-radius: var(--rd-r-sm);
   border: 0;
   font: inherit;
   font-size: 13px;
   font-weight: 600;
-  white-space: nowrap;
   cursor: pointer;
   transition: background 0.15s ease, box-shadow 0.15s ease;
 }
@@ -212,9 +218,63 @@
   color: var(--ink);
 }
 
+/* The quiet word beside the dark button (Skip / Go without a mailbox): plain text, no fill, no edge. */
+.quiet {
+  background: transparent;
+  color: var(--ink-soft);
+}
+
+.quiet:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+/* One-press choices (name suggestions, preference pills): the chosen one is dark, the rest white with a hairline. */
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+
+.pill {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 15px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pill[data-on="true"] {
+  background: var(--black);
+  border-color: var(--black);
+  color: var(--white);
+}
+
+.pills + .field {
+  margin-top: 18px;
+}
+
+/* One quiet line under a card that says what the dark button will do. */
+.note {
+  max-width: 500px;
+  margin: 10px 0 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
 .primary:disabled,
 .secondary:disabled,
-.ghost:disabled {
+.ghost:disabled,
+.quiet:disabled {
   opacity: 0.45;
   cursor: default;
 }
@@ -387,49 +447,11 @@
   color: var(--ink);
 }
 
-.facts {
-  width: min(500px, 100%);
-  margin: 12px 0 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: 6px;
-}
 
-.facts li {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--ink-soft);
-  font-size: 12px;
-}
 
-.facts li b {
-  color: var(--ink);
-  font-weight: 600;
-  white-space: nowrap;
-}
 
-.consent {
-  width: min(500px, 100%);
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  margin-top: 16px;
-  color: var(--ink-soft);
-  font-size: 12px;
-  line-height: 1.5;
-  cursor: pointer;
-}
 
-.consent input {
-  margin: 2px 0 0;
-  accent-color: var(--black);
-}
 
-.inlineAction {
-  margin-top: 14px;
-}
 
 /* ── 04 AI cards ─────────────────────────────── */
 .cards {
@@ -506,9 +528,11 @@
   color: var(--ink);
 }
 
+/* A descendant selector cannot `composes`; the card button restates the rule's parts (nowrap below) and takes the padding token. */
 .aiCard button {
   width: 100%;
   min-height: 34px;
+  padding: 0 var(--agentlas-btn-pad-x);
   margin-top: auto;
   border: 0;
   border-radius: var(--rd-r-xs);
@@ -788,7 +812,7 @@
 .planStatus button {
   margin-left: 8px;
   min-height: 28px;
-  padding: 0 10px;
+  padding: 0 var(--agentlas-btn-pad-x-sm);
   font-size: 12px;
 }
 
@@ -845,3 +869,7 @@
   display: flex;
   margin-bottom: 8px;
 }
+
+.carryList { list-style: none; width: min(500px, 100%); margin: 14px auto 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--paper-edge, #e8e8e5); }
+.carryList li { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 40px; border-bottom: 1px solid var(--paper-edge, #e8e8e5); font-size: 14px; color: var(--ink); }
+.carryList small { color: var(--muted-deep); font-size: 13px; }

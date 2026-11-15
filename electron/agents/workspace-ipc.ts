@@ -4,11 +4,11 @@ import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import type { AgentWorkspaceIpc } from "../../shared/agent-workspace";
 import { AgentWorkspaceError } from "./workspace-snapshot";
 import { getAgentWorkspace, getAgentWorkspaceMemoryCounts, listAgentWorkspaceFiles, readAgentWorkspaceFile, prepareAgentWorkspaceFromMemory,
-  prepareAgentWorkspaceFileChange, prepareAgentWorkspaceRollback, prepareAgentWorkspaceFileOperation, getAgentWorkspaceDiff, issueAgentWorkspaceApprovalReceipt,
-  applyAgentWorkspaceProposal, rejectAgentWorkspaceProposal, getAgentWorkspaceRecoveryDiff, acknowledgeAgentWorkspaceRecovery,
+  prepareAgentWorkspaceFileChange, prepareAgentWorkspaceRollback, prepareAgentWorkspaceFileOperation, getAgentWorkspaceDiff,
+  rejectAgentWorkspaceProposal, getAgentWorkspaceRecoveryDiff, acknowledgeAgentWorkspaceRecovery,
   withWorkspaceLockPatience } from "./workspace-service";
 import { setAutoEvolution } from "./auto-evolution";
-import { deferOwnerApproval } from "./deferred-apply";
+import { approveReviewedAgentWorkspaceProposal } from "./workspace-approve";
 import { prepareAgentWorkspaceComparison, receiveAgentWorkspace, sendAgentWorkspace, type AgentWorkspaceRemoteReview } from "./workspace-remote";
 
 type Input<K extends keyof AgentWorkspaceIpc> = Parameters<NonNullable<AgentWorkspaceIpc[K]>>[0];
@@ -46,15 +46,7 @@ export function registerAgentWorkspaceIpc(input: { ipc: Pick<IpcMain, "handle">;
   });
   handle("agentWorkspace:approveAndApply", async (event, value: Input<"approveAndApply">) => {
     consume(event, value.reviewToken, "apply", value.proposalId, value.reviewedHash);
-    // The review grant is spent above, once; only the two lock-taking steps wait (each refused before it ran anything).
-    const approvalReceiptId = await withWorkspaceLockPatience(() => issueAgentWorkspaceApprovalReceipt(value.proposalId, value.reviewedHash));
-    try { return await withWorkspaceLockPatience(() => applyAgentWorkspaceProposal({ proposalId: value.proposalId, reviewedHash: value.reviewedHash, approvalReceiptId })); }
-    catch (error) {
-      // A run holds the agent: keep the owner's approval for this exact diff and apply it when the run ends (deferred-apply.ts).
-      if (!(error instanceof AgentWorkspaceError) || error.code !== "run_active") throw error;
-      deferOwnerApproval(value.proposalId, value.reviewedHash);
-      return { ...(await withWorkspaceLockPatience(() => getAgentWorkspaceDiff(value.proposalId))), applyWhenIdle: true };
-    }
+    return approveReviewedAgentWorkspaceProposal({ proposalId: value.proposalId, reviewedHash: value.reviewedHash });
   });
   handle("agentWorkspace:reject", (_event, value: Input<"reject">) => withWorkspaceLockPatience(() => rejectAgentWorkspaceProposal(value.proposalId)));
   // The owner's standing permission to apply the narrow kind of learning change without a diff review (auto-evolution.ts).

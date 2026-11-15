@@ -68,8 +68,10 @@ function projected(monitor: FinanceMonitor, job: Automation): FinanceMonitor {
 export function readFinanceMonitor(input: Pick<FinanceMonitorInput, "scope" | "monitor">): FinanceMonitor {
   const link = binding(fileFor(registry(input.scope), input.monitor.id));
   if (!link) return input.monitor;
+  // The owner deleted the linked automation (Automations, Remove): the monitor is simply not scheduled any more, and turning it on
+  // again creates a new one (scheduleFinanceMonitor). It used to show "error" and refuse every new schedule for good.
   const job = getAutomation(link.automationId);
-  return job ? projected(input.monitor, job) : { ...input.monitor, status: "error", nextCheckAt: null, note: "The linked automation is unavailable. Review it in Automations." };
+  return job ? projected(input.monitor, job) : input.monitor;
 }
 
 export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promise<FinanceMonitor> {
@@ -82,7 +84,8 @@ export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promis
   const directory = registry(input.scope);
   // Everything slow happens before the registry lock: runtime detection and the plan check. The lock then covers local reads and writes only.
   let runtime: ReturnType<typeof workStartRuntimePin> | undefined;
-  if (!binding(fileFor(directory, input.monitor.id))) {
+  const linked = binding(fileFor(directory, input.monitor.id));
+  if (!linked || !getAutomation(linked.automationId)) {
     const runtimes = await detectRuntimes(); input.scope.assertCurrent();
     // The owner's active runtime when it is usable; otherwise Agentlas serving on Light (a signed-in account, free included,
     // runs on its weekly allowance and then credits). A monitor never needs a subscription CLI.
@@ -99,9 +102,10 @@ export async function scheduleFinanceMonitor(input: FinanceMonitorInput): Promis
     input.scope.assertCurrent();
     const file = fileFor(directory, input.monitor.id); const prior = binding(file);
     const prompt = financeMonitorPrompt(input.monitor, input.assets);
-    if (prior) {
-      job = getAutomation(prior.automationId);
-      if (!job) throw new Error("finance_monitor_automation_missing");
+    // A binding whose automation the owner deleted is no binding: a new automation is created and the binding rewritten below.
+    const existing = prior ? getAutomation(prior.automationId) : null;
+    if (existing) {
+      job = existing;
       toggleAutomation(job.id, false);
       job = updateAutomation(job.id, { name: input.monitor.name, scheduleHuman: schedule, timezone, promptTemplate: prompt,executionPermission:"write",toolMode:"auto" });
       job = updateAutomationGraph(job.id,financeMonitorGraph(input.monitor));
@@ -130,7 +134,7 @@ export async function pauseFinanceMonitor(input: Pick<FinanceMonitorInput, "scop
   try {
     input.scope.assertCurrent();
     const prior = binding(fileFor(directory, input.monitor.id));
-    if (!prior) throw new Error("finance_monitor_not_scheduled");
+    if (!prior || !getAutomation(prior.automationId)) throw new Error("finance_monitor_not_scheduled");
     const job = toggleAutomation(prior.automationId, false);
     return projected(input.monitor, job);
   } finally { await release(); }

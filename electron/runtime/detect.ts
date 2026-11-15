@@ -4,7 +4,7 @@ import { managedOneConfigured, managedOneAuthentication } from "../managed-one/a
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { canonicalRuntimeBackend } from "../../shared/runtime-backends";
 import { runtimeMatchesSelection as exactRuntimeMatchesSelection } from "../../shared/runtime-selection";
-import { ollamaModelListIncludes } from "../../shared/runtime-connect";
+import { ollamaModelListIncludes, ollamaModelNamesEqual } from "../../shared/runtime-connect";
 import { byokDiscoveryIdentity, fetchByokModelDiscovery } from "./providers";
 import { allocationAdvertisement } from "./model-advertisement";
 import { clearCodexBinCache, probeCodex } from "./codex";
@@ -14,6 +14,7 @@ import { POOL_AUTOPICK_ROLES, RUNTIME_ROLES, type RuntimeRole } from "../../shar
 import { reportDiscoveryLoudly , storedResolvedAliases } from "./model-discovery-store";
 import { cliConfiguredDefaultModel } from "./cli-default-model";
 import { registerProbeModels } from "./model-catalog";
+import { LOCAL_RUNTIME_UNKNOWN_WINDOW } from "./session-generation";
 import { ACP_AGENTS, acpDisabledFor, forgetSignedOutAcpModelProbes, probeAcpModelsCached } from "./acp";
 import { listAcpKindSpecs, resolveAcpCommand } from "./acp-agents";
 import { withForeignCliContext } from "./foreign-cli-context";
@@ -128,8 +129,6 @@ function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
   }));
 }
 
-const LOCAL_RUNTIME_CONTEXT_WINDOW = 32_000;
-
 /**
  * Local OpenAI-compatible runners expose model IDs but no trustworthy model
  * capability metadata or reasoning-effort control. Advertise only facts the
@@ -140,18 +139,22 @@ const LOCAL_RUNTIME_CONTEXT_WINDOW = 32_000;
  * approval, dispatch, effect ledger), so the lane takes tool work (A4 gap 10). A model that cannot emit tool calls is a
  * typed refusal of that run (workforce_broker_tool_protocol_unsupported for a team grant), never a silent tool-less pass.
  */
-export function conservativeLocalRuntimeAllocation(models: string[]): Pick<
+export function conservativeLocalRuntimeAllocation(models: string[], ollamaSelectedModel?: string | null): Pick<
   RuntimeStatus,
   "allocationModels" | "allocationModelProfiles" | "effort" | "efforts"
 > {
-  const allocationModels = [...new Set(models)];
+  const discoveredModels = [...new Set(models)];
+  const aliasMatches = ollamaSelectedModel && !discoveredModels.includes(ollamaSelectedModel)
+    ? discoveredModels.filter((modelId) => ollamaModelNamesEqual(modelId, ollamaSelectedModel)) : [];
+  const allocationModels = aliasMatches.length === 1
+    ? [...discoveredModels, ollamaSelectedModel!] : discoveredModels;
   return {
     allocationModels,
     allocationModelProfiles: Object.fromEntries(allocationModels.map((modelId) => [
       modelId,
       {
         costTier: "balanced" as const,
-        contextWindow: LOCAL_RUNTIME_CONTEXT_WINDOW,
+        contextWindow: LOCAL_RUNTIME_UNKNOWN_WINDOW,
         capabilities: [],
         supportsTools: true,
         supportsMultimodal: false,
@@ -300,9 +303,10 @@ function saveActiveRuntime(status: RuntimeStatus | RuntimeSelection): void {
         outgoing.backend,
         outgoing.model,
         !!outgoing.long_context,
+        outgoing.acp_agent_id,
       );
     }
-    rememberRuntimeSelection(status.kind, status.backend, status.model, longCtx);
+    rememberRuntimeSelection(status.kind, status.backend, status.model, longCtx, status.acpAgentId);
     db.prepare(
       "INSERT OR REPLACE INTO active_runtime(id, kind, backend, source, acp_agent_id, runtime_label, model, long_context) VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
@@ -768,13 +772,13 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       source: agy.path,
       version: agy.version,
       active: false,
-      model: cliModelOf("antigravity", active, antigravityModels, "google") ?? antigravityModels[0],
+      model: cliModelOf("antigravity", active, antigravityModels, "google"),
       availableModels: antigravityModels,
       modelDiscovery: discoveryOf("antigravity", agy.discovery),
       ...allocationAdvertisement({
         catalogKind: "antigravity",
         live: agy.models,
-        selected: cliModelOf("antigravity", active, antigravityModels, "google") ?? antigravityModels[0],
+        selected: cliModelOf("antigravity", active, antigravityModels, "google"),
         catalogFallback: true,
       }),
     });
@@ -782,24 +786,19 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
   if (kimiCli) {
     const kimiDiscovery = await acpDiscovery("kimi", kimiCli.path);
     const kimiModels = kimiDiscovery.models;
+    const selectedKimi = cliModelOf("kimi", active, kimiModels, "kimi");
     list.push({
       kind: "kimi",
       backend: "kimi",
       source: kimiCli.path,
       version: kimiCli.version,
       active: false,
-      ...(kimiModels.length > 0
-        ? {
-            model: cliModelOf("kimi", active, kimiModels, "kimi") ?? kimiDiscovery.defaultModel,
-            availableModels: kimiModels,
-          }
-        : {}),
+      ...(selectedKimi ? { model: selectedKimi } : {}),
+      ...(kimiModels.length > 0 ? { availableModels: kimiModels } : {}),
       ...allocationAdvertisement({
         catalogKind: "kimi",
         live: kimiModels,
-        selected: kimiModels.length > 0
-          ? cliModelOf("kimi", active, kimiModels, "kimi") ?? kimiDiscovery.defaultModel
-          : null,
+        selected: selectedKimi ?? null,
         catalogFallback: true,
       }),
       modelDiscovery: discoveryOf("kimi", kimiDiscovery),
@@ -817,21 +816,20 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       source: gr.path,
       version: gr.version,
       active: false,
-      model: storedGrok ?? grokModels[0],
+      model: storedGrok,
       availableModels: grokModels,
       modelDiscovery: discoveryOf("grok", grokDiscovery),
       ...allocationAdvertisement({
         catalogKind: "grok",
         live: grokLive,
-        selected: storedGrok ?? grokModels[0],
+        selected: storedGrok,
         catalogFallback: true,
       }),
     });
   }
   if (cursor) {
-    // Current Cursor CLI exposes `agent models`; retain Auto as a safe fallback
-    // and preserve an operator selection, but never fabricate entitlement from
-    // the display catalog when live discovery returned nothing.
+    // Keep Auto available as an explicit option, without replacing the host default.
+    // The display catalog does not prove entitlement when discovery is unavailable.
     const rememberedCursor =
       (active?.kind === "cursor" && active.backend === "cursor" ? active.model : undefined) ??
       recallRuntimeSelection("cursor", "cursor")?.model;
@@ -848,13 +846,13 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
       source: cursor.path,
       version: cursor.version,
       active: false,
-      model: cliModelOf("cursor", active, cursorModels, "cursor") ?? "auto",
+      model: cliModelOf("cursor", active, cursorModels, "cursor"),
       availableModels: cursorModels,
       modelDiscovery: discoveryOf("cursor", cursorDiscovery),
       // cursor 카탈로그는 표시 전용이라 실행 자격을 보증하지 못한다 — 폴백 금지 유지.
       ...allocationAdvertisement({
         live: ["auto", ...cursorLive],
-        selected: cliModelOf("cursor", active, cursorModels, "cursor") ?? "auto",
+        selected: cliModelOf("cursor", active, cursorModels, "cursor"),
         catalogFallback: false,
       }),
     });
@@ -864,7 +862,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
     const preferred = remembered && ollamaModelListIncludes(ollama.models, remembered) ? remembered : ollama.models[0] ?? null;
     list.push({ kind: "ollama", backend: "ollama", source: "ollama", version: ollama.version,
       active: active?.kind === "ollama", model: preferred, availableModels: ollama.models,
-      ...conservativeLocalRuntimeAllocation(ollama.models) });
+      ...conservativeLocalRuntimeAllocation(ollama.models, preferred) });
   }
   // LM Studio / MLX — OpenAI 호환 로컬 서버. Ollama와 동일한 "단일 런타임 + 동적 모델 목록" 모양.
   if (lmstudio && lmstudio.models.length > 0) {
@@ -906,17 +904,20 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
   // dedicated kind (OpenCode, Goose, Copilot CLI) plus user profiles in ACP mode.
   // Presence = the command exists; models = ACP session/new (cached 10 min).
   // Detection is best-effort per spec: one broken agent never hides the others.
-  for (const spec of runtimeProbeDisabled("acp") ? [] : listAcpKindSpecs()) {
+  // D12 (trial): the seats are probed side by side, each with its own limit (the probe's 20 s), so one slow agent (Copilot with no network: 20 s) no longer holds the others' probes back.
+  // The list keeps the order of `listAcpKindSpecs()`; one broken agent is still only its own skip.
+  const acpSeats = await Promise.all((runtimeProbeDisabled("acp") ? [] : listAcpKindSpecs()).map(async (spec): Promise<RuntimeStatus | null> => {
     try {
       const found = await resolveAcpCommand(spec);
-      if (!found) continue;
+      if (!found) return null;
       const discovery = acpDisabledFor("acp")
         ? unsupportedDiscovery("acp-disabled", "acp")
         : await probeAcpModelsCached(spec, { command: found.path, env: withForeignCliContext(spec.id, process.env, undefined) });
       const acpModels = discovery.models;
-      const remembered = cliModelOf("acp", active, acpModels, "custom");
-      const agentDefault = discovery.defaultModel && acpModels.includes(discovery.defaultModel) ? discovery.defaultModel : undefined;
-      list.push({
+      const remembered = active?.kind === "acp" && active.acp_agent_id === spec.id
+        ? active.model || undefined
+        : recallRuntimeSelection("acp", "custom", spec.id)?.model ?? undefined;
+      return {
         kind: "acp",
         backend: "custom",
         source: found.path,
@@ -924,15 +925,18 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
         active: false,
         label: spec.label,
         acpAgentId: spec.id,
+        ...(remembered ? { model: remembered } : {}),
         ...(acpModels.length > 0
-          ? { model: remembered ?? agentDefault ?? acpModels[0], availableModels: acpModels, allocationModels: acpModels }
+          ? { availableModels: acpModels, allocationModels: acpModels }
           : {}),
         modelDiscovery: discoveryOf(`acp:${spec.id}`, discovery),
-      });
+      };
     } catch (err) {
       console.warn(`[detect] acp agent ${spec.id} skipped: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
     }
-  }
+  }));
+  for (const seat of acpSeats) if (seat) list.push(seat);
   /*
    * Agentlas 서빙 — CLI 도 API 키도 없는 사람의 실행 경로.
    *
@@ -1172,6 +1176,7 @@ export async function setActiveRuntime(input: RuntimeSelection, origin: ModelRol
       selection.backend,
       selection.model,
       Boolean(selection.longContext),
+      selection.acpAgentId,
     );
   }
   clearDetectCache();

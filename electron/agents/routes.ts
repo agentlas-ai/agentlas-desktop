@@ -72,7 +72,13 @@ function readAll(): Record<string, AgentRoute> {
   }
 }
 
-function writeAll(map: Record<string, AgentRoute>): void {
+/**
+ * `stillCurrent` runs after the new content is written and flushed to the temporary file and immediately before the rename that publishes
+ * it. A writer that compares the file's fingerprint there (updateRoutes) keeps its check-then-replace window to the rename alone; checked
+ * before the flush, another process had the whole fsync (milliseconds) to publish a route that this write then silently replaced
+ * (seen as a moved agent's route going back to its old path when two processes moved folders at once). Returns false when it declined.
+ */
+function writeAll(map: Record<string, AgentRoute>, stillCurrent?: () => boolean): boolean {
   readCache = null;
   const target = routesFile();
   const parent = path.dirname(target);
@@ -89,9 +95,11 @@ function writeAll(map: Record<string, AgentRoute>): void {
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = null;
+    if (stillCurrent && !stillCurrent()) return false;
     fs.renameSync(temp, target);
     fsyncDirectoryBestEffort(parent);
     routesRevision += 1;
+    return true;
   } finally {
     if (fd !== null) fs.closeSync(fd);
     try {
@@ -198,11 +206,10 @@ function quarantineRoutesFile(file: string, raw: string): string {
   return target;
 }
 
-function writeAllWithRetry(map: Record<string, AgentRoute>): void {
+function writeAllWithRetry(map: Record<string, AgentRoute>, stillCurrent?: () => boolean): boolean {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      writeAll(map);
-      return;
+      return writeAll(map, stillCurrent);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
       if (attempt + 1 >= ROUTES_WRITE_ATTEMPTS || !code || !TRANSIENT_FS_CODES.has(code)) throw error;
@@ -232,12 +239,14 @@ function updateRoutes(mutate: (map: Record<string, AgentRoute>) => boolean | voi
     }
     if (mutate(base) === false) return;
     // The last attempt skips the fingerprint check: merging into the content just read beats refusing to save.
-    if (attempt + 1 < ROUTES_CAS_ATTEMPTS && routesFingerprint(file) !== state.fingerprint) {
+    const lastAttempt = attempt + 1 >= ROUTES_CAS_ATTEMPTS;
+    if (!lastAttempt && routesFingerprint(file) !== state.fingerprint) {
       sleepSync(10 + Math.floor(Math.random() * 30));
       continue;
     }
-    writeAllWithRetry(base);
-    return;
+    // Checked once more right before the rename (after the flush): see writeAll.
+    if (writeAllWithRetry(base, lastAttempt ? undefined : () => routesFingerprint(file) === state.fingerprint)) return;
+    sleepSync(10 + Math.floor(Math.random() * 30));
   }
 }
 
@@ -402,6 +411,33 @@ export function replaceRoute(route: AgentRoute, removeAgentIds: string[] = []): 
     for (const agentId of removeAgentIds) delete map[agentId];
     map[route.agentId] = route;
   });
+}
+
+/**
+ * 폴더를 옮긴 뒤: 옛 폴더 아래를 가리키던 라우트를 모두 새 폴더 아래로 바꾼다. 한 번의 CAS 갱신 안에서, `path` 외의 필드(source,
+ * packageHash, definitionHash, importedAt …)는 그대로 둔다 — 같은 에이전트다. 이전 `missingSince` 는 지운다(폴더가 다시 읽힌다).
+ * 이미 새 경로인 라우트·무관한 라우트는 건드리지 않아 다시 불러도 안전하다. 바뀐 에이전트 id 목록을 돌려준다. 파일을 못 쓰면 던진다.
+ */
+export function rebindRoutesUnder(oldRoot: string, newRoot: string): string[] {
+  const from = path.resolve(oldRoot), to = path.resolve(newRoot);
+  const fold = process.platform === "win32" ? (value: string) => value.toLowerCase() : (value: string) => value;
+  const changed: string[] = [];
+  if (fold(from) === fold(to)) return changed;
+  updateRoutes((map) => {
+    changed.length = 0; // CAS 재시도가 같은 변경을 다시 적용한다
+    for (const [agentId, route] of Object.entries(map)) {
+      if (!route || typeof route.path !== "string" || !route.path) continue;
+      const current = path.resolve(route.path);
+      const relative = path.relative(fold(from), fold(current));
+      if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+      const next: AgentRoute = { ...route, path: relative ? path.join(to, current.slice(from.length + 1)) : to };
+      delete next.missingSince;
+      map[agentId] = next;
+      changed.push(agentId);
+    }
+    return changed.length > 0;
+  });
+  return changed;
 }
 
 export function removeRoute(agentId: string): void {

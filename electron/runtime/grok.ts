@@ -1,4 +1,5 @@
 import { selectionFor } from "../capabilities/one-capabilities";
+import { memoryDeathCause } from "./child-death";
 import { GROK_RUN_MCP_REGISTRY, withForeignCliContext } from "./foreign-cli-context";
 import { isAgentlasProductHome } from "./product-home-identity";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -28,6 +29,7 @@ import { StringDecoder } from "node:string_decoder";
 import { grokListingSignedOut, parseGrokModels, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { settleDiscovery } from "./model-discovery-store";
 import { normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
+import { failedDiscoveryRetryWaitMs } from "./failed-discovery-retry";
 
 /**
  * 중지 사유를 그대로 전한다. 중지는 사람이 누른 것 외에도 무활동 워치독·단계 시간 초과·
@@ -358,18 +360,20 @@ export interface GrokProbe {
  * `grok models` the same way as `agy models` (antigravity.ts cachedAgyModelDiscovery). detectRuntimes() caches for
  * 10 seconds only, so every runtime list the app needed started a `grok models` process: production 2026-10-12,
  * 27 of them from Main in 15 minutes (procmon). The list changes with a CLI update or a new sign-in.
- *   - success: kept 10 minutes; failure: looked at again after 1 minute;
+ *   - success: kept 10 minutes; failure: looked at again after 1, 2, 4, 8 and 16 minutes, then only when a sign-in, a CLI
+ *     update or the owner's "check again" clears the cache (failed-discovery-retry.ts);
  *   - an expired value is returned at once and refreshed once in the background;
  *   - only the first detection (or a changed binary) waits.
  */
 export const GROK_MODEL_DISCOVERY_FRESH_MS = 10 * 60_000;
-export const GROK_MODEL_DISCOVERY_FAILED_RETRY_MS = 60_000;
-let grokModelsCache: { binary: string; at: number; outcome: DiscoveryOutcome; version: string } | null = null;
+/** The first wait after a failed listing; later waits grow and then stop (failed-discovery-retry.ts). */
+export const GROK_MODEL_DISCOVERY_FAILED_RETRY_MS = failedDiscoveryRetryWaitMs(1);
+let grokModelsCache: { binary: string; at: number; outcome: DiscoveryOutcome; version: string; failures: number } | null = null;
 let grokModelsFlight: { binary: string; promise: Promise<{ outcome: DiscoveryOutcome; version: string }> } | null = null;
 
 /** Runtime replaced or signed in again: keep the value, refresh it on the next detection. */
 export function invalidateGrokModelDiscovery(): void {
-  if (grokModelsCache) grokModelsCache = { ...grokModelsCache, at: 0 };
+  if (grokModelsCache) grokModelsCache = { ...grokModelsCache, at: 0, failures: 0 };
 }
 
 export function cachedGrokModelDiscovery(
@@ -381,7 +385,8 @@ export function cachedGrokModelDiscovery(
     if (grokModelsFlight?.binary === binary) return grokModelsFlight.promise;
     const promise = probe(binary)
       .then((value) => {
-        grokModelsCache = { binary, at: Date.now(), ...value };
+        const failures = value.outcome.status === "ok" ? 0 : (grokModelsCache?.binary === binary ? grokModelsCache.failures : 0) + 1;
+        grokModelsCache = { binary, at: Date.now(), ...value, failures };
         return value;
       })
       .finally(() => { if (grokModelsFlight?.promise === promise) grokModelsFlight = null; });
@@ -390,7 +395,7 @@ export function cachedGrokModelDiscovery(
   };
   const cached = grokModelsCache?.binary === binary ? grokModelsCache : null;
   if (!cached) return refresh();
-  const ttl = cached.outcome.status === "ok" ? GROK_MODEL_DISCOVERY_FRESH_MS : GROK_MODEL_DISCOVERY_FAILED_RETRY_MS;
+  const ttl = cached.outcome.status === "ok" ? GROK_MODEL_DISCOVERY_FRESH_MS : failedDiscoveryRetryWaitMs(cached.failures);
   if (now - cached.at >= ttl) void refresh().catch(() => undefined);
   return Promise.resolve({ outcome: cached.outcome, version: cached.version });
 }
@@ -937,6 +942,9 @@ async function runGrokTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
           ownerControlTerminal: normalEnd?.outcome === "completed" ? "completed" : "uncertain" });
         return;
       }
+      // Desktop R part 2 (DD sibling of claude-code, codex and ACP): a child the computer's memory shortage ended (a machine fact, runtime/child-death.ts) is that turn's typed cause; any other ending keeps what it had.
+      const memoryCause = !terminalCompleted ? memoryDeathCause(child, KIND) : undefined;
+      if (memoryCause) { resolve({ text: text.trim(), tokens, sessionId, ownerControlTerminal: "uncertain", failure: memoryCause }); return; }
       // Partial output is evidence, not a successful terminal receipt. Keep it
       // beside the failure while the host blocks automatic provider replay.
       finishFailed(code);

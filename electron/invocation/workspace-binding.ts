@@ -144,17 +144,51 @@ export function captureInvocationWorkspaceBinding(
 }
 
 /**
- * Main-only identity for a Mobile One first turn. It intentionally carries no
- * caller-selected folder; the paired Desktop remains the sole owner of the
- * workspace, runtime, and One context. The distinct source is never
- * serializable on the Mobile wire.
+ * Main-only identity for a Mobile One turn. It carries no caller-selected folder; the paired Desktop remains the sole owner of the
+ * workspace, runtime, and One context. The distinct source is never serializable on the Mobile wire.
+ *
+ * A room that belongs to a project (a new Agent Chat made inside one) runs where the Desktop runs it: in the folder Main already
+ * holds for that room (its own working folder, else the project's). The phone never picks it. Without `chatId`, or when the room has
+ * no folder (a project without one, or a folder that is gone), the turn runs in the default run folder exactly as before.
  */
-export function captureMobileOneInvocationBinding(): InvocationWorkspaceBinding {
+export function captureMobileOneInvocationBinding(chatId?: string): InvocationWorkspaceBinding {
+  const folder = chatId ? mobileOneRoomFolder(chatId) : null;
+  if (folder) {
+    try {
+      const directory = canonicalDirectory(folder);
+      return Object.freeze({ source: "mobile-one", canonicalPath: directory.canonicalPath, directoryIdentity: directory.directoryIdentity });
+    } catch {
+      // a folder that moved or became unreadable: the room still answers, from the default run folder
+    }
+  }
   return Object.freeze({
     source: "mobile-one",
     canonicalPath: null,
     directoryIdentity: null,
   });
+}
+
+function mobileOneRoomFolder(chatId: string): string | null {
+  try {
+    const chats = require("../store/chats") as typeof import("../store/chats"); // eslint-disable-line @typescript-eslint/no-require-imports
+    const chat = chats.getChat(chatId);
+    if (!chat || chat.originSurface !== "one" || !chat.projectId) return null;
+    const own = chats.getChatWorkingFolder(chatId);
+    if (own) return own;
+    const projects = require("../store/projects") as typeof import("../store/projects"); // eslint-disable-line @typescript-eslint/no-require-imports
+    return projects.getProject(chat.projectId)?.folderPath ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The folder a group room without a folder of its own works in (`agent-cwd/<room id>`, runtime/room-member-cwd.ts): the same kind of
+ * binding a room with a folder gets, so a member's turn runs where this room runs.
+ */
+export function captureRoomOwnFolderBinding(folder: string): InvocationWorkspaceBinding {
+  const directory = canonicalDirectory(folder);
+  return Object.freeze({ source: "mobile-one", canonicalPath: directory.canonicalPath, directoryIdentity: directory.directoryIdentity });
 }
 
 /** Main-only company workspace, captured from the original installed clone custody. */

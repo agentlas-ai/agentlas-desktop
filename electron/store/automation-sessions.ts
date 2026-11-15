@@ -3,6 +3,7 @@ import type { Chat, RuntimeSelection } from "../../shared/types";
 import { emitDesktopStoreChange } from "./change-bus";
 import { createChat, getChat, normalizeChatRuntimeSelection, setChatRuntimeSelection } from "./chats";
 import { getDb } from "./db";
+import { purgeOrphanChatMarks } from "../runtime/session-scope";
 
 export type AutomationSessionTarget =
   | { kind: "host"; id: "default" }
@@ -174,5 +175,6 @@ export function removeAutomationSessions(automationId: string): void {
     .run(automationId, `${automationId}::%`);
   const removeLedger = db.prepare("DELETE FROM chats WHERE id = ?");
   for (const row of rows) removeLedger.run(row.ledger_chat_id);
+  purgeOrphanChatMarks(db);
   emitDesktopStoreChange({ entity: "automation", id: automationId });
 }

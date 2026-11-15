@@ -5,10 +5,12 @@
 //   2) openCliLogin(kind) — 시스템 터미널을 열어 CLI 자체 로그인 실행 → 브라우저 OAuth
 //      (사용자는 "웹 로그인"만 하면 됨)
 //   3) 이후 detectRuntimes()가 자동 인식
+import { isAbsolutePathEntry } from "./safe-executable";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { spawnCli, killCliTree, cliPathValue, setCliPath, standardAntigravityBinDirs } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
 import { cliSelfUpdateEnv } from "./cli-update-prefix";
@@ -87,7 +89,8 @@ const EXTRA_BIN_DIRS = [
 ];
 
 function searchDirs(): string[] {
-  const fromPath = cliPathValue(process.env).split(path.delimiter).filter(Boolean);
+  // Relative entries would make resolveBinary return a relative file that the child then finds in ITS working folder.
+  const fromPath = cliPathValue(process.env).split(path.delimiter).filter((entry) => isAbsolutePathEntry(entry, process.platform));
   // Once Agentlas owns a verified install, always prefer it over stale user or
   // system shims. Otherwise installation can succeed and login immediately
   // reopen an older broken binary from PATH.
@@ -602,8 +605,8 @@ function managedBinary(name: string): string | null {
   return null;
 }
 
-function appendTail(current: string, chunk: Buffer, limit = 65_536): string {
-  const next = current + chunk.toString("utf8");
+function appendTail(current: string, text: string, limit = 65_536): string {
+  const next = current + text;
   return next.length <= limit ? next : next.slice(-limit);
 }
 
@@ -746,8 +749,11 @@ async function installCliUnlocked(
       done({ ok: false, message: "cancelled", command: fallbackCommand, reasonCode: "install_cancelled" });
     };
     opts?.signal?.addEventListener("abort", onAbort, { once: true });
-    child.stdout?.on("data", (chunk: Buffer) => { outputTail = appendTail(outputTail, chunk); emit(chunk.toString("utf8")); });
-    child.stderr?.on("data", (chunk: Buffer) => { outputTail = appendTail(outputTail, chunk); emit(chunk.toString("utf8")); });
+    // One decoder per stream: a character split between two chunks must not become U+FFFD in the install log.
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => { const text = stdoutDecoder.write(chunk); outputTail = appendTail(outputTail, text); emit(text); });
+    child.stderr?.on("data", (chunk: Buffer) => { const text = stderrDecoder.write(chunk); outputTail = appendTail(outputTail, text); emit(text); });
     child.on("error", (error) => done({ ok: false, message: `CLI installer failed to start: ${error.message}`, command: fallbackCommand }));
     child.on("close", (code) => {
       // Do not expose raw npm output: proxy URLs and local paths can contain secrets.
@@ -924,8 +930,10 @@ function runBinary(
       }
       done({ ok: false, message: `timed out after ${Math.round(timeoutMs / 60000)} min`, command });
     }, timeoutMs);
-    child.stdout?.on("data", (c: Buffer) => { out = appendTail(out, c); });
-    child.stderr?.on("data", (c: Buffer) => { err = appendTail(err, c); });
+    const outDecoder = new StringDecoder("utf8");
+    const errDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (c: Buffer) => { out = appendTail(out, outDecoder.write(c)); });
+    child.stderr?.on("data", (c: Buffer) => { err = appendTail(err, errDecoder.write(c)); });
     child.on("error", (e) => done({ ok: false, message: e.message, command }));
     child.on("close", (code) => {
       if (code === 0) done({ ok: true, message: out.slice(-400).trim() || "updated" });

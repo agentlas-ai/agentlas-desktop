@@ -1,4 +1,3 @@
-import { BrowserWindow, dialog } from "electron";
 import { createHash } from "node:crypto";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import path from "node:path";
@@ -388,6 +387,8 @@ export function registerScienceWorkbookIntakeHandlers(options: {
       const active = await event.sender.executeJavaScriptInIsolatedWorld(1007, [{ code: "navigator.userActivation.isActive === true" }]);
       if (active !== true) throw new Error("science-workbook-user-gesture-required");
       if (options.assertScienceProjectDocument(event, envelope) !== documentId) throw new Error("science-workbook-document-changed");
+      // Loaded here, not at module load: the background service reads persisted workbooks through this file and has no window host.
+      const { BrowserWindow, dialog } = require("electron") as typeof import("electron");
       const owner = BrowserWindow.fromWebContents(event.sender);
       if (!owner || owner.isDestroyed()) throw new Error("science-owner-window-missing");
       const selected = await dialog.showOpenDialog(owner, {

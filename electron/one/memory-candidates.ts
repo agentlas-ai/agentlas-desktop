@@ -35,7 +35,7 @@ import {
   type RecordOneDomainEventInput,
 } from "./domain-events";
 import { getOneValueClosureState } from "./value-closure";
-import { recordAutomaticMemoryTurn } from "../memory/automatic-curator";
+import { recordTurnRecord } from "../memory/turn-record";
 import { assertMemoryTicketSource } from "../memory/source-custody";
 import { getMemoryDb } from "../memory/database";
 
@@ -661,7 +661,7 @@ export function proposeUnverifiedOneMemoryCandidateFromRun(
     .get(context.runId, context.chatId, context.agentId);
   if (existing) return null;
   const observation = cleanMemoryText(input.normalizedPreview, "Memory observation");
-  recordAutomaticMemoryTurn({ context, turnSummary: observation, replyText: observation });
+  recordTurnRecord({ context, turnSummary: observation });
   return null;
 }
 

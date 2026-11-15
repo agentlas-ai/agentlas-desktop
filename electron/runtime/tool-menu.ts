@@ -4,6 +4,7 @@ import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { toolSchemaVariants, type ToolSchemaVariant } from "./tool-schema-selection";
 import { closestToolNames, resolveToolNameAlias, toolNameKey } from "./tool-name-alias";
 import { closestNames } from "../../shared/did-you-mean";
+import { ONE_PHONE_TOOLS } from "../../shared/one-phone-tools";
 import type { OpenAiToolDef, ResolvedTool } from "./local-tool-loop";
 
 const LIST = "agentlas_tools_list";
@@ -96,11 +97,19 @@ const DIRECT_ENTRY_TOOLS = new Set(["harness_search", "harness_describe", "harne
  * same reason: it is what the turn's prompt and project declare the model works with; only the rest waits behind the menu.
  */
 export const PROMPT_NAMED_APP_TOOLS: Readonly<Record<string, ReadonlySet<string>>> = Object.freeze({
-  "agentlas-turn": new Set([...DIRECT_ENTRY_TOOLS, "ask_form", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi"]),
+  // memory_ticket (the app-control refusal for forgetting a line names its "remove") and memory_get (the memory block's "not shown" line names it) are named in model-facing text.
+  "agentlas-turn": new Set([...DIRECT_ENTRY_TOOLS, "ask_form", "goal_wait", "goal_complete", "goal_tactic", "goal_plan_op", "goal_kpi", "memory_ticket", "memory_get"]),
   "agentlas-ui": new Set(["read_ui_schema", "read_surface_protocol", "read_automation_protocol"]),
+  // The peer-envelope rule every received message carries ("send the answer back with message_send", harness/peer-envelope.ts) names it.
+  "one-team": new Set(["message_send"]),
 });
+// These are exposed only if the authenticated personal One inventory admitted them.
+// Keep them directly callable when a large One tool inventory uses the lazy menu.
+const PERSONAL_PHONE_DIRECT_TOOLS = new Set<string>(ONE_PHONE_TOOLS.map(tool => tool.name));
 export function isDirectEntryTool(resolved: ResolvedTool | undefined): boolean {
   if (resolved?.kind === "mcp" && resolved.firstListed === true) return true;
+  if (resolved?.kind === "mcp" && resolved.server.catalogId === "one-team"
+    && PERSONAL_PHONE_DIRECT_TOOLS.has(resolved.serverToolName)) return true;
   return resolved?.kind === "mcp" && resolved.server.catalogId !== null && resolved.server.catalogId !== undefined
     && PROMPT_NAMED_APP_TOOLS[resolved.server.catalogId]?.has(resolved.serverToolName) === true;
 }

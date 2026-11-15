@@ -8,6 +8,7 @@
 // 공식 로그인 페이지로 연다. 완료는 타이머가 아니라 인증 상태 폴링으로 판단하고, 확인되면
 // 로그인 프로세스를 정리한다. 모든 실패는 기계 사유 코드(reasonCode)를 싣는다.
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -117,8 +118,10 @@ function run(binary: string, args: string[], timeoutMs: number, context: AuthPro
       finish(null, "spawn-failed");
       return;
     }
-    child.stdout?.on("data", (c: Buffer) => { if (out.length < 64_000) out += c.toString("utf8"); });
-    child.stderr?.on("data", (c: Buffer) => { if (out.length < 64_000) out += c.toString("utf8"); });
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (c: Buffer) => { const text = stdoutDecoder.write(c); if (out.length < 64_000) out += text; });
+    child.stderr?.on("data", (c: Buffer) => { const text = stderrDecoder.write(c); if (out.length < 64_000) out += text; });
     child.on("error", () => finish(null, "spawn-failed"));
     child.on("close", (code) => finish(code));
     timer = setTimeout(() => stop("timeout"), timeoutMs);
@@ -386,9 +389,9 @@ export function createRuntimeConnector(deps: RuntimeConnectDeps) {
       }
       s().login = child;
       let opened = false;
-      const onData = (chunk: Buffer) => {
+      const onText = (raw: string) => {
         if (!alive()) return;
-        const text = stripAnsi(chunk.toString("utf8"));
+        const text = stripAnsi(raw);
         for (const line of text.split(/\r?\n/)) {
           const clean = line.trim();
           if (!clean) continue;
@@ -403,8 +406,11 @@ export function createRuntimeConnector(deps: RuntimeConnectDeps) {
           logCurrent(url ? clean.replace(url, new URL(url).origin + "/…") : clean.slice(0, 300));
         }
       };
-      child.stdout?.on("data", onData);
-      child.stderr?.on("data", onData);
+      // One decoder per stream: a character split between two chunks must not become U+FFFD in the login log.
+      const loginStdout = new StringDecoder("utf8");
+      const loginStderr = new StringDecoder("utf8");
+      child.stdout?.on("data", (chunk: Buffer) => onText(loginStdout.write(chunk)));
+      child.stderr?.on("data", (chunk: Buffer) => onText(loginStderr.write(chunk)));
       child.on("error", (e) => failCurrent("login_spawn_failed", e.message));
       child.on("exit", (code) => { exited = code; });
     } else {

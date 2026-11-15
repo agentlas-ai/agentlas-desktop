@@ -8,7 +8,7 @@ import popupMenu from "./PanelPopover.module.css";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ProductModeMenu } from "./one/ProductModeMenu";
+import { PersonalAgentRow } from "./PersonalAgentRow";
 import { AccountChip } from "./AccountChip";
 import { CreditBalanceWidget } from "./CreditBalanceWidget";
 import { UpdateBanner } from "./UpdateBanner";
@@ -181,8 +181,8 @@ export function SideNav({
 
   const primary: Leaf[] = useMemo(
     () => [
-      { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
       { label: t("nav.workspace"), href: "/workspace", icon: IconChat },
+      { label: t("nav.dashboard"), href: "/dashboard", icon: IconHome },
       { label: t("nav.finance"), href: "/finance", icon: IconCircleDollar },
       { label: t("nav.localModels"), href: "/local-models", icon: IconCpu },
       /*
@@ -206,7 +206,7 @@ export function SideNav({
         items: [
           { label: t("nav.build"), href: "/build", icon: IconWand },
           { label: t("nav.agent"), href: "/library/agents", icon: IconUsers },
-          { label: t("nav.agent_upload"), href: "/cloud", icon: IconFileUp },
+          // "Upload agents" has no menu row in 2.0 (Manage agents' Sync tab takes its job); the /cloud screen stays until F-D9.
           { label: t("nav.agent_hub"), href: "/marketplace", icon: IconUsers },
           { label: t("nav.automations"), href: "/automation", icon: IconBolt },
         ],
@@ -296,7 +296,7 @@ export function SideNav({
       <div className="sidenav-drag titlebar-drag" />
 
       <div className="sidenav-header titlebar-nodrag">
-        <ProductModeMenu current="work" compact={collapsed} />
+        <PersonalAgentRow compact={collapsed} />
         {!forceCollapsed && (
           <button
             type="button"
@@ -540,7 +540,7 @@ export function SideNav({
           })}
         </div>
 
-        <div className="sidenav-divider" />
+        {(scienceReady || (SCIENCE_INSTALL_DISCOVERY_ENABLED && scienceSuite !== null)) && <div className="sidenav-divider" />}
 
         {(scienceReady || (SCIENCE_INSTALL_DISCOVERY_ENABLED && scienceSuite !== null)) && <button
           type="button"

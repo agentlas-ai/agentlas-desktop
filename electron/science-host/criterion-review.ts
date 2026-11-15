@@ -6,6 +6,7 @@ import { scienceStore } from "agentlas-science";
 import type { ScienceCriterionReview, ScienceCriterionReviewHost, ScienceCriterionReviewObservation, ScienceReviewerPin } from "agentlas-science";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
 import { buildEffectiveAgentSystemPrompt, computeAgentPackageHash, resolveAgentPackageDir } from "../agents/files";
+import { locationBeforeMove } from "../agents/home-relocation";
 import { getDb } from "../store/db";
 import { createChat, getChat, setChatRuntimeSelection } from "../store/chats";
 import { SCIENCE_SURFACE_PACK, tagChatSurfacePack } from "../store/surface-conversation-schema";
@@ -20,7 +21,9 @@ const authorities = new WeakMap<object,Authority>();
 const launched = new Set<string>();
 const interrupted = (code:string):ScienceCriterionReviewObservation=>({status:"interrupted",code});
 
-function installedPin(agentId:string, producers:string[]):ScienceReviewerPin {
+// beforeMove: the reviewer pin as it was before the agent's folder moved into the agent root. Only the prompt hash depends on the place
+// (the skills line names the folder); the package digest is content. A rename alone must not read as "package changed" (-4).
+function installedPin(agentId:string, producers:string[], beforeMove=false):ScienceReviewerPin {
   const agent=listInstalledAgentsReadOnly().find(a=>a.id===agentId);
   if(!agent || agent.kind==="team" || agent.sourceMissingSince) throw new Error("science-review-installed-agent-unavailable");
   for(const runId of producers){
@@ -31,7 +34,10 @@ function installedPin(agentId:string, producers:string[]):ScienceReviewerPin {
   const location=resolveAgentPackageDir(agent.id,agent.slug);
   // Reading a proposal must not materialize an uninstalled package or manufacture a reviewer.
   if(!location.isLocal || !fs.existsSync(location.dir))throw new Error("science-review-installed-package-unavailable");
-  const prompt=buildEffectiveAgentSystemPrompt(agent.id,agent.systemPrompt);
+  const earlier=beforeMove?locationBeforeMove(location.dir):null;
+  if(beforeMove && !earlier)throw new Error("science-review-package-changed");
+  const currentPrompt=buildEffectiveAgentSystemPrompt(agent.id,agent.systemPrompt);
+  const prompt=earlier?currentPrompt.split(location.dir).join(earlier.path):currentPrompt;
   if(!prompt.trim())throw new Error("science-review-prompt-unavailable");
   const basePrompt=readCanonicalPromptFromDirectory(location.dir)?.content ?? agent.systemPrompt;
   for(const runId of producers){
@@ -45,6 +51,12 @@ function installedPin(agentId:string, producers:string[]):ScienceReviewerPin {
   const digest=computeAgentPackageHash(agent.id,"agent.md");
   return {agentId:agent.id,agentSlug:agent.slug,packageDigest:`sha256:${digest}`,packageVersion:`content-sha256:${digest}`,systemPromptSha256:sha(prompt)};
 }
+/** The stored reviewer pin no longer describes the installed package. A folder that only moved is the same package. */
+function reviewerChanged(review:ScienceCriterionReview):boolean {
+  const producers=review.basis.producerInvocationRunIds;
+  if(stable(installedPin(review.reviewer.agentId,producers))===stable(review.reviewer))return false;
+  try{return stable(installedPin(review.reviewer.agentId,producers,true))!==stable(review.reviewer);}catch{return true;}
+}
 function current(projectId:string,id:string):ScienceCriterionReview {
   const review=scienceStore().criterionReviews().get(projectId,id);
   if(!review)throw new Error("science-review-not-found");
@@ -57,7 +69,7 @@ export function resolveScienceReviewAuthority(authority:object,runId:string,chat
   const review=current(admitted.projectId,admitted.reviewRequestId);
   if(review.inputSha256!==admitted.inputSha256 || !["dispatching","running"].includes(review.status))throw new Error("science-review-grant-stale");
   scienceStore().assertCriterionReviewCurrent(review);
-  if(stable(installedPin(review.reviewer.agentId,review.basis.producerInvocationRunIds))!==stable(review.reviewer))throw new Error("science-review-package-changed");
+  if(reviewerChanged(review))throw new Error("science-review-package-changed");
   const chat=getChat(chatId);
   if(!chat || chat.agentId!==review.reviewer.agentId)throw new Error("science-review-chat-binding-mismatch");
   return review;
@@ -95,7 +107,7 @@ function observe(projectId:string,id:string):ScienceCriterionReviewObservation {
   const finding=result.finding;
   if(finding.criterionIndex!==review.basis.criterionIndex || !["passed","failed","inconclusive"].includes(finding.verdict) || !["supported","contradicted","inconclusive","not-assessed"].includes(finding.scientificOutcome)
     || typeof finding.summary!=="string" || !finding.summary.trim() || finding.summary.length>8000 || !Array.isArray(finding.limitations) || finding.limitations.length>40 || finding.limitations.some((v:unknown)=>typeof v!=="string" || !v.trim() || v.length>2000))return interrupted("science-review-final-findings-invalid");
-  if(stable(installedPin(review.reviewer.agentId,review.basis.producerInvocationRunIds))!==stable(review.reviewer))return interrupted("science-review-package-changed");
+  if(reviewerChanged(review))return interrupted("science-review-package-changed");
   return {status:"settled",execution:{schema:"agentlas.science-criterion-review-execution.v1",reviewRequestId:review.id,invocationRunId:review.invocationRunId,runtimeChatId:review.runtimeChatId,
     inputSha256:review.inputSha256,reviewer:review.reviewer,runtimeSelection:pin,startedEventId:starts[0].id,terminalEventId:boundary.terminalEventId,
     finalAnswerId:answer.id,finalAnswerSha256:sha(answer.text),effectBoundarySha256:boundary.snapshotDigest,finding}};
@@ -123,7 +135,7 @@ export const scienceCriterionReviewHost:ScienceCriterionReviewHost={
     if(getDb().prepare("SELECT 1 FROM run_events WHERE run_id=? LIMIT 1").get(review.invocationRunId))return observe(projectId,reviewRequestId);
     if(launched.has(review.invocationRunId))return interrupted("science-review-dispatch-uncertain");
     scienceStore().assertCriterionReviewCurrent(review);
-    if(stable(installedPin(review.reviewer.agentId,review.basis.producerInvocationRunIds))!==stable(review.reviewer))throw new Error("science-review-package-changed");
+    if(reviewerChanged(review))throw new Error("science-review-package-changed");
     const parent=scienceStore().getConversationRuntimeBinding(projectId,review.basis.conversationId);
     const project=scienceStore().getProject(projectId);
     if(!parent || !project?.folderPath)throw new Error("science-review-workspace-unavailable");

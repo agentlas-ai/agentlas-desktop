@@ -9,7 +9,7 @@
  */
 const SAFE_ID = "[A-Za-z0-9._:%-]{1,200}";
 const ONE_SCREEN = new RegExp(`^/one(?:\\?(?:personal=1|(?:task|chat|conversation)=${SAFE_ID}))?$`);
-const WORK_CONVERSATION = new RegExp(`^/workspace/task\\?id=${SAFE_ID}$`);
+const WORK_CONVERSATION = new RegExp(`^/workspace/task\\?id=${SAFE_ID}(?:&(?:task|projectId)=${SAFE_ID})*$`);
 const WORK_PAGES: ReadonlySet<string> = new Set([
   "/dashboard", "/automation", "/apps", "/cloud", "/library", "/library/agents", "/library/mcps", "/library/env",
   "/library/toolchains", "/local-models", "/marketplace", "/prompts", "/settings", "/workspace",

@@ -9,6 +9,7 @@ import type { NativeOwnerTextBinding, NativeOwnerTextKind, NativeOwnerTextReceip
 import type { McpInvocationRequest } from "../../shared/types";
 import type { ToolApprovalDecision, ToolApprovalRequestEvent, ToolApprovalResolutionReceipt } from "../../shared/types";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
+import { noteToolApprovalExpiredByTimeout } from "../runtime/tool-approval";
 import { importNativeJsonValue } from "../daemon/native-json-transfer";
 import { publishNativeGuiApprovalRequested } from "./native-gui-events";
 import { nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
@@ -259,9 +260,13 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     }
     if (method === "invocation.approval.ready") { try { approvalReady(value, sourceMode); } catch (error) { console.warn("[native-invocation] approval card unavailable", error); /* Per-card uncertainty is not a future-input gate. */ } }
     if (method === "invocation.approval.resolved") {
-      try { current(); if (!exact(value, ["version", "requestId", "receipt"]) || value.version !== "agentlas.native-approval.v1" || !id(value.requestId)) fail("native_gui_approval_receipt_invalid");
+      try { current(); if (!exact(value, ["version", "requestId", "receipt"], ["expiredByTimeout"]) || value.version !== "agentlas.native-approval.v1" || !id(value.requestId)
+          || (value.expiredByTimeout !== undefined && value.expiredByTimeout !== true)) fail("native_gui_approval_receipt_invalid");
         const record = approvals.get(value.requestId); if (!record) fail("native_gui_original_approval_required");
-        record.receipt = receipt(value.receipt, value.requestId); broadcast("runtime:toolApprovalResolution", record.receipt); approvalChanged();
+        record.receipt = receipt(value.receipt, value.requestId); broadcast("runtime:toolApprovalResolution", record.receipt);
+        // L1 D6: the daemon says nobody answered (not a cancel): this process's snapshot names the card as expired too. An older daemon sends no flag: as before.
+        if (value.expiredByTimeout === true && record.receipt.status === "expired") noteToolApprovalExpiredByTimeout(value.requestId);
+        approvalChanged();
       } catch (error) { console.warn("[native-invocation] approval resolution unavailable", error); /* Original per-card receipt uncertainty is not start authority. */ }
     }
   }

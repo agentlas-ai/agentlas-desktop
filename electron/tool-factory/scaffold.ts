@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { nodeCommandToStart } from "../runtime/exec";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -488,7 +489,7 @@ function execNode(
   timeoutMs: number,
 ): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(nodeExecPath(), args, { cwd, timeout: timeoutMs, windowsHide: true }, (error, stdout, stderr) => {
+    execFile(nodeCommandToStart(nodeExecPath()), args, { cwd, timeout: timeoutMs, windowsHide: true }, (error, stdout, stderr) => {
       const errorCode = (error as NodeJS.ErrnoException | null)?.code;
       const exitCode =
         typeof errorCode === "number"

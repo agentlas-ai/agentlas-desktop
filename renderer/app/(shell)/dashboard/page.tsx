@@ -1,55 +1,49 @@
-// 대시보드 홈 — 사장 관제탑.
-//   좌: 조직도(출처 트리: 로컬·클라우드·허브 > firm > HQ > agent)
-//   우: 엔진 사용량(프로바이더 OAuth usage) + 활동(실행 중·최근) + 자동화
-// 데이터는 전부 실제 IPC.
+// Dashboard (Agentlas 2.0, F-D2). One column of cards in the shape of mockups/dashboard-final:
+//   Work in progress (cards, newest left, a red dot + words where a chat waits for the owner)
+//   left  : Models (Orchestrator, Worker, Multimodal: [model][effort] lines). Below it stays empty on purpose (owner: "뭐 넣지 흠 - 나중에").
+//   right : the readiness card (only while the owner has something to do), the waiting-for-you inbox (only while something waits), Connections and usage, Agent Hub.
+// The org chart, the summary strip, the project cards and the Recent tasks list are gone: where each of their jobs lives now is in
+// docs/Agentlas2.0/evidence/frontend/F-D2/. Every card reads through the shared caches and signals; nothing here polls an unchanged state.
 "use client";
+import { useEffect } from "react";
 import { useT } from "@/lib/i18n";
-import { QuestBoard } from "@/components/dashboard/QuestBoard";
-import { OrgTree } from "@/components/dashboard/OrgTree";
-import { FleetSummaryStrip } from "@/components/dashboard/FleetSummaryStrip";
+import { dropRetiredLocalKeys } from "@/lib/retired-local-keys";
 import { HubBorrowRoom } from "@/components/dashboard/HubBorrowRoom";
 import { EngineUsage } from "@/components/EngineUsage";
 import { RuntimeControl } from "@/components/dashboard/RuntimeControl";
 import { RuntimeReadiness } from "@/components/dashboard/RuntimeReadiness";
 import { ConfirmRequests } from "@/components/dashboard/ConfirmRequests";
-import { DashboardActivity } from "@/components/dashboard/DashboardActivity";
-import { DashboardProjects } from "@/components/dashboard/DashboardProjects";
+import { FirstRunLine } from "@/components/dashboard/FirstRunLine";
+import { OneHomeKeepCard } from "@/components/one/OneHomeKeepCard";
+import { WorkInProgress } from "@/components/dashboard/WorkInProgress";
+import s from "@/components/dashboard/Dashboard.module.css";
 
 export default function DashboardPage() {
-  const { locale } = useT();
-  const ko = locale === "ko";
+  const { t } = useT();
+  useEffect(() => { dropRetiredLocalKeys(); }, []);
   return (
     <div className="dashboard-root rd" style={{ position: "relative", display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <div className="titlebar-drag" style={{ position: "absolute", top: 0, left: 0, right: 0, height: 38 }} />
       <div className="dashboard-scroll">
         {/* The bottom clears the help button (20px from the edge, 46px tall), which covered the last card's button. */}
         <div className="dashboard-shell" style={{ paddingBottom: 88 }}>
-          <h1 className="sr-only">{ko ? "대시보드" : "Dashboard"}</h1>
-
-          <FleetSummaryStrip />
-          <DashboardProjects />
-
-          <div className="dashboard-workspace">
-            {/* 전역 LLM 연결은 창 폭과 무관하게 첫 조작부다. DOM에서도 먼저 두고,
-                데스크톱에서는 우측 상단·좁은 창에서는 전체폭 최상단에 배치한다. */}
-            <div className="dashboard-panel dashboard-engine-panel" data-tour-id="dashboard.llm">
-              <RuntimeControl />
-              <EngineUsage />
-            </div>
-            {/* 퀘스트 보드가 왼쪽 위 — 조직도는 그 아래로 살짝 내려간다. */}
-            <div className="dashboard-org-column" data-tour-id="dashboard.org" style={{ display: "grid", gap: 14 }}>
-              <QuestBoard />
-              <OrgTree />
-            </div>
-            <div className="dashboard-flow-column">
-              {/* 승인 인박스 — 가장 먼저 눈에 띄도록 최상단 전체폭으로. 대기 시 빨간 강조(data-alert). */}
-              <div className="dashboard-panel" data-tour-id="dashboard.approvals"><ConfirmRequests /></div>
-              <div className="dashboard-panel" data-tour-id="dashboard.readiness"><RuntimeReadiness /></div>
-              <div className="dashboard-panel" data-tour-id="dashboard.activity">
-                <DashboardActivity />
+          {/* The page name is the menu row's own word: the nav.dashboard key. */}
+          <h1 className="sr-only">{t("nav.dashboard")}</h1>
+          <div className={s.shell}>
+            {/* The first run after the 2.0 update: one line, the very top (nothing on a build with no cleanup). */}
+            <FirstRunLine />
+            <OneHomeKeepCard />
+            <WorkInProgress />
+            <div className={s.grid}>
+              <div className={s.col} data-testid="dashboard-left">
+                <RuntimeControl />
               </div>
-              <div className="dashboard-panel" data-tour-id="dashboard.hub">
-                <HubBorrowRoom />
+              <div className={s.col} data-testid="dashboard-right">
+                {/* The readiness card is the top of this column and exists only while the owner has something to do. */}
+                <RuntimeReadiness />
+                <ConfirmRequests />
+                <EngineUsage />
+                <div className={`${s.card} ${s.hub}`} data-tour-id="dashboard.hub"><HubBorrowRoom /></div>
               </div>
             </div>
           </div>

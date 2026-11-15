@@ -24,6 +24,7 @@
  *     끝까지 간다.
  */
 import { getMemoryDb as getDb } from "../memory/database";
+import { agentStoreLatestAt } from "../memory/store";
 import { ARCHITECTURE_VERSION } from "./manifest";
 import {
   currentExperienceBaseHash,
@@ -120,7 +121,9 @@ function lastActivityAt(agentId: string): string | null {
        SELECT MAX(created_at) AS at FROM memory_entries WHERE agent_id = ?
      )`,
   ).get(agentId, agentId) as { at?: string | null } | undefined;
-  return row?.at ?? null;
+  // Layout switch on: the agent's newest line may be in its own store (#11). Switch off: null, so the answer is the one above.
+  const inStore = agentStoreLatestAt(agentId);
+  return inStore && (!row?.at || inStore > row.at) ? inStore : row?.at ?? null;
 }
 
 /**

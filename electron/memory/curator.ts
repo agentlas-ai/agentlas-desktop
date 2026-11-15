@@ -2,14 +2,13 @@
 // semantic Curator may propose disposition/scope; deterministic policy remains
 // the final privacy, owner isolation, deduplication, graph, and write authority.
 import {
-  appendAgentNestExperienceMemory,
   type AgentNestExperienceItem,
   appendMemoryLog,
   appendSoulMemory,
 } from "./project-files";
-import { appendMemoryOrigins, findEquivalentMemoryId, insertMemoryEntry, type RequestContext } from "./store";
-import { supersedeExplicitMemory, supersedeRestatedMemories } from "./graph";
-import { enqueueAutomaticMemoryCuration } from "./automatic-curator";
+import { appendMemoryOrigins, findEquivalentMemoryId, insertMemoryEntry, MemoryStoreFullError, type RequestContext } from "./store";
+import { peekExplicitSupersedeTarget, supersedeExplicitMemory, supersedeRestatedMemories } from "./graph";
+import { notifyMemoryWritten } from "./memory-written-signal";
 import { getMemoryStoreInfo } from "./database";
 import { isAutomationLedgerChat } from "./automation-surface";
 import {
@@ -23,11 +22,13 @@ import {
   stripAllMemoryEventBlocks,
   type RawMemoryEvent,
 } from "./events";
-import type { MemoryKind, MemoryScope } from "../architecture/manifest";
+import { MEMORY_KINDS, type MemoryKind, type MemoryScope } from "../architecture/manifest";
 import { tryRecordRunEvent } from "../store/run-events";
 import { currentUiLocale } from "../ui-locale";
 import { policyTurnSummary } from "./policy-turn-summary";
-import { runEvidenceRef } from "./run-evidence";
+import { ORIGIN_INSTRUCTION, ORIGIN_OWNER_SPOKE, runEvidenceRef } from "./run-evidence";
+import { deriveOrigin, type TurnFacts } from "./origin-class";
+import { groundedInOwnerWords } from "../one/turn-memory-exclusion";
 
 // Secret/credential detection — events matching these are dropped, never stored.
 // Shared with every other write boundary; this file used to carry its own shorter list that
@@ -35,8 +36,10 @@ import { runEvidenceRef } from "./run-evidence";
 // looksSecret is the single chokepoint before memory writes, including the agent_repo nest
 // mirroring that crosses projects — a miss here reaches the widest surface in the product.
 import { looksSecret } from "../../shared/secret-patterns";
-import { normalizeMemoryOwnership } from "../../shared/memory-ownership";
-import type { SemanticMemoryDecision } from "./semantic-curator";
+import { memoryActorKind, normalizeMemoryOwnership, residentAgentRepoBelongsToProject } from "../../shared/memory-ownership";
+import { classifyStage1, classifyStage2, lowerConfidence, personalMinConfidence, tokenContainment, tokenOverlap, type ClassificationRules } from "../../shared/memory-classification";
+import { currentHomeState, memoryClassificationRules, memoryStoreCeiling, workspaceRulesOn } from "./classification";
+import { personalWriteRefusal } from "../one/write-gate";
 import {
   beginMemoryTicket,
   completeMemoryTicket,
@@ -52,6 +55,22 @@ import { appendCuratorDecision } from "./project-artifacts";
 export interface CurationContext {
   /** Main-authored before the model call. Renderer/model input is never trusted here. */
   turnId?: string | null;
+  /**
+   * this turn was started by a message the OWNER wrote — a positive fact minted at the owner's own entry points (the composer, the paired phone, the paired
+   * Telegram chat), never derived from a list of what a turn is not (invocation/owner-spoke.ts). Only a turn with this set can add a line to Personal memory.
+   * Absent = false: an automation run, a ledger conversation, a synthesised answer, a mention chain, a cross-session message, a check-in, a restart resume, a hub call.
+   */
+  ownerSpoke?: boolean;
+  /**
+   * Agentlas 2.0 P2: this turn is the personal agent's own conversation (`isPersonalAgentConversation`, workspace-rules/scope.ts), set by the host that starts the turn (P3a). Only read with the
+   * workspace-rules switch on, where a Personal line is written from such a turn only. Absent = false (a value nobody set is "not the personal agent's conversation").
+   */
+  personalConversation?: boolean;
+  /**
+   * what the host saw in this turn besides the owner's message (a tool call completed, a file/photo/room text came in, a verification receipt). Decides the two origin columns of a line
+   * (origin-class.ts); never a reason to refuse one. Minted by the host at the turn's end; absent = nothing known. In memory and in the job's own payload only.
+   */
+  turnFacts?: TurnFacts;
   projectPath: string | null;
   projectId: string | null;
   agentId: string | null;
@@ -80,6 +99,8 @@ export interface CurationContext {
   /** Trusted compatibility boundary; parsed/model JSON never sets these. */
   memoryChannel?: "default" | "legacy_one_overlay";
   memoryCompatibilityScope?: { scope: "personal" | "project" | "agent" | "team"; scopeRef: string | null };
+  /** the owner's own words of the turn (null: the prompt was written by the host). The origin check reads them before the experience hint. */
+  ownerWords?: string | null;
   /** Exact runtime/base context supplied only by real installed-agent runs. */
   experienceIntake?: {
     platform: string;
@@ -92,8 +113,9 @@ export interface CurationContext {
    * v75 · Team-run identities for deterministic 3-layer scope routing. Present
    * only when the run is a materialized team run. When set, durable agent_repo
    * learning is routed by kind (see classifyTeamLearningRoute): team
-   * coordination → orchestrator, shared norms → team_memory, domain skill/taste
-   * → the member cell. Absent (single-agent run) → behavior is unchanged.
+   * coordination → orchestrator, shared norms → the bound project, else the
+   * orchestrator's own store (no new team_memory line; P-T, §5.7),
+   * domain skill/taste → the member cell. Absent (single-agent run) → behavior is unchanged.
    */
   teamRun?: {
     orchestratorAgentId: string;
@@ -108,7 +130,6 @@ export interface CurationContext {
 // curator-ruleset.json instead of inline constants.
 import {
   classifyTeamLearningRoute,
-  hasWellShapedEvidence,
   loadCuratorRuleset,
   mentionsProjectSpecifics as rulesMentionsProjectSpecifics,
   type TeamLearningLayer,
@@ -116,31 +137,30 @@ import {
   noWorkspaceFallbackScope,
 } from "./curator-rules";
 
-// R21 W2a — kinds whose evidence must be machine-checkable in shape before a
-// durable claim is written. Matches the OS ruleset kinds.evidenceRequired: a
-// preference/hypothesis is not held to this bar.
-const EVIDENCE_SHAPE_REQUIRED: ReadonlySet<MemoryKind> = new Set<MemoryKind>([
-  "fact",
-  "decision",
-  "procedure",
-]);
-
 export { classifyTeamLearningRoute, type TeamLearningLayer };
 
 /**
  * Apply the team layer routing to a resolved durable learning. Only rewrites
  * agent_repo learning (the scope the 3 layers live on); every other scope is
  * returned unchanged. Deterministic and side-effect free.
+ *
+ * P-T (Agentlas 2.0 §5.7, principles P2/P3): the old company run no longer writes a `team_memory` line. The shared layer goes to the project the
+ * chat is bound to; without a project it goes to the team's orchestrator agent (its own store). Existing `team_memory` lines are only read.
  */
 function routeTeamLearning(
   scope: MemoryScope,
   kind: MemoryKind,
   ownerAgentId: string | null,
   teamRun: NonNullable<CurationContext["teamRun"]>,
+  hasProject: boolean,
 ): { scope: MemoryScope; agentId: string | null } {
   if (scope !== "agent_repo") return { scope, agentId: ownerAgentId };
   const layer = classifyTeamLearningRoute(kind);
-  if (layer === "shared") return { scope: "team_memory", agentId: null };
+  if (layer === "shared") {
+    return hasProject
+      ? { scope: "project", agentId: ownerAgentId }
+      : { scope: "agent_repo", agentId: teamRun.orchestratorAgentId };
+  }
   if (layer === "coordination") return { scope: "agent_repo", agentId: teamRun.orchestratorAgentId };
   return {
     scope: "agent_repo",
@@ -154,21 +174,25 @@ export interface CurationReport {
   redacted: number;
   sessionOnly: number;
   discarded: number;
+  /** K2b': the store ids of the lines this batch wrote and of the existing lines a duplicate was merged into, in event order (absent when none). In memory only: never stored, never sent. */
+  writtenIds?: string[];
+  dedupedIds?: string[];
 }
 
 export interface CurateReplyOptions {
-  semanticDecisions?: SemanticMemoryDecision[];
-  semanticAttempted?: boolean;
-  semanticFailed?: boolean;
-  automaticRuntimeKey?: string;
   automaticOwnerNamespace?: string;
   /** Explicit compatibility export, never a second automatic memory authority. */
   writeProjections?: boolean;
   /**
    * Memory events taken out of this turn's earlier continuous passes, each committed as its own message before the
-   * final answer. Appended after the final answer's events, so semantic decisions keep their candidate indexes.
+   * final answer. Appended after the final answer's events.
    */
   carriedEvents?: RawMemoryEvent[];
+  /**
+   * K2b': what the model's memory_ticket calls of this turn already did (the lines were written at the call; the answers said so). The turn's own record counts them
+   * (candidates, outcome, the report) and links each written line to the turn's ticket; they are never written a second time.
+   */
+  toolWrites?: { candidates: number; report: CurationReport; writtenIds: string[] };
 }
 
 export interface CuratedReply {
@@ -178,15 +202,6 @@ export interface CuratedReply {
   emitterStatus: MemoryEmitterStatus;
   curatorMode: MemoryCuratorMode;
 }
-
-// Kinds that assert something about the world. A low-confidence claim of one
-// of these is quarantined to the session log instead of being promoted —
-// the AMGB governed reference's trust gate.
-const QUARANTINE_ON_LOW_CONFIDENCE: ReadonlySet<MemoryKind> = new Set([
-  "fact",
-  "decision",
-  "procedure",
-]);
 
 function emptyReport(): CurationReport {
   return { written: 0, deduped: 0, redacted: 0, sessionOnly: 0, discarded: 0 };
@@ -284,6 +299,10 @@ function mentionsProjectSpecifics(content: string, ctx: CurationContext): boolea
 }
 
 function resolveScope(ev: RawMemoryEvent, ctx: CurationContext): MemoryScope {
+  // (§11.6, engine F2 always-part): a resident actor (One family, host:*) that worked inside a project did not learn a portable agent skill —
+  // it learned something about that project. An agent_repo proposal that is not a preference becomes a project line; a preference stays for Personal
+  // (resolved by the write-time classification). No project this turn, or an agent with its own folder: unchanged. This is the one sink every executor reaches.
+  if (ev.suggested_scope === "agent_repo" && residentAgentRepoBelongsToProject(ctx.agentId, Boolean(ctx.projectPath), ev.memory_kind)) return "project";
   if (ev.suggested_scope === "agent_repo" && mentionsProjectSpecifics(ev.content, ctx)) {
     // The model labelled this a portable agent skill, but it names this project or this machine.
     // Keep it — just not somewhere it can surface in an unrelated project or a borrowed nest.
@@ -308,7 +327,8 @@ function resolveScope(ev: RawMemoryEvent, ctx: CurationContext): MemoryScope {
     return "team_memory";
   }
   if (ev.suggested_scope === "user_identity") {
-    if (ev.confidence !== "high" || !USER_IDENTITY_KINDS.has(ev.memory_kind)) {
+    // no confidence condition. How sure the model was lowers the line's origin class (origin-class.ts), it does not keep the line out of Personal; the kinds Personal takes are unchanged.
+    if (!USER_IDENTITY_KINDS.has(ev.memory_kind)) {
       return "session";
     }
     return "user_identity";
@@ -335,6 +355,7 @@ function compactContext(ctx: RequestContext): RequestContext | null {
   if (ctx.targetPath !== undefined) next.targetPath = ctx.targetPath;
   if (ctx.crossContext !== undefined) next.crossContext = ctx.crossContext;
   if (ctx.outcome !== undefined) next.outcome = ctx.outcome ? ctx.outcome.slice(0, 240) : ctx.outcome;
+  if (ctx.ticket_kind === "identity" || ctx.ticket_kind === "boundary") next.ticket_kind = ctx.ticket_kind;
   if (looksSecret(JSON.stringify(next))) return null;
   return Object.keys(next).length > 0 ? next : null;
 }
@@ -357,6 +378,8 @@ function buildRequestContext(
     targetProject,
     targetPath,
     crossContext,
+    // K2b': the kind a Personal ticket was given before the computer folded it (host-set on the event; a model cannot send it).
+    ...(ev.ticket_kind ? { ticket_kind: ev.ticket_kind } : {}),
   });
 }
 
@@ -373,25 +396,34 @@ function requestContextForLog(ctx: RequestContext | null): Record<string, unknow
   };
 }
 
-function evidenceWithSourceProvenance(ev: RawMemoryEvent, ctx: CurationContext): string[] {
+function evidenceWithSourceProvenance(ev: RawMemoryEvent, ctx: CurationContext, marks: { instruction: boolean } = { instruction: false }): string[] {
   // Runtime callers normally pass parsed events, but direct deterministic tests and
   // legacy integrations may omit evidence_refs; preserve the former empty-list behavior.
   const evidence = (ev.evidence_refs ?? []).slice();
   if (ctx.sourceProvenance) evidence.push(`source:${ctx.sourceProvenance}`);
   // The run this came from, so the lesson's recurrence can be counted (run-evidence.ts); never model text.
   evidence.push(...runEvidenceRef(ctx.runId));
+  // Agentlas 2.0 P2 (workspace-rules switch on only): the line came from a proposal that was an instruction (the original scope was Personal or the original kind a preference, before the host
+  // corrected it). The marks are read by the skill-candidate list (never counted towards a skill) and by the "my rules" pick list; they are not shown to a model (`entryLines` renders no evidence).
+  if (marks.instruction) {
+    evidence.push(ORIGIN_INSTRUCTION);
+    if (ctx.ownerSpoke === true) evidence.push(ORIGIN_OWNER_SPOKE);
+  }
   return [...new Set(evidence)];
 }
 
-interface EventCurationOptions {
+export interface EventCurationOptions {
+  /** The owner's own words of the turn(s) these events came from; the default is the context's own task hint. Only read for a turn that took in something besides them. */
+  ownerText?: string;
   ticketId?: string;
   curatorMode?: MemoryCuratorMode;
-  semanticDecisions?: SemanticMemoryDecision[];
   projectPath?: string | null;
   decisionIndexOffset?: number;
   writeProjections?: boolean;
   originTicketIds?: string[];
   policyVersion?: string;
+  /** K2b': the reason code of every candidate that was not written is also pushed here (in memory only), so a caller that answers per candidate can tell why. */
+  reasonSink?: string[];
 }
 
 function safeDecisionReasonCode(value: string): string {
@@ -408,6 +440,7 @@ function recordCandidateDecision(input: {
   reason: string;
   targetMemoryId?: string | null;
 }): void {
+  input.options.reasonSink?.push(input.reason);
   if (!input.options.ticketId) return;
   recordMemoryDecision({
     ticketId: input.options.ticketId,
@@ -481,31 +514,72 @@ function appendTurnOutcomeDecision(input: {
   }
 }
 
+interface CandidateScope { scope: MemoryScope; kind: MemoryKind; reason: string; deferred: boolean; hub?: boolean; instruction?: boolean }
+
+/**
+ * stage 1 (§12-2/§12-3, the engine's memory_classify.stage1): the proposal's scope and kind are corrected by CODE before anything else
+ * reads them — the kind corrections of the ruleset, the Personal admission (high confidence, no secret or host path, 200 characters, a home that is not
+ * away/sealed, and the owner having spoken), a project line needing a bound project, a resident actor's agent_repo line inside a project becoming a project line.
+ * Rules off (an older or damaged ruleset copy) or a scope outside the three stores: the proposal passes unchanged.
+ */
+function classifyProposal(
+  rules: ClassificationRules | null,
+  scope: MemoryScope | "agent_team",
+  kind: MemoryKind,
+  confidence: string | undefined,
+  event: RawMemoryEvent,
+  ctx: CurationContext,
+  rulesOn: () => boolean,
+): { pass: { scope: MemoryScope; kind: MemoryKind; instruction?: boolean } } | { stop: CandidateScope } {
+  // The team's shared scope (#5). A hub-called agent keeps no memory of the owner's anywhere. Outside a team run nobody is writing for a team: the line is an
+  // agent_repo proposal and meets the same thresholds as every other (the owner having spoken for a preference, a bound project for a project line, the hub, the ceilings).
+  // A team run is no exception (P-T): its team_memory proposal is an agent_repo proposal too and meets the same thresholds; routeTeamLearning below then picks the layer
+  // (project, orchestrator or member). Only the rules off (an older ruleset copy) outside a team run leave a team_memory proposal as before.
+  if (scope === "team_memory" || scope === "agent_team") {
+    if (memoryActorKind(ctx.agentId) === "hub") return { stop: { scope: "discard", kind, reason: "policy-hub-agent-no-memory", deferred: false, hub: true } };
+    if (!rules && !ctx.teamRun) return { pass: { scope: "team_memory", kind } };
+    scope = "agent_repo";
+  }
+  if (!rules || (scope !== "user_identity" && scope !== "agent_repo" && scope !== "project")) return { pass: { scope, kind } };
+  // A team run's agent_repo lines are ROUTED by the kind the model gave (coordination / shared / domain, classifyTeamLearningRoute; curateEvents), but they are WRITTEN, de-duplicated and
+  // checked against the forget stamp with the corrected kind, like the same line outside a team run (#4: the team run filed a decision under `decision`, the same words outside it under `procedure`).
+  const project = Boolean(ctx.projectPath);
+  // the Personal admission no longer asks the model's confidence to be high. The ruleset's own value is passed through, so the rest of the admission (kinds, owner spoke, home state, path, length) is unchanged
+  // and the ruleset copy the engine mirrors stays as it is; the confidence itself is read when the line's origin class is decided.
+  const outcome = classifyStage1(rules, { scope, kind, confidence: personalMinConfidence(rules) ?? confidence, text: event.content, surface: "desktop", project, inProject: project,
+    actorKind: memoryActorKind(ctx.agentId), ownerSpoke: ctx.ownerSpoke === true, homeState: currentHomeState,
+    rulesOn, personalConversation: ctx.personalConversation === true });
+  if ("write" in outcome) return { stop: { scope: "discard", kind, reason: "policy-hub-agent-no-memory", deferred: false, hub: true } };
+  if ("discard" in outcome) return { stop: { scope: "discard", kind, reason: "policy-secret", deferred: false } };
+  // The desktop cannot ask the agent a second time once its turn is over, and no format reason may kill a turn: a Personal line over its length
+  // is kept out of Personal and nothing is written; the decision ledger says why.
+  if ("askAgain" in outcome) return { stop: { scope: "session", kind, reason: "policy-personal-too-long", deferred: false } };
+  if (outcome.scope === "session") {
+    const personal = scope === "user_identity" || (scope === "agent_repo" && memoryActorKind(ctx.agentId) === "resident" && kind === "preference");
+    return { stop: { scope: "session", kind, reason: personal ? "policy-personal-not-admitted" : "policy-classification-session", deferred: false } };
+  }
+  return { pass: { scope: outcome.scope as MemoryScope, kind: ("kind" in outcome ? outcome.kind : kind) as MemoryKind, ...("instruction" in outcome && outcome.instruction === true ? { instruction: true } : {}) } };
+}
+
 function scopeForCandidate(
   event: RawMemoryEvent,
   index: number,
   ctx: CurationContext,
   options: EventCurationOptions,
-): { scope: MemoryScope; reason: string; deferred: boolean } {
-  const semantic = options.semanticDecisions?.find((decision) => decision.candidateIndex === index);
-  if (!semantic) return { scope: resolveScope(event, ctx), reason: "policy-scope", deferred: false };
-  if (semantic.disposition === "discard") {
-    return { scope: "discard", reason: semantic.reasonCode, deferred: false };
-  }
-  if (semantic.disposition === "session" || semantic.disposition === "defer") {
-    return {
-      scope: "session",
-      reason: semantic.reasonCode,
-      deferred: semantic.disposition === "defer",
-    };
-  }
-  // The model may propose scope, but the same deterministic narrowing gates are
-  // re-applied here. It cannot create a project/agent owner or widen synthesis.
-  return {
-    scope: resolveScope({ ...event, suggested_scope: semantic.resolvedScope }, ctx),
-    reason: semantic.reasonCode,
-    deferred: false,
-  };
+  rulesOn: () => boolean,
+): CandidateScope {
+  const rules = memoryClassificationRules();
+  // The proposal the code then corrects (K3': no reviewing model any more - the emitter's own proposal, corrected by the host's rules).
+  const proposedScope = event.suggested_scope;
+  const proposedKind = event.memory_kind;
+  const confidence = event.confidence;
+  const classified = classifyProposal(rules, proposedScope === "agent_team" ? "team_memory" : proposedScope, proposedKind, confidence, event, ctx, rulesOn);
+  if ("stop" in classified) return classified.stop;
+  const { scope: classifiedScope, kind, instruction } = classified.pass;
+  // The same deterministic narrowing gates are re-applied on the corrected proposal. The model may propose scope, but cannot create a
+  // project/agent owner or widen synthesis.
+  const resolvedScope = resolveScope({ ...event, memory_kind: kind, suggested_scope: classifiedScope }, ctx);
+  return { scope: resolvedScope, kind, reason: "policy-scope", deferred: false, ...(instruction ? { instruction: true } : {}) };
 }
 
 /** Curate a batch of raw events into durable memory. Pure side effects + a report. */
@@ -524,7 +598,13 @@ export function curateEvents(
   // agent_repo 스코프(에이전트 기술·경험) 배움 — 빌린 에이전트의 전역 둥지로 미러링할 후보.
   const nestExperienceItems: AgentNestExperienceItem[] = [];
 
-  for (const [index, ev] of events.entries()) {
+  const rules = memoryClassificationRules();
+  // The workspace-rules switch is read at most once per batch, and only when a proposal reaches a store (a batch that never gets there never asks).
+  let switchOn: boolean | null = null;
+  const rulesOn = (): boolean => (switchOn ??= workspaceRulesOn());
+  for (const [index, proposed] of events.entries()) {
+    // `ev` is the line as the code corrected it (kind corrections happen once, below, before the duplicate check and the forget stamp).
+    let ev: RawMemoryEvent = proposed;
     if (ev.sensitivity === "secret" || looksSecret(ev.content)
       || looksSecret(ev.content_native ?? "")) {
       report.redacted += 1;
@@ -547,38 +627,7 @@ export function curateEvents(
       continue;
     }
 
-    // Trust gate — the one AMGB governed rule this curator was missing. The
-    // benchmark reference (governance 1.000) quarantines a low-trust claim
-    // before promotion: it may sit in the session log, it never becomes a
-    // durable fact. Here the emitter's own confidence is the trust signal, and
-    // the gate is deliberately narrow: only kinds that assert something about
-    // the world (fact/decision/procedure) are held back — a low-confidence
-    // "hypothesis" is already labelled as conjecture and a "preference" is the
-    // user's to state at any confidence. Without this, a low-confidence fact
-    // was written durable exactly like a high-confidence one, which is the
-    // measured difference between governance 1.000 and 0.617.
-    if (ev.confidence === "low" && QUARANTINE_ON_LOW_CONFIDENCE.has(ev.memory_kind)) {
-      report.sessionOnly += 1;
-      recordCandidateDecision({
-        options,
-        index,
-        event: ev,
-        scope: "session",
-        action: "session",
-        reason: "policy-low-trust-quarantine",
-      });
-      if (writeProjections && ctx.projectPath) {
-        appendMemoryLog(ctx.projectPath, {
-          action: "session",
-          reason: "low-trust-quarantine",
-          kind: ev.memory_kind,
-          content: ev.content,
-          source_provenance: ctx.sourceProvenance ?? "assistant-turn",
-          at: new Date().toISOString(),
-        });
-      }
-      continue;
-    }
+    // the low-confidence quarantine that stood here is gone. A line the model was unsure of is written with the origin class `inferred` (origin-class.ts), not held back.
 
     // Capability-widening content screening was REMOVED 2026-08-12 (owner
     // decision) — a content wordlist cannot separate a widening assertion from a
@@ -586,36 +635,8 @@ export function curateEvents(
     // framing + the PreToolUse broker; see one_workspace._classify and the
     // ruleset _capabilityWideningNote.
 
-    // R21 W2a — an evidence-required claim whose evidence is present but all
-    // ill-shaped (self-reported ratings/feelings only) is held to the session
-    // log, never durable. Empty evidence keeps its existing path; ANY one
-    // well-shaped entry passes, so real evidence is never starved.
-    if (
-      EVIDENCE_SHAPE_REQUIRED.has(ev.memory_kind) &&
-      ev.evidence_refs.length > 0 &&
-      !hasWellShapedEvidence(ev.evidence_refs)
-    ) {
-      report.sessionOnly += 1;
-      recordCandidateDecision({
-        options,
-        index,
-        event: ev,
-        scope: "session",
-        action: "deferred",
-        reason: "evidence-shape-insufficient",
-      });
-      if (writeProjections && ctx.projectPath) {
-        appendMemoryLog(ctx.projectPath, {
-          action: "session",
-          reason: "evidence-shape-insufficient",
-          kind: ev.memory_kind,
-          content: ev.content,
-          source_provenance: ctx.sourceProvenance ?? "assistant-turn",
-          at: new Date().toISOString(),
-        });
-      }
-      continue;
-    }
+    // the evidence-shape door that stood here (a fact/decision/procedure whose evidence was all ill-shaped went to the session log) is gone: the source of a line is attached by the host
+    // (evidenceWithSourceProvenance, the two origin columns), never a condition of writing it.
 
     // Unattended automation runs (2026-09-24). Nobody reviews these turns, and
     // measured on the owner's store their decisions/procedures were the run's
@@ -626,14 +647,11 @@ export function curateEvents(
     // or user_identity. The surface is a host fact, not a reading of the text.
     const unattended = ctx.sourceSurface === "automation-run" || isAutomationLedgerChat(ctx.chatId);
     const hostObserved = (ev as RawMemoryEvent & { source?: string }).source === "host-observed";
-    if (unattended && !hostObserved && (
-      ev.memory_kind === "decision" || ev.memory_kind === "procedure"
-      || (EVIDENCE_SHAPE_REQUIRED.has(ev.memory_kind) && !hasWellShapedEvidence(ev.evidence_refs ?? []))
-    )) {
+    if (unattended && !hostObserved && (ev.memory_kind === "decision" || ev.memory_kind === "procedure")) {
+      // only the run's own choice stays out (an rule of WHO decides, not of evidence). The "unevidenced claim" half of this door is gone: such a line is written, narrowed below to
+      // the project or the session like every unattended line, with the origin class `inferred`.
       report.sessionOnly += 1;
-      const reason = ev.memory_kind === "decision" || ev.memory_kind === "procedure"
-        ? "policy-automation-run-own-choice"
-        : "policy-automation-run-unevidenced";
+      const reason = "policy-automation-run-own-choice";
       recordCandidateDecision({ options, index, event: ev, scope: "session", action: "session", reason });
       if (writeProjections && ctx.projectPath) {
         appendMemoryLog(ctx.projectPath, {
@@ -648,13 +666,20 @@ export function curateEvents(
       continue;
     }
 
-    const resolvedByPolicy = scopeForCandidate(ev, index, ctx, options);
+    const resolvedByPolicy = scopeForCandidate(ev, index, ctx, options, rulesOn);
     const resolved = unattended && !hostObserved
       && (resolvedByPolicy.scope === "agent_repo" || resolvedByPolicy.scope === "user_identity")
       ? { ...resolvedByPolicy, scope: (ctx.projectPath ? "project" : "session") as MemoryScope,
         reason: "policy-automation-run-narrowed" }
       : resolvedByPolicy;
     const scope = resolved.scope;
+    // from here on every step — the duplicate check, the forget stamp, the write, the decision ledger — sees the corrected kind.
+    if (resolved.kind !== ev.memory_kind) ev = { ...proposed, memory_kind: resolved.kind };
+    if (resolved.hub) {
+      report.discarded += 1;
+      recordCandidateDecision({ options, index, event: ev, scope: "discard", action: "discarded", reason: resolved.reason });
+      continue;
+    }
     if (scope === "discard") {
       report.discarded += 1;
       recordCandidateDecision({
@@ -695,7 +720,7 @@ export function curateEvents(
     // learning is rewritten; the owner/scope decided here drive dedup, insert,
     // and Experience intake so a member's domain skill accrues to its own cell.
     const routed = ctx.teamRun
-      ? routeTeamLearning(scope, ev.memory_kind, ctx.agentId, ctx.teamRun)
+      ? routeTeamLearning(scope, proposed.memory_kind, ctx.agentId, ctx.teamRun, Boolean(ctx.projectPath))
       : { scope, agentId: ctx.agentId };
     // 마지막 관문: 개인 칸을 못 가지는 주인(팀 낙인 `agt_team_`, 또는 설치 에이전트가 없는
     // 조직 노드)에게 향한 agent_repo 학습을 팀 공유로 되돌린다. 주인 판정은 여기 한 곳에서만
@@ -710,9 +735,61 @@ export function curateEvents(
     );
     const effectiveScope = owned.scope;
     const effectiveAgentId = owned.agentId;
+    // P-T: a team run keeps nothing in `team_memory` any more. When the last gate above finds no personal store for the owner (a team brand, no installed agent, even the orchestrator),
+    // there is no place for the line: it stays in the run's session log (principle P3, nothing is kept) and the decision ledger says why. The turn goes on.
+    if (ctx.teamRun && effectiveScope === "team_memory") {
+      report.sessionOnly += 1;
+      recordCandidateDecision({ options, index, event: ev, scope: "session", action: "session", reason: "policy-team-run-no-store" });
+      continue;
+    }
+
+    // the two origin columns, decided from host facts (origin-class.ts). `personTurn` = the owner typed this turn and nobody else's words stand in for it. A turn that took in a tool result,
+    // a file, a photo or room text (`turnFacts`) writes a line as the owner's own only when it rests on the owner's own words; otherwise it is `observed`.
+    const personTurn = ctx.ownerSpoke === true && !unattended && !ctx.sourceProvenance;
+    const mixedTurn = ctx.turnFacts?.toolsRan === true || ctx.turnFacts?.inputsRead === true;
+    // K2b': a memory_ticket line comes with the two columns the ticket receiver already decided from the same host facts (ticket-receiver.ts); that verdict stands (one authority), nothing is derived a second time.
+    const origin = ev.ticket_origin ?? deriveOrigin({
+      ownerSpoke: ctx.ownerSpoke === true, notAPersonTurn: !personTurn, hostMinted: hostObserved, kind: ev.memory_kind,
+      // How sure the proposer was.
+      confidence: ev.confidence,
+      modelClaim: ev.origin_class, facts: ctx.turnFacts,
+      ...(mixedTurn && personTurn ? { groundedInOwnerWords: groundedInOwnerWords(ev, options.ownerText ?? ctx.ownerWords ?? ctx.experienceIntake?.taskHint ?? "", "") } : {}),
+    });
+    // The injection door that stays (keeps it): a Personal PREFERENCE, an instruction about the owner, may not come from words a tool, file or page brought into the turn. Such a line is not the owner's
+    // (origin `observed`) and is kept out of Personal; a Personal FACT read from a photo or file is written as `observed` and never loaded on every turn.
+    if (effectiveScope === "user_identity" && mixedTurn && origin.originClass !== "user" && ev.memory_kind === "preference") {
+      report.sessionOnly += 1;
+      recordCandidateDecision({ options, index, event: ev, scope: "session", action: "session", reason: "policy-personal-not-owner-words" });
+      continue;
+    }
 
     const projectPath = effectiveScope === "project" ? ctx.projectPath : null;
     const requestContext = buildRequestContext(ev, ctx, projectPath);
+    // stage 2 (the engine's classify stage2): a model that points at an older line replaces it only when the two are similar enough (the ruleset's
+    // `limits.mergeTokenOverlapMin`) and the older line is in the same scope and reads as the same corrected kind; otherwise the text is a NEW line and the old one
+    // stays (never a guess). At a store's ceiling only a replacing line is written. Rules off: the explicit link is followed as before.
+    let supersedes = ev.supersedes;
+    let replaces = false;
+    if (supersedes && ev.explicit_replace === true) {
+      // K2b': a memory_ticket rewrite or condense NAMES its line itself and the receiver has already checked its scope and kind line; the target is found again here under this write's own owner,
+      // and no similarity test stands in front of it (a new city is not "similar" to the old one). A line that is gone by now (forgotten or replaced a moment ago) is not written as a near copy.
+      const target = peekExplicitSupersedeTarget({ scope: effectiveScope, projectId: ctx.projectId, projectPath, agentId: effectiveAgentId, chatId: ctx.chatId }, supersedes);
+      if (!target) {
+        report.discarded += 1;
+        recordCandidateDecision({ options, index, event: ev, scope: effectiveScope, action: "discarded", reason: "policy-ticket-target-gone" });
+        continue;
+      }
+      replaces = true;
+    } else if (rules && supersedes) {
+      const target = peekExplicitSupersedeTarget({ scope: effectiveScope, projectId: ctx.projectId, projectPath, agentId: effectiveAgentId, chatId: ctx.chatId }, supersedes);
+      if (target) {
+        const verdict = classifyStage2(rules, { scope: effectiveScope, kind: ev.memory_kind, similarity: tokenOverlap(rules, ev.content, target.content),
+          named: true, containment: tokenContainment(rules, ev.content, target.content), target: { scope: target.scope, kind: target.kind }, storeRows: 0 });
+        replaces = "replace" in verdict && verdict.replace === true;
+        if (!replaces) supersedes = undefined;
+      }
+    }
+    const ceiling = rules && (effectiveScope === "user_identity" || effectiveScope === "agent_repo" || effectiveScope === "project") ? memoryStoreCeiling(effectiveScope, memoryActorKind(effectiveAgentId)) : null;
     const equivalentMemoryId = findEquivalentMemoryId(
       effectiveScope,
       ev.memory_kind,
@@ -723,12 +800,19 @@ export function curateEvents(
         compatibilityScope: ctx.memoryCompatibilityScope },
     );
     if (equivalentMemoryId) {
-      appendMemoryOrigins(equivalentMemoryId, [
-        ...(options.originTicketIds ?? (options.ticketId ? [options.ticketId] : [])).map(id => ({ kind: "ticket" as const, id })),
-        ...(ctx.runId ? [{ kind: "run" as const, id: ctx.runId }] : []),
-        ...(ctx.projectId ? [{ kind: "project" as const, id: ctx.projectId }] : []),
-      ], ctx.projectId);
+      // Audit 62 (memory B7): adding a source to a line that already exists is bookkeeping. With the layout switch on that line may sit in a store that is locked or catching up on a forget; the
+      // candidate is still a duplicate and the other candidates of the turn are still written. The source is not added this time (a later restatement adds it).
+      try {
+        appendMemoryOrigins(equivalentMemoryId, [
+          ...(options.originTicketIds ?? (options.ticketId ? [options.ticketId] : [])).map(id => ({ kind: "ticket" as const, id })),
+          ...(ctx.runId ? [{ kind: "run" as const, id: ctx.runId }] : []),
+          ...(ctx.projectId ? [{ kind: "project" as const, id: ctx.projectId }] : []),
+        ], ctx.projectId);
+      } catch (error) {
+        console.warn(`[memory] duplicate source not added: ${typeof (error as { code?: unknown } | null)?.code === "string" ? (error as { code: string }).code : error instanceof Error ? error.message.slice(0, 80) : "unknown"}`);
+      }
       report.deduped += 1;
+      (report.dedupedIds ??= []).push(equivalentMemoryId);
       recordCandidateDecision({
         options,
         index,
@@ -740,13 +824,20 @@ export function curateEvents(
       });
       // A repeated admitted successor can repair an interrupted explicit relation.
       // Resolve its identity from storage, never from this model's scope fields.
-      if (ev.supersedes) {
-        try { supersedeExplicitMemory({ id: equivalentMemoryId }, ev.supersedes); }
+      if (supersedes) {
+        try { supersedeExplicitMemory({ id: equivalentMemoryId }, supersedes); }
         catch { console.warn("[memory] explicit replacement retry deferred"); }
       }
       continue;
     }
 
+    // Audit 59 desktop C item 4 (F-6 sibling): the last door to a Personal line of this write path asks the personal agent's write gate too (the stage-1 admission reads the home mirror; this reads the home record). A turn never dies for it:
+    // the line is not written, the ledger says why (the reason the stage-1 admission already uses), and the next candidate goes on. `home` and `legacy` computers: null, nothing changes.
+    if (effectiveScope === "user_identity" && personalWriteRefusal()) {
+      report.discarded += 1;
+      recordCandidateDecision({ options, index, event: ev, scope: effectiveScope, action: "discarded", reason: "policy-personal-not-admitted" });
+      continue;
+    }
     let entry: ReturnType<typeof insertMemoryEntry>;
     try {
       entry = insertMemoryEntry({
@@ -760,13 +851,17 @@ export function curateEvents(
         chatId: ctx.chatId,
         confidence: ev.confidence,
         sensitivity: ev.sensitivity,
-        evidence: evidenceWithSourceProvenance(ev, ctx),
+        originClass: origin.originClass,
+        certainty: origin.certainty,
+        // The marks of an instruction go on a line an agent or a project keeps; a Personal line is not a skill candidate and carries none.
+        evidence: evidenceWithSourceProvenance(ev, ctx, { instruction: resolved.instruction === true && effectiveScope !== "user_identity" }),
         requestContext,
         intakeRunId: ctx.runId,
         curationActor: options.curatorMode === "semantic" ? "model_curated" : "host_admitted",
         policyVersion: options.policyVersion ?? "agentlas.memory-admission.v1",
         recallChannel: ctx.memoryChannel,
         compatibilityScope: ctx.memoryCompatibilityScope,
+        ...(ceiling ? { ceiling: { rows: ceiling.rows, reason: ceiling.reason, replace: replaces, countsFrom: ceiling.countsFrom } } : {}),
         originRefs: [
           ...(options.originTicketIds ?? (options.ticketId ? [options.ticketId] : [])).map(id => ({ kind: "ticket" as const, id })),
           ...(ctx.runId ? [{ kind: "run" as const, id: ctx.runId }] : []),
@@ -774,6 +869,12 @@ export function curateEvents(
         ],
       });
     } catch (error) {
+      if (error instanceof MemoryStoreFullError) {
+        // The store holds its ceiling of lines and this one replaces none: not written, not tried again, one line in the decision ledger. Code never retires an older line.
+        report.discarded += 1;
+        recordCandidateDecision({ options, index, event: ev, scope: effectiveScope, action: "discarded", reason: error.reason });
+        continue;
+      }
       if (!(error instanceof MemoryRevokedError)) throw error;
       if (options.ticketId) redactMemoryTicketEpisode(options.ticketId);
       report.discarded += 1;
@@ -797,7 +898,14 @@ export function curateEvents(
       }
       continue;
     }
+    if (entry.id.startsWith("unwritten:")) {
+      // A hub-called agent keeps no memory anywhere: the store hands back a marked stand-in, nothing was written. Not "written" (#8).
+      report.discarded += 1;
+      recordCandidateDecision({ options, index, event: ev, scope: effectiveScope, action: "discarded", reason: "policy-hub-agent-no-memory" });
+      continue;
+    }
     report.written += 1;
+    (report.writtenIds ??= []).push(entry.id);
     recordCandidateDecision({
       options,
       index,
@@ -810,7 +918,7 @@ export function curateEvents(
     // Latest wins for a restated rule under the same owner boundary. The old
     // row is superseded (recoverable) with a `supersedes` edge as provenance.
     try {
-      if (ev.supersedes) supersedeExplicitMemory(entry, ev.supersedes);
+      if (supersedes) supersedeExplicitMemory(entry, supersedes);
       else supersedeRestatedMemories(entry);
     } catch (error) {
       console.warn(`[memory] restatement supersede deferred: ${error instanceof Error ? error.message : "unknown"}`);
@@ -878,13 +986,11 @@ export function curateEvents(
 
   // agent_repo 배움을 이 실행에 관여한 빌린 에이전트들의 private ontology cache에 미러링.
   // 데스크탑 DB(agentId 기반 agent_repo)와 Hephaestus vector query(slug 기반)를 잇는다.
-  const nestSlugs = [...new Set((ctx.borrowedAgentSlugs ?? []).map((s) => s.trim()).filter(Boolean))];
-  if (writeProjections && nestExperienceItems.length > 0 && nestSlugs.length > 0) {
-    for (const slug of nestSlugs) {
-      appendAgentNestExperienceMemory(slug, nestExperienceItems);
-    }
-  }
+  // 호출 전용 허브 에이전트는 기억을 남기지 않는다: 서랍(experience.sqlite)에 더는 쓰지 않는다.
+  void nestExperienceItems;
 
+  // The lessons the learning proposer reads, and the memory dreaming and the English migration work on, are made here.
+  if (report.written + report.deduped > 0) notifyMemoryWritten();
   return report;
 }
 
@@ -901,33 +1007,6 @@ function fallbackTurnObservation(cleanedText: string): string | null {
   return plain ? plain.slice(0, 360) : null;
 }
 
-/**
- * 모델이 Memory Events 를 내지 않은 턴에서, 호스트가 대신 남기는 사실 한 줄.
- *
- * 지어내지 않는 것이 요점이다. 모델의 답을 요약하지 않고(그건 모델이 할 일이다),
- * 호스트가 이미 아는 값만 쓴다: 이 실행이 어떤 요청이었는지(taskHint)와 어느 실행에서
- * 나왔는지(runId). 그래서 kind 는 fact 이고 증거는 실행 id 다.
- *
- * 요청 문구를 모르면 아무것도 만들지 않는다 — 내용 없는 기억을 쌓는 것은 0건보다 나쁘다.
- */
-function hostObservedTurnEvents(ctx: CurationContext): RawMemoryEvent[] {
-  const runId = String(ctx.runId ?? "").trim();
-  if (!runId) return [];
-  if (!ctx.agentId) return [];
-  const hint = String(ctx.experienceIntake?.taskHint ?? "").replace(/\s+/g, " ").trim();
-  if (hint.length < 12) return [];
-  const request = hint.length > 220 ? `${hint.slice(0, 220)}…` : hint;
-  return [{
-    memory_kind: "fact",
-    content: `This agent received a request in run ${runId}: ${request}`,
-    suggested_scope: "session",
-    confidence: "high",
-    sensitivity: "internal",
-    evidence_refs: [runId],
-    source: "host-observed",
-  } as RawMemoryEvent];
-}
-
 export function curateReply(
   replyText: string,
   ctx: CurationContext,
@@ -939,11 +1018,12 @@ export function curateReply(
   }
   const carried = options.carriedEvents ?? [];
   const modelEvents = carried.length ? [...parsed.events, ...carried] : parsed.events;
-  const emitterStatus = parsed.events.length === 0 && carried.length > 0 ? "valid" : parsed.emitterStatus;
+  const toolCandidates = Math.max(0, options.toolWrites?.candidates ?? 0);
+  const emitterStatus = parsed.events.length === 0 && (carried.length > 0 || toolCandidates > 0) ? "valid" : parsed.emitterStatus;
   const ticket = beginMemoryTicket({
     context: ctx,
     emitterStatus,
-    candidateCount: parsed.candidateCount + carried.length,
+    candidateCount: parsed.candidateCount + carried.length + toolCandidates,
     turnSummary: parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText),
     reviveFailedTurn: true,
   });
@@ -956,44 +1036,32 @@ export function curateReply(
       curatorMode: "policy",
     };
   }
-  const curatorMode: MemoryCuratorMode = options.semanticAttempted
-    ? options.semanticFailed
-      ? "policy_fallback"
-      : "semantic"
-    : "policy";
-  /*
-   * ★모델이 침묵해도 그 턴은 일어났다 — 호스트가 사실을 남긴다(오너 결정 2026-08-16).
-   *
-   * 기억 방출은 지금까지 순전히 프롬프트 계약이었다. 지시를 따르는 런타임에서는 잘
-   * 돌지만(One 813건), 같은 지시를 받고도 한 건도 내지 않는 에이전트가 있었다 —
-   * 실측: Pitch Deck Architect 913회 실행에 기억 0, 큐레이션 영수증은
-   * memoryEventCount 0 / discarded 0. 버려진 게 아니라 애초에 후보가 없었다.
-   * 기억이 0이면 경험 후보도 0이고 칩도 0이라, 사용자에게는 제품이 고장난 것과
-   * 구분되지 않는다.
-   *
-   * 그래서 모델이 아무것도 내지 않은 턴에서는 호스트가 **검증 가능한 사실 한 줄**을
-   * 대신 만든다. 내용을 지어내지 않는다: 무엇을 요청받았고 어느 실행이었는지만 적고,
-   * 출처를 host-observed 로 표시해 모델이 스스로 남긴 배움과 섞이지 않게 한다.
-   */
-  const hostObserved = modelEvents.length === 0 ? hostObservedTurnEvents(ctx) : [];
-  const effectiveEvents = modelEvents.length > 0 ? modelEvents : hostObserved;
+  const curatorMode: MemoryCuratorMode = "policy";
+  // K3': a turn whose model wrote nothing leaves its turn record (above) and nothing else: no "request received" line is made for it any more. What a turn taught is read from its record by the
+  // resting-time gathering (gathering.ts), once, together with the turns around it.
+  const effectiveEvents = modelEvents;
   const attemptedReport = effectiveEvents.length > 0
     ? curateEvents(effectiveEvents, ctx, {
         ticketId: ticket.ticketId,
         curatorMode,
-        semanticDecisions: options.semanticDecisions,
         projectPath: ctx.projectPath,
         writeProjections: options.writeProjections,
       })
     : emptyReport();
-  const report = memoryDecisionReport(ticket.ticketId, attemptedReport);
-  const outcome = parsed.emitterStatus === "malformed" && carried.length === 0
+  const decided = memoryDecisionReport(ticket.ticketId, attemptedReport);
+  const toolReport = options.toolWrites?.report;
+  const report: CurationReport = toolReport ? {
+    written: decided.written + toolReport.written, deduped: decided.deduped + toolReport.deduped, redacted: decided.redacted + toolReport.redacted,
+    sessionOnly: decided.sessionOnly + toolReport.sessionOnly, discarded: decided.discarded + toolReport.discarded } : decided;
+  // The lines the tool wrote at the call belong to this turn's ticket now (the same link a line written here gets).
+  for (const id of options.toolWrites?.writtenIds ?? []) {
+    try { appendMemoryOrigins(id, [{ kind: "ticket", id: ticket.ticketId }], ctx.projectId); } catch { /* the line is stored; its link to the turn is information, not a condition */ }
+  }
+  const outcome = parsed.emitterStatus === "malformed" && carried.length === 0 && toolCandidates === 0
     ? "malformed_output"
-    : options.semanticFailed
-      ? "curator_failed"
-      : modelEvents.length === 0
-        ? "no_candidates"
-        : "decided";
+    : modelEvents.length === 0 && toolCandidates === 0
+      ? "no_candidates"
+      : "decided";
   appendTurnOutcomeDecision({
     projectPath: options.writeProjections === true ? ctx.projectPath : null,
     ticketId: ticket.ticketId,
@@ -1003,10 +1071,6 @@ export function curateReply(
   });
   completeMemoryTicket(ticket.ticketId, report, curatorMode, { outcome });
   recordCurationReceipt(ctx, report);
-  if (modelEvents.length === 0) {
-    try { enqueueAutomaticMemoryCuration(ticket.ticketId, ctx, parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText), replyText, options.automaticRuntimeKey); }
-    catch { /* Intake cannot block or repeat a completed foreground effect. */ }
-  }
   return {
     cleanedText: parsed.cleanedText,
     report,
@@ -1044,28 +1108,6 @@ export function stripReplyMemoryEventsReadOnly(
     reviveFailedTurn: true,
   });
   if (ticket.created) {
-    /*
-     * ★읽기 실행도 일어난 일이다 — 권한과 무관하게 사실은 남긴다(오너 결정 2026-08-16).
-     *
-     * 이 경계는 **모델이 낸 기억**을 버린다. 읽기 권한으로 도는 턴이 프로젝트 파일이나
-     * 남의 기억을 건드리지 못하게 하려는 것이고, 그 부분은 그대로 둔다. 하지만 "이
-     * 에이전트가 이런 요청을 처리했다"는 호스트 자신의 관측이지 모델이 주장한 내용이
-     * 아니다. 그것까지 버리면, 읽기로만 쓰이는 에이전트는 아무리 오래 일해도 경험이
-     * 0으로 남는다 — 실측에서 913회 실행에 기억 0이던 원인의 절반이 여기였다.
-     */
-    const hostObserved = hostObservedTurnEvents(ctx);
-    if (hostObserved.length > 0) {
-      const hostReport = curateEvents(hostObserved, ctx, {
-        ticketId: ticket.ticketId,
-        curatorMode: "read_only",
-        projectPath: null,
-      });
-      finalReport = {
-        ...report,
-        written: report.written + hostReport.written,
-        deduped: report.deduped + hostReport.deduped,
-      };
-    }
     for (const [index, event] of parsed.events.entries()) {
       recordCandidateDecision({
         options: {

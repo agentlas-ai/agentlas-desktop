@@ -4,7 +4,8 @@ import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shar
 import { READ_ANSWER_ONLY_EMPTY_CODE } from "../../shared/turn-settlement";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
 import { runnerResultRefusedBeforeDispatch, runtimeFailureIsClosedHttpRefusal, unsettledTurnError,
-  RUNTIME_TURN_UNSETTLED_CODE, RUNTIME_SILENT_TIMEOUT_CODE, RUNTIME_PROTOCOL_UNRECOGNIZED_CODE } from "./runner";
+  RUNTIME_TURN_UNSETTLED_CODE, RUNTIME_SILENT_TIMEOUT_CODE, RUNTIME_PROTOCOL_UNRECOGNIZED_CODE, runtimeSilentTimeoutFailure } from "./runner";
+import { apiSilenceError } from "./api-silence-fetch";
 import { beginInvocationUsageAttempt } from "./invocation-usage";
 import { withModelCallScope, type ModelCallRole } from "./model-call-ledger";
 
@@ -25,7 +26,9 @@ function observeRunnerSettlement<T>(provider: Promise<T>): Promise<T> {
  * A provider's own typed refusal (quota/billing, sign-in, an unsupported request, unavailable or at capacity, a policy
  * refusal), reported as a marker with or without dispatch, is that failure: callers keep its kind and providerCode (a
  * judgment walks to its next candidate, system-agents/judgment.ts; the no-tools lane's own refusals such as
- * codex_no_tools_frame_unknown are "refused"). Only an unknown terminal stays unsettled: no typed cause, the unsettled
+ * codex_no_tools_frame_unknown are "refused"). A busy server's closed word (runtime_overloaded, kind "unavailable") keeps its own code and
+ * its provider time (retryAfterHint) when the provider asked for more than the inline wait of provider-overload.ts (60 s); the waits up to
+ * that are taken before this point, inside the runner. Only an unknown terminal stays unsettled: no typed cause, the unsettled
  * code itself, a silent timeout, an unrecognized stream, a bare exit; it keeps the result as its cause. A refusal that
  * follows observed tool activity in a run that had tools also stays unsettled: the tools may have acted before it.
  * Production 2026-10-15..16: 2,849 judgment calls reported runtime_turn_unsettled while the runner had returned
@@ -41,7 +44,7 @@ function typedProviderFailure(failure: RunnerFailure | undefined, toolActivity: 
   return TYPED_PROVIDER_FAILURE_KINDS.has(failure.kind) && (!toolActivity || toolless);
 }
 
-/** The same rule for a host that calls a runner without this wrapper (alive-organisms/light-wake.ts). */
+/** The same rule for a host that calls a runner without this wrapper (the removed Alive light wake did). */
 export function runnerFailureKeepsOwnCode(failure: RunnerFailure | undefined, toolActivity: boolean, request: RunnerRequest): boolean {
   return typedProviderFailure(failure, toolActivity, request);
 }
@@ -163,7 +166,13 @@ export async function runObservedRunner(
     invocationAttempt.complete(observedUsage);
     nativeReceipts.set(measuredResult, receipts);
     return measuredResult;
-  } catch (error) {
+  } catch (caught) {
+    // An API runner whose model server went silent for the window (api-silence-fetch.ts) ends exactly like a silent CLI: the same
+    // closed word and sentence as the failure, and an unsettled turn (the request was sent, its effect is unknown), never a bare throw.
+    const silent = apiSilenceError(caught);
+    const silentRuntime = nativeRuntimeKind ?? "runtime";
+    const error = silent ? unsettledTurnError({ runtimeKind: silentRuntime, locale: request.locale,
+      cause: { text: "", ownerControlTerminal: "uncertain", failure: runtimeSilentTimeoutFailure(silentRuntime, silent.windowMs) } satisfies RunnerResult }) : caught;
     returnedResult??=observedRunnerReturnedResult(error);
     invocationAttempt.complete(usage.total(returnedResult?.observedUsage));
     if (error !== null && (typeof error === "object" || typeof error === "function")) {

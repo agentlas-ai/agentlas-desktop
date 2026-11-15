@@ -8,7 +8,7 @@ import { hasInlineVisualBlock } from "@/lib/visual-html";
 import { LinkedLocalFiles } from "@/components/LinkedLocalFiles";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { runtimeMatchesSelection, sameRuntimeIdentity, selectionForRuntime } from "@shared/runtime-selection";
-import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
+import { createOneScrollFollow, oneRunReceiptIsTerminalForThread } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { createFrameBatcher, isLiveStreamTick, type FrameBatcher } from "@/lib/frame-coalescer";
 import { createKeyedThrottle, stableTurnIds } from "@/lib/store-change-policy";
@@ -56,6 +56,7 @@ import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { hasIntellectUiFence, IntellectUiActions } from "@/lib/intellect-ui-actions";
 import { InlineUiInstances, useInlineUiInstances, inlineUiForReply } from "@/components/UiInstances";
+import { AnswerCardsForTurns } from "@/components/AnswerCards";
 import { mapInlineVisualProse } from "@shared/inline-visual";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import {
@@ -76,7 +77,7 @@ import { goalReceiptIsQueued, goalRuntimeRefusalNotice, isOvertakenSelectionCode
 import { readChatForRuntime } from "@/lib/chat-runtime-read";
 import { useToolbarFit } from "@/lib/use-toolbar-fit";
 import { readOneDocumentMark } from "@/lib/one-document-mark";
-import { OneSplitPane } from "@/components/one/OneSplitPane";
+import { RoomPane } from "@/components/room/RoomPane";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { AutomationStrategyApprovalSheet } from "@/components/automation/AutomationStrategyApprovalSheet";
@@ -228,8 +229,8 @@ import {
   type OneTaskProjection,
 } from "@/lib/one-task-adapter";
 import { ProductModeMenu } from "./ProductModeMenu";
-import { AttentionDot } from "@/components/AttentionDot";
-import { useChatAttention } from "@/lib/attention";
+import { useChatConfirmations } from "@/lib/attention";
+import { useLeadRoomMark } from "@/lib/lead-room-mark";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
 import { OneAdaptiveResult, type OneAgentDraftSeed } from "./OneAdaptiveResult";
@@ -246,6 +247,7 @@ import { OneFirstRequestCards, OneNewSessionButton, OneSeatAttachLink, oneFirstR
 import { TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "../workspace/TaskSidePanel";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
+import { WaitingDot } from "./OneWaitingLine";
 import { OneMailRail } from "./mail/OneMailRail";
 import { OneMailWorkspace } from "./mail/OneMailWorkspace";
 import { useOneMail } from "./mail/useOneMail";
@@ -253,13 +255,20 @@ import { llmLogoSrc } from "@/lib/llm-logo";
 import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget, type OneEditSelfTarget } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
 import { OneSessionTree } from "./OneSessionTree";
-import { OneRunComet, oneRunCometHostClass, useOneRunSignals } from "./OneRunComet";
+import { useOneRunSignals } from "./OneRunComet";
+import { ConversationListButton, briefingSourceName } from "./ConversationListButton";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneToolchains, toolchainStackClassName } from "./OneToolchains";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
 import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
+import { ApprovalRecordLines } from "./OneApprovalRecords";
+import { OneTurnFiles } from "./OneTurnFiles";
+import { turnFilesOfActivity, type TurnFile } from "@/lib/turn-files";
+import { approvalClosedRowIds, placeApprovalRecords } from "@/lib/approval-record-lines";
+import { useSettledApprovals } from "@/lib/use-settled-approvals";
+import { useRoomChildren } from "@/lib/room-children";
 import { OneTaskforceConversation } from "./OneTaskforceConversation";
 import {
   memberForAgent, OneDiscussionReplyContext, OneDiscussionThread, useOneDiscussion,
@@ -312,7 +321,6 @@ import {
   type OneComposerPluginOption,
   type OnePermissionMode,
 } from "./OneComposerControls";
-import { AliveComposerButton } from "@/components/alive/AliveComposerButton";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { OneWeeklyReflectionCard } from "./OneWeeklyReflectionCard";
 import { loadSkillPluginMentions, appendSkillPluginMention, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
@@ -328,12 +336,17 @@ import {
 import { readRunLateRowsAfterWindow, withLateRunRows } from "@/lib/one-chat-outputs";
 import { useEarlierOutputs } from "@/lib/one-earlier-outputs";
 import styles from "./OneShell.module.css";
+import { RoomLeadStatus } from "../room/RoomLeadStatus";
 import roomWorkStyles from "./SeatRoomWork.module.css";
 import { PersonalOneWorkspace } from "./PersonalOneWorkspace";
 import panelMenu from "@/components/PanelPopover.module.css";
 import { ownerFailureReasonOrNull } from "@shared/owner-visible-activity-text";
 import { PersonalAgentRoomNotice } from "@/components/PersonalAgentRoomNotice";
 import { isPersonalAgentRoom, PERSONAL_AGENT_HREF, usePersonalAgentRoom } from "@/lib/personal-agent-room";
+import { agentChatReadOnlyCopy, useAgentChatReadOnly } from "@/lib/agent-chat-state";
+import { sendRefusalLine } from "@/lib/send-refusal-line";
+import { claimFirstMessageSend } from "@/lib/new-chat-start";
+import { NewAgentChatDialog } from "@/components/NewAgentChatDialog";
 
 // IPC 결과는 호출마다 새 객체다. 내용이 같으면 이전 상태 참조를 돌려줘 React가
 // 리렌더를 생략하게 한다(모든 IPC 페이로드는 구조상 JSON 직렬화 가능).
@@ -1332,34 +1345,6 @@ function oneMemoryUseOnceTargetKey(target: OneMemoryUseOnceTarget): string {
   return [target.chatId, target.expectedTaskId ?? "conversation", target.expectedTaskVersion ?? "none"].join(":");
 }
 
-/** 카드 제목에 들어가는 이름 — 원시 시스템 봉투·마크다운·매달린 구두점을 숨기고 짧게 자른다. */
-function briefingSourceName(raw: string, locale: "ko" | "en"): string {
-  const trimmed = raw.trim();
-  if (/^[{[]/.test(trimmed)) {
-    try {
-      const parsed: unknown = JSON.parse(trimmed);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const record = parsed as Record<string, unknown>;
-        const candidate = [record.title, record.name, record.label, record.task, record.request]
-          .find((value): value is string => typeof value === "string" && Boolean(value.trim()));
-        if (candidate) return briefingSourceName(candidate, locale);
-      }
-      return locale === "ko" ? "현재 작업" : "Current work";
-    } catch {
-      return locale === "ko" ? "현재 작업" : "Current work";
-    }
-  }
-  const cleaned = trimmed
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/[*_`#>|{}[\]]/g, " ")
-    .replace(/\s+([:;,.!?])/g, "$1")
-    .replace(/(?:\s*[:;,\-–—|/\\])+\s*$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return locale === "ko" ? "현재 작업" : "Current work";
-  return cleaned.length > 44 ? `${cleaned.slice(0, 43).trimEnd()}…` : cleaned;
-}
-
 function safeBriefingSnapshot(value: OneBriefingSnapshot | null): OneBriefingSnapshot | null {
   if (!value || value.contractVersion !== ONE_BRIEFING_CONTRACT_VERSION) return null;
   if (!Number.isFinite(Date.parse(value.evaluatedAt))) return null;
@@ -1495,21 +1480,6 @@ function directSessionUnavailable(chat: Chat, org: OneOrgState | null): boolean 
   return !member || Boolean(member.archivedAt);
 }
 
-function sessionListTime(iso: string, locale: "ko" | "en"): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  const today = new Date();
-  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-  const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-  const difference = Math.floor((start - day) / 86_400_000);
-  if (difference <= 0) return date.toLocaleTimeString(locale === "ko" ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit" });
-  return date.toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", {
-    ...(date.getFullYear() === today.getFullYear() ? {} : { year: "numeric" as const }),
-    month: "numeric",
-    day: "numeric",
-  });
-}
-
 function rememberLastOneConversation(chatId: string | null): void {
   try {
     if (chatId) window.localStorage.setItem(LAST_ONE_CONVERSATION_KEY, chatId);
@@ -1533,11 +1503,92 @@ export function OneShell() {
   return params.get("personal") === "1" ? <PersonalOneWorkspace detached={params.get("companion") === "1"} /> : <OneSessionsShell />;
 }
 
-function OneSessionsShell() {
+/**
+ * Reads that every pane of a Space needs the same way (the organisation, the Taskforce list, the profile, the running chats):
+ * panes that ask in the same moment share ONE read instead of one each.
+ */
+const sharedPaneReads = new Map<string, Promise<unknown>>();
+function readSharedOnce<T>(key: string, read: () => Promise<T>): Promise<T> {
+  const live = sharedPaneReads.get(key) as Promise<T> | undefined;
+  if (live) return live;
+  const next = read().finally(() => { sharedPaneReads.delete(key); });
+  sharedPaneReads.set(key, next);
+  return next;
+}
+
+/**
+ * Where this conversation view reads "what is open" and how it moves (Agentlas 2.0 H1). On the One route it is the URL
+ * (`/one?chat=`, `/one?task=`), exactly as before. The seam exists so the same view can later sit in a Space pane, where
+ * "open" comes from the pane and moving changes that pane's tab.
+ */
+export interface OneNav {
+  openChat(chatId: string): void;
+  openTask(taskId: string): void;
+  home(how: "replace" | "push"): void;
+  /** True while this view's own route is the screen the person is on (read at call time, never cached). */
+  hostRoute(): boolean;
+}
+
+function useOneRouteNav(router: ReturnType<typeof useRouter>): OneNav {
+  return useMemo<OneNav>(() => ({
+    openChat: (chatId) => router.replace(`/one?chat=${encodeURIComponent(chatId)}`),
+    openTask: (taskId) => router.replace(`/one?task=${encodeURIComponent(taskId)}`),
+    home: (how) => (how === "push" ? router.push("/one") : router.replace("/one")),
+    hostRoute: () => window.location.pathname.startsWith("/one"),
+  }), [router]);
+}
+
+/**
+ * One conversation as a pane of Home's Space (Agentlas 2.0 H1, decision): the same view the One screen draws, without the rail,
+ * the settings screens and the mail view. "Open" comes from the pane (`chatId`), a move goes back to the pane (`onOpenChat`: the tab
+ * shows another chat; `onOpenTask`: the Work surface takes it; `onClose`: the pane has no "home" to go to). An embedded view reads
+ * only its own chat plus the few shared reads it needs, runs no 5 s refresh and does not touch the One screen's own memory.
+ */
+export interface OneEmbed {
+  chatId: string;
+  /** The pane that has the keyboard; the others do not answer the document's key presses. */
+  focused: boolean;
+  onOpenChat(chatId: string): void;
+  onOpenTask(taskId: string): void;
+  onClose(): void;
+  /** The first message a New chat start screen held for this chat: sent once when the room is ready (absent = nothing to send). */
+  startPrompt?: string | null;
+}
+
+/** Drafts the One composer keeps per conversation (memory + session storage); Space calls this for chats that are gone. */
+export function forgetOneComposerDrafts(chatIds: Iterable<string>): void {
+  for (const id of chatIds) {
+    oneComposerDraftCache.delete(`chat:${id}`);
+    try { window.sessionStorage.removeItem(`${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}chat:${id}`); } catch { /* best effort */ }
+  }
+}
+
+export function OneEmbeddedShell({ embed }: { embed: OneEmbed }) {
+  return <OneSessionsShell embed={embed} />;
+}
+
+function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const selectedTaskId = searchParams.get("task");
-  const selectedConversationId = searchParams.get("chat");
+  const embedded = embed !== undefined;
+  const embedRef = useRef(embed);
+  embedRef.current = embed;
+  const embedFocused = embed?.focused ?? true;
+  const embedFocusedRef = useRef(embedFocused);
+  embedFocusedRef.current = embedFocused;
+  const routeNav = useOneRouteNav(router);
+  const embedNav = useMemo<OneNav>(() => ({
+    openChat: (chatId) => embedRef.current?.onOpenChat(chatId),
+    openTask: (taskId) => embedRef.current?.onOpenTask(taskId),
+    home: () => embedRef.current?.onClose(),
+    // A pane has no "One route" to be pulled back to: the team-preflight finishers must not move a pane to a task.
+    hostRoute: () => false,
+  }), []);
+  const nav = embedded ? embedNav : routeNav;
+  // A pane of Space never writes the One screen's "last conversation".
+  const rememberLast = embedded ? ((_chatId: string | null) => undefined) : rememberLastOneConversation;
+  const selectedTaskId = embedded ? null : searchParams.get("task");
+  const selectedConversationId = embedded ? embed.chatId : searchParams.get("chat");
   const { locale, setPref } = useT();
   const configuredOneLocale: OneConversationLocale = locale === "ko" ? "ko" : "en";
   const appLocale = configuredOneLocale;
@@ -2401,13 +2452,13 @@ function OneSessionsShell() {
   const [archiveMutationTaskId, setArchiveMutationTaskId] = useState<string | null>(null);
   const [railOpen, setRailOpen] = useState(false);
   const [railCollapsed, setRailCollapsedState] = useState(() => readStoredBoolean(ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY, false));
-  const [railMode, setRailModeState] = useState<OneRailMode>(() => readLastRailMode());
+  const [railMode, setRailModeState] = useState<OneRailMode>(() => embedded ? "sessions" : readLastRailMode());
   const activeRailMode = useRef<OneRailMode>(railMode);
   const settingsReturnMode = useRef<Exclude<OneRailMode, "settings">>(railMode === "settings" ? "organisation" : railMode);
   const setRailMode = useCallback((mode: OneRailMode) => {
     if (mode === "settings" && activeRailMode.current !== "settings") settingsReturnMode.current = activeRailMode.current;
     activeRailMode.current = mode;
-    rememberRailMode(mode);
+    if (!embedRef.current) rememberRailMode(mode);
     setRailModeState(mode);
   }, []);
   const [settingsSheet, setSettingsSheet] = useState<OneSettingsKey | "profile" | "memory" | "language">("mcp");
@@ -3172,7 +3223,7 @@ function OneSessionsShell() {
     selectedConversationIdRef.current = selectedConversationId;
     // 어떤 길로 들어왔든(목록 클릭·주소 복원·앱 재시작) 지금 보고 있는 대화를 기억한다.
     // 목록 클릭에만 걸어 두면 주소로 들어온 경우를 놓쳐 다음 실행에서 홈으로 떨어진다.
-    if (selectedConversationId) rememberLastOneConversation(selectedConversationId);
+    if (selectedConversationId) rememberLast(selectedConversationId);
   }, [selectedConversationId, selectedTaskId]);
 
   useEffect(() => () => {
@@ -3470,7 +3521,42 @@ function OneSessionsShell() {
   // The 5 s poll reuses the last task projections unless something that feeds them moved (perf review R-05).
   const projectionReadRef = useRef<{ dirty: boolean; at: number | null; items: OneTaskProjection[]; active: string; pending: string; context: string }>(
     { dirty: true, at: null, items: [], active: "", pending: "", context: "" });
+  // A pane of Home's Space reads its own chat and the few shared things it draws with - never the conversation list, the task
+  // projections, the memory and the other rail data (2.0 H1; a pane of four would read all of them four times).
+  const refreshEmbeddedRead = useCallback(async (options: { includeOrg?: boolean } = {}) => {
+    const api = ipc();
+    const chatId = selectedConversationIdRef.current;
+    if (!api || !chatId) { setLoaded(true); return; }
+    const readIdentityGeneration = identityGeneration.current;
+    try {
+      const [active, profile, org, taskforceRows, chat] = await Promise.all([
+        readSharedOnce("active-chats", () => api.invoke.activeChats()).catch(() => [] as string[]),
+        readSharedOnce("one-profile", () => api.oneProfile.get()).catch(() => null),
+        options.includeOrg !== false ? readSharedOnce("one-org", () => api.oneOrg.get()).catch(() => null) : Promise.resolve(null),
+        readSharedOnce("one-taskforces", () => api.oneTaskforces.list()).catch(() => []),
+        api.chats.get(chatId).catch(() => null),
+      ]);
+      if (selectedConversationIdRef.current !== chatId) return;
+      setActiveChatIds(keepPrevIfDeepEqual(active));
+      if (readIdentityGeneration === identityGeneration.current && profile) setOneProfile(keepPrevIfDeepEqual(profile));
+      if (org) setOneOrgState(keepPrevIfDeepEqual(org));
+      setTaskforces(keepPrevIfDeepEqual(taskforceRows));
+      const taskforceChatIds = new Set(taskforceRows.map((taskforce) => taskforce.chatId));
+      const mine = chat && chat.originSurface === "one" ? (taskforceChatIds.has(chat.id) ? { ...chat, isTaskforce: true } : chat) : null;
+      setConversations(keepPrevIfDeepEqual(mine ? [mine] : []));
+      setSelected(null);
+      setConversation(keepPrevIfDeepEqual(mine));
+      setReceipt(null);
+      setError(null);
+    } catch (cause) {
+      requestOneOperationalRecovery("one-load", cause);
+      setError(null);
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
   const refreshAllRead = useCallback(async (options: { includeOrg?: boolean; poll?: boolean } = {}) => {
+    if (embedRef.current) return refreshEmbeddedRead(options);
     const readIdentityGeneration = identityGeneration.current;
     const includeOrg = options.includeOrg !== false;
     const api = ipc();
@@ -3644,7 +3730,7 @@ function OneSessionsShell() {
             setSelected(null);
             setConversation(origin);
             setReceipt(null);
-            router.replace(`/one?chat=${encodeURIComponent(origin.id)}`);
+            nav.openChat(origin.id);
           }
         }
       } else if (selectedConversationIdRef.current) {
@@ -3672,7 +3758,7 @@ function OneSessionsShell() {
             setSelected(keepPrevIfDeepEqual(detail));
             setConversation(null);
             setReceipt(keepPrevIfDeepEqual(detail.latestReceipt ?? null));
-            router.replace(`/one?task=${encodeURIComponent(promotedTask.id)}`);
+            nav.openTask(promotedTask.id);
           } else if (conversationRouteStillOwnsScreen()) {
             // Keep the stable chat owner visible until the Task projection is
             // coherent. The next store refresh retries the promotion.
@@ -3687,7 +3773,7 @@ function OneSessionsShell() {
           setSelected(null);
           setConversation(null);
           setReceipt(null);
-          router.replace("/one");
+          nav.home("replace");
         } else if (conversationRouteStillOwnsScreen()) {
           setSelected(null);
           setConversation(keepPrevIfDeepEqual(chat));
@@ -3704,7 +3790,15 @@ function OneSessionsShell() {
     } finally {
       setLoaded(true);
     }
-  }, [appLocale, router]);
+  }, [appLocale, router, nav, refreshEmbeddedRead]);
+
+  // A pane of Space gets the questions this chat waits on from the app's shared attention store (already kept fresh once for the
+  // whole window), not from a read of its own.
+  const embeddedConfirmations = useChatConfirmations(embed?.chatId ?? null);
+  useEffect(() => {
+    if (!embedded) return;
+    setConfirmations(keepPrevIfDeepEqual(answeredConfirmationsRef.current.apply([...embeddedConfirmations])));
+  }, [embedded, embeddedConfirmations]);
 
   const refreshAllReadRef = useRef(refreshAllRead);
   refreshAllReadRef.current = refreshAllRead;
@@ -3842,6 +3936,8 @@ function OneSessionsShell() {
   }, []);
   useEffect(() => {
     void refreshAll();
+    // A pane of Space follows the store's signals only: no clock, no refresh on every window focus.
+    if (embedded) return;
     const onVisibility = () => {
       if (document.visibilityState === "visible") void refreshAll();
     };
@@ -3857,7 +3953,7 @@ function OneSessionsShell() {
       window.removeEventListener("focus", onVisibility);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [refreshAll]);
+  }, [refreshAll, embedded]);
 
   useEffect(() => {
     const events = ipcEvents();
@@ -3889,6 +3985,11 @@ function OneSessionsShell() {
             oneRuntimeReadGenerationRef.current += 1;
             setOneRuntimePreferenceRevision((revision) => revision + 1);
           });
+        }
+        // A pane of Space has no list to keep in order; it re-reads only its own chat when that chat changed.
+        if (embedded) {
+          if (change.id === selectedConversationIdRef.current) void refreshAll({ includeOrg: false });
+          return;
         }
         // 다른 방에 답·자동화 보고가 떨어지면 5초 폴링을 기다리지 않고 목록만 다시 읽는다.
         // 정렬 키(lastActivityAt)는 Main 이 보이는 줄로만 계산하므로 조용한 변경은 순서를 안 바꾼다.
@@ -3922,15 +4023,17 @@ function OneSessionsShell() {
     // may create Tasks, but those Tasks are activity within the conversation,
     // not a replacement route for the conversation itself.
     if (isOneTaskforceChat(chatId, taskforces)) return null;
+    // A pane of Space keeps its conversation: it never swaps itself for the Task the conversation started.
+    if (embedRef.current) return null;
     const task = await api.tasks.findForChat(chatId).catch(() => null);
     if (!task) return null;
     runTaskIdRef.current = task.id;
     selectedTaskIdRef.current = task.id;
     selectedConversationIdRef.current = null;
-    router.replace(`/one?task=${encodeURIComponent(task.id)}`);
+    nav.openTask(task.id);
     await refreshAll();
     return task;
-  }, [refreshAll, router, taskforces]);
+  }, [refreshAll, router, nav, taskforces]);
   // Teammate and tool events arrive by the hundred per run (avg 125, max 2,162); each looked the task up over IPC.
   // At most one lookup per chat per 3 s, the last one trailing, and only while this run's chat is still unbound.
   const reconcileConversationTaskRef = useRef(reconcileConversationTask);
@@ -5011,6 +5114,8 @@ function OneSessionsShell() {
     () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
     [activeThreadChatId, taskforces],
   );
+  // A room run under the lead model has no personal agent in it: its face bundle is its members', not One's.
+  const leadRoom = useLeadRoomMark(activeTaskforce?.chatId ?? null);
   // Room members whose seat can no longer work (agent uninstalled or its source folder gone). They must be
   // named with a plain reason and a way out, never left as a silent "planned participant".
   const unavailableRoomMembers = useMemo(() => {
@@ -5118,6 +5223,11 @@ function OneSessionsShell() {
   // A teammate session the personal agent opened (owner 2026-10-27): read here, spoken to through the personal agent.
   const activeRoomLive = usePersonalAgentRoom(activeThreadChatId);
   const activePersonalAgentRoom = activeRoomLive || isPersonalAgentRoom(activeChatRecord);
+  // A one-to-one room whose agent was deleted: readable, nobody answers (item 1). Main refuses the send too.
+  // A room that can take no owner message: its agent was deleted, or a group room has no live member left (Main: agent-chat-state.ts).
+  const activeReadOnlyReason = useAgentChatReadOnly(activeThreadChatId);
+  const activeAgentDeleted = activeReadOnlyReason === "agent_deleted" || activeReadOnlyReason === "no_members";
+  const [continueAgentChatOpen, setContinueAgentChatOpen] = useState(false);
   /** 이전 담당 이름 — 좌석 스냅샷(참여자)에서. 없으면 그 줄을 그리지 않는다(I9). */
   const previousOccupantName = useMemo(() => {
     if (!activeSeatEmpty) return null;
@@ -5215,6 +5325,28 @@ function OneSessionsShell() {
     }
     return [...merged, ...roomRows.slice(roomIndex)];
   }, [seatRoomWorkAgentId, seatRoomWork, visibleMessages]);
+  // AL: the answered or closed approval cards of this conversation (and of a group room's member sessions): one quiet line each where the card stood.
+  const approvalRoomChildren = useRoomChildren(activeThreadChatId ?? "", Boolean(activeTaskforce && activeThreadChatId));
+  const settledApprovals = useSettledApprovals(activeThreadChatId ? [activeThreadChatId, ...approvalRoomChildren] : []);
+  // AK: the files each finished run made or changed, under that run's last answer (the run's own answer ids; typed write / edit calls only).
+  const turnFilesByAnswer = useMemo(() => {
+    const byAnswer = new Map<string, TurnFile[]>();
+    for (const run of threadRuns) {
+      const last = run.answerMessageIds?.at(-1);
+      if (!last || !["completed", "failed", "cancelled", "interrupted"].includes(run.status)) continue;
+      const files = turnFilesOfActivity([run.state], appLocale === "ko" ? "ko" : "en", workspacePath);
+      if (files.length) byAnswer.set(last, [...(byAnswer.get(last) ?? []), ...files]);
+    }
+    return byAnswer;
+  }, [threadRuns, appLocale, workspacePath]);
+  // The stored "request closed" notice says what the line says: the line replaces it here.
+  const approvalClosedIds = useMemo(() => approvalClosedRowIds(settledApprovals), [settledApprovals]);
+  // A line sits after a message the thread really draws (a folded housekeeping row or an empty one cannot hold it).
+  const approvalSlots = useMemo(() => placeApprovalRecords(seatThreadMessages.filter((message) => {
+    const sourceId = message.continuationSourceId ?? message.id;
+    if (housekeepingMessageIds.has(sourceId) || settledFailureLineIds.has(sourceId) || approvalClosedIds.has(sourceId)) return false;
+    return Boolean(visibleOneMessageText(message).trim()) || (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
+  }), settledApprovals), [seatThreadMessages, settledApprovals, approvalClosedIds, housekeepingMessageIds, settledFailureLineIds]);
   useEffect(() => {
     const agentId = activeSeatMemberAgentId;
     const api = ipc();
@@ -5696,7 +5828,9 @@ function OneSessionsShell() {
             // Still being admitted: it has not started, let alone finished.
             if (admittingRunIdsRef.current.has(missedRunId)) return;
             const terminal = await api.invoke.receipt(missedRunId).catch(() => null);
-            if (!oneRunReceiptIsTerminal(terminal, missedRunId, chatId)
+            // A group room's run ends in a member's child session of it: its receipt names the child (oneRunReceiptIsTerminalForThread).
+            const ended = await oneRunReceiptIsTerminalForThread(api, terminal, missedRunId, chatId);
+            if (!ended
               || runIdRef.current !== missedRunId || runChatIdRef.current !== chatId
               || admittingRunIdsRef.current.has(missedRunId)) return;
             if (cancelNoticeRunIdRef.current === missedRunId) {
@@ -5809,7 +5943,9 @@ function OneSessionsShell() {
           || admittingRunIdsRef.current.has(expectedRunId)
         ) return;
         const terminal = await api.invoke.receipt(expectedRunId).catch(() => null);
-        if (cancelled || !oneRunReceiptIsTerminal(terminal, expectedRunId, chatId)
+        // A group room's run ends in a member's child session of it: its receipt names the child (oneRunReceiptIsTerminalForThread).
+        const ended = await oneRunReceiptIsTerminalForThread(api, terminal, expectedRunId, chatId);
+        if (cancelled || !ended
           || runIdRef.current !== expectedRunId || runChatIdRef.current !== chatId
           || admittingRunIdsRef.current.has(expectedRunId)) return;
         // Only an exact terminal receipt settles this renderer projection.
@@ -5835,10 +5971,14 @@ function OneSessionsShell() {
     };
     const first = window.setTimeout(reconcile, 700);
     const interval = window.setInterval(reconcile, 5_000);
+    // The timers above skip a hidden window; the moment it shows again is the signal to read once, not the next tick.
+    const onVisible = () => { if (!document.hidden) void reconcile(); };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       window.clearTimeout(first);
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [busy, settleRun]);
 
@@ -6901,11 +7041,13 @@ function OneSessionsShell() {
       if (result.kind !== "reserved") {
         throw new Error("One could not reserve the work safely");
       }
-      selectedTaskIdRef.current = proposal.binding.taskId;
-      selectedConversationIdRef.current = null;
+      if (!embedRef.current) {
+        selectedTaskIdRef.current = proposal.binding.taskId;
+        selectedConversationIdRef.current = null;
+      }
       // 오너가 그 사이 다른 메뉴로 갔으면 끌고 돌아오지 않는다 — 실행은 그대로 시작한다.
-      if (window.location.pathname.startsWith("/one")) {
-        router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
+      if (nav.hostRoute()) {
+        nav.openTask(proposal.binding.taskId);
       }
       const outcome = await startRun(
         proposal.binding.chatId,
@@ -6993,7 +7135,7 @@ function OneSessionsShell() {
       if (autoResolvingProposalRef.current === proposal.proposalId) autoResolvingProposalRef.current = null;
       setTeamPreflightBusy(false);
     }
-  }, [normalizedLocale, refreshAll, router, startRun]);
+  }, [normalizedLocale, refreshAll, router, nav, startRun]);
 
   /*
    * Bringing in outside help changes the team and the public agent used, so
@@ -7060,10 +7202,12 @@ function OneSessionsShell() {
       setTeamPreflight(result.proposal);
       if (result.proposal.taskforce) void refreshAll({ includeOrg: true });
       if (result.kind !== "reserved") throw new Error("One could not reserve the work safely");
-      selectedTaskIdRef.current = proposal.binding.taskId;
-      selectedConversationIdRef.current = null;
-      if (window.location.pathname.startsWith("/one")) {
-        router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
+      if (!embedRef.current) {
+        selectedTaskIdRef.current = proposal.binding.taskId;
+        selectedConversationIdRef.current = null;
+      }
+      if (nav.hostRoute()) {
+        nav.openTask(proposal.binding.taskId);
       }
       const outcome = await startRun(
         proposal.binding.chatId,
@@ -7105,7 +7249,7 @@ function OneSessionsShell() {
     } finally {
       setTeamPreflightBusy(false);
     }
-  }, [oneRuntimeSelection, pendingTeamPrompt, refreshAll, router, startRun, teamPreflight]);
+  }, [oneRuntimeSelection, pendingTeamPrompt, refreshAll, router, nav, startRun, teamPreflight]);
 
   const awaitingWorkforceConsent = Boolean(
     teamPreflight
@@ -7370,7 +7514,7 @@ function OneSessionsShell() {
           selectedTaskIdRef.current = null;
           selectedConversationIdRef.current = targetChat.id;
           shownThreadChatIdRef.current = targetChat.id;
-          router.replace(`/one?chat=${encodeURIComponent(targetChat.id)}`);
+          nav.openChat(targetChat.id);
         }
         const entry = await api.chats.appendOneUserMessage(targetChat.id, explicitValue);
         setComposer("");
@@ -7492,7 +7636,11 @@ function OneSessionsShell() {
       // Resolve new-chat intent in Main before team preflight. A cold model can
       // miss the fast judgment budget, in which case the explicitly labeled
       // undecided result keeps the safe conversational default.
-      const requestIntentPromise = taskIntent === "conversation" && attachmentSnapshot.length === 0
+      // A group room runs under the lead model: its message goes straight to the lead / the member it names. No intent
+      // judgement and no team preflight stand in front of it (each was model calls the owner never asked for, and a refused judgement
+      // sent the text back to the composer).
+      const leadRoomChat = taskforces.some((item) => item.chatId === chatId);
+      const requestIntentPromise = taskIntent === "conversation" && attachmentSnapshot.length === 0 && !leadRoomChat
         ? api.oneRequestIntent.resolve(runPrompt, submissionRuntimeSelection).catch(() => null)
         : Promise.resolve(null);
       try {
@@ -7542,6 +7690,23 @@ function OneSessionsShell() {
         }
         setMessageReply(current => current === submittedReply ? null : current);
         releaseParentReadiness();
+        if (leadRoomChat) {
+          runOutcome = await startRun(
+            chatId, taskId, taskVersion, runPrompt, "conversation",
+            {
+              attachments: preparedAttachments,
+              recurrence: recurrenceSnapshot,
+              overrides: overrideSnapshot,
+              taskForceTargets: taskForceTargetSnapshot,
+              runtimeSelection: submissionRuntimeSelection,
+              preflightSubmissionId,
+              userAlreadyShown: true,
+              ...(resume ? { permissionMode: submissionPermission } : {}),
+            },
+          );
+          settleFirstSendOutcome(chatId, preflightSubmissionId, runPrompt, runOutcome);
+          return;
+        }
         const mainIntent = await requestIntentPromise;
         const resolvedIntent = preparedAttachments
           || taskIntent === "task"
@@ -7880,9 +8045,11 @@ function OneSessionsShell() {
         // the optimistic text/photo before Main has persisted the turn. This
         // is the same /one document, so update its query in-place and notify
         // Next's history listener without replacing the renderer process.
-        const nextLocation = `/one?chat=${encodeURIComponent(chat.id)}`;
-        window.history.replaceState(window.history.state, "", nextLocation);
-        window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+        if (!embedded) {
+          const nextLocation = `/one?chat=${encodeURIComponent(chat.id)}`;
+          window.history.replaceState(window.history.state, "", nextLocation);
+          window.dispatchEvent(new PopStateEvent("popstate", { state: window.history.state }));
+        }
       }
       if (workspaceGrant) {
         await api.workspace.set(chat.id, workspaceGrant);
@@ -8056,6 +8223,13 @@ function OneSessionsShell() {
        *   자리가 없다). 그래서 이미 화면에 그려지는 actionNotice 로 낸다.
        */
       const raw = failureMessage(cause);
+      const refusalLine = sendRefusalLine(cause, appLocale === "ko" ? "ko" : "en");
+      if (refusalLine) {
+        // A refusal code with its own line (read-only room, no member left, empty message): the line names why, the text stays in the composer.
+        setActionNotice(refusalLine);
+        setError(null);
+        return;
+      }
       const controlFailure = goalAdmissionControlFailure(cause, appLocale === "ko");
       if (unsupportedInputMessage) {
         setActionNotice(unsupportedInputMessage);
@@ -8104,6 +8278,16 @@ function OneSessionsShell() {
     }
   }, [shownRestoredRuntimeDraft, messageReply, activeTaskforce, discussion.refresh, oneProfile, activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, pendingTeamPrompt, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
   submitTextRef.current = submit;
+
+  // The first message the New chat start screen held for this Agent Chat (F-D6): sent once, by the same send a typed message takes, when the room has loaded and is idle.
+  const startPromptSentRef = useRef<string | null>(null);
+  const startPrompt = embed?.startPrompt ?? null;
+  useEffect(() => {
+    if (!startPrompt || !embed || !loaded || !conversation || busy) return;
+    if (activeThreadChatId !== embed.chatId || startPromptSentRef.current === embed.chatId) return;
+    startPromptSentRef.current = embed.chatId;
+    if (claimFirstMessageSend(embed.chatId)) void submitTextRef.current?.(startPrompt);
+  }, [startPrompt, embed, loaded, conversation, busy, activeThreadChatId]);
 
   /*
    * ★A send Main never took survives a reload (one-first-send-outbox). When its room is open again, Main's receipts
@@ -8869,7 +9053,7 @@ function OneSessionsShell() {
     setStagedSteerState(null);
     selectedTaskIdRef.current = null;
     selectedConversationIdRef.current = null;
-    rememberLastOneConversation(null);
+    rememberLast(null);
     setSelected(null);
     setConversation(null);
     setFailureFocus(null);
@@ -8905,8 +9089,8 @@ function OneSessionsShell() {
     setRailOpen(false);
     setSearchOpen(false);
     clearAttachmentDrafts();
-    router.push("/one");
-  }, [clearAttachmentDrafts, router]);
+    nav.home("push");
+  }, [clearAttachmentDrafts, router, nav]);
 
   const openOneFailure = useCallback(async (member: OneOrgMember) => {
     const api = ipc();
@@ -8915,14 +9099,14 @@ function OneSessionsShell() {
     if (failure?.chatId) {
       setRailOpen(false);
       setSearchOpen(false);
-      router.replace(`/one?chat=${encodeURIComponent(failure.chatId)}`);
+      nav.openChat(failure.chatId);
       return;
     }
     startNewConversation();
     setComposer(appLocale === "ko"
       ? `${member.displayName}의 실패를 원장과 함께 확인하고, 필요한 담당·도구를 바꿔 다시 완주해줘. 실패 표식: ${member.statusLine}`
       : `Review ${member.displayName}'s failure record, then change the owner or tool and retry to completion. Failure marker: ${member.statusLine}`);
-  }, [appLocale, router, startNewConversation]);
+  }, [appLocale, router, nav, startNewConversation]);
 
   const openOneMember = useCallback((member: OneOrgMember, options?: { fresh?: boolean }): Promise<void> => {
     const api = ipc();
@@ -8952,7 +9136,7 @@ function OneSessionsShell() {
         // `one.txt` RSC sidecar to the main document. Replace follows the same
         // proven path used when a newly started run receives its chat binding.
         try {
-          router.replace(`/one?chat=${encodeURIComponent(chat.id)}`);
+          nav.openChat(chat.id);
         } catch (cause) {
           onePaneCommitWaiterRef.current.reject(chat.id, cause);
           await paneCommit;
@@ -8987,7 +9171,7 @@ function OneSessionsShell() {
         requestOneOperationalRecovery("one-member-channel", cause);
       }
     })();
-  }, [activeThreadChatId, refreshAll, router, selectedConversationId]);
+  }, [activeThreadChatId, refreshAll, router, nav, selectedConversationId]);
 
   const startReplacementSession = useCallback(() => {
     const occupantAgentId = activeSeat?.kind === "solo" ? activeSeat.occupants[0]?.agentId : null;
@@ -9114,14 +9298,14 @@ function OneSessionsShell() {
         oneTranscriptRevisionRef.current += 1;
         setMessages([]);
         setReceipt(null);
-        rememberLastOneConversation(projection.chatId);
-        router.replace(`/one?task=${encodeURIComponent(projection.taskId)}`);
+        rememberLast(projection.chatId);
+        nav.openTask(projection.taskId);
         await refreshAll({ includeOrg: false });
       } catch (cause) {
         requestOneOperationalRecovery("one-search-open-task", cause);
       }
     })();
-  }, [activeChatIds, appLocale, confirmations, oneProfile, refreshAll, router]);
+  }, [activeChatIds, appLocale, confirmations, oneProfile, refreshAll, router, nav]);
 
   const openConversation = useCallback((chatId: string) => {
     setRailOpen(false);
@@ -9144,10 +9328,10 @@ function OneSessionsShell() {
         setReceipt(null);
       }
     }
-    rememberLastOneConversation(chatId);
-    router.replace(`/one?chat=${encodeURIComponent(chatId)}`);
+    rememberLast(chatId);
+    nav.openChat(chatId);
     void refreshAll({ includeOrg: false });
-  }, [conversations, refreshAll, router]);
+  }, [conversations, refreshAll, router, nav]);
 
   // "세션 열기" on a One→teammate handoff line: open that exact session and,
   // like entering a teammate from the rail, acknowledge its unread result.
@@ -9199,10 +9383,10 @@ function OneSessionsShell() {
       try {
         const api = ipc();
         const chat = api ? await api.chats.get(remembered).catch(() => null) : null;
-        if (!chat || chat.archivedAt) { rememberLastOneConversation(null); return; }
+        if (!chat || chat.archivedAt) { rememberLast(null); return; }
         openConversation(remembered);
       } catch {
-        rememberLastOneConversation(null);
+        rememberLast(null);
       }
     })();
   }, [selectedConversationId, selectedTaskId, openConversation]);
@@ -9220,12 +9404,12 @@ function OneSessionsShell() {
       setTaskforceEditingId(null);
       selectedTaskIdRef.current = null;
       selectedConversationIdRef.current = created.chatId;
-      router.replace(`/one?chat=${encodeURIComponent(created.chatId)}`);
+      nav.openChat(created.chatId);
       await refreshAll({ includeOrg: false });
     } finally {
       setTaskforceBusy(false);
     }
-  }, [refreshAll, router]);
+  }, [refreshAll, router, nav]);
 
   // "같은 멤버로 새 단톡 만들기" — 해체(T7) 세션의 참여자 스냅샷(I2)에서 재구성하되,
   // 지금 조직에 살아 있는 멤버만 앉힌다(만들기 계약이 활성 스태프만 허용).
@@ -9278,13 +9462,13 @@ function OneSessionsShell() {
         setMessages([]);
         setSurface(null);
         setReceipt(null);
-        router.replace("/one");
+        nav.home("replace");
       }
       await refreshAll({ includeOrg: false });
     } finally {
       setTaskforceBusy(false);
     }
-  }, [activeThreadChatId, refreshAll, router, taskforces]);
+  }, [activeThreadChatId, refreshAll, router, nav, taskforces]);
 
   const removeConversation = useCallback(async (chatId: string) => {
     const api = ipc();
@@ -9308,13 +9492,13 @@ function OneSessionsShell() {
         setMessages([]);
         setSurface(null);
         setReceipt(null);
-        router.replace("/one");
+        nav.home("replace");
       }
       await refreshAll();
     } catch (cause) {
       requestOneOperationalRecovery("one-chat-remove", cause);
     }
-  }, [activeChatIds, appLocale, conversations, refreshAll, router]);
+  }, [activeChatIds, appLocale, conversations, refreshAll, router, nav]);
 
   const mutateTaskArchive = useCallback(async (taskId: string, operation: "archive" | "restore") => {
     const api = ipc();
@@ -9347,7 +9531,7 @@ function OneSessionsShell() {
         setMessages([]);
         setSurface(null);
         setReceipt(null);
-        router.push("/one");
+        nav.home("push");
       }
       await refreshAll();
       const value = query.replace(/\s+/g, " ").trim();
@@ -9361,7 +9545,7 @@ function OneSessionsShell() {
     } finally {
       setArchiveMutationTaskId(null);
     }
-  }, [archiveMutationTaskId, appLocale, query, refreshAll, requestOneSearch, router, searchIncludeArchived, searchOpen]);
+  }, [archiveMutationTaskId, appLocale, query, refreshAll, requestOneSearch, router, nav, searchIncludeArchived, searchOpen]);
 
   const loadMoreSearchResults = useCallback(() => {
     const value = query.replace(/\s+/g, " ").trim();
@@ -9724,7 +9908,7 @@ function OneSessionsShell() {
       selected ? "task" : "conversation",
       { displayUserMessage: false },
     );
-  }, [appLocale, busy, conversation?.id, focusOneOutput, openCreateAgentDialog, router, selected, startRun]);
+  }, [appLocale, busy, conversation?.id, focusOneOutput, openCreateAgentDialog, router, nav, selected, startRun]);
   const acceptSelectedResult = useCallback(async () => {
     const api = ipc();
     if (
@@ -9823,10 +10007,15 @@ function OneSessionsShell() {
   // A direct room belongs to its seated agent; the general room and a taskforce
   // synthesis belong to One. Never borrow either identity for user messages.
   const assistantSpeaker = activeTaskforce
-    ? { label: oneDisplayName, tone: oneAvatarTone, status: "quiet" as const }
+    // A line with no speaker in a group room is the room's own (a failure or a limit), never the personal agent talking.
+    ? { label: appLocale === "ko" ? "대화" : "Room", tone: oneAvatarTone, status: "quiet" as const }
     : activeOneMember
       ? { label: activeOneMember.displayName, tone: activeOneMember.icon, status: activeOneMember.statusKind }
       : { label: oneDisplayName, tone: oneAvatarTone, status: "quiet" as const };
+  const approvalCtx = {
+    lang: (appLocale === "ko" ? "ko" : "en") as "ko" | "en", now: Date.now(),
+    agentName: (id: string) => memberForAgent(oneOrgState?.members, id)?.displayName ?? (activeOneMember?.installedAgentId === id ? activeOneMember.displayName : undefined),
+  };
   const removeAttachmentDraft = useCallback((id: string) => {
     const current = attachmentDraftsRef.current;
     const removed = current.find((item) => item.id === id);
@@ -9973,7 +10162,7 @@ function OneSessionsShell() {
       return;
     }
     focusOneOutput();
-  }, [appLocale, focusOneOutput, openOneSettings, router]);
+  }, [appLocale, focusOneOutput, openOneSettings, router, nav]);
   /*
    * 브리핑이 찾아낸 것을 One 이 **실제로 살펴보게** 한다.
    *
@@ -10148,6 +10337,13 @@ function OneSessionsShell() {
     prepareFollowup: prepareUiFollowup, disabled: busy || activeSeatDissolved || activeDirectSessionUnavailable,
   }), [prepareUiFollowup, busy, activeSeatDissolved, activeDirectSessionUnavailable]);
 
+  if (embedded && (!loaded || !conversation)) {
+    // A pane of Space: no rail skeleton, and never the One home (this pane always has a chat).
+    return <div className={styles.shell} data-embed="true"><div className={styles.loadingShell} role="status" aria-live="polite" data-one-embed-state={loaded ? "unavailable" : "loading"}>
+      <main className={styles.loadingWorkspace}>{loaded ? <strong>{appLocale === "ko" ? "이 대화를 열 수 없어요." : "This conversation could not be opened."}</strong>
+        : <><span className={styles.loadingSpinner} aria-hidden="true" /><strong>{tFor(appLocale, "one.shell.loading")}</strong></>}</main>
+    </div></div>;
+  }
   if (!loaded) {
     return <div className={styles.shell}><div className={styles.loadingShell} role="status" aria-live="polite">
       <aside className={styles.loadingRail}><span className={styles.loadingBrand} /><span /><span /><span /><span /></aside>
@@ -10157,7 +10353,7 @@ function OneSessionsShell() {
   }
 
   return (
-    <div className={styles.shell}>
+    <div className={styles.shell} data-embed={embedded ? "true" : undefined}>
       <div
         className={styles.body}
         inert={railMode === "settings" ? true : undefined}
@@ -10172,7 +10368,8 @@ function OneSessionsShell() {
         data-rail-mode={railMode}
         style={{ "--one-rail-width": `${contextRailWidth}px` } as CSSProperties}
       >
-        {railOpen && <button type="button" className={styles.railScrim} aria-label={tFor(appLocale, "one.shell.rail.close_history_aria")} onClick={() => setRailOpen(false)} />}
+        {!embedded && railOpen && <button type="button" className={styles.railScrim} aria-label={tFor(appLocale, "one.shell.rail.close_history_aria")} onClick={() => setRailOpen(false)} />}
+        {!embedded && (
         <aside
           className={styles.rail}
           data-open={railOpen ? "true" : "false"}
@@ -10197,7 +10394,7 @@ function OneSessionsShell() {
               }}
             ><IconSidebar size={16} /></button>
           </div>
-          <button type="button" data-personal-one-entry="true" className={styles.railPrimaryButton} style={{display:"flex",alignItems:"center",gap:10,minHeight:52}} onClick={() => router.push("/one?personal=1")}><OneAgentPortrait status="quiet" label={oneDisplayName} tone={oneAvatarTone} size="small"/><span style={{display:"flex",flexDirection:"column",gap:2,minWidth:0,textAlign:"left",fontSize:12,color:"var(--ink)"}}><strong style={{fontWeight:600}}>{oneDisplayName}</strong><small style={{fontSize:11,color:"var(--muted-deep)"}}>{appLocale === "ko" ? "개인 에이전트" : "Personal agent"}</small></span></button>
+          <button type="button" data-personal-one-entry="true" className={styles.railPrimaryButton} style={{display:"flex",alignItems:"center",gap:10,minHeight:52}} onClick={() => router.push("/one?personal=1")}><span style={{position:"relative",display:"inline-flex",flex:"none"}}><OneAgentPortrait status="quiet" label={oneDisplayName} tone={oneAvatarTone} size="small"/><WaitingDot /></span><span style={{display:"flex",flexDirection:"column",gap:2,minWidth:0,textAlign:"left",fontSize:12,color:"var(--ink)"}}><strong style={{fontWeight:600}}>{oneDisplayName}</strong><small style={{fontSize:11,color:"var(--muted-deep)"}}>{appLocale === "ko" ? "개인 에이전트" : "Personal agent"}</small></span></button>
           {railMode !== "settings" ? <>
             {/* 대화 목록은 하루에 수십 번 오가는 곳이라 화면 뒤로 숨기지 않는다. 레일이
                 조직도로 차 있으므로 탭으로 나누되, 나가지 않고 한 화면 안에 남긴다. */}
@@ -10377,6 +10574,7 @@ function OneSessionsShell() {
             </div>
           </> : null}
         </aside>
+        )}
 
         <main
           className={styles.workspace}
@@ -10389,7 +10587,7 @@ function OneSessionsShell() {
           // 칸이 조작 불능이 된다(D-5/D-6).
           style={splitPanes.length > 0 ? { ["--split-col" as string]: `${splitRatio.col}%` } : undefined}
         >
-          {(railMode === "mail" || mail.compose) && <OneMailWorkspace
+          {!embedded && (railMode === "mail" || mail.compose) && <OneMailWorkspace
             mail={mail}
             locale={appLocale}
             oneName={oneDisplayName}
@@ -10399,9 +10597,10 @@ function OneSessionsShell() {
               openConversation(chatId);
             }}
           />}
-          <div className={`${styles.windowBar} titlebar-drag`}>
+          <div className={embedded ? styles.windowBar : `${styles.windowBar} titlebar-drag`}>
             {selected || conversation ? (
               <div className={`${styles.taskToolbar} titlebar-nodrag`}>
+                {!embedded && <>
                 <button
                   ref={railRevealButtonRef}
                   type="button"
@@ -10424,10 +10623,11 @@ function OneSessionsShell() {
                   }}
                 ><IconSidebar size={16} /></button>
                 <span className={styles.taskToolbarDivider} aria-hidden="true" />
+                </>}
                 <div className={styles.taskToolbarIdentity}>
                   {activeTaskforce ? <span className={styles.taskforceToolbarPortraits} aria-hidden="true">
-                    <OneAgentPortrait status={busy ? "working" : "quiet"} label={oneDisplayName} tone={oneAvatarTone} size="small" />
-                    {activeTaskforce.memberAgentIds.slice(0, 2).map((agentId) => {
+                    {leadRoom ? null : <OneAgentPortrait status={busy ? "working" : "quiet"} label={oneDisplayName} tone={oneAvatarTone} size="small" />}
+                    {activeTaskforce.memberAgentIds.slice(0, leadRoom ? 3 : 2).map((agentId) => {
                       const member = oneOrgState?.members.find((item) => item.installedAgentId === agentId);
                       const unavailable = memberUnavailable(member);
                       return <OneAgentPortrait key={agentId} status={unavailable || !member ? "locked" : member.statusKind} label={member?.displayName ?? "Unavailable"} tone={member?.icon ?? "blue"} size="small" />;
@@ -10466,9 +10666,10 @@ function OneSessionsShell() {
                     {/* 명단 길이가 아니라 지금 말할 수 있는 사람을 센다 — 나간 팀원은 아바타만
                         회색이 되고 머릿수는 그대로였다(UX-D-7). 아바타를 회색으로 칠하는
                         바로 그 판정으로 센다. */}
+                    {/* The personal agent is not in a group room: the count is the members who can speak. */}
                     {activeTaskforce && <small data-one-taskforce-count="true">{appLocale === "ko"
-                      ? `One 포함 ${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}명`
-                      : `${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)} ${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState) === 1 ? "member" : "members"} incl. One`}</small>}
+                      ? `${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState) - 1}명`
+                      : `${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState) - 1} ${speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState) - 1 === 1 ? "member" : "members"}`}</small>}
                   </span>
                 </div>
                 {activeTaskforce && <button
@@ -10479,7 +10680,7 @@ function OneSessionsShell() {
                     setTaskforceDialogOpen(true);
                   }}
                   aria-label={appLocale === "ko" ? "태스크포스 멤버 관리" : "Manage Taskforce members"}
-                ><IconUsers size={15} /><span data-one-taskforce-badge="true">{speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}</span></button>}
+                ><IconUsers size={15} /><span data-one-taskforce-badge="true">{speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState) - 1}</span></button>}
                 {!activeTaskforce && (activeOneSelected || activeOneMember) && (
                   <OneNewSessionButton locale={appLocale} onClick={() => startFreshSession(activeOneSelected ? null : activeOneMember)} />
                 )}
@@ -10659,8 +10860,11 @@ function OneSessionsShell() {
                       {renderUiOnlyBubble(block.runId)}
                     </Fragment>
                   ))}
+                  {!historyStart && !leadingHistoryStart && <ApprovalRecordLines records={approvalSlots.before} ctx={approvalCtx} />}
                   {seatThreadMessages.map((message, messageIndex) => {
                     const sourceMessageId = message.continuationSourceId ?? message.id;
+                    // The stored "request closed" notice is drawn as the approval line instead (AL).
+                    if (approvalClosedIds.has(sourceMessageId)) return null;
                     const firstSourceSegment = !message.continuationSourceId
                       || seatThreadMessages.find(item => (item.continuationSourceId ?? item.id) === sourceMessageId)?.id === message.id;
                     const contentMessageId = message.continuationFirst && message.continuationUiMessageId
@@ -10717,7 +10921,10 @@ function OneSessionsShell() {
                     const messageSpeakerMember = message.role === "assistant" ? memberForAgent(oneOrgState?.members, message.speakerAgentId) : undefined;
                     const messageSpeaker = messageSpeakerMember
                       ? { label: messageSpeakerMember.displayName, tone: messageSpeakerMember.icon, status: messageSpeakerMember.statusKind }
-                      : assistantSpeaker;
+                      // An earlier answer of an agent that is gone keeps a name of its own, not the personal agent's face and name.
+                      : message.role === "assistant" && message.speakerAgentId
+                        ? { label: appLocale === "ko" ? "삭제된 에이전트" : "Removed agent", tone: assistantSpeaker.tone, status: "locked" as const }
+                        : assistantSpeaker;
                     const assistantGroupStart = message.role === "assistant"
                       && (seatThreadMessages[messageIndex - 1]?.role !== "assistant"
                         || seatThreadMessages[messageIndex - 1]?.speakerAgentId !== message.speakerAgentId
@@ -10779,8 +10986,8 @@ function OneSessionsShell() {
                             <div className={message.room ? `${styles.messageContent} ${roomWorkStyles.roomBubble}` : styles.messageContent}>
                             {message.room && (
                               <button type="button" className={roomWorkStyles.roomTag} onClick={() => openDispatchedSession(message.room!.sessionChatId)}
-                                title={appLocale === "ko" ? "이 방 작업 열기" : "Open this room work"}>
-                                @{message.room.title || (appLocale === "ko" ? "방" : "Room")}{message.role === "user" ? " · One" : ""}
+                                title={appLocale === "ko" ? "이 대화의 작업 열기" : "Open this room work"}>
+                                @{message.room.title || (appLocale === "ko" ? "대화" : "Room")}{message.role === "user" ? " · One" : ""}
                               </button>
                             )}
                             {activeTaskforce && message.role !== "system" && (
@@ -10838,9 +11045,10 @@ function OneSessionsShell() {
                                 * 답이 자라는 중에는 평소대로 그린다: 표식만 있고 본문이
                                 * 아직 한 줄인 글을 문서 카드로 세우면 빈 액자가 된다.
                                 */}
+                              <AnswerCardsForTurns chatId={activeThreadChatId ?? undefined} turnIds={stableTurnIds(uiTurnId)} disabled={message.role !== "assistant"}>
                               <GoalResultReport result={message.goalResult} locale={appLocale}>
                               {markdownText && ((message.streaming || hasIntellectUiFence(markdownText) || hasInlineVisualBlock(markdownText))
-                                ? <StreamingMarkdown text={markdownText} messageId={contentMessageId} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} />
+                                ? <StreamingMarkdown text={markdownText} messageId={contentMessageId} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} growing={Boolean(message.streaming)} />
                                 : (() => {
                                   const documentMark = message.continuationTail === false ? null : readOneDocumentMark(markdownText);
                                   return documentMark
@@ -10849,6 +11057,7 @@ function OneSessionsShell() {
                                 })())}
                               {message.role === "assistant" && !message.streaming && message.continuationTail !== false && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
                               </GoalResultReport>
+                              </AnswerCardsForTurns>
                               <IntellectUiActions.Provider value={oneUiActions}>
                                 <InlineUiInstances chatId={activeThreadChatId ?? undefined} instances={ownedUi} turnIds={stableTurnIds(uiTurnId)} locale={appLocale === "ko" ? "ko" : "en"}/>
                               </IntellectUiActions.Provider>
@@ -10936,6 +11145,10 @@ function OneSessionsShell() {
                       {renderUiOnlyBubble(block.runId)}
                           </Fragment>
                         ))}
+                        {message.role === "assistant" && !message.streaming && (turnFilesByAnswer.get(sourceMessageId)?.length ?? 0) > 0 && (
+                          <OneTurnFiles files={turnFilesByAnswer.get(sourceMessageId)!} chatId={activeThreadChatId} locale={appLocale === "ko" ? "ko" : "en"} onPreview={openOneLinkedFile} inset={50} />
+                        )}
+                        <ApprovalRecordLines records={approvalSlots.after.get(message.id) ?? []} ctx={approvalCtx} />
                       </Fragment>
                     );
                   })}
@@ -11179,7 +11392,7 @@ function OneSessionsShell() {
             </button>
           )}
           {splitPanes.map((pane) => (
-            <OneSplitPane
+            <RoomPane
               key={pane.id}
               chatId={pane.id}
               title={pane.title || (appLocale === "ko" ? "새 대화" : "New conversation")}
@@ -11258,6 +11471,8 @@ function OneSessionsShell() {
             {/* Keep live permissions close to the action they unblock. The
                 durable request stays in the approval queue/diagnostics; One
                 shows only compact choices immediately above the composer. */}
+            {/* A pane of Space shows the team-lead state of a group room (who works, who waits, Stop) and its members' own cards. */}
+            {embedded && activeTaskforce && activeThreadChatId && <RoomLeadStatus roomChatId={activeThreadChatId} locale={appLocale} permission={onePermission} />}
             {activeThreadChatId && visibleSelectedConfirmation && (
               <DecisionInline
                 confirmation={visibleSelectedConfirmation}
@@ -11265,6 +11480,7 @@ function OneSessionsShell() {
                 locale={appLocale}
                 disabled={selectedReadOnly}
                 block={visibleConfirmationBlock}
+                keysActive={embedFocused}
                 onAnswer={answerConfirmation}
                 onResend={(confirmation, text) => {
                   // 답을 새 메시지로 — 작성창과 같은 길(submit)이라 실행 중이면 조향·대기열로 간다.
@@ -11386,6 +11602,7 @@ function OneSessionsShell() {
                 alwaysApproval={composerAlwaysApproval}
                 turnOptions={turnOverrides}
                 localFilesConnected={Boolean(workspacePath)}
+                paneShape={embedded}
                 onMenuChange={setComposerMenu}
                 onAttach={() => {
                   setComposerMenu(null);
@@ -11618,6 +11835,14 @@ function OneSessionsShell() {
                 disabled={taskforceBusy}
               >{appLocale === "ko" ? "같은 멤버로 새 단톡 만들기" : "Start a new group chat with the same members"}</button>
             </div>}
+            {activeAgentDeleted && !activeDirectSessionUnavailable && <div className={styles.sessionUnavailableBanner} role="status" data-one-agent-deleted-banner="true">
+              <IconAlertTriangle size={17} strokeWidth={2} />
+              <strong>{agentChatReadOnlyCopy(appLocale === "ko" ? "ko" : "en", activeReadOnlyReason).title}</strong>
+              <span>{agentChatReadOnlyCopy(appLocale === "ko" ? "ko" : "en", activeReadOnlyReason).body}</span>
+              <button type="button" data-one-agent-deleted-continue="true" onClick={() => setContinueAgentChatOpen(true)}>{agentChatReadOnlyCopy(appLocale === "ko" ? "ko" : "en", activeReadOnlyReason).action}</button>
+            </div>}
+            <NewAgentChatDialog open={continueAgentChatOpen} projectId={activeChatRecord?.projectId ?? null} projectName={null}
+              locale={appLocale === "ko" ? "ko" : "en"} onClose={() => setContinueAgentChatOpen(false)} />
             {activePersonalAgentRoom && <PersonalAgentRoomNotice locale={appLocale === "ko" ? "ko" : "en"} width="100%"
               onOpenPersonalAgent={() => router.push(PERSONAL_AGENT_HREF)} />}
             {/* 새 세션 추천 작업 — 작성창 바로 위(오너 2026-09-26, Codex 식). */}
@@ -11626,9 +11851,9 @@ function OneSessionsShell() {
             )}
             <MessageReplyPreview reply={messageReply} locale={appLocale} onDismiss={() => setMessageReply(null)} />
             {!activeSeatDissolved && !activePersonalAgentRoom && <WaitingRetryStop chatId={activeThreadChatId} locale={appLocale === "ko" ? "ko" : "en"} live={busy} />}
-            <form className={styles.composer} data-one-composer="true" data-has-files={attachmentDrafts.length > 0 ? "true" : undefined} data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved || activePersonalAgentRoom ? { display: "none" } : undefined} onSubmit={(event) => {
+            <form className={styles.composer} data-one-composer="true" data-has-files={attachmentDrafts.length > 0 ? "true" : undefined} data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved || activePersonalAgentRoom || activeAgentDeleted ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
-              if (activeSeatDissolved || activeDirectSessionUnavailable || activePersonalAgentRoom) return;
+              if (activeSeatDissolved || activeDirectSessionUnavailable || activePersonalAgentRoom || activeAgentDeleted) return;
               const submittedValue = composerInputRef.current?.value ?? composer;
               if (busy && !submittedValue.trim()) stopRun();
               else void submit(submittedValue);
@@ -11719,6 +11944,9 @@ function OneSessionsShell() {
                 }}
                 placeholder={activeDirectSessionUnavailable
                   ? (appLocale === "ko" ? "메시지를 입력할 수 없습니다." : "Messaging is unavailable.")
+                  : embedded
+                  // A conversation in a Workspace pane has the pane's one placeholder, the same words as a work conversation's (F-D5).
+                  ? tFor(appLocale, "chatinput.placeholder_pane")
                   : activeTaskforce
                   ? (appLocale === "ko" ? `${activeTaskforce.title}에 메시지` : `Message ${activeTaskforce.title}`)
                   : activeOneMember
@@ -11752,14 +11980,6 @@ function OneSessionsShell() {
                   >
                     <IconPlus size={20} aria-hidden="true" />
                   </button>
-                  <AliveComposerButton
-                    surface="one"
-                    /* 목표 대화는 ?task=… 로 열린다 — 주소의 chat 이 아니라 지금 보이는 대화의 id 를 쓴다. */
-                    chatId={activeThreadChatId}
-                    locale={appLocale}
-                    triggerClassName={styles.attachmentButton}
-                    disabled={composerSettingsBlocked}
-                  />
                   {(oneRuntimeInventory.length > 0 || oneRuntime?.model) && (
                     <button
                       type="button"
@@ -12142,6 +12362,7 @@ function OneSessionsShell() {
       {settingsPickerInterruption && <div role="status" style={{ position: "absolute", top: 12, right: 16, zIndex: 80, maxWidth: 440, padding: 12, background: "var(--paper)", color: "var(--ink)", border: "1px solid var(--paper-edge)", borderRadius: 8 }}>
         {keySaveInterruptionText(settingsPickerInterruption, appLocale === "ko")}{" "}<button type="button" onClick={() => setSettingsPickerInterruption(null)}>{appLocale === "ko" ? "닫기" : "Dismiss"}</button>
       </div>}
+      {!embedded && (
       <div ref={settingsScreenRef} tabIndex={-1} hidden={railMode !== "settings"} className={styles.settingsScreen} data-one-settings-screen="true">
         <aside className={styles.settingsNavigation} style={{flexDirection:"column"}}>
           <OneSettingsRail locale={appLocale} profileName={oneDisplayName} pendingMemoryCount={0} selected={capabilitiesOpen || oneEditorOpen ? undefined : settingsSheet}
@@ -12198,13 +12419,15 @@ function OneSessionsShell() {
           </div>
         </main>
       </div>
+      )}
 
       {/* /one lives in the no-shell route group, so AppShell's global browser
           approval listener is not mounted here. Keep the native approval
           checkpoint in this route explicitly; otherwise browser actions can
           wait behind an invisible sheet. */}
-      <BrowserActionApprovalSheet permission={onePermission} chatId={activeThreadChatId} />
-      <AutomationStrategyApprovalSheet chatId={activeThreadChatId} />
+      {/* A Space pane lives under AppShell, which already mounts both sheets once for the whole window. */}
+      {!embedded && <BrowserActionApprovalSheet permission={onePermission} chatId={activeThreadChatId} />}
+      {!embedded && <AutomationStrategyApprovalSheet chatId={activeThreadChatId} />}
 
 
       <OneBottomSheet
@@ -12255,6 +12478,7 @@ function OneSessionsShell() {
         onUpdate={updateTaskforce}
         onRemove={removeTaskforce}
       />
+      {!embedded && <>
       <OneCreateAgentDialog
         open={createAgentOpen}
         isOwnerCurrent={() => identityGeneration.current === settingsOwnerGeneration}
@@ -12298,7 +12522,7 @@ function OneSessionsShell() {
           selectedConversationIdRef.current = result.chatId;
           setRailOpen(false);
           setSearchOpen(false);
-          router.replace(`/one?chat=${encodeURIComponent(result.chatId)}`);
+          nav.openChat(result.chatId);
           await refreshAll();
         }}
         onAddExisting={() => {
@@ -12338,6 +12562,7 @@ function OneSessionsShell() {
           else if (action === "mobile") router.push("/settings");
         }}
       />
+      </>}
     </div>
   );
 }
@@ -12349,59 +12574,6 @@ function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProject
       <small>{statusLabel(item.status.value, locale, item.canonicalStatus, item.canonicalInterruption)} · {formatTimestamp(item.status.asOf, locale)}</small>
       <span className={styles.statusDot} data-status={item.status.value} aria-hidden="true" />
     </button>
-  );
-}
-
-function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLabel, running, spinning = false, unavailable, member = null, groupMembers = [], oneAvatarTone = "character:orange-dino", oneName = "One" }: {
-  item: Chat;
-  active: boolean;
-  locale: "ko" | "en";
-  onOpen: (chatId: string) => void;
-  onRemove: (chatId: string) => Promise<void>;
-  seatLabel?: string;
-  running?: boolean;
-  spinning?: boolean;
-  unavailable?: boolean;
-  member?: OneOrgMember | null;
-  groupMembers?: OneOrgMember[];
-  oneAvatarTone?: string;
-  oneName?: string;
-}) {
-  const isGroup = item.seatKind === "group" || groupMembers.length > 0;
-  const attention = useChatAttention(item.id);
-  const roomTitle = seatLabel?.trim() || briefingSourceName(item.title, locale);
-  const unavailableCopy = locale === "ko"
-    ? "에이전트가 사라져 세션을 계속할 수 없습니다."
-    : "The agent is gone, so this session cannot continue.";
-  const preview = unavailable ? unavailableCopy : (item.lastMessagePreview?.trim() || briefingSourceName(item.title, locale));
-  return (
-    <div className={styles.conversationRow} data-unavailable={unavailable ? "true" : "false"}>
-      <button type="button" className={`${styles.taskButton} ${styles.sessionButton} ${oneRunCometHostClass}`} data-active={active ? "true" : "false"} data-one-running={spinning ? "true" : "false"} title={roomTitle} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
-        {isGroup ? <span className={styles.sessionGroupAvatar} aria-label={roomTitle}>
-          <OneAgentPortrait status="quiet" label={oneName} tone={oneAvatarTone} size="small" />
-          {groupMembers.slice(0, 2).map((groupMember) => (
-            <OneAgentPortrait key={groupMember.installedAgentId} status={groupMember.archivedAt ? "locked" : groupMember.statusKind} label={groupMember.displayName} tone={groupMember.icon} size="small" />
-          ))}
-        </span> : <OneAgentPortrait
-          status={unavailable ? "locked" : member?.statusKind ?? "quiet"}
-          label={roomTitle}
-          tone={member?.icon ?? oneAvatarTone}
-          size="small"
-        />}
-        <span className={styles.sessionCopy}>
-          <span className={styles.sessionTitleLine}>
-            <strong>{roomTitle}</strong>
-            {/* 화면 밖에서 오너를 기다리는 대화(승인·질문·안 본 결과) — 파란 점(lib/attention). */}
-            <AttentionDot counts={attention} locale={locale} className={styles.sessionAttentionDot} />
-            {unavailable && <span className={styles.sessionWarning} aria-label={locale === "ko" ? "에이전트 없음" : "Agent unavailable"}><IconAlertTriangle size={14} strokeWidth={2} /></span>}
-            <time dateTime={item.updatedAt}>{sessionListTime(item.updatedAt, locale)}</time>
-          </span>
-          <small>{running && <span className={styles.sessionRunningDot} aria-hidden="true" />}{preview}</small>
-        </span>
-        <OneRunComet running={spinning} locale={locale} />
-      </button>
-      <button type="button" className={styles.conversationDelete} onClick={(event) => { event.stopPropagation(); void onRemove(item.id); }} aria-label={locale === "ko" ? "대화 삭제" : "Delete conversation"}><IconClose size={12} /></button>
-    </div>
   );
 }
 
@@ -12508,8 +12680,10 @@ function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): strin
     : tFor(locale, "one.shell.decision.not_stated");
 }
 
-function DecisionInline({ confirmation, taskId, locale, disabled, block, onAnswer, onResend, onAlwaysApprove, onClarify, onSnooze, onDismiss }: {
+function DecisionInline({ confirmation, taskId, locale, disabled, block, keysActive = true, onAnswer, onResend, onAlwaysApprove, onClarify, onSnooze, onDismiss }: {
   confirmation: PendingConfirmation;
+  /** False in a Space pane that does not have the keyboard: the document's number/Enter/Esc keys answer only the focused pane's card. */
+  keysActive?: boolean;
   taskId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
@@ -12535,6 +12709,7 @@ function DecisionInline({ confirmation, taskId, locale, disabled, block, onAnswe
         locale={locale}
         disabled={disabled}
         block={block}
+        keysActive={keysActive}
         compact
         onAnswer={onAnswer}
         onResend={onResend}
@@ -12555,11 +12730,12 @@ function DecisionInline({ confirmation, taskId, locale, disabled, block, onAnswe
   );
 }
 
-function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", compact = false, onAnswer, onResend, onDismiss, onAlwaysApprove, onClarify, onSnooze }: {
+function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", compact = false, keysActive = true, onAnswer, onResend, onDismiss, onAlwaysApprove, onClarify, onSnooze }: {
   confirmation: PendingConfirmation;
   taskId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
+  keysActive?: boolean;
   block?: AskActionBlock;
   compact?: boolean;
   onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
@@ -12609,8 +12785,10 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
   // ChatQuestionSheet 2026-09-03 실측과 같은 이유). 핸들러는 렌더마다 최신 상태로 갈아 끼운다.
   const questionKeyRef = useRef<((event: KeyboardEvent) => void) | null>(null);
   const questionCardRef = useRef<HTMLDivElement | null>(null);
+  const keysActiveRef = useRef(keysActive);
+  keysActiveRef.current = keysActive;
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => questionKeyRef.current?.(event);
+    const onKey = (event: KeyboardEvent) => { if (keysActiveRef.current) questionKeyRef.current?.(event); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, []);

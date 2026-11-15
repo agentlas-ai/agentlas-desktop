@@ -19,6 +19,8 @@ import { ipc } from "@/lib/ipc";
 import { askUserQueueSnapshot, removeAskUserRequest, useAskUserQueue } from "@/lib/ask-user-queue";
 import { useOrphanAttentionRevealed } from "@/lib/attention";
 import { useToolApprovals } from "@/lib/tool-approvals";
+import { useFocusedSpaceChatId } from "@/lib/space-store";
+import { roomOfChat } from "@/lib/room-children";
 import type { AskUserRequestEvent } from "@/lib/types";
 
 /*
@@ -58,7 +60,9 @@ export function AskUserSheet() {
   const [now, setNow] = useState(() => Date.now());
   const { visible } = useToolApprovals();
   const onScreen = (item: AskUserRequestEvent): boolean => item.chatId ? visible.has(item.chatId) : orphansRevealed;
-  const req = queue.find(onScreen) ?? null;
+  // Home's Space can show several rooms at once: the question of the focused pane comes first, so it lands in that pane's composer.
+  const spaceFocus = useFocusedSpaceChatId();
+  const req = (spaceFocus ? queue.find((item) => roomOfChat(item.chatId) === spaceFocus && onScreen(item)) : undefined) ?? queue.find(onScreen) ?? null;
   const isLive = (requestId: string): boolean => askUserQueueSnapshot().some((item) => item.requestId === requestId);
   const currentRequestIdRef = useRef<string | null>(null);
   currentRequestIdRef.current = req?.requestId ?? null;

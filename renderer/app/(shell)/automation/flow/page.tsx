@@ -73,7 +73,7 @@ function runtimeSelectionPresentation(selection: RuntimeSelection | null | undef
   if (!selection) {
     return {
       label: locale === "en" ? "Role default" : "역할 기본값 사용",
-      detail: locale === "en" ? "Worker pool priority + fallback at run time" : "실행 시 Worker 풀 우선순위 · fallback",
+      detail: locale === "en" ? "Worker pool priority + fallback at run time" : "실행 시 워커 풀 우선순위 · fallback",
     };
   }
   const runtimeIdentity = {
@@ -87,7 +87,7 @@ function runtimeSelectionPresentation(selection: RuntimeSelection | null | undef
   const effort = selection.effort?.trim() || (locale === "en" ? "Default effort" : "기본 작업량");
   return {
     label: locale === "en" ? "Automation pin · overrides role default" : "자동화별 고정 · 역할 기본보다 우선",
-    detail: `${provider} · ${engine} · ${model ?? (locale === "en" ? "model unknown" : "모델 알 수 없음")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "Worker if unavailable · review uncertain execution" : "불가 시 Worker · 실행 불확실 시 확인"}`,
+    detail: `${provider} · ${engine} · ${model ?? (locale === "en" ? "model unknown" : "모델 알 수 없음")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "Worker if unavailable · review uncertain execution" : "불가 시 워커 · 실행 불확실 시 확인"}`,
   };
 }
 
@@ -1853,7 +1853,7 @@ function AutomationFlowPage() {
           style={{
             
             padding: "12px 14px", borderRadius: 12,
-            border: "1px solid var(--line)", background: "var(--paper)",
+            border: "1px solid var(--paper-edge)", background: "var(--paper)",
             display: "flex", flexDirection: "column", gap: 8,
           }}
         >
@@ -1872,7 +1872,7 @@ function AutomationFlowPage() {
             }}
             className="titlebar-nodrag"
             style={{
-              padding: "8px 10px", borderRadius: 8, border: "1px solid var(--line)",
+              padding: "8px 10px", borderRadius: 8, border: "1px solid var(--paper-edge)",
               background: "var(--paper-2)", color: "var(--ink)", fontSize: 13, outline: "none",
             }}
           />

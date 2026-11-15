@@ -24,7 +24,8 @@ import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
 import { archivedAgentIds, isAgentArchived } from "../archive/auto-archive";
-import { agentFolderPath, materializeAgentFiles } from "../agents/files";
+import { materializeAgentFiles } from "../agents/files";
+import { classifyAgentFolder } from "../agents/home";
 import { removeRoute, setRoute } from "../agents/routes";
 import { appendChatMessage, createChat, getOrCreateOneMemberChat } from "../store/chats";
 import { closeAgentOccupancies, replaceSeatOccupant } from "../store/seats";
@@ -34,16 +35,18 @@ import { currentUiLocale } from "../ui-locale";
 import { assertManagedOneTeamAvailable } from "../managed-one/auth";
 import {
   decodeOneTeamAvatarDataUrl,
-  removeOneTeamAvatarDirectory,
+  removeOneTeamAvatarFiles,
   writeOneTeamAvatar,
 } from "./avatar";
 import { agentResidencySnapshot } from "../runtime/agent-residency";
-import { readableActiveHubMemoryNestRoots } from "../agents/hub-memory-nest";
+import { hubMemoryNestRootsForRecall } from "../agents/hub-memory-nest";
 import { couldHaveChangedTheOutsideWorld, isHostPreflightTool } from "../../shared/tool-activity";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { getAgentRuntimeOverride, removeAgentRuntimeOverride, setAgentRuntimeOverride } from "../store/agent-runtime-overrides";
 import { seatFailureVerdictInDb } from "../store/seat-failure-evidence";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
+import { isPersonalAgentId } from "./personal-agent-id";
+import { purgeOrphanChatMarks } from "../runtime/session-scope";
 
 type Row = {
   id: string;
@@ -150,6 +153,11 @@ const MEMBER_UNAVAILABLE_TEMPLATES: Record<OneMemberUnavailableCode, { ko: strin
     replace: true,
   },
 };
+
+/** The owner-facing sentence of one reason, for refusals that are not a room join (invoke:run on a session whose teammate was archived). */
+export function oneMemberUnavailableSentence(reason: OneMemberUnavailableCode, locale: "ko" | "en"): string {
+  return MEMBER_UNAVAILABLE_TEMPLATES[reason][locale];
+}
 
 /**
  * Refusal to call a teammate into a room. `.message` is plain owner-facing text that names the teammate; the
@@ -373,14 +381,18 @@ function oneTeamAgentSlug(name: string, id: string): string {
   return candidate;
 }
 
+/** The first line of an agent definition this function wrote before Agentlas 2.0 (no org chart, no coordinator): stored definitions still start with it, so the editor reads both. */
+const ONE_TEAM_AGENT_FIRST_LINE_BEFORE_2_0 = (name: string): string => `You are ${name}, a persistent named teammate inside Agentlas One Team.`;
+const oneTeamAgentFirstLine = (name: string): string => `You are ${name}, a persistent named agent in Agentlas.`;
+
 function oneTeamAgentPrompt(name: string, title: string, personality: string): string {
   return [
-    `You are ${name}, a persistent named teammate inside Agentlas One Team.`,
-    title ? `Your role is: ${title}.` : "Your role is a flexible specialist directed by the owner and One, the CEO orchestrator.",
+    oneTeamAgentFirstLine(name),
+    title ? `Your role is: ${title}.` : "Your role is a flexible specialist directed by the owner.",
     personality ? `Your voice, personality, and working soul are: ${personality}` : "Be thoughtful, concrete, candid, and collaborative.",
     "",
     "Operating contract:",
-    "- chat, memory, identity: independent of One and other teammates; One is the CEO orchestrator (explicit messages, Taskforces, permission and handoff boundaries).",
+    "- chat, memory, identity: yours, independent of other agents and of the owner's personal agent (an assistant that may pass you messages; it does not command you); act within the owner's permission and handoff boundaries.",
     "- Never claim another agent's work, memory, credentials, files; use only host-granted tools; never invent actions or receipts.",
     "- Materially ambiguous goal: one concise question; else act and report outcomes.",
   ].join("\n");
@@ -401,7 +413,7 @@ function oneTeamAgentPrompt(name: string, title: string, personality: string): s
  */
 function parseOneTeamAgentPrompt(prompt: string, name: string): { title: string; personality: string } | null {
   const lines = (prompt || "").split("\n");
-  if (lines[0] !== `You are ${name}, a persistent named teammate inside Agentlas One Team.`) return null;
+  if (lines[0] !== oneTeamAgentFirstLine(name) && lines[0] !== ONE_TEAM_AGENT_FIRST_LINE_BEFORE_2_0(name)) return null;
   const roleLine = lines[1] ?? "";
   const roleMatch = /^Your role is: (.*)\.$/.exec(roleLine);
   const title = roleMatch ? roleMatch[1] : "";
@@ -437,7 +449,7 @@ function editableIdentityOf(agent: InstalledAgent | undefined): { title: string;
  * 만들기·좌석 배치·편집 세 입구가 같은 규칙을 쓰게 하는 유일한 자리다 —
  * 한 곳에만 두면 나머지 두 곳에서 아이콘이 제멋대로 정해진다(2026-08-23 오너 지적).
  */
-function resolveOneTeamAvatar(
+export function resolveOneTeamAvatar(
   avatar: OneTeamAgentAvatarInput,
   agentId: string,
 ): { icon: string; image: ReturnType<typeof decodeOneTeamAvatarDataUrl> | null } {
@@ -474,6 +486,7 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
   let sortOrder = 0;
   let chatId = "";
   let committed = false;
+  let createdDir: string | null = null;
   try {
     db.transaction(() => {
       sortOrder = activeRows().reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
@@ -514,6 +527,7 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
     // 이 팀원도 나중에 발행할 수 있는 진짜 꾸러미가 된다. 등록하지 않으면 파일은 디스크에
     // 있는데 localPath는 영영 비어, 사용자가 만든 팀원을 발행할 길이 없는 막다른 골목이 된다.
     const agentDir = materializeAgentFiles(id);
+    createdDir = agentDir;
     if (agentDir) {
       setRoute({
         agentId: id,
@@ -530,6 +544,7 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
     if (committed) {
       db.transaction(() => {
         db.prepare("DELETE FROM chats WHERE agent_id = ? AND origin_surface = 'one'").run(id);
+        purgeOrphanChatMarks(db);
         db.prepare("DELETE FROM one_org_members WHERE installed_agent_id = ?").run(id);
         db.prepare("DELETE FROM installed_agents WHERE id = ?").run(id);
       })();
@@ -537,8 +552,9 @@ export function createOneTeamAgent(input: CreateOneTeamAgentInput): CreateOneTea
     // 트랜잭션을 정직하게 유지한다: 폴더 등록(route)이 반쯤 됐거나, 폴더 쓰기 자체가
     // 실패했다면 그 흔적을 지운다. 행이 갖지도 않은 폴더를 가진 척해서는 안 된다.
     try { removeRoute(id); } catch { /* 등록된 적이 없으면 no-op */ }
-    try { fs.rmSync(agentFolderPath(slug), { recursive: true, force: true }); } catch { /* best-effort */ }
-    removeOneTeamAvatarDirectory(slug);
+    // 방금 *이 호출이* 만든 폴더만 치운다: 지금은 에이전트 루트 안에 만들어지므로(예전 자리가 아니다) 만든 경로를 그대로 지운다. 사진은 그 폴더 안에 있다.
+    removeOneTeamAvatarFiles(id, slug);
+    if (createdDir && classifyAgentFolder(createdDir).owner === "app") { try { fs.rmSync(createdDir, { recursive: true, force: true }); } catch { /* best-effort */ } }
     throw error;
   }
 
@@ -768,7 +784,7 @@ function ensureSeatableAgent(id: string): InstalledAgent {
 }
 
 function readHandoverSource(agentSlug: string, displayName: string): string {
-  const candidates = readableActiveHubMemoryNestRoots(agentSlug)
+  const candidates = hubMemoryNestRootsForRecall(agentSlug)
     .map((root) => path.join(root, "project-soul-memory.md"));
   for (const file of candidates) {
     try {
@@ -801,6 +817,15 @@ function handoverNote(value: string | null | undefined, row: Row): string | null
   return safe ? safe.slice(0, 8_000) : null;
 }
 
+/** Agentlas 2.0 D6: the "register first" refusal of a seat or room join (agents/usability.ts), or null. Loaded on use; off the 2.0 switch it is always null. */
+function registerFirstRefusal(agentId: string): Error | null {
+  try {
+    const { seatRefusalFor } = require("../agents/usability") as typeof import("../agents/usability"); // eslint-disable-line @typescript-eslint/no-require-imports
+    const refusal = seatRefusalFor(agentId, currentUiLocale() === "ko" ? "ko" : "en");
+    return refusal instanceof Error ? refusal : null;
+  } catch { return null; }
+}
+
 /** Main-only local staffing inside the caller's group/reservation transaction.
  * Existing leased seats are reused only while current; this never recruits or
  * renews a remote asset and never restores an archived identity implicitly.
@@ -818,6 +843,8 @@ export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true,
         reason, id, prior?.display_name?.trim() || installed?.localDisplayName || installed?.name || prior?.agent_slug || id,
       );
     };
+    const mustRegister = registerFirstRefusal(id.trim()); // Agentlas 2.0 D6: see ensureOneOrgSeat
+    if (mustRegister) throw mustRegister;
     const refusal = oneGroupJoinRefusal(prior, installed, { allowPriorTaskFailure: options.allowPriorTaskFailure });
     if (refusal === "group_requires_local") throw new Error("one_group_member_seating_required");
     if (refusal) refuse(refusal);
@@ -837,6 +864,76 @@ export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true,
       VALUES (?, ?, ?, NULL, ?, ?, 'local', NULL, ?, ?, 'new', ?, 'unknown', 1)`)
       .run(randomUUID(), agent.slug, agent.id, agent.tone ?? "one-puppy", sortOrder, now, now, DEFAULT_STATUS_LINE);
   }
+}
+
+/**
+ * Automatic seating for a new Agent Chat. Idempotent: an agent that already has an active seat gets no
+ * second row (and only its stored source is brought up to date); one without gets exactly one `one_org_members` row. It makes
+ * nothing else — no conversation, no handover, no lease, no installed copy: a call-only Hub agent is seated as `hub` from the
+ * `installed_agents` row it already has, so seating never installs it or creates a local folder.
+ *
+ * Unlike ensureOneGroupLocalStaff, a call-only Hub agent is welcome (the room opens on its Hub seat); every other refusal
+ * (archived identity, hidden agent, missing source) is the same plain-language error. Runs inside the caller's transaction, or in its own.
+ */
+export function ensureOneOrgSeat(agentId: string): { created: boolean; excluded?: "personal_agent" } {
+  assertManagedOneTeamAvailable();
+  const db = getDb();
+  // The personal agent is the assistant, never a room member: it gets no seat here. Not a refusal; the caller
+  // reads `excluded` and carries on with the other agents.
+  if (isPersonalAgentId(agentId)) return { created: false, excluded: "personal_agent" };
+  const run = (): { created: boolean } => {
+    const id = agentId.trim();
+    const installed = listInstalledAgentsReadOnly().find((candidate) => candidate.id === id);
+    const prior = db.prepare("SELECT * FROM one_org_members WHERE installed_agent_id = ? ORDER BY archived_at IS NULL DESC LIMIT 1").get(id) as Row | undefined;
+    // Agentlas 2.0 D6: a call-only Hub seat or an agent without a folder is not seated - it is registered first (character, row, folder). Off the switch: no change.
+    const mustRegister = registerFirstRefusal(id);
+    if (mustRegister) throw mustRegister;
+    const refusal = oneGroupJoinRefusal(prior, installed, { allowPriorTaskFailure: true });
+    // The one refusal that does not apply: the seat made below IS the Hub seat the check asks for.
+    if (refusal && !(refusal === "group_requires_local" && installed && isCallOnlyHubAgent(installed))) {
+      throw new OneGroupMemberUnavailableError(
+        refusal === "group_requires_local" ? "agent_not_installed" : refusal, id, prior?.display_name?.trim() || installed?.localDisplayName || installed?.name || prior?.agent_slug || id,
+      );
+    }
+    const agent = installed!;
+    if (prior) {
+      const current = sourceFor(agent);
+      if (prior.source !== current) db.prepare("UPDATE one_org_members SET source = ?, updated_at = ? WHERE id = ?").run(current, new Date().toISOString(), prior.id);
+      return { created: false };
+    }
+    const now = new Date().toISOString();
+    const sortOrder = activeRows().reduce((max, row) => Math.max(max, row.sort_order), -1) + 1;
+    db.prepare(`INSERT INTO one_org_members
+      (id, agent_slug, installed_agent_id, display_name, icon, sort_order, source,
+       lease_expires_at, added_at, updated_at, status_kind, status_line, credit_state, revision)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?, 'new', ?, 'unknown', 1)`)
+      .run(randomUUID(), agent.slug, agent.id, agent.tone ?? "one-puppy", sortOrder, sourceFor(agent), now, now, DEFAULT_STATUS_LINE);
+    return { created: true };
+  };
+  const result = db.inTransaction ? run() : db.transaction(run).immediate();
+  if (result.created) emitOrgChanged();
+  return result;
+}
+
+/**
+ * The seating checks of `ensureOneOrgSeat` as a pure read (Agentlas 2.0 D5): the closed code of why this agent cannot be put in an Agent Chat, or null
+ * when it can. The model's roster (`one_team_list`) asks it, so an agent is offered for a room exactly when the room join would accept it; it writes nothing.
+ */
+export function oneAgentSeatingRefusal(agentId: string): string | null {
+  if (isPersonalAgentId(agentId)) return "personal_agent";
+  const id = agentId.trim();
+  const installed = listInstalledAgentsReadOnly().find((candidate) => candidate.id === id);
+  const mustRegister = registerFirstRefusal(id);
+  if (mustRegister) { const code = (mustRegister as unknown as { code?: unknown }).code; return typeof code === "string" ? code : "needs_registration"; }
+  const prior = getDb().prepare("SELECT * FROM one_org_members WHERE installed_agent_id = ? ORDER BY archived_at IS NULL DESC LIMIT 1").get(id) as Row | undefined;
+  const refusal = oneGroupJoinRefusal(prior, installed, { allowPriorTaskFailure: true });
+  if (refusal && !(refusal === "group_requires_local" && installed && isCallOnlyHubAgent(installed))) return refusal === "group_requires_local" ? "agent_not_installed" : refusal;
+  return null;
+}
+
+/** Whether an installed agent runs from its own folder (`local`) or by calling the Hub (`hub`, a call-only seat). */
+export function oneAgentSource(agent: InstalledAgent): OneOrgSource {
+  return sourceFor(agent);
 }
 
 /** Value-free transcript handoff: redact Unix, drive-letter, and UNC homes. */
@@ -1125,6 +1222,28 @@ export function archiveOneOrgMember(input: ArchiveOneOrgMemberInput): OneOrgStat
   }
   emitOrgChanged();
   return getOneOrgState();
+}
+
+/**
+ * Startup, idempotent: a seat whose agent is no longer installed at all is the residue of an owner's removal that ran before the removal took
+ * its seat with it (mcp/registry.ts uninstallAgent now does). Nothing else leaves such a row: the dedupe and the failed-create rollback delete
+ * their own rows, and a seat of a Hub or cloud agent has an installed row. Exact condition: no installed_agents row carries the seat's agent id.
+ * Returns the number removed; the org chart then counts and shows the members that exist.
+ */
+export function dropOrphanedOneOrgSeats(): number {
+  const db = getDb();
+  const orphans = db.prepare(`SELECT installed_agent_id AS id FROM one_org_members m
+    WHERE NOT EXISTS (SELECT 1 FROM installed_agents a WHERE a.id = m.installed_agent_id)`).all() as Array<{ id: string }>;
+  if (!orphans.length) return 0;
+  let removed = 0;
+  db.transaction(() => {
+    for (const { id } of [...new Map(orphans.map((row) => [row.id, row])).values()]) {
+      removed += db.prepare("DELETE FROM one_org_members WHERE installed_agent_id = ?").run(id).changes;
+      db.prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?").run(id);
+    }
+  })();
+  if (removed) emitOrgChanged();
+  return removed;
 }
 
 export function restoreOneOrgMember(input: ArchiveOneOrgMemberInput): OneOrgState {

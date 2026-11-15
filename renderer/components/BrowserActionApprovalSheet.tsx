@@ -16,7 +16,9 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { useOrphanAttentionRevealed } from "@/lib/attention";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
 import { ApprovalPrompt, type ApprovalPromptDeck } from "./ApprovalPrompt";
-import { useApprovalDeck } from "@/lib/tool-approvals";
+import { useApprovalDeck, useToolApprovals } from "@/lib/tool-approvals";
+import { useFocusedSpaceChatId } from "@/lib/space-store";
+import { roomOfChat } from "@/lib/room-children";
 import { cleanApprovalNote, clearApprovalNoteDraft } from "@/lib/approval-note-drafts";
 
 const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
@@ -71,7 +73,16 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
   const oneRoute = pathname.startsWith("/one");
   const buildRoute = pathname === "/build" || pathname.startsWith("/build/");
   const surface = oneRoute ? "one" : pathname.startsWith("/science") ? "science" : "work";
-  const currentChatId = chatId !== undefined ? chatId : (oneRoute ? null : searchParams.get("id"));
+  /*
+   * Home's Space shows several conversations at once, of both kinds, on one address. The route cannot say which chat
+   * an approval belongs to, so there the screen decides: a request is drawn when ITS chat is mounted in a pane (the panes
+   * register through markChatVisible), whatever surface started it, and the focused pane's chat is "the current one" that
+   * the card joins the composer of.
+   */
+  const spaceRoute = chatId === undefined && !supervisedRoom && pathname.replace(/\/+$/, "") === "/workspace";
+  const mountedChats = useToolApprovals().visible;
+  const spaceFocusChatId = useFocusedSpaceChatId();
+  const currentChatId = chatId !== undefined ? chatId : spaceRoute ? spaceFocusChatId : (oneRoute ? null : searchParams.get("id"));
   const [queue, setQueue] = useState<BrowserApprovalRequestEvent[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [expiredNotice, setExpiredNotice] = useState<string | null>(null);
@@ -90,6 +101,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
     if (buildRoute) {
       return owner.surface === "work" && owner.chatId === null && owner.context === "build";
     }
+    if (spaceRoute) return owner.context !== "build" && owner.surface !== "science" && owner.chatId !== null && mountedChats.has(owner.chatId);
     if (owner.context === "build" || owner.surface !== surface) return false;
     if (approvalPolicy(surface).listsEveryChat) return true;
     // 대화가 없는 요청은 오너가 전환기 점 목록에서 열었을 때만(아래 orphansRevealed).
@@ -114,7 +126,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
     && req.owner.context !== "build"
     && approvalPolicy(req.owner.surface).composerInPlace
     && currentChatId !== null
-    && req.owner.chatId === currentChatId,
+    && (req.owner.chatId === currentChatId || (spaceRoute && roomOfChat(req.owner.chatId) === currentChatId)),
   );
   useLayoutEffect(() => {
     if (!onStandaloneHeightChange) return;

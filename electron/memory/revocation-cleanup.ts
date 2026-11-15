@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 
+import { onDesktopStoreChange } from "../store/change-bus";
 import { openedStoreMigrationRole } from "../store/db";
 import { getMemoryDb as getDb } from "./database";
 import {
   forgetAgentNestExperienceMemoryForOwnerScope,
   reconcileProjectMemoryProjectionCleanup,
 } from "./project-files";
+import { onMemoryRevocationCleanupQueued } from "./revocations";
 
 const DEFAULT_BATCH_SIZE = 8;
 const CLEANUP_LEASE_MS = 30_000;
@@ -176,6 +178,36 @@ export async function drainMemoryRevocationCleanup(input: {
 let timer: NodeJS.Timeout | null = null;
 let controller: AbortController | null = null;
 let activeDrain: Promise<void> | null = null;
+let failedDrains = 0;
+let stopListening: (() => void) | null = null;
+let lastExternalWakeAt = 0;
+
+// Node timers overflow near 24.8 days; a longer wait is re-aimed when it fires.
+const MAX_TIMER_MS = 24 * 60 * 60_000;
+// A drain that claimed nothing although a target looked due (another worker took it, a clock step) is not retried in a tight loop.
+const EMPTY_PASS_FLOOR_MS = 1_000;
+const WAKE_DEBOUNCE_MS = 250;
+// Another process's commits arrive as chat changes, many per turn: one look at the queue per window is enough.
+const EXTERNAL_WAKE_WINDOW_MS = 5_000;
+/** A store that keeps failing is tried a few more times, further apart, then left alone until something wakes the worker. */
+export const MEMORY_REVOCATION_CLEANUP_FAILURE_WAITS_MS: readonly number[] = [5_000, 20_000, 60_000, 300_000];
+
+/**
+ * When the earliest waiting target can be claimed: its retry time, or the end of the lease another worker holds on it.
+ * 0 means now; null means nothing waits, so no timer is needed.
+ */
+export function nextMemoryRevocationCleanupDueMs(): number | null {
+  const row = getDb().prepare(
+    `SELECT MIN(MAX(COALESCE(next_attempt_at, ''),
+                    CASE WHEN lease_token IS NULL THEN '' ELSE COALESCE(lease_expires_at, '') END)) AS due
+       FROM memory_revocation_cleanup_targets
+      WHERE revocation_id IS NOT NULL AND state <> 'complete'`,
+  ).get() as { due: string | null } | undefined;
+  if (!row || row.due === null) return null;
+  if (row.due === "") return 0;
+  const due = Date.parse(row.due);
+  return Number.isFinite(due) ? due : 0;
+}
 
 function schedule(delayMs: number): void {
   if (!controller || controller.signal.aborted || timer) return;
@@ -185,20 +217,64 @@ function schedule(delayMs: number): void {
     const signal = controller.signal;
     activeDrain = drainMemoryRevocationCleanup({ signal })
       .then((receipt) => {
-        if (!signal.aborted) schedule(receipt.pending > 0 ? 1_000 : 30_000);
+        failedDrains = 0;
+        if (!signal.aborted) aim(receipt.claimed === 0 ? EMPTY_PASS_FLOOR_MS : 0);
       })
       .catch(() => {
-        if (!signal.aborted) schedule(5_000);
+        const wait = MEMORY_REVOCATION_CLEANUP_FAILURE_WAITS_MS[failedDrains];
+        failedDrains += 1;
+        if (!signal.aborted && wait !== undefined) schedule(wait);
       })
       .finally(() => { activeDrain = null; });
-  }, delayMs);
+  }, Math.min(MAX_TIMER_MS, Math.max(0, delayMs)));
   timer.unref?.();
+}
+
+/** One timer aimed at the earliest waiting target, and none when the queue is empty. */
+function aim(floorMs: number): void {
+  if (!controller || controller.signal.aborted || timer) return;
+  let due: number | null;
+  try { due = nextMemoryRevocationCleanupDueMs(); }
+  catch {
+    const wait = MEMORY_REVOCATION_CLEANUP_FAILURE_WAITS_MS[failedDrains];
+    failedDrains += 1;
+    if (wait !== undefined) schedule(wait);
+    return;
+  }
+  if (due === null) return;
+  schedule(Math.max(floorMs, due - Date.now()));
+}
+
+/**
+ * A forgotten memory just queued (or re-queued) a cleanup target: look at the queue now instead of at the timer's old aim.
+ * Safe to call from inside the writing transaction; the look happens after it commits.
+ */
+export function wakeMemoryRevocationCleanup(): void {
+  if (!controller || controller.signal.aborted) return;
+  failedDrains = 0;
+  // A running drain re-reads the queue when it ends, so it already covers this wake.
+  if (activeDrain) return;
+  if (timer) { clearTimeout(timer); timer = null; }
+  schedule(WAKE_DEBOUNCE_MS);
 }
 
 export function startMemoryRevocationCleanup(): void {
   if (openedStoreMigrationRole() !== "owner") return;
   if (controller && !controller.signal.aborted) return;
   controller = new AbortController();
+  failedDrains = 0;
+  onMemoryRevocationCleanupQueued(wakeMemoryRevocationCleanup);
+  // The background service forgets memories too (One turns run there) and cannot call into this process. Its turn commits
+  // chat rows, which reach this process's change bus, so that is when the queue is looked at for its targets.
+  const unsubscribe = onDesktopStoreChange((change) => {
+    if (change.entity !== "chat" || timer || activeDrain) return;
+    const now = Date.now();
+    if (now - lastExternalWakeAt < EXTERNAL_WAKE_WINDOW_MS) return;
+    lastExternalWakeAt = now;
+    wakeMemoryRevocationCleanup();
+  });
+  stopListening = () => { unsubscribe(); onMemoryRevocationCleanupQueued(null); };
+  // One pass at start picks up whatever a crash, a quit or the background service left queued.
   schedule(0);
 }
 
@@ -206,6 +282,8 @@ export async function stopMemoryRevocationCleanup(): Promise<void> {
   const current = controller;
   controller = null;
   current?.abort(new Error("memory_revocation_cleanup_stopped"));
+  stopListening?.();
+  stopListening = null;
   if (timer) clearTimeout(timer);
   timer = null;
   await activeDrain?.catch(() => {});

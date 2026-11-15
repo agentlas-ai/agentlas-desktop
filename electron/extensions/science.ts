@@ -7,6 +7,7 @@ import { createGunzip } from "node:zlib";
 import { electronAppVersion, isPackagedRuntime, optionalElectronAppPath, runtimeResourcesPath, userDataPath } from "../runtime-paths";
 import type {
   ProductExtensionInstallReceipt,
+  ProductExtensionPermission,
   ProductExtensionStatus,
   ProductExtensionUninstallReceipt,
   ScienceSuiteComponentId,
@@ -683,6 +684,13 @@ export function scienceSuiteStatus(): ScienceSuiteStatus {
 export function activeScienceExtension() {
   if (!remoteSuiteActivationMatches()) return null;
   return installer().activeRelease(SCIENCE_EXTENSION_ID);
+}
+
+/** One's app-control call has no Science view: it is held to what the active, verified release itself declares. */
+export function assertScienceExtensionReleasePermission(permission: ProductExtensionPermission): void {
+  const release = activeScienceExtension();
+  if (!release) throw new Error("science-extension-not-active");
+  if (!release.manifest.permissions.includes(permission)) throw new Error("science-extension-permission-denied");
 }
 
 export function scienceRendererPackStatuses() {

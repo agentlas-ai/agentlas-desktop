@@ -23,6 +23,7 @@ import { ContextBreakdown } from "@/components/ContextBreakdown";
 import type { ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import { sameRuntimeIdentity, selectionText } from "@shared/runtime-selection";
 import type { RuntimeStatus } from "@shared/types";
+import { tFor } from "@/lib/i18n";
 import styles from "./OneShell.module.css";
 
 export type OneComposerMenuKey = "plus" | "agents" | "model" | "effort" | "permission" | "context";
@@ -85,6 +86,8 @@ type Props = {
   contextChatId?: string | null;
   /** Optional exact trigger for a picker outside the conversation composer. */
   anchor?: HTMLElement | null;
+  /** Drawn in a Workspace pane (F-D5): the "+" menu has the same rows and words as a work conversation's (files, folder, plugins, Plan, Goal, Agent). Absent = unchanged. */
+  paneShape?: boolean;
   onMenuChange: (menu: OneComposerMenuKey | null) => void;
   onAttach: () => void;
   onAddFolder: () => void;
@@ -120,6 +123,7 @@ export function OneComposerControls({
   localFilesConnected,
   contextChatId,
   anchor,
+  paneShape,
   onMenuChange,
   onAttach,
   onAddFolder,
@@ -253,6 +257,15 @@ export function OneComposerControls({
         <div data-one-context-breakdown="true" style={{ padding: "14px 16px", minWidth: 240 }}>
           <ContextBreakdown chatId={contextChatId ?? null} locale={locale} fallbackLabel="—" fallbackNote="" />
         </div>
+      ) : activeMenu === "plus" && paneShape ? (
+        <div className={styles.composerPopoverList} data-pane-plus-menu="true">
+          <ComposerRow icon={<IconFileUp size={15} />} title={locale === "ko" ? "파일 추가" : "Add files"} compactDetails onClick={onAttach} />
+          <ComposerRow icon={<IconFolder size={15} />} title={locale === "ko" ? "폴더 연결" : "Connect folder"} checked={localFilesConnected} compactDetails onClick={onAddFolder} />
+          {localFilesConnected ? <ComposerRow icon={<IconShield size={15} />} title={locale === "ko" ? "폴더 연결 해제" : "Disconnect folder"} compactDetails onClick={onClearFolder} /> : null}
+          <ComposerRow icon={<IconLayers size={15} />} title={locale === "ko" ? "도구" : "Tools"} trailing={<IconChevronRight size={13} />} compactDetails onClick={onOpenPlugins} />
+          <div className={styles.composerPopoverDivider} />
+          <ComposerRow icon={<IconAtSign size={15} />} title={locale === "ko" ? "에이전트" : "Agent"} subtitle={locale === "ko" ? "이 턴에만 수동으로 추가" : "One-turn manual override"} compactDetails onClick={() => onMenuChange("agents")} />
+        </div>
       ) : activeMenu === "plus" ? (
         <div className={styles.composerPopoverList}>
           <div className={styles.composerPopoverSectionLabel}>{locale === "ko" ? "추가" : "Add"}</div>
@@ -280,9 +293,6 @@ export function OneComposerControls({
             compactDetails
             onClick={onClearFolder}
           /> : null}
-          <div className={styles.composerPopoverDivider} />
-          <ComposerRow icon={<IconRoute size={15} />} title={locale === "ko" ? "플랜 모드" : "Plan mode"} toggle checked={Boolean(turnOptions.planMode)} onClick={() => onToggleTurnOption("planMode")} />
-          <ComposerRow icon={<IconTarget size={15} />} title={locale === "ko" ? "목표 추진" : "Goal mode"} toggle checked={Boolean(turnOptions.goalMode)} onClick={() => onToggleTurnOption("goalMode")} />
           <div className={styles.composerPopoverDivider} />
           <ComposerRow
             icon={<IconAtSign size={15} />}

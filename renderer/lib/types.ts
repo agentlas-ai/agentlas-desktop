@@ -576,13 +576,3 @@ export type LocalizedItem = {
   tagline?: string;
   taglineEn?: string;
 };
-export type {
-  AliveChangedEvent,
-  AliveGetStateInput,
-  AliveModelOrderItem,
-  AliveSetEnabledInput,
-  AliveSetTokenLimitInput,
-  AliveState,
-  AliveStatus,
-  AliveSurface,
-} from "@shared/alive";

@@ -277,7 +277,16 @@ function ensureVideoJobsHydrated(): void {
   const operations = recoverableMediaOperations().filter((entry) => entry.modality === "video");
   hydrationStarted = true;
   for (const operation of operations) {
-    const job = jobFromOperation(operation);
+    // D6 (trial): one row whose output folder is outside this profile (a profile moved or restored, a row an older build wrote) threw here and the whole app start failed with media_video_operation_corrupt.
+    // That row alone is marked failed with its machine code (never deleted; its history stays) and the app starts; every other row is hydrated as before.
+    let job: MultimodalVideoJob;
+    try { job = jobFromOperation(operation); }
+    catch (error) {
+      const code = error instanceof Error && /^media_[a-z_]+$/.test(error.message) ? error.message : "media_video_operation_corrupt";
+      console.warn(`[multimodal-video] job ${operation.id} cannot be restored (${code}); it is marked failed, nothing is deleted`);
+      try { recordMediaFailed(operation.id, code, code); } catch { /* the row stays as it is; the next start looks again */ }
+      continue;
+    }
     jobs.set(job.id, job);
     void recoverVideoOperation(operation).catch((error: unknown) => failJob(operation.id, error));
   }

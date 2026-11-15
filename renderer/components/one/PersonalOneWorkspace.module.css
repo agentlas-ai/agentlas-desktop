@@ -92,7 +92,7 @@
 .turn[data-role=assistant]>img{align-self:flex-start}
 
 .bubble{--accent:var(--personal-bubble);position:relative;background:var(--im-in);color:var(--im-ink);padding:8px 14px;border-radius:19px;width:fit-content;max-width:min(76%,560px);overflow-wrap:anywhere;word-break:keep-all;align-self:flex-start;font-size:15px;line-height:1.4}
-.bubble[data-role=user]{--ink:var(--white);--ink-soft:var(--white-soft);background:var(--personal-bubble);color:var(--white);align-self:flex-end}
+.bubble[data-role=user]{--ink:var(--white);--ink-soft:var(--white-soft);--design-ink:var(--white);--design-ink-2:var(--white-soft);--design-muted:var(--white-soft);--design-faint:var(--white-faint);--design-line:rgba(255,255,255,.18);--design-line-2:rgba(255,255,255,.24);--output-surface-ink:var(--white);--design-bg:rgba(255,255,255,.05);--design-panel:rgba(255,255,255,.07);--design-panel-muted:rgba(255,255,255,.11);background:var(--personal-bubble);color:var(--white);align-self:flex-end}
 /* The inline design surface of each Markdown block sets 14px / 1.65 itself; a bubble reads at message size. */
 .bubble [data-design-surface]{font-size:15px!important;line-height:1.42!important}
 .bubble>[data-design-surface]{position:relative;z-index:2}
@@ -168,7 +168,6 @@
 .composerDock button:not(:where(.decisionStack *)){background:transparent}
 .composer{position:relative;width:100%;min-height:42px;display:grid;grid-template-columns:28px minmax(0,1fr) auto 28px;grid-template-areas:"plus text mic send";align-items:end;column-gap:0;border:0;padding:0;background:transparent}
 .composer::before{content:"";grid-column:2 / 5;grid-row:1 / -1;align-self:stretch;margin-left:8px;border:1px solid var(--im-hair);border-radius:21px;background:var(--im-bg);pointer-events:none}
-.composer:focus-within::before{border-color:color-mix(in srgb,var(--im-sub) 60%,var(--im-hair))}
 /* One shape only: the text keeps its place and the pill grows around it. The model and effort sit under the pill, so they never take room from the text. */
 .composer .plus{grid-area:plus;align-self:end;margin-bottom:7px}
 .composer .plus .iconButton{width:28px;height:28px;flex:0 0 28px;padding:0;border:0;background:var(--im-in);color:var(--im-sub);border-radius:50%;display:grid;place-items:center}
@@ -274,7 +273,7 @@
 .resultContents{display:flex;flex-direction:column;gap:14px;min-width:0;overflow-wrap:anywhere}.resultContents :is(img,video,audio){max-width:100%}.resultContents :is(pre,table){max-width:100%;overflow:auto}.resultState{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;font-size:12px;color:var(--im-sub)}.resultState small{margin-left:auto}.resultDirection{display:flex;flex-direction:column;gap:8px;padding-top:12px;border-top:1px solid var(--im-hair)}.resultDirection label{display:flex;flex-direction:column;gap:6px}.selectionChip{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--im-hair);border-radius:12px;font-size:12px}.selectionChip span{flex:1;min-width:0;overflow-wrap:anywhere}
 /* Keep the selected result mounted when the drawer closes or the window reflows. */
 .taskDrawer{position:relative;height:100%;overflow:auto;overscroll-behavior:contain;background:var(--im-bg);min-width:0;scrollbar-gutter:stable}.taskDrawer[hidden]{display:none}.taskDrawer .taskContents>header{position:sticky;top:0;z-index:2;background:var(--im-bg);padding:4px 0}.panelResize{position:absolute;left:0;top:0;bottom:0;width:6px;cursor:col-resize;touch-action:none;z-index:4}.panelResize:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}.resultContents :is(button,textarea):focus-visible,.root button:focus-visible{outline:2px solid var(--personal-bubble);outline-offset:2px}.root .resultContents :is(table,pre){display:block;max-width:100%;overflow:auto}.resultContents textarea{font-size:14px}.taskDrawer .taskContents{min-height:100%}
-.rangePicker{border:1px solid var(--im-hair);border-radius:12px;padding:10px;font-size:13px}.rangePicker summary{cursor:pointer;min-height:30px}.rangePicker label{margin-top:9px}.rangeFields{display:flex;flex-direction:column;gap:8px}.resultContents :is(input,select){min-width:0;width:100%;min-height:36px;border:1px solid var(--paper-edge-strong);border-radius:10px;background:var(--paper);color:var(--ink);padding:7px;font:inherit}.resultContents :is(input,select):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.rangePicker{border:1px solid var(--im-hair);border-radius:12px;padding:10px;font-size:13px}.rangePicker summary{cursor:pointer;min-height:30px}.rangePicker label{margin-top:9px}.rangeFields{display:flex;flex-direction:column;gap:8px}.resultContents :is(input,select){min-width:0;width:100%;min-height:36px;border:1px solid var(--paper-edge-strong);border-radius:10px;background:var(--paper);color:var(--ink);padding:7px;font:inherit}
 
 /* ── Detached (the companion window): no sidebar, the same conversation ── */
 .root[data-detached=true]{background:var(--im-bg);container-type:inline-size;flex-direction:row;min-width:0}

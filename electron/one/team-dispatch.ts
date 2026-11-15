@@ -87,6 +87,8 @@ export interface OneDispatchRow {
   graph_owner?: string | null;
   /** "write" for a session the AGI unblocker started (never full); null = the One delegation default (full). Host-written. */
   delegation_permission?: string | null;
+  /** The cut run the one restart resume was claimed for; null until then and again after a new direction. Host-written. */
+  restart_resume_of?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -96,17 +98,22 @@ const MAX_BRIEF = 8_000;
 const MAX_QUEUED_BRIEF = MAX_BRIEF * 2;
 const MAX_RESULT = 12_000;
 /*
- * Runaway brakes (pre-mortem 2026-09-26, EDGE-CASES.md). The depth rule stops a
- * teammate from delegating, but One itself can still bounce: a report turn carries
- * the teammate's text and One's tools, so that text can steer One into starting
- * another session, whose report starts another… Bounded here, not by prompt text.
+ * What bounds a loop of hand-overs (counted brakes were arbitrary numbers and are gone).
+ * The depth rule stops a teammate from delegating; one seat runs one session at a time for a parent (seatBlocker); the same
+ * brief to the same teammate is one session inside DUPLICATE_WINDOW_MS; the owner's Stop and budget end the rest.
+ * The former "8 starts per hour" and "12 queued" limits were removed with the fixed "3 running".
  */
-/** Teammate sessions from one One conversation running at the same time. */
-const MAX_RUNNING_PER_PARENT = 3;
-/** Sessions one One conversation may start per rolling hour. */
-const MAX_STARTS_PER_PARENT_PER_HOUR = 8;
-/** Hand-overs one One conversation may keep waiting in the queue behind the two brakes above; the next one is refused (typed). */
-const MAX_QUEUED_PER_PARENT = 12;
+/**
+ * Teammate sessions from one One conversation running at the same time. The default follows Claude Code's documented default
+ * for concurrent subagents (20) and, like there, the owner may change it (AGENTLAS_MAX_CONCURRENT_TEAM_SESSIONS). What the
+ * machine can run at once is the run-slot budget's business (runtime/run-slots.ts), not this number. More than this wait in
+ * the queue and start by themselves (startQueuedDispatches); nothing is refused.
+ */
+const DEFAULT_MAX_RUNNING_PER_PARENT = 20;
+function maxRunningPerParent(): number {
+  const configured = Number.parseInt(process.env.AGENTLAS_MAX_CONCURRENT_TEAM_SESSIONS ?? "", 10);
+  return Number.isFinite(configured) && configured >= 1 ? configured : DEFAULT_MAX_RUNNING_PER_PARENT;
+}
 /** The same brief to the same teammate is one session only while it runs or within this window. */
 const DUPLICATE_WINDOW_MS = 10 * 60_000;
 
@@ -149,6 +156,8 @@ function ensureTable(): void {
   getDb().exec("CREATE INDEX IF NOT EXISTS idx_one_team_dispatches_graph_owner ON one_team_dispatches(graph_owner)");
   // The permission a session was started with when it is lower than the One delegation default (AGI-started sessions: write).
   if (!columns.has("delegation_permission")) getDb().exec("ALTER TABLE one_team_dispatches ADD COLUMN delegation_permission TEXT");
+  // The cut run a restart resume was claimed for (resumeInterruptedDispatch); cleared by a new direction. Lives and goes with the row.
+  if (!columns.has("restart_resume_of")) getDb().exec("ALTER TABLE one_team_dispatches ADD COLUMN restart_resume_of TEXT");
   const resultColumns = new Set((getDb().prepare("PRAGMA table_info(one_team_dispatch_results)").all() as Array<{name:string}>).map(column=>column.name));
   for (const name of ["owner_scope","brief","parent_run_id"]) {
     if (!resultColumns.has(name)) getDb().exec(`ALTER TABLE one_team_dispatch_results ADD COLUMN ${name} TEXT`);
@@ -208,7 +217,11 @@ function activeMembers(): OneOrgMember[] {
   return runtime().org.getOneOrgState().members.filter((member) => !member.archivedAt);
 }
 
-/** Every teammate ever on the roster, archived included: an archived teammate's own chat is still not One's. */
+/**
+ * Every teammate ever on the roster, archived included: an archived teammate's own chat is still not One's. Stays the SEAT table on purpose (Agentlas 2.0 D5): every path that
+ * gives an agent a conversation of origin `one` seats it first (`ensureOneOrgSeat`), and a legacy room's controller is an installed row that holds no seat, so a registry read here
+ * would take its own conversation away from it.
+ */
 function memberAgentIds(): Set<string> {
   return new Set(runtime().org.getOneOrgState().members.map((member) => member.installedAgentId));
 }
@@ -346,25 +359,57 @@ function startRefusal(error: unknown): Error {
   )}`), { startRefusalCode: code });
 }
 
+/**
+ * Agentlas 2.0 D6: the personal agent hands work to, or invites, a teammate only when that agent is usable - registered here with its folder, not archived
+ * (agents/usability.ts, the one question every place asks). Without this the start would be accepted and the teammate's own run would refuse a moment later, out of
+ * the personal agent's sight. The refusal is an answer, not a failed step (TEAM_REFUSALS_AS_ANSWER), and carries the closed code and the structured `register` words.
+ * Off the 2.0 switch it never refuses. A folder that vanished and can be reconnected still passes (the turn runs from the stored prompt).
+ */
+export function assertOneTeamMemberUsable(member: Pick<OneOrgMember, "installedAgentId">): void {
+  const blocked = oneTeamMemberUsabilityBlock(member);
+  if (blocked) throw Object.assign(new Error(`one-team-member-unusable: ${blocked.message}`), { code: blocked.code, register: blocked.register });
+}
+
+/** The same question for `one_team_list`: why this teammate cannot be started right now (closed code + structured words + the sentence), or null. */
+export function oneTeamMemberUsabilityBlock(member: Pick<OneOrgMember, "installedAgentId">): { code: string; message: string; register: { next: string; slugs: string[]; agentIds: string[] } } | null {
+  // Loaded on use, like org.ts registerFirstRefusal: a host that cannot load the module (a plain-Node gate reading the TypeScript) simply has no refusal to give.
+  try {
+    const usability = require("../agents/usability") as typeof import("../agents/usability"); // eslint-disable-line @typescript-eslint/no-require-imports
+    const result = usability.agentUsability({ agentId: member.installedAgentId });
+    if (result.usable || (result.why === "no_folder" && result.reconnectable)) return null;
+    const error = usability.usabilityError(result, ko() ? "ko" : "en");
+    return { code: error.code, message: error.message, register: usability.usabilityRegisterField(error) };
+  } catch { return null; }
+}
+
+/**
+ * The agent a name, slug or id points at, from the registry (team-roster.ts), as the seat the dispatch machinery keys on. An agent that holds no seat yet is seated
+ * here exactly as a new Agent Chat seats it (`ensureOneOrgSeat`: the same registered-first check, one idempotent row, nothing else), so naming a registered agent never needs
+ * a seat to exist first. A refusal (not registered, no folder, archived) is the closed `one-team-member-unusable` answer with the words to register.
+ */
 export function resolveOneTeamMember(query: string): OneOrgMember {
-  const wanted = normalizeName(query ?? "");
-  if (!wanted) throw new Error(`one-team-member-required: ${ko() ? "맡길 팀원 이름을 적어 주세요(one_team_list 참고)." : "Name the teammate (see one_team_list)."}`);
-  const members = activeMembers();
-  const exact = members.filter((member) => [member.id, member.installedAgentId, member.agentSlug, member.displayName, member.nameEn]
-    .some((value) => typeof value === "string" && normalizeName(value) === wanted));
-  const pool = exact.length > 0 ? exact : members.filter((member) => [member.displayName, member.nameEn, member.agentSlug]
-    .some((value) => typeof value === "string" && normalizeName(value).includes(wanted)));
-  if (pool.length === 1) return pool[0];
-  const names = members.map((member) => member.displayName).join(", ");
-  if (pool.length === 0) {
-    throw new Error(ko()
-      ? `one-team-member-not-found: "${query}"에 맞는 팀원이 없어요. 지금 팀원: ${names || "(없음)"}. 아무것도 시작되지 않았어요. 없는 역할이면 one_team_create_member 로 팀원을 먼저 만드세요.`
-      : `one-team-member-not-found: no teammate matches "${query}". Teammates: ${names || "(none)"}. Nothing was started. If nobody fits, create one first with one_team_create_member.`);
+  const entry = (require("./team-roster") as typeof import("./team-roster")).resolveRosterEntry(query); // eslint-disable-line @typescript-eslint/no-require-imports
+  assertOneTeamMemberUsable({ installedAgentId: entry.agentId });
+  return seatOfRosterAgent(entry.agentId, entry.name);
+}
+
+/** The agent's active seat; made when it has none. A seat the join guard refuses (archived person, hidden agent, missing source) is the same closed answer, not a failed step. */
+export function seatOfRosterAgent(agentId: string, name: string): OneOrgMember {
+  const find = () => activeMembers().find((member) => member.installedAgentId === agentId);
+  const existing = find();
+  if (existing) return existing;
+  try { runtime().org.ensureOneOrgSeat(agentId); }
+  catch (error) {
+    const detail = error as { code?: unknown; next?: unknown; slugs?: unknown; agentIds?: unknown };
+    const message = error instanceof Error ? error.message : String(error);
+    throw Object.assign(new Error(`one-team-member-unusable: ${message}`), {
+      code: typeof detail.code === "string" ? detail.code : "agent_unavailable",
+      ...(detail.next ? { register: { next: detail.next, slugs: detail.slugs ?? [], agentIds: detail.agentIds ?? [] } } : {}),
+    });
   }
-  const matches = pool.map((member) => member.displayName).join(", ");
-  throw new Error(ko()
-    ? `one-team-member-ambiguous: "${query}"에 맞는 팀원이 여럿이에요(${matches}). 정확한 이름이나 member_id 로 다시 맡기세요. 아무것도 시작되지 않았어요.`
-    : `one-team-member-ambiguous: "${query}" matches ${matches}. Use the exact name or member id. Nothing was started.`);
+  const seat = find();
+  if (!seat) throw new Error(`one-team-member-unusable: ${ko() ? `${name}을(를) 지금 쓸 수 없어요.` : `${name} cannot be used right now.`}`);
+  return seat;
 }
 
 function row(id: string): OneDispatchRow | null {
@@ -552,6 +597,80 @@ function orphanState(dispatch: OneDispatchRow, graceMs: number): OrphanState {
   return { kind: "interrupted", runId };
 }
 
+/** How long a resume another process claimed may take to show its run before the job is closed as interrupted after all. */
+const RESUME_CLAIM_STALE_MS = 2 * 60_000;
+
+/**
+ * A teammate session whose process died under it (an app restart or update, a crash) is continued once, in its own session: its own
+ * brief again, with the registered earlier-attempt line, so it reads what it already did before doing anything again. Before, the job
+ * closed as "interrupted" and One was told to start nothing new, so the owner's request ended at every update (owner store
+ * 21 of 369 jobs, none handed over again). A second cut in a row (the resumed run cut too), a teammate no longer on the
+ * team, a stop the owner asked for, a room whose result cannot be relayed, or a refused start closes it as interrupted exactly as before.
+ *
+ * Main and the background service both sweep after an update. The claim is `restart_resume_of` (the cut run) written only where it is
+ * NULL, so one process takes it. The other one sees the claim for the same cut and waits for the run it starts instead of closing the
+ * job beside it; only a claim older than RESUME_CLAIM_STALE_MS whose run never appeared (the claiming process died) is closed.
+ * A new direction from One (oneTeamSteer) clears the claim: the session then has one resume again for its next cut.
+ */
+function resumeInterruptedDispatch(dispatch: OneDispatchRow, cutRunId: string): "resumed" | "claimed_elsewhere" | "retry_later" | "not_resumed" {
+  try {
+    if (dispatch.restart_resume_of) {
+      const claimedAt = Date.parse(dispatch.updated_at);
+      return dispatch.restart_resume_of === cutRunId && Number.isFinite(claimedAt) && Date.now() - claimedAt < RESUME_CLAIM_STALE_MS
+        ? "claimed_elsewhere" : "not_resumed";
+    }
+    // The same conditions the result needs to reach One (reportToOne): a bound receiver and the room; and the teammate's own chat.
+    const { invocationService, chats } = runtime();
+    const member = activeMembers().find((candidate) => candidate.id === dispatch.member_id);
+    if (!member || member.installedAgentId !== dispatch.member_agent_id || dispatch.child_chat_id.startsWith(QUEUED_CHAT_PREFIX)
+      || stopWantedRun(dispatch.id) !== null || !dispatchReceiverCurrent(dispatch) || !dispatchHandoff(dispatch).relayAllowed
+      || !chats.getChat(dispatch.parent_chat_id) || !chats.getChat(dispatch.child_chat_id)) return "not_resumed";
+    const now = new Date().toISOString();
+    const claimed = getDb().prepare("UPDATE one_team_dispatches SET restart_resume_of = ?, updated_at = ? WHERE id = ? AND status = 'running' AND restart_resume_of IS NULL")
+      .run(cutRunId, now, dispatch.id).changes === 1;
+    if (!claimed) return "claimed_elsewhere";
+    installSettleListener();
+    const { withEarlierAttempt } = require("../invocation/earlier-attempt") as typeof import("../invocation/earlier-attempt");
+    const delegation = teamDelegationPermission(dispatch.delegation_permission);
+    let result: ReturnType<typeof invocationService.steer>;
+    try {
+      result = invocationService.steer(withEarlierAttempt({
+        chatId: dispatch.child_chat_id,
+        userPrompt: withRoomParagraph(dispatch.brief, dispatch.parent_chat_id, member),
+        promptOrigin: "system",
+        locale: currentUiLocale(),
+        permissions: delegation,
+        onePermissionMode: delegation,
+        taskIntent: "conversation",
+        oneMode: true,
+        ...teammateRuntimeSelection(dispatch.parent_chat_id, member),
+      }));
+    } catch (error) {
+      // Refused for a moment before anything started (the runtime still coming up after the update, a busy store): the claim goes
+      // back and the job stays running, so the next sweep tries again. Any other refusal closes it below, as before.
+      // Required here, not at the top: the contract gates load this file alone and resolve only the modules they stub.
+      const { isTransientSendRefusal, startRefusedBeforeDispatchWaits } = require("../../shared/transient-send-refusal") as typeof import("../../shared/transient-send-refusal");
+      if (!isTransientSendRefusal(error) && !startRefusedBeforeDispatchWaits(error)) throw error;
+      getDb().prepare("UPDATE one_team_dispatches SET restart_resume_of = NULL WHERE id = ? AND restart_resume_of = ?").run(dispatch.id, cutRunId);
+      return "retry_later";
+    }
+    // The run is started: a failed bookkeeping write must not close the job beside it. latestChildRun finds the new run in the
+    // child chat's ledger even when child_run_id still names the cut one.
+    try {
+      getDb().prepare("UPDATE one_team_dispatches SET child_run_id = COALESCE(?, child_run_id), updated_at = ? WHERE id = ? AND status = 'running'")
+        .run(result.runId ?? result.activeRunId ?? null, new Date().toISOString(), dispatch.id);
+      const continued = row(dispatch.id);
+      if (continued && continued.child_run_id !== dispatch.child_run_id) appendParentNotice(continued, "link");
+    } catch (error) {
+      console.warn("[one-team] resumed session bookkeeping skipped:", error instanceof Error ? error.message : error);
+    }
+    return "resumed";
+  } catch (error) {
+    console.warn("[one-team] interrupted session not resumed:", error instanceof Error ? error.message : error);
+    return "not_resumed";
+  }
+}
+
 /** Running rows whose child no process holds any more: settled from the durable receipt, or closed as interrupted. */
 export function settleOrphanedDispatches(graceMs: number): void {
   try {
@@ -562,7 +681,10 @@ export function settleOrphanedDispatches(graceMs: number): void {
       if (state.kind === "live") { installSettleListener(); continue; }
       if (state.kind === "quiet") continue;
       if (state.kind === "settled") finalizeDispatch(dispatch.id, state.status, state.runId);
-      else finalizeDispatch(dispatch.id, "interrupted", state.runId, true);
+      else {
+        const resume = resumeInterruptedDispatch(dispatch, state.runId);
+        if (resume === "not_resumed") finalizeDispatch(dispatch.id, "interrupted", state.runId, true);
+      }
     }
   } catch (error) {
     console.warn("[one-team] orphaned dispatch check skipped:", error instanceof Error ? error.message : error);
@@ -1485,6 +1607,23 @@ export async function stopTeamDispatchOfRun(runId: string, cancelRun: (runId: st
   return { status: result.kind === "stopped" ? (result.cancel === "not-found" ? "requested" : result.cancel) : "not-found" };
 }
 
+/**
+ * The room's own Stop ends the room's teammate jobs too (desktop values S2): with no count limit on what teammates say to each other
+ * (one/room-chat.ts), a back-and-forth between two running jobs lasts until a job ends, so the one Stop of the room must reach them, not only each
+ * card's own Stop. Every running or queued job of this room that no open graph step owns is stopped the same way a card's Stop does (stopTeamDispatch).
+ * A graph step's job keeps its own close (cancelGraphStepOwnedWork). Returns how many jobs were stopped; never throws.
+ */
+export async function stopRoomTeamJobs(roomChatId: string, cancelRun: (runId: string) => Promise<CancelOutcome> | CancelOutcome): Promise<number> {
+  let stopped = 0;
+  try {
+    const jobs = getDb().prepare("SELECT * FROM one_team_dispatches WHERE parent_chat_id = ? AND status IN ('running', 'queued') AND graph_owner IS NULL").all(roomChatId) as OneDispatchRow[];
+    for (const job of jobs) {
+      try { if ((await stopTeamDispatch(job, cancelRun)).kind === "stopped") stopped += 1; } catch (error) { console.warn(`[one-team] room stop could not stop dispatch=${job.id}:`, error instanceof Error ? error.message : error); }
+    }
+  } catch { /* a store without the table has no jobs */ }
+  return stopped;
+}
+
 /** A stop the service did not answer is asked again by the minute sweep, a few times; the saved wish then closes the job when it ends. */
 export async function retryWantedStops(): Promise<void> {
   const running = getDb().prepare("SELECT * FROM one_team_dispatches WHERE status = 'running'").all() as OneDispatchRow[];
@@ -1557,48 +1696,74 @@ function teammateIdentity(member: OneOrgMember): { package_name?: string; descri
   return out;
 }
 
-/** `can_join_group` + the machine reason when false (`group_unavailable`, the same codes the join guard refuses with). */
-export function oneTeamGroupJoinFields(member: Pick<OneOrgMember, "groupJoinRefusal" | "source">): { can_join_group: boolean; group_unavailable?: string } {
-  const code = member.groupJoinRefusal ?? (member.source !== "local" ? "group_requires_local" : null);
-  return code ? { can_join_group: false, group_unavailable: code } : { can_join_group: true };
+/** The list's default and largest page: the registry can hold a hundred agents, and every row is read by the model on every call (it narrows with `query`). */
+const ROSTER_DEFAULT_LIMIT = 20;
+const ROSTER_MAX_LIMIT = 50;
+
+/** The same identity lines as `teammateIdentity`, for an agent that holds no seat (its own package words). */
+function agentIdentity(entry: import("./team-roster").RosterEntry): { package_name?: string; description?: string } {
+  const out: { package_name?: string; description?: string } = {};
+  const packageName = clip(entry.nameEn, 80);
+  if (packageName && normalizeName(packageName) !== normalizeName(entry.name)) out.package_name = packageName;
+  try {
+    const lib = require("../../shared/agent-description") as typeof import("../../shared/agent-description");
+    const names = [entry.name, entry.nameEn, entry.slug];
+    const text = lib.usableAgentDescription(entry.agent.tagline, names) ?? lib.usableAgentDescription(entry.agent.taglineEn, names);
+    if (text) out.description = lib.clampAgentDescription(text);
+  } catch { /* the list is still the list without a description */ }
+  return out;
 }
 
-export function oneTeamList(caller: OneTeamCaller) {
+/**
+ * The agents this conversation may name, from the registry (Agentlas 2.0 D5, team-roster.ts): not the seat table. `query` narrows by name, id or a word of the one-line
+ * description; `limit` pages (default 20): the answer carries the total so a longer registry is searched, never dumped. The agents that already worked for the owner
+ * come first. Each row says whether it can start work now and whether it can be put in an Agent Chat, with the host's own closed codes.
+ */
+export function oneTeamList(caller: OneTeamCaller, input: { query?: unknown; limit?: unknown } = {}) {
   const ownerChatId = assertCaller(caller.chatId);
-  const group = groupOf(ownerChatId);
   recoverOneTeamDispatches();
   ensureTable();
+  const roster = require("./team-roster") as typeof import("./team-roster"); // eslint-disable-line @typescript-eslint/no-require-imports
+  const query = typeof input?.query === "string" ? input.query.trim().slice(0, 120) : "";
+  const asked = typeof input?.limit === "number" && Number.isInteger(input.limit) ? input.limit : ROSTER_DEFAULT_LIMIT;
+  const limit = Math.min(ROSTER_MAX_LIMIT, Math.max(1, asked));
   const open = getDb().prepare(
     "SELECT * FROM one_team_dispatches WHERE parent_chat_id = ? ORDER BY created_at DESC LIMIT 20",
   ).all(ownerChatId) as OneDispatchRow[];
+  const entries = roster.matchRoster(roster.registeredRoster(), query, { describe: true });
+  // Seated agents with recent work first (they are the ones the owner uses), then the rest in registry order.
+  const ranked = entries.map((entry, index) => ({ entry, index }))
+    .sort((a, b) => (Date.parse(b.entry.seat?.lastActivityAt ?? "") || 0) - (Date.parse(a.entry.seat?.lastActivityAt ?? "") || 0) || a.index - b.index)
+    .map((item) => item.entry);
   return {
-    conversation: {
-      chat_id: ownerChatId,
-      is_group: group !== null,
-      group: group ? { id: group.id, revision: group.revision, member_agent_ids: [...group.memberAgentIds] } : null,
-    },
+    conversation: { chat_id: ownerChatId },
+    roster: { total: ranked.length, shown: Math.min(ranked.length, limit), ...(ranked.length > limit ? { note: "more registered agents match; narrow with query" } : {}) },
     // Availability, not the owner's status line. "Failed · review needed" is the owner's call to action; a One that read it
     // never started that teammate again (dev replay r08, 2026-10-17: motion grap and Blender Animator skipped because the
     // list said so), and a failure stays on the seat until that teammate's next run, so one failure idled it for good.
     // start_session never refused such a teammate. A typed `last_run: "failed"` still kept it idle in most real-model runs,
     // so the seat's last outcome is not listed; sessions this conversation started carry their own outcome below.
-    teammates: activeMembers().map((member) => ({
-      member_id: member.id,
-      name: member.displayName,
-      name_en: member.nameEn,
-      ...teammateIdentity(member),
-      now: member.statusKind === "working" ? "working" : member.statusKind === "waiting" ? "waiting_for_owner"
-        : member.statusKind === "locked" ? "locked" : "idle",
-      last_activity_at: member.lastActivityAt,
-      can_start: !member.unavailable && member.statusKind !== "locked",
-      ...(member.unavailable ? { unavailable: member.unavailable.code } : {}),
-      // Joining a group is a different test from starting a session (hidden agents, expired leases and Hub/cloud seats can start
-      // but cannot join), so the list says so with the host's own machine code; the model never has to find out by being refused.
-      ...oneTeamGroupJoinFields(member),
-      installed_agent_id: member.installedAgentId,
-      source: member.source,
-      in_current_group: group?.memberAgentIds.includes(member.installedAgentId) ?? false,
-    })),
+    teammates: ranked.slice(0, limit).map((entry) => {
+      const seat = entry.seat;
+      // Agentlas 2.0 D6: an agent that is not registered here / has no folder is listed as one that cannot start, with the closed code and the register words (switch off: never).
+      const blocked = oneTeamMemberUsabilityBlock({ installedAgentId: entry.agentId });
+      const seating = blocked ? null : runtime().org.oneAgentSeatingRefusal(entry.agentId);
+      return {
+        // What to pass back: the seat id when the agent holds one (it is what sessions carry), else the agent id. Either is accepted.
+        member_id: seat?.id ?? entry.agentId,
+        name: entry.name,
+        name_en: entry.nameEn,
+        ...(seat ? teammateIdentity(seat) : agentIdentity(entry)),
+        now: seat ? (seat.statusKind === "working" ? "working" : seat.statusKind === "waiting" ? "waiting_for_owner" : seat.statusKind === "locked" ? "locked" : "idle") : "idle",
+        last_activity_at: seat?.lastActivityAt ?? null,
+        can_start: !seat?.unavailable && !blocked && seat?.statusKind !== "locked",
+        ...(seat?.unavailable ? { unavailable: seat.unavailable.code } : blocked ? { unavailable: blocked.code, register: blocked.register } : {}),
+        // Joining an Agent Chat is a different test from starting a session: the host's own closed code, found before any write, so the model never has to be refused to learn it.
+        can_join_chat: !blocked && seating === null,
+        ...(blocked ? { chat_unavailable: blocked.code } : seating ? { chat_unavailable: seating } : {}),
+        source: seat?.source ?? runtime().org.oneAgentSource(entry.agent),
+      };
+    }),
     sessions_from_this_conversation: open.filter(dispatch=>dispatchReceiverCurrent(dispatch)
       && (isLive(dispatch) || dispatchHandoff(dispatch).relayAllowed)).map((dispatch) => ({
       ...view(dispatch),
@@ -1639,6 +1804,16 @@ export function roomRuntimeSelectionForTeammate(parentChatId: string, member: On
   }
 }
 
+/**
+ * The request field for a teammate turn: the room's model, by the same rule for the start, a restart resume and a direction from One.
+ * The start's choice is not stored on the teammate's chat (mcp/client.ts keeps a per-run choice off the saved one), so a resume or a
+ * direction without it ran on the teammate's default model: another runtime than the session it continues.
+ */
+function teammateRuntimeSelection(parentChatId: string, member: OneOrgMember | undefined): { runtimeSelection?: import("../../shared/types").RuntimeSelection } {
+  const selection = member ? roomRuntimeSelectionForTeammate(parentChatId, member) : undefined;
+  return selection ? { runtimeSelection: selection } : {};
+}
+
 /** Owner 2026-10-04: "one이 다른곳에 시키는건 무조건 전체권한에 항상허용". */
 export const ONE_DELEGATION_PERMISSION = "full" as const;
 
@@ -1660,6 +1835,7 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   if (!brief) throw new Error("one-team-brief-required: write the brief (what, why, what done looks like).");
   if (brief.length > MAX_BRIEF) throw new Error(`one-team-brief-too-long: keep the brief under ${MAX_BRIEF} characters.`);
   const member = resolveOneTeamMember(typeof input.member === "string" ? input.member : "");
+  assertOneTeamMemberUsable(member);
   const hash = briefHash(member.id, brief);
   ensureTable();
   recoverOneTeamDispatches();
@@ -1690,25 +1866,16 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const runningNow = (getDb().prepare(
     "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'running'",
   ).get(parentChatId) as { n: number }).n;
-  // The running cap is a brake on how many sessions work at once, not a reason to refuse the owner's work: the job is queued like
-  // the busy-seat case below and starts by itself when one finishes (the drain keeps the cap, startQueuedDispatches). Only a queue that
-  // already holds MAX_QUEUED_PER_PARENT jobs refuses, with the typed code: a loop of hand-overs still cannot grow without bound.
-  const capped: "running" | "rate" | null = runningNow >= MAX_RUNNING_PER_PARENT ? "running" : null;
-  if (capped) refuseWhenQueueFull(parentChatId, runningNow);
+  // The concurrent limit never refuses the owner's work: the job is queued like the busy-seat case below and starts by itself when
+  // one finishes (the drain keeps the limit, startQueuedDispatches). The queue has no size limit; every queued job leaves it by
+  // starting, by being closed with a typed cause, or by one_team_cancel_queued.
+  const capReason: "running" | null = runningNow >= maxRunningPerParent() ? "running" : null;
   // Per-seat cap: one teammate never has two runs at once for the same parent (also with new_session=true, which would
   // otherwise open a second child chat for the same seat). A session parked on the owner has no live turn and is exempt
   // (new work for that teammate gets its own session, see `parked` below). A second request is not refused: it is accepted
   // as `queued` below and starts by itself, in order, when the seat's running session settles (owner principle: no refusal
   // where the work can wait).
   const blocker = seatBlocker(parentChatId, member);
-  const startedLastHour = (getDb().prepare(
-    "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND created_at >= ?",
-  ).get(parentChatId, new Date(Date.now() - 3_600_000).toISOString()) as { n: number }).n;
-  // The hourly brake keeps its bound: the job waits in the queue and the drain starts it only while the hour has room
-  // (startQueuedDispatches), so a loop of hand-overs is slowed, never refused and never unbounded.
-  const rateCapped = !capped && startedLastHour >= MAX_STARTS_PER_PARENT_PER_HOUR;
-  if (rateCapped) refuseWhenQueueFull(parentChatId, runningNow);
-  const capReason: "running" | "rate" | null = capped ?? (rateCapped ? "rate" : null);
   const { chats } = runtime();
   const title = brief.split(/\r?\n/, 1)[0]!.slice(0, 120);
   const fresh = input.newSession === true;
@@ -1857,10 +2024,7 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
       onePermissionMode: delegation,
       taskIntent: "conversation",
       oneMode: true,
-      ...((): { runtimeSelection?: import("../../shared/types").RuntimeSelection } => {
-        const roomSelection = roomRuntimeSelectionForTeammate(parentChatId, member);
-        return roomSelection ? { runtimeSelection: roomSelection } : {};
-      })(),
+      ...teammateRuntimeSelection(parentChatId, member),
     }, undefined, undefined, undefined, "one-dispatch-brief");
   } catch (error) {
     if (input.queuedId) {
@@ -1887,19 +2051,9 @@ function launchDispatch(input: { parentChatId: string; member: OneOrgMember; bri
  * non-error "queued behind <session>" answer. `chatId` is the session to continue (null = a new session when it starts).
  */
 /** The queue ceiling: a conversation whose queue is already this long is refused with the typed code (never unbounded growth). */
-function refuseWhenQueueFull(parentChatId: string, runningNow: number): void {
-  const waiting = (getDb().prepare(
-    "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'queued'",
-  ).get(parentChatId) as { n: number }).n;
-  if (waiting < MAX_QUEUED_PER_PARENT) return;
-  throw new Error(ko()
-    ? `one-team-too-many-running: 이 대화에서 맡긴 일이 ${runningNow}개 진행 중이고 ${waiting}개가 줄에 서 있어요. 일부가 끝난 뒤 맡기거나 one_team_steer 로 방향을 더하세요.`
-    : `one-team-too-many-running: ${runningNow} teammate sessions from this conversation are running and ${waiting} more are queued. Wait for some to finish or use one_team_steer.`);
-}
-
 function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member: OneOrgMember; brief: string; hash: string; blocker: OneDispatchRow | null; chatId: string | null; graphOwner?: string | null; parentRunId?: string | null; delegationPermission?: string | null;
-  /** Queued because a brake (not a busy seat) was reached: "running" = the concurrent cap, "rate" = the hourly cap. */
-  cap?: "running" | "rate" | null }) {
+  /** Queued because the concurrent limit (not a busy seat) was reached. */
+  cap?: "running" | null }) {
   const { parentChatId, member, brief, hash, blocker } = input;
   const id = `dispatch-${randomUUID()}`;
   const now = new Date().toISOString();
@@ -1931,19 +2085,14 @@ function enqueueDispatch(input: { fresh?: boolean; parentChatId: string; member:
     queue_position: ahead + 1,
     owner_message: input.cap === "running"
       ? ownerMessage(
-        `이 대화에서 동시에 맡길 수 있는 일(${MAX_RUNNING_PER_PARENT}개)이 모두 진행 중이라 이 일은 줄에 세웠어요. 하나가 끝나면 자동으로 시작하고, 결과는 이 대화로 알려 드릴게요.`,
-        `${MAX_RUNNING_PER_PARENT} teammate sessions are already running from this conversation, so this one is queued. It starts by itself when one finishes, and the result comes back to this conversation.`,
+        `이 대화에서 동시에 맡길 수 있는 일(${maxRunningPerParent()}개)이 모두 진행 중이라 이 일은 줄에 세웠어요. 하나가 끝나면 자동으로 시작하고, 결과는 이 대화로 알려 드릴게요.`,
+        `${maxRunningPerParent()} teammate sessions are already running from this conversation, so this one is queued. It starts by itself when one finishes, and the result comes back to this conversation.`,
       )
-      : input.cap === "rate"
-        ? ownerMessage(
-          `한 시간에 맡길 수 있는 일(${MAX_STARTS_PER_PARENT_PER_HOUR}개)에 닿아 이 일은 줄에 세웠어요. 여유가 생기면 자동으로 시작하고, 결과는 이 대화로 알려 드릴게요.`,
-          `The hourly limit of ${MAX_STARTS_PER_PARENT_PER_HOUR} hand-overs was reached, so this one is queued. It starts by itself when there is room, and the result comes back to this conversation.`,
-        )
-        : ownerMessage(
+      : ownerMessage(
           `팀원 ${member.displayName}은 지금 다른 일을 하고 있어 이 일은 줄에 세웠어요. 앞 일이 끝나면 자동으로 시작하고, 결과는 이 대화로 알려 드릴게요.`,
           `Teammate ${member.displayName} is busy with another job, so this one is queued. It starts by itself when the earlier job finishes, and the result comes back to this conversation.`,
         ),
-    note: `queued ${input.cap === "running" ? `because ${MAX_RUNNING_PER_PARENT} sessions are already running` : input.cap === "rate" ? "because the hourly hand-over limit was reached" : `behind ${blocker ? `session ${blocker.id}` : "the teammate's current session"}`}; not an error and nothing to retry. It starts automatically, in order. Progress and result arrive here and wake this conversation. Do not poll; end the turn. Never show session_id or quote the result.`,
+    note: `queued ${input.cap === "running" ? `because ${maxRunningPerParent()} sessions are already running` : `behind ${blocker ? `session ${blocker.id}` : "the teammate's current session"}`}; not an error and nothing to retry. It starts automatically, in order. Progress and result arrive here and wake this conversation. Do not poll; end the turn. Never show session_id or quote the result.`,
   };
 }
 
@@ -1983,12 +2132,7 @@ export function startQueuedDispatches(): void {
       }
       if (seatBlocker(item.parent_chat_id, member)) continue;
       const running = (getDb().prepare("SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'running'").get(item.parent_chat_id) as { n: number }).n;
-      if (running >= MAX_RUNNING_PER_PARENT) continue;
-      // The hourly brake holds for a queued job too: it starts only while the hour has room (jobs already started, not the queue itself).
-      const startedThisHour = (getDb().prepare(
-        "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND created_at >= ? AND status != 'queued'",
-      ).get(item.parent_chat_id, new Date(Date.now() - 3_600_000).toISOString()) as { n: number }).n;
-      if (startedThisHour >= MAX_STARTS_PER_PARENT_PER_HOUR) continue;
+      if (running >= maxRunningPerParent()) continue;
       let continuing: ReturnType<typeof chats.getChat> | null = null;
       if (!item.child_chat_id.startsWith(QUEUED_CHAT_PREFIX)) {
         const candidate = chats.getChat(item.child_chat_id);
@@ -2199,6 +2343,7 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
       onePermissionMode: teamDelegationPermission(dispatch.delegation_permission),
       taskIntent: "conversation",
       oneMode: true,
+      ...teammateRuntimeSelection(dispatch.parent_chat_id, activeMembers().find((candidate) => candidate.id === dispatch.member_id)),
     });
   } catch (error) {
     // The teammate's own direction queue is full (it is working through eight already). That is backpressure, not a failed tool: the
@@ -2214,7 +2359,7 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   // report still waiting in One's queue is withdrawn (One already saw that result).
   withdrawQueuedOneTeamReport(dispatch.id);
   getDb().prepare(
-    "UPDATE one_team_dispatches SET status = 'running', reported_at = NULL, child_run_id = COALESCE(?, child_run_id), updated_at = ?, graph_owner = COALESCE(graph_owner, ?) WHERE id = ?",
+    "UPDATE one_team_dispatches SET status = 'running', reported_at = NULL, restart_resume_of = NULL, child_run_id = COALESCE(?, child_run_id), updated_at = ?, graph_owner = COALESCE(graph_owner, ?) WHERE id = ?",
   ).run(result.runId ?? result.activeRunId ?? null, now, graphOwnerOf(caller), dispatch.id);
   const continued = row(dispatch.id)!;
   if (continued.child_run_id !== dispatch.child_run_id) appendParentNotice(continued, "link");
@@ -2360,174 +2505,29 @@ function groupOf(chatId: string): { id: string; title: string; description: stri
   return found ? { id: found.id, title: found.title, description: found.description, revision: found.revision, memberAgentIds: [...found.memberAgentIds] } : null;
 }
 
-function appendJoinReceipt(chatId: string, member: OneOrgMember, created: boolean): void {
-  try {
-    const text = ownerMessage(
-      created ? `새 팀원 ${member.displayName}${particle(member.displayName, "object")} 만들어 이 단톡방에 초대했어요.` : `팀원 ${member.displayName}${particle(member.displayName, "object")} 이 단톡방에 초대했어요.`,
-      created ? `Created a new teammate, ${member.displayName}, and invited them to this group chat.` : `Invited teammate ${member.displayName} to this group chat.`,
-    );
-    runtime().chats.appendChatMessage(chatId, "system", text, {
-      hostNotice: { purpose: "one-team-member-joined", memberName: member.displayName.slice(0, 80), created },
-    });
-    emitDesktopStoreChange({ entity: "chat", id: chatId });
-  } catch (error) {
-    console.warn("[one-team] join receipt not written:", error instanceof Error ? error.message : error);
-  }
-}
-
-/** Adds an active member to the caller's group chat. Returns false when already a member. */
-function inviteIntoGroup(chatId: string, member: OneOrgMember): boolean {
-  const group = groupOf(chatId);
-  if (!group) {
-    throw new Error(`one-team-not-a-group-chat: ${ownerMessage(
-      "이 대화는 단톡방이 아니라서 초대하지 않았어요. 팀원에게 일을 맡기려면 one_team_start_session 을 쓰세요.",
-      "This conversation is not a group chat, so nobody was invited. To hand work to a teammate, use one_team_start_session.",
-    )}`);
-  }
-  if (group.memberAgentIds.includes(member.installedAgentId)) return false;
-  try {
-    taskforceStore().updateOneTaskforce({
-      id: group.id,
-      title: group.title,
-      description: group.description,
-      memberAgentIds: [...group.memberAgentIds, member.installedAgentId],
-      expectedRevision: group.revision,
-    });
-  } catch (error) {
-    const raw = error instanceof Error ? error.message : String(error);
-    const full = /up to (\d+)/.exec(raw);
-    throw new Error(`one-team-invite-refused: ${full
-      ? ownerMessage(`이 단톡방은 최대 ${full[1]}명이라 더 초대하지 않았어요(${group.memberAgentIds.length}/${full[1]}).`, `This group chat holds at most ${full[1]} members, so nobody else was invited (${group.memberAgentIds.length}/${full[1]}).`)
-      : ownerMessage(`초대하지 못했어요: ${raw}`, `Could not invite: ${raw}`)} ${ownerMessage("단톡방 구성은 바뀌지 않았어요.", "The group chat is unchanged.")}`);
-  }
-  return true;
-}
-
-/** Only the persistent private room is protected; ordinary One group participation is unchanged. */
-function assertGroupMutationAllowed(chatId: string): void {
-  const db = getDb();
-  if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get()
-    && db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE chat_id=?").get(chatId)) {
-    throw new Error("one-personal-conversation-is-private: Open Organization and use a separate group conversation; the personal conversation is unchanged.");
-  }
-}
-
 function memberView(member: OneOrgMember) {
   return { member_id: member.id, name: member.displayName, name_en: member.nameEn };
 }
 
-export function oneTeamInvite(caller: OneTeamCaller, input: { member?: unknown }) {
+export function oneTeamCreateMember(caller: OneTeamCaller, input: { name?: unknown; role?: unknown; personality?: unknown }) {
   assertManagedOneTeamAvailable();
-  const chatId = assertCaller(caller.chatId);
-  assertGroupMutationAllowed(chatId);
-  assertRosterPermission(caller);
-  const member = resolveOneTeamMember(typeof input.member === "string" ? input.member : "");
-  const joined = inviteIntoGroup(chatId, member);
-  if (joined) appendJoinReceipt(chatId, member, false);
-  return {
-    ...memberView(member),
-    confirmed: true,
-    ...(joined ? {} : { already_member: true }),
-    owner_message: joined
-      ? ownerMessage(`팀원 ${member.displayName}${particle(member.displayName, "object")} 이 단톡방에 초대했어요.`, `Invited teammate ${member.displayName} to this group chat.`)
-      : ownerMessage(`팀원 ${member.displayName}${particle(member.displayName, "topic")} 이미 이 단톡방에 있어요.`, `Teammate ${member.displayName} is already in this group chat.`),
-    note: "To hand this teammate work, call one_team_start_session with this name.",
-  };
-}
-
-/** Explicit composition, distinct from invitation into an already existing room. */
-export interface OneTeamComposeGroupInput { members: string[] }
-
-function isOneTeamComposeGroupInput(input: unknown): input is OneTeamComposeGroupInput {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
-  const value = input as Record<string, unknown>;
-  return Object.keys(value).every(key => key === "members")
-    && Array.isArray(value.members) && value.members.length >= 1 && value.members.length <= 16
-    && value.members.every(id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(id))
-    && new Set(value.members).size === value.members.length;
-}
-
-/** Why a Hub or cloud teammate cannot be seated in a group conversation, and what to do instead (both owner and model read it). */
-const GROUP_NOT_LOCAL_REASON = {
-  en: "Hub and cloud teammates cannot join a group conversation. Give this teammate work as its own session (one_team_start_session), or create a local teammate with the same role (one_team_create_member) and add that one to the group.",
-  ko: "허브·클라우드 팀원은 그룹 대화에 들어올 수 없어요. 이 팀원에게는 개별 작업(one_team_start_session)으로 일을 맡기거나, 같은 역할의 로컬 팀원을 새로 만들어(one_team_create_member) 그룹에 넣어 주세요.",
-} as const;
-
-export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
-  assertManagedOneTeamAvailable();
-  const chatId = assertCaller(caller.chatId);
-  assertGroupMutationAllowed(chatId);
-  assertRosterPermission(caller);
-  if (caller.permission !== "write" && caller.permission !== "full") throw new Error("one-team-permission-required");
-  if (!isOneTeamComposeGroupInput(input)) {
-    throw new Error("one-team-group-invalid-members: supply one to sixteen distinct exact member_id values; the group is unchanged.");
-  }
-  const roster = activeMembers();
-  const members = input.members.map(id => {
-    const matches = roster.filter(member => member.id === id);
-    const member = matches.length === 1 ? matches[0] : null;
-    if (member?.unavailable) {
-      // Name the teammate and say why in plain words (both languages); the machine code is only in the prefix.
-      throw new Error(`one-team-group-member-unavailable: "${member.displayName}" cannot join this group. ${member.unavailable.reason.en} / ${member.unavailable.reason.ko} The group is unchanged.`);
-    }
-    if (member && member.source !== "local") {
-      // A Hub or cloud teammate runs as its own session, never inside a group conversation. Say what works instead, in both
-      // languages: with only "local members only" the model stops and asks the owner instead of staffing the group.
-      throw new Error(`one-team-group-member-unavailable: "${member.displayName}" cannot join this group. ${GROUP_NOT_LOCAL_REASON.en} / ${GROUP_NOT_LOCAL_REASON.ko} The group is unchanged.`);
-    }
-    if (member?.groupJoinRefusal) {
-      // The join guard's own refusal, found before any write (hidden agent, expired lease, ...): same code one_team_list shows as group_unavailable.
-      throw new Error(`one-team-group-member-unavailable: "${member.displayName}" cannot join this group [${member.groupJoinRefusal}]. The group is unchanged.`);
-    }
-    if (!member || member.statusKind === "locked") {
-      throw new Error("one-team-group-member-unavailable: only existing active local One members can compose this group; the group is unchanged.");
-    }
-    return member;
-  });
-  let result: ReturnType<ReturnType<typeof taskforceStore>["composeOneTaskforceForChat"]>;
-  try {
-    result = taskforceStore().composeOneTaskforceForChat({ chatId, memberAgentIds: members.map(member => member.installedAgentId) });
-  } catch (error) {
-    throw new Error(`one-team-group-compose-refused: ${error instanceof Error ? error.message : "one-team-group-failed"}; the group is unchanged.`);
-  }
-  return {
-    confirmed: true,
-    created: result.created,
-    already_composed: !result.created && result.addedMemberAgentIds.length === 0,
-    added_member_ids: members.filter(member => result.addedMemberAgentIds.includes(member.installedAgentId)).map(member => member.id),
-    conversation: { chat_id: chatId, is_group: true, group: { id: result.group.id, revision: result.group.revision, member_agent_ids: [...result.group.memberAgentIds] } },
-    owner_message: result.created
-      ? ownerMessage("이 대화를 요청한 팀원들과 함께하는 단톡방으로 만들었어요.", "Made this conversation a group with the requested teammates.")
-      : result.addedMemberAgentIds.length > 0
-        ? ownerMessage("요청한 팀원을 이 단톡방에 추가했어요. 기존 팀원은 그대로 있어요.", "Added the requested teammates to this group, keeping its current members.")
-        : ownerMessage("요청한 팀원이 모두 이미 이 단톡방에 있어요.", "All requested teammates are already in this group."),
-    note: "No work was started. Hand work separately with one_team_start_session.",
-  };
-}
-
-export function oneTeamCreateMember(caller: OneTeamCaller, input: { name?: unknown; role?: unknown; personality?: unknown; invite?: unknown }) {
-  assertManagedOneTeamAvailable();
-  const chatId = assertCaller(caller.chatId);
+  assertCaller(caller.chatId);
   assertRosterPermission(caller);
   const name = clip(input.name, 80);
-  if (!name) throw new Error(`one-team-name-required: ${ownerMessage("새 팀원의 이름을 적어 주세요.", "Give the new teammate a name.")}`);
-  const invite = input.invite !== false;
-  // A retry or a second call with the same name must not create a twin.
-  const existing = activeMembers().find((member) => normalizeName(member.displayName) === normalizeName(name)
-    || (member.nameEn && normalizeName(member.nameEn) === normalizeName(name)));
+  if (!name) throw new Error(`one-team-name-required: ${ownerMessage("새 에이전트의 이름을 적어 주세요.", "Give the new agent a name.")}`);
+  // A retry or a second call with the same name must not create a twin: the registry decides, not the seat table (an agent that holds no seat is still registered).
+  const roster = require("./team-roster") as typeof import("./team-roster"); // eslint-disable-line @typescript-eslint/no-require-imports
+  const existing = roster.matchRoster(roster.registeredRoster(), name, { exactOnly: true })[0];
   if (existing) {
-    const joined = invite && groupOf(chatId) ? inviteIntoGroup(chatId, existing) : false;
-    if (joined) appendJoinReceipt(chatId, existing, false);
     return {
-      ...memberView(existing),
+      member_id: existing.seat?.id ?? existing.agentId, name: existing.name, name_en: existing.nameEn,
       confirmed: true,
       already_exists: true,
-      invited: joined,
       owner_message: ownerMessage(
-        `이미 ${existing.displayName}라는 팀원이 있어 새로 만들지 않았어요.${joined ? " 이 단톡방에 초대했어요." : ""}`,
-        `A teammate named ${existing.displayName} already exists, so no new one was created.${joined ? " Invited them to this group chat." : ""}`,
+        `이미 ${existing.name}라는 에이전트가 있어 새로 만들지 않았어요.`,
+        `An agent named ${existing.name} already exists, so no new one was created.`,
       ),
-      note: "Not created twice. Hand work with one_team_start_session using this name.",
+      note: "Not created twice. Put it in a chat with one_team_new_chat or one_team_add_to_chat, or hand it work with one_team_start_session using this name.",
     };
   }
   let created: { installedAgentId: string; chatId: string };
@@ -2540,25 +2540,24 @@ export function oneTeamCreateMember(caller: OneTeamCaller, input: { name?: unkno
     });
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
-    throw new Error(`one-team-create-refused: ${raw} ${ownerMessage("아무도 만들어지지 않았어요.", "No teammate was created.")}`);
+    throw new Error(`one-team-create-refused: ${raw} ${ownerMessage("아무도 만들어지지 않았어요.", "No agent was created.")}`);
   }
   const member = activeMembers().find((row) => row.installedAgentId === created.installedAgentId);
-  if (!member) throw new Error("one-team-create-refused: the new teammate is not on the roster.");
-  let joined = false;
-  let inviteRefusal: string | null = null;
-  if (invite && groupOf(chatId)) {
-    try { joined = inviteIntoGroup(chatId, member); } catch (error) { inviteRefusal = error instanceof Error ? error.message : String(error); }
-  }
-  if (joined) appendJoinReceipt(chatId, member, true);
+  if (!member) throw new Error("one-team-create-refused: the new agent is not on the roster.");
   return {
     ...memberView(member),
     confirmed: true,
     created: true,
-    invited: joined,
-    ...(inviteRefusal ? { invite_refusal: inviteRefusal } : {}),
-    owner_message: joined
-      ? ownerMessage(`새 팀원 ${member.displayName}${particle(member.displayName, "object")} 만들어 이 단톡방에 초대했어요.`, `Created a new teammate, ${member.displayName}, and invited them to this group chat.`)
-      : ownerMessage(`새 팀원 ${member.displayName}${particle(member.displayName, "object")} 만들었어요.`, `Created a new teammate, ${member.displayName}.`),
-    note: "The teammate exists now. Hand work with one_team_start_session using this name.",
+    owner_message: ownerMessage(`새 에이전트 ${member.displayName}${particle(member.displayName, "object")} 만들었어요.`, `Created a new agent, ${member.displayName}.`),
+    note: "The agent exists now. Put it in a chat with one_team_new_chat or one_team_add_to_chat, or hand it work with one_team_start_session using this name.",
   };
 }
+
+/** For team-rooms.ts: the checks every roster operation of the personal agent makes first (its own conversation, a write or full run), and the owner-language helper. */
+export function assertOneTeamRoomCaller(caller: OneTeamCaller): string {
+  assertManagedOneTeamAvailable();
+  const chatId = assertCaller(caller.chatId);
+  assertRosterPermission(caller);
+  return chatId;
+}
+export { ownerMessage as oneTeamOwnerMessage };

@@ -13,8 +13,24 @@ type Request = { schemaVersion: typeof REQUEST_SCHEMA; jobId: string; leaseToken
   visibilityDomain: string | null; originTaskId: string | null; requestedRuntime: unknown };
 type CompleteArgs = { jobId: string; leaseToken: string; inputDigest: string; model: string; output: string };
 type RemoteTransport = Exclude<PreparedMcpTransport, { kind: "stdio" }>;
-const seen = new Map<string, number>();
+/** One process-memory row per job, content-free. `done` = a commit was attempted (never sent twice); `retry` = failed before the commit attempt and waiting; `ended` = the job's own
+ * failures reached the cap, so the row is kept (no more model calls for this job in this process until the 24 h row life ends). */
+type JobRow = { at: number; n: number; m: number; until: number; epoch: number | null; state: "running" | "retry" | "done" | "ended" };
+const seen = new Map<string, JobRow>();
 let pending = 0;
+/** Counts every judgment that came back usable. A job that failed because the model call failed waits until the next answer of any job (the model is back) or its wait. */
+let answerEpoch = 0, lastAnswerAt = 0;
+const ROW_LIFE_MS = 24 * 60 * 60_000, JOB_FAULT_CAP = 3, WAIT_MS = 10 * 60_000, ENDED_WAIT_MS = 5 * 60_000;
+const jobFaultWait = (n: number) => WAIT_MS * 2 ** (n - 1);
+/** What a failure before the commit attempt says about whose fault it is: the job's (the model answered and the answer cannot be used), the model's (the call itself failed), or neither. */
+function classifyFailure(error: unknown, deadlineHit: boolean): "job" | "model" | "ended" | "not_ready" {
+  const code = error instanceof Error ? error.message : "";
+  if (code === "remote_memory_model_result_unavailable") return "job";
+  const aborted = code === "remote_memory_cancelled" || error instanceof Error && error.name === "AbortError";
+  if (code === "remote_memory_runtime_ended" || aborted && !deadlineHit) return "ended";
+  if (code === "remote_memory_runtime_unavailable") return "not_ready";
+  return "model";
+}
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 /** Constant-time compare of a credential-bearing header with the expected value, as computer-use/control-server.ts
  * bearerMatches does: length check first, an empty expected value never matches. */
@@ -66,6 +82,23 @@ function extract(result: unknown): Request | null {
   }
   if (!packets.length || packets.some(packet => hash(packet) !== hash(packets[0]))) return null;
   return packets[0];
+}
+
+function settleFailure(key: string, row: JobRow, failure: unknown, deadlineHit: boolean): void {
+  const now = Date.now(), kind = classifyFailure(failure, deadlineHit);
+  row.at = now; row.epoch = null;
+  if (kind === "not_ready") { // nothing was asked of the model: no wait, no count; a row with no history is dropped
+    if (row.n === 0 && row.m === 0) seen.delete(key); else { row.state = "retry"; row.until = 0; }
+    return;
+  }
+  if (kind === "ended") { row.state = "retry"; row.until = now + ENDED_WAIT_MS; return; }
+  // A call that failed is the job's only when the model answered another job in the last 24 h (as the terminal engine's ledger does); otherwise it is the model's and counts nothing against the job.
+  if (kind === "job" || kind === "model" && now - lastAnswerAt < ROW_LIFE_MS && lastAnswerAt > 0) {
+    row.n++;
+    if (row.n >= JOB_FAULT_CAP) { row.state = "ended"; return; }
+    row.state = "retry"; row.until = now + jobFaultWait(row.n); return;
+  }
+  row.m++; row.state = "retry"; row.until = now + Math.min(ROW_LIFE_MS, WAIT_MS * 2 ** (row.m - 1)); row.epoch = answerEpoch;
 }
 
 /** The auxiliary source snapshot belongs to the background consumer. Returning
@@ -142,28 +175,45 @@ export function captureRemoteCurationConsumer(binding: PreparedMcpBinding | unde
       // suppresses replay; an ambiguous completion is never retried automatically.
       const key = hash([account, configured.href, binding.server.id, packet.jobId]);
       const now = Date.now();
-      for (const [entry, at] of seen) if (now - at > 24 * 60 * 60_000) seen.delete(entry);
-      if (seen.has(key)) return foregroundProjection(rawResult, "background_pending");
-      if (seen.size >= 4_096) return foregroundProjection(rawResult, "deferred");
-      seen.set(key, now); pending++;
+      for (const [entry, row] of seen) if (row.state !== "running" && now - row.at > ROW_LIFE_MS) seen.delete(entry);
+      const previous = seen.get(key);
+      if (previous) {
+        // Repair (curation retry 1): a failure before the commit attempt is tried again only after its wait; the job's own failures end at three. A model that failed to answer is tried
+        // again as soon as any job gets an answer (the model is back) or when the wait is over.
+        const waiting = previous.state === "retry" && now < previous.until && !(previous.epoch !== null && previous.epoch !== answerEpoch);
+        if (previous.state !== "retry" || waiting) return foregroundProjection(rawResult, "background_pending");
+      } else if (seen.size >= 4_096) return foregroundProjection(rawResult, "deferred");
+      const row: JobRow = previous ?? { at: now, n: 0, m: 0, until: 0, epoch: null, state: "running" };
+      row.state = "running"; row.at = now; seen.set(key, row); pending++;
+      // Audit 62 (memory D3): the tombstone exists for one reason - a commit that may or may not have reached the server must never be sent twice. A job that failed BEFORE the commit
+      // attempt (the judgment failed or was cancelled, the account or configuration changed) left nothing at the server, so it is not "ambiguous": its tombstone is taken back and the
+      // server's next delivery of the job is run again, instead of reading "in progress" for 24 hours.
+      // Audit 63 / curation retry 1: that take-back had no end (a job whose judgment fails every time cost one model call per delivery for ever). The row now counts.
+      let commitAttempted = false, failure: unknown = null, deadlineHit = false;
       scheduleRemoteCuration(async () => {
         const controller = new AbortController();
-        const deadline = setTimeout(() => controller.abort(), packet.timeoutMs);
+        const deadline = setTimeout(() => { deadlineHit = true; controller.abort(); }, packet.timeoutMs);
         const fence = setInterval(() => { try { if (!current()) controller.abort(); } catch { controller.abort(); } }, 50);
         try {
-          if (!current()) return;
+          if (!current()) throw new Error("remote_memory_runtime_unavailable");
           const work = runtime.generate({ system: packet.system, input: packet.input, maxOutputTokens: packet.maxOutputTokens }, controller.signal);
           const abort = new Promise<never>((_, reject) => {
             controller.signal.addEventListener("abort", () => reject(new Error("remote_memory_cancelled")), { once: true });
           });
           const answer = await Promise.race([work, abort]);
           controller.signal.throwIfAborted();
-          if (!current()) return;
+          answerEpoch++; lastAnswerAt = Date.now();
+          if (!current()) throw new Error("remote_memory_runtime_ended");
           // Exactly one server commit attempt; no retries after a lost response.
+          commitAttempted = true;
           await complete(captured, { jobId: packet.jobId, leaseToken: packet.leaseToken, inputDigest: packet.inputDigest,
             model: answer.model, output: answer.output }, controller.signal);
-        } catch { /* Server lease/fence or inference failure leaves the job with Web, without payload logging. */ }
-        finally { clearTimeout(deadline); clearInterval(fence); pending--; }
+        } catch (error) { failure = error; /* Server lease/fence or inference failure leaves the job with Web, without payload logging. */ }
+        finally {
+          clearTimeout(deadline); clearInterval(fence); pending--;
+          if (commitAttempted) row.state = "done";
+          else settleFailure(key, row, failure, deadlineHit);
+        }
       });
       return foregroundProjection(rawResult, "background_pending");
     };

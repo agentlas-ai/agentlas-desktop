@@ -35,7 +35,7 @@ export function describeRoleWriteFailure(error: unknown, ko: boolean): string {
     // 앱을 다시 켜면 저장소 업그레이드(db.ts v106)가 열을 넓힌다. 그래도 같은 오류면
     // 업그레이드 자체가 실패한 상태다 — 그때는 재시도가 아니라 다른 조치가 필요하다.
     return ko
-      ? "이 컴퓨터의 저장소가 아직 이 역할을 모릅니다. 앱을 완전히 종료했다 다시 켜면 저장소를 올립니다. 다시 켜도 같은 오류가 나오면 저장소 업그레이드가 실패한 상태입니다."
+      ? "이 데스크탑의 데이터가 아직 이 역할을 지원하지 않아요. 앱을 완전히 종료했다 다시 켜면 데이터가 업그레이드돼요. 다시 켜도 같은 오류가 나오면 데이터 업그레이드에 실패한 상태예요."
       : "This machine's store does not know this role yet. Quit and reopen the app to finish the store upgrade. If the same error returns after a restart, the store upgrade itself failed.";
   }
 

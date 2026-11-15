@@ -17,6 +17,13 @@ interface Approval { owner: Owner; signal?: AbortSignal; ledger: object | null; 
 const scopes = new AsyncLocalStorage<Owner>();
 const signals = new WeakMap<AbortSignal, SignalOwner>();
 const approvals = new WeakMap<object, Approval>();
+const childToParent = new WeakMap<AbortSignal, AbortSignal>();
+/** The signal and its ancestors, nearest first (every child made by a registered child-controller site). */
+export function nativeApprovalSignalChain(signal: AbortSignal | undefined): AbortSignal[] {
+  const chain: AbortSignal[] = [];
+  for (let current = signal; current && chain.length < 16 && !chain.includes(current); current = childToParent.get(current)) chain.push(current);
+  return chain;
+}
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 function current(owner: Owner): void {
@@ -37,6 +44,7 @@ export async function withNativeApprovalExecution<T>(source: NativeApprovalExecu
  * ordinary signals are untouched; native ownership cannot be made from JSON. */
 export function registerNativeApprovalChildSignal(parent: AbortSignal | undefined, child: AbortSignal): void {
   if (!parent) return;
+  childToParent.set(child, parent); // lineage for any approval signal (N0b: a card under this child lets the turn's run slot go), native or not
   const binding = signals.get(parent);
   if (!binding) return;
   current(binding.owner);

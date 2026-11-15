@@ -13,6 +13,10 @@
   font-family: var(--font-body, Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
 }
 
+/* Button rule (globals.css "Button rule — the ONE place"): nowrap, keep-all, min height, ellipsis. */
+.primaryButton { composes: agentlas-btn from global; }
+.ghostButton { composes: agentlas-btn from global; }
+
 .headerAction,
 .workLink,
 .iconButton,
@@ -1019,7 +1023,7 @@
 .memoryHomeAlert .primaryButton,
 .memoryHomeAlert .ghostButton {
   min-height: 34px;
-  padding: 0 12px;
+  padding: 0 max(12px, var(--agentlas-btn-pad-x-sm));
   font-size: 10px;
 }
 
@@ -1149,7 +1153,7 @@
 .primaryButton,
 .ghostButton {
   min-height: 44px;
-  padding: 0 16px;
+  padding: 0 var(--agentlas-btn-pad-x);
   border-color: var(--paper-edge);
   background: var(--paper);
 }
@@ -4701,3 +4705,61 @@
 .settingsLanguage label { display: block; margin-bottom: 8px; font-weight: 650; }
 .settingsLanguage select { min-width: 180px; padding: 10px; color: var(--ink); background: var(--paper-2); border: 1px solid var(--paper-edge); border-radius: 8px; }
 @media (max-width: 620px) { .settingsScreen { grid-template-columns: minmax(140px, 38%) minmax(0, 1fr); } .settingsNavigation { padding: 40px 6px 8px; } .settingsLanguage { padding: 24px 18px; } }
+
+/*
+ * Agentlas 2.0 H1 - the conversation view as a pane of Home's Space (OneShell `embed`). Only rules under [data-embed="true"];
+ * no rule above this line changed. The rail is not rendered in a pane, so the grid has no rail column, and the window-height
+ * and traffic-light spacing of the full screen do not apply to a pane.
+ */
+.shell[data-embed="true"] { height: 100%; }
+.shell[data-embed="true"] .body,
+.shell[data-embed="true"] .body[data-task-active="true"],
+.shell[data-embed="true"] .body[data-rail-collapsed="true"],
+.shell[data-embed="true"] .body[data-task-active="true"][data-rail-collapsed="true"] {
+  grid-template-columns: minmax(0, 1fr) 0;
+}
+.shell[data-embed="true"] .body[data-context-rail="true"],
+.shell[data-embed="true"] .body[data-task-active="true"][data-context-rail="true"],
+.shell[data-embed="true"] .body[data-rail-collapsed="true"][data-context-rail="true"],
+.shell[data-embed="true"] .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
+  grid-template-columns: minmax(0, 1fr) var(--one-rail-width, 210px);
+}
+.shell[data-embed="true"] .workspace { grid-column: 1; }
+.shell[data-embed="true"] .body > [data-one-runtime-artifacts="true"] { grid-column: 2; }
+.shell[data-embed="true"] .body[data-task-active="true"] .taskToolbar,
+.shell[data-embed="true"] .body[data-task-active="true"][data-rail-collapsed="true"] .taskToolbar { padding-left: 20px; }
+.shell[data-embed="true"] .loadingShell { grid-template-columns: minmax(0, 1fr); }
+
+/*
+ * F-D5 - a room in a pane has no head of its own (the pane's head is the only one: title, "1:1" / member count, result panel, "..." menu) and the
+ * same composer shape as the work conversation: a pill with "+" on the left and mic / send on the right, model, effort and permission as plain
+ * words under it. Only rules under [data-embed="true"], which only a Workspace pane sets. What the old head showed as a STATE (a teammate gone, a
+ * dissolved room, an empty seat) is still drawn as a slim line. Its buttons stay in the page, hidden, and the pane's head presses them.
+ */
+.shell[data-embed="true"] .windowBar .taskToolbar > :not(.taskToolbarIdentity) { display: none; }
+.shell[data-embed="true"] .windowBar .taskToolbarIdentity > [class] { display: none; }
+.shell[data-embed="true"] .windowBar .taskToolbarIdentity strong,
+.shell[data-embed="true"] .windowBar .taskToolbarIdentity small[data-one-taskforce-count] { display: none; }
+.shell[data-embed="true"] .windowBar:not(:has(small[data-one-session-unavailable], small[data-one-dissolved-badge], small[data-one-empty-seat-badge])) { display: none; }
+.shell[data-embed="true"] .windowBar { min-height: 0; height: auto; padding-block: 6px; }
+.shell[data-embed="true"] .composer {
+  --pane-meta-h: 28px; --pane-gap: 8px; --pane-pill-h: 44px;
+  --pane-btn-bottom: calc(var(--pane-meta-h) + var(--pane-gap) + (var(--pane-pill-h) - 30px) / 2);
+  position: relative; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none;
+  grid-template-columns: minmax(0, 1fr); grid-template-rows: auto var(--pane-meta-h); grid-template-areas: "input" "tools"; row-gap: var(--pane-gap);
+}
+.shell[data-embed="true"] .composer textarea {
+  box-sizing: border-box; min-height: var(--pane-pill-h); padding: 11px 92px 11px 48px; border-radius: 24px; background: var(--paper);
+  --pill-rest: inset 0 0 0 1px color-mix(in srgb, var(--ink) 12%, var(--paper-edge)); box-shadow: var(--pill-rest), 0 8px 24px rgba(15, 18, 20, 0.07), 0 1px 2px rgba(15, 18, 20, 0.05);
+}
+.shell[data-embed="true"] .composer textarea:focus { box-shadow: var(--pill-rest), 0 12px 32px rgba(15, 18, 20, 0.1); }
+.shell[data-embed="true"] .composerTools { justify-content: flex-end; gap: 10px; min-height: var(--pane-meta-h); }
+.shell[data-embed="true"] .attachmentButton[data-one-composer-trigger="plus"] { position: absolute; left: 10px; bottom: var(--pane-btn-bottom); width: 30px; min-width: 30px; min-height: 30px; height: 30px; z-index: 1; }
+.shell[data-embed="true"] .composerActions { position: absolute; right: 10px; bottom: var(--pane-btn-bottom); z-index: 1; }
+.shell[data-embed="true"] .composerChip[data-one-composer-trigger] { min-height: 26px; height: 26px; padding: 0 8px; border-radius: 7px; font-size: 12.5px; font-weight: 500; gap: 4px; }
+.shell[data-embed="true"] .composerChip[data-one-composer-trigger] > svg { display: none; }
+/* The picture's composer has the three words under the pill and nothing after them: the bolt and layers icons of the full One view are not drawn in a pane (workspace-v3-two). */
+.shell[data-embed="true"] .composerQuickMode { display: none; }
+.shell[data-embed="true"] .composer textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shell[data-embed="true"] .composerChip[data-one-composer-trigger]:hover,
+.shell[data-embed="true"] .composerChip[data-one-composer-trigger][aria-expanded="true"] { background: var(--paper-3); color: var(--ink); }

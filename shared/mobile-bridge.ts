@@ -5,6 +5,8 @@ import type {OneProviderRemoteErrorCode} from "./one-provider-remote";
 import type { MobileBridgeSpecificRefusalCode } from "./mobile-bridge-refusal";
 import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobileGoalControlMethod, validateMobileGoalControlParams } from "./mobile-goal-control";
 import type { OneSurfaceManifestV1 } from "./one-surface";
+import { validateMobileBuildContinuation, validateMobileBuildV2Params } from "./mobile-build-v2";
+import { MOBILE_WORKSPACE_V2_COMMAND_OPERATIONS, MOBILE_WORKSPACE_V2_READ_OPERATIONS, validateMobileWorkspaceV2Args } from "./mobile-workspace-v2";
 import { SUPERVISOR_DONE_WHEN_LIMITS, supervisorIdentifier, supervisorObject, supervisorText } from "./one-supervisor";
 import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
 import type { AutomationRunRecord, InvocationCurrentTurnSteerRequest, InvocationCurrentTurnSteerReceipt } from "./types";
@@ -111,12 +113,28 @@ export const MOBILE_BRIDGE_METHODS = [
   "one.vault.request", "one.vault.submit", "one.vault.status", "one.vault.cancel", "one.provider.remote.read",
   "notifications.register", "notifications.unregister",
   ...MOBILE_GOAL_CONTROL_METHODS,
+  // O-M3a (contracts/one-home-desktop.md §2): the personal agent's home. Phones call these only when bridge.ready carries oneHomeV1.
+  "one.home.status", "one.home.check", "one.home.deviceKey",
   "snapshot.get",
   "host.status",
   "team.list",
   "one.org.get",
   "one.supervisor.snapshot",
+  "one.supervisor.historyPage",
   "one.supervisor.receipt",
+  "one.phoneTool.pending",
+  "one.phoneTool.answer",
+  "one.companion.publicKey",
+  "one.companion.proof",
+  "one.companion.continuity.request",
+  "one.companion.continuity.status",
+  "one.companion.continuity.cancel",
+  "one.companion.frontTransfer.request",
+  "one.companion.frontTransfer.status",
+  "one.companion.frontTransfer.cancel",
+  "one.companion.work.admit",
+  "one.companion.work.receipt",
+  "one.companion.work.fullPart",
   "one.supervisor.send",
   "one.supervisor.startWork",
   "one.supervisor.startScience",
@@ -276,6 +294,20 @@ export const MOBILE_BRIDGE_METHODS = [
   "connectors.test",
   // The phone tells this connection what it can decode (2026-10-17). Appended: older apps never call it.
   "device.capabilities",
+  // Redesigned phone (decision): Workspace list, Agents list and profile, "What I know". Appended: older apps never call
+  // them. Operations are listed in shared/mobile-workspace-v2.ts; bridge.ready advertises them as capability `workspaceV2`.
+  "workspace2.read",
+  "workspace2.command",
+  // Saved Builds on the phone (redesign backend C, shared/mobile-build-v2.ts), advertised as `workspaceV2.build: true`. Appended: older apps never call them.
+  "build2.list",
+  "build2.open",
+  "build2.files",
+  "build2.file.read",
+  // PB-D (contracts/phone-build2.md): which Build is my run, and Preview of the agent being built. Advertised as `workspaceV2.buildCommands`. Appended: older apps never call them.
+  "build2.forRun",
+  "build2.preview.send",
+  "build2.preview.restart",
+  "build2.preview.read",
 ] as const;
 
 /**
@@ -310,6 +342,14 @@ export const MOBILE_CLIENT_CAPABILITIES = [
    * bytes as before (`[local-path]`).
    */
   "chat.file.v1",
+  /** Knows the one.home.* methods (O-M3a advertises oneHomeV1 to it; nothing reads this value yet). */
+  "oneHome.v1",
+  /**
+   * Long operations (contracts/phone-long-ops.md, Agentlas 2.0 L1): the phone holds a write the Desktop took ("request.accepted") until the Desktop's own
+   * answer for the original request id arrives on its live socket, and reads `longOpsV1.readWaitMs` from bridge.ready for its read waits.
+   * Only such a phone receives `request.accepted` and the late answer; every other phone gets the same answers as before.
+   */
+  "longOps.v1",
 ] as const;
 export type MobileClientCapability = (typeof MOBILE_CLIENT_CAPABILITIES)[number];
 
@@ -492,14 +532,17 @@ export function validateMobileScienceChatParams(method: MobileScienceChatMethod,
  * settled state). They keep the authority path of a write but need no ledger entry, so a resend after a lost answer always
  * reaches the authority instead of waiting on an unsettled key.
  */
-export const MOBILE_BRIDGE_SELF_IDEMPOTENT_WRITE_METHODS: ReadonlySet<string> = new Set(["science.chat.cancel"]);
+export const MOBILE_BRIDGE_SELF_IDEMPOTENT_WRITE_METHODS: ReadonlySet<string> = new Set(["one.home.check", "science.chat.cancel", "one.phoneTool.answer", "one.companion.work.admit", "one.companion.continuity.request", "one.companion.continuity.cancel", "one.companion.frontTransfer.request", "one.companion.frontTransfer.cancel"]);
 
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "notifications.register", "notifications.unregister",
+  "one.home.check", "one.home.deviceKey",
   "chat.attachments.begin", "chat.attachments.chunk", "chat.attachments.finish",
   "one.supervisor.send", "one.supervisor.startWork", "one.supervisor.startScience",
   "one.supervisor.control", "one.supervisor.stopReply", "one.supervisor.appearance", "one.avatar.set",
+  "one.phoneTool.answer",
+  "one.companion.work.admit", "one.companion.continuity.request", "one.companion.continuity.cancel", "one.companion.frontTransfer.request", "one.companion.frontTransfer.cancel",
   "science.chat.send", "science.chat.cancel",
   ...MOBILE_GOAL_CONTROL_WRITE_METHODS,
   "device.revokeSelf",
@@ -557,6 +600,9 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "agents.cloudDelete",
   "build.start",
   "build.answer",
+  "workspace2.command",
+  "build2.preview.send",
+  "build2.preview.restart",
   ...MOBILE_BRIDGE_MAIL_WRITE_METHODS,
 ]);
 
@@ -572,6 +618,8 @@ export const MOBILE_BRIDGE_EVENT_NAMES = [
   "build.event",
   // 내용 없이 "무엇이 바뀌었나"만 싣는다(changeSeq·대화 id·안읽음 수). 폰은 내용을 다시 묻는다.
   "mail.updated",
+  // 8초 안에 안 끝난 쓰기를 컴퓨터가 받아 두었다는 한 번의 알림 {requestId, maxMs}. `longOps.v1` 을 알린 폰에만 간다(electron/mobile-bridge/long-ops.ts).
+  "request.accepted",
 ] as const;
 
 export type MobileBridgeEventName = (typeof MOBILE_BRIDGE_EVENT_NAMES)[number];
@@ -1041,6 +1089,9 @@ export interface MobileBridgeRpcErrorBody {
     // An owner message into a room the personal agent runs (capability personalAgentRoomsV1). Not retryable: the phone points
     // the owner at the personal agent. An older phone reads it as an ordinary refusal.
     | "supervised_room_read_only"
+    // The personal agent's home is moving (`one_sealed`) or has moved (`one_away`): only to a phone that announced `oneHome.v1`; others keep `authority_error`.
+    | "one_sealed"
+    | "one_away"
     // A refusal the owner can act on, for a phone that reported refusal.specific.v1 (shared/mobile-bridge-refusal.ts).
     | MobileBridgeSpecificRefusalCode
     | OneVaultErrorCode
@@ -1202,6 +1253,15 @@ export interface MobileBridgeInvocationEventDto {
   kind: "thinking" | "tool-use" | "partial" | "final" | "error" | "surface" | "usage" | "reasoning" | "notice" | "plan";
   status?: string;
   /**
+   * kind:"final" only, a run's own answer (not a teammate's, not the personal agent's): the saved answer's id, or null when none was
+   * saved. Optional on the wire: an absent key is an older Desktop, so every such final carries the key (notification decisions only).
+   */
+  durableMessageId?: string | null;
+  /** kind:"final" only: a Goal run whose next run the host starts says `pending`; absent otherwise. Notification decisions only. */
+  goalResult?: { status: "pending" };
+  /** kind:"final" only, optional: `text` starts at the answer, the part before the run's last tool call is left out (MobileBridgeChatMessageDto.progressOmitted). */
+  progressOmitted?: true;
+  /**
    * kind:"notice" only — what the HOST says, with its own severity.
    *
    * A host notice must never be appended to the model's answer string; it gets
@@ -1230,7 +1290,8 @@ export interface MobileBridgeInvocationEventDto {
   text?: string;
   delta?: string;
   textLen?: number;
-  error?: { code: string; message: string };
+  /** `register`: with the closed codes needs_registration / agent_no_folder / seat_archived / agent_archived, what the owner can do (register, reconnect, restore) and which agents; an older phone reads code and message only and ignores it. */
+  error?: { code: string; message: string; register?: { next: "register" | "reconnect" | "restore" | "none"; slugs: string[]; agentIds: string[] } };
   tool?: MobileBridgeInvocationToolDto;
   tokens?: number;
   agentId?: string;
@@ -1293,6 +1354,8 @@ export interface MobileBridgeAgentDto {
   kind: "agent" | "team";
   visibility: "visible" | "background" | "private";
   requiresSetup: boolean;
+  /** Agentlas 2.0 D6: registered on this computer (character, row, folder = usable). Present only when the computer enforces the rule; absent = unknown, the phone keeps its current behaviour. */
+  registered?: boolean;
   /**
    * Whether Desktop would accept this agent as a project-pool member.
    * `visibility` alone cannot decide it — a materialized HQ cell with an empty
@@ -1584,6 +1647,12 @@ export interface MobileBridgeChatMessageDto {
   images?: MobileBridgeChatImageDto[];
   /** Bounded generic-file metadata; raw paths, URLs, bytes, and manifests stay on Desktop. */
   files?: MobileBridgeChatFileDto[];
+  /**
+   * Assistant rows only, optional: `text` starts at the answer. The sentences the model wrote before its run's last tool call
+   * (progress) stay on the Desktop; a phone that does not know the key shows `text` as it always did, which is now the answer.
+   * Absent when the whole saved text is the answer (and on every older Desktop). The same key is on the run's final event.
+   */
+  progressOmitted?: true;
 }
 
 /** invoke.historyPage: newest page first, each page in (createdAt, id) ascending order. */
@@ -2332,6 +2401,8 @@ export interface MobileBridgeHubMarketListingDto {
   category: string | null;
   callable: boolean;
   perCallCredits: number | null;
+  /** Agentlas 2.0 D6: see MobileBridgeAgentDto.registered. */
+  registered?: boolean;
   verifiedInvocations: number | null;
   rating: number | null;
   release: MobileBridgeHubReleaseIdentityDto | null;
@@ -2415,7 +2486,16 @@ export interface MobileBridgeBuildRefusalDto {
     | "build_completion_unproven"
     | "desktop_approval_denied"
     | "desktop_approval_unavailable"
-    | "desktop_approval_timed_out";
+    | "desktop_approval_timed_out"
+    // PB-D: the words that refuse a continuation of a saved Build (`build.start { buildKey }`), with an empty `message`.
+    | "build_not_found"
+    | "folder_unavailable"
+    | "owner_unavailable"
+    | "build_turn_active"
+    | "another_build_active"
+    | "agent_running"
+    | "root_move_active"
+    | "build_changed";
   message: string;
   retryable: boolean;
 }
@@ -2811,6 +2891,12 @@ export interface MobileBridgeSnapshot {
    * 새 빌드는 대기가 없을 때 빈 배열을 보내 폰이 낡은 카드를 지울 수 있게 한다.
    */
   pendingToolApprovals?: MobileBridgeToolApprovalDto[];
+  /**
+   * Cards that closed because nobody answered in time (the 5-minute window, Agentlas 2.0 desktop values S3). Absent when there is none, and absent on older
+   * Desktop builds. A phone that knows this key says "approval expired, the call was not run" for a card it held; a phone that does not simply keeps
+   * its own clock rule (expiresAt passed). The closed word is `outcome: "expired"` — the call was refused, never run; the owner did not answer "no".
+   */
+  expiredToolApprovals?: Array<{ id: string; outcome: "expired" }>;
   /** Live synchronous runtime questions; [] clears cards resolved elsewhere. */
   pendingUserInputs?: MobileBridgeUserInputDto[];
   automations: MobileBridgeAutomationDto[];
@@ -2856,9 +2942,18 @@ export type MobileBridgeRequestParseResult =
 const METHOD_SET: ReadonlySet<string> = new Set([...MOBILE_BRIDGE_METHODS, ...MOBILE_BRIDGE_RETIRED_METHODS]);
 const EVENT_SET: ReadonlySet<string> = new Set(MOBILE_BRIDGE_EVENT_NAMES);
 const BLOCKED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+/** A computer's host id as the server and this desktop write it (web proof.ts `HOST_ID_RE`). */
+const ONE_HOME_HOST_ID_RE = /^host_[a-f0-9]{32}$/;
+/**
+ * MB-1 (contracts/trust-root.md section 13, phone 14): the word in `capabilities.oneHomeV1.methods` of a computer whose `one.home.deviceKey` takes `possessionHost`.
+ * A phone that does not know the word drops it (the 168 parser keeps only the three names it knows), so the list may grow by it.
+ */
+export const ONE_HOME_POSSESSION_HOST_CAPABILITY = "deviceKey.possessionHost";
 const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  "one.companion.publicKey",
   "one.supervisor.snapshot",
   "snapshot.get",
+  "one.home.status",
   "host.status",
   "team.list",
   "one.org.get",
@@ -3493,6 +3588,19 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
   }
 
   switch (method) {
+    case "one.home.check":
+      return hasOnlyKeys(params, ["reason"]) && (params.reason === "phone_approved" || params.reason === "pointer_changed")
+        ? null : "one.home.check accepts only reason phone_approved or pointer_changed";
+    case "one.home.deviceKey":
+      return hasOnlyKeys(params, ["pub", "kind", "possession", "possessionTs", "label", "possessionHost"])
+        && typeof params.pub === "string" && /^[A-Za-z0-9_-]{43}$/.test(params.pub)
+        && params.kind === "phone"
+        && typeof params.possession === "string" && /^[A-Za-z0-9_-]{86}$/.test(params.possession)
+        && typeof params.possessionTs === "number" && Number.isSafeInteger(params.possessionTs) && params.possessionTs > 0
+        && (params.label === undefined || (typeof params.label === "string" && params.label.length <= 32))
+        // MB-1: the computer the possession was signed FOR (contracts/trust-root.md section 13). Optional: a phone that does not send it signs the text it always did.
+        && (params.possessionHost === undefined || (typeof params.possessionHost === "string" && ONE_HOME_HOST_ID_RE.test(params.possessionHost)))
+        ? null : "one.home.deviceKey accepts only pub, kind phone, possession, possessionTs, an optional label of 32 characters and an optional possessionHost";
     case "request.status": {
       if (!hasOnlyKeys(params, ["requestId", "idempotencyKey", "method", "params"])) {
         return "request.status accepts only the exact original request envelope";
@@ -3863,6 +3971,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["chatId", "limit"])
         ? firstError(requiredString(params, "chatId"), optionalInteger(params, "limit", 1, 200))
         : "invoke.history accepts only chatId and limit";
+    case "one.supervisor.historyPage":
     case "invoke.historyPage":
       return hasOnlyKeys(params, ["chatId", "limit", "cursor"])
         ? firstError(requiredString(params, "chatId"), optionalInteger(params, "limit", 1, 200),
@@ -3875,6 +3984,22 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "finance.read":
     case "finance.command":
       return validateMobileFinanceParams(method, params);
+    case "workspace2.read":
+    case "workspace2.command": {
+      const allowed: readonly string[] = method === "workspace2.read" ? MOBILE_WORKSPACE_V2_READ_OPERATIONS : MOBILE_WORKSPACE_V2_COMMAND_OPERATIONS;
+      if (!hasOnlyKeys(params, ["operation", "args"])) return `${method} accepts only operation and args`;
+      if (typeof params.operation !== "string" || !allowed.includes(params.operation)) return `${method} operation must be one of ${allowed.join(", ")}`;
+      return validateMobileWorkspaceV2Args(params.operation, params.args);
+    }
+    case "build2.list":
+    case "build2.open":
+    case "build2.files":
+    case "build2.file.read":
+    case "build2.forRun":
+    case "build2.preview.send":
+    case "build2.preview.restart":
+    case "build2.preview.read":
+      return validateMobileBuildV2Params(method, params);
     case "harness.read":
     case "harness.command": {
       const allowed: readonly string[] = method === "harness.read" ? MOBILE_HARNESS_READ_OPERATIONS : MOBILE_HARNESS_COMMAND_OPERATIONS;
@@ -3893,6 +4018,37 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "science.chat.send":
     case "science.chat.cancel":
       return validateMobileScienceChatParams(method, params);
+    case "one.phoneTool.pending":
+      return hasOnlyKeys(params, ["runId"]) ? requiredString(params, "runId", 128) : "phone_tool_input_invalid";
+    case "one.phoneTool.answer":
+      if (!hasOnlyKeys(params, ["runId", "callId", "result"]) ||
+          requiredString(params, "runId", 128) || requiredString(params, "callId", 128) ||
+          !isRecord(params.result) || JSON.stringify(params.result).length > 16_000) return "phone_tool_input_invalid";
+      return null;
+    case "one.companion.proof":
+      return hasOnlyKeys(params, ["purpose", "binding"]) &&
+        (params.purpose === "enroll" || params.purpose === "run" || params.purpose === "handoff") && isRecord(params.binding) &&
+        JSON.stringify(params.binding).length <= 4096 ? null : "companion_proof_input_invalid";
+    case "one.companion.continuity.request":
+    case "one.companion.continuity.status":
+    case "one.companion.continuity.cancel":
+      return hasOnlyKeys(params, ["binding"]) && isRecord(params.binding) && JSON.stringify(params.binding).length <= 4096
+        ? null : "continuity_input_invalid";
+    case "one.companion.frontTransfer.request":
+    case "one.companion.frontTransfer.status":
+    case "one.companion.frontTransfer.cancel":
+      return hasOnlyKeys(params, ["binding"]) && isRecord(params.binding) && JSON.stringify(params.binding).length <= 4096
+        ? null : "front_transfer_input_invalid";
+    case "one.companion.work.admit":
+      return hasOnlyKeys(params, ["grant", "binding", "payload"]) && typeof params.grant === "string" && params.grant.length <= 4096 &&
+        isRecord(params.binding) && JSON.stringify(params.binding).length <= 4096 && typeof params.payload === "string" && params.payload.length <= 80 * 1024
+        ? null : "companion_work_input_invalid";
+    case "one.companion.work.receipt":
+      return hasOnlyKeys(params, ["commandId"]) ? requiredString(params, "commandId", 128) : "companion_work_input_invalid";
+    case "one.companion.work.fullPart":
+      return hasOnlyKeys(params, ["commandId", "index", "limit"]) && !requiredString(params, "commandId", 128) &&
+        Number.isSafeInteger(params.index) && Number(params.index) >= 0 && Number(params.index) <= 1_000_000 &&
+        (params.limit === undefined || (Number.isSafeInteger(params.limit) && Number(params.limit) >= 1 && Number(params.limit) <= 16)) ? null : "companion_work_input_invalid";
     case "one.supervisor.receipt":
       try {
         supervisorObject(params, ["oneId", "commandId"]);
@@ -4261,12 +4417,13 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           )
         : "agents.cloudDelete accepts only slug and idempotencyKey";
     case "build.start":
-      return hasOnlyKeys(params, ["goal", "idempotencyKey"])
+      return hasOnlyKeys(params, ["goal", "idempotencyKey", "buildKey", "seenUpdatedAt"])
         ? firstError(
             requiredText(params, "goal", 20_000),
             requiredString(params, "idempotencyKey", 160),
+            validateMobileBuildContinuation(params),
         )
-        : "build.start accepts only goal and idempotencyKey";
+        : "build.start accepts only goal, idempotencyKey and an optional buildKey with seenUpdatedAt";
     case "build.answer": {
       if (!hasOnlyKeys(params, ["runId", "questionSetId", "answers", "idempotencyKey", "questionSetRevision"])) {
         return "build.answer contains unsupported fields";
@@ -4597,6 +4754,9 @@ export function parseMobileBridgeRequest(input: unknown): MobileBridgeRequestPar
   const paramsError = validateParams(input.method, input.params);
   if (paramsError) {
     return { ok: false, error: mobileBridgeFailure(id, "invalid_params", paramsError) };
+  }
+  if (input.method === "one.home.deviceKey" && idempotencyKey === undefined) {
+    return { ok: false, error: mobileBridgeFailure(id, "invalid_params", "one.home.deviceKey requires an idempotencyKey") };
   }
   return {
     ok: true,

@@ -9,3 +9,9 @@
 @media(pointer:coarse){.toolbar button,.editor button,.toolbar input,.editor input{min-height:44px}.icon{min-width:44px;min-height:44px}}
 
 .confirm{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink)}.confirm button{min-height:32px;padding:4px 10px;font:inherit;font-size:12px;border:1px solid var(--paper-edge-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);cursor:pointer}.emptyState{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px;color:var(--ink-soft)}.emptyState p{margin:0}
+
+/* F-D17: the icon buttons carry a word. One shared look; the button rule comes from the global one. */
+.icon{composes:agentlas-btn from global}
+.toolbar button.icon.labelled,.itemActions button.icon.labelled{display:inline-flex;align-items:center;justify-content:center;gap:6px;width:auto;padding:0 var(--agentlas-btn-pad-x-sm);font-size:12.5px;white-space:nowrap}
+.itemActions{gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.emptyAction{composes:agentlas-btn from global;border:1px solid var(--paper-edge-strong);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink);font:inherit;font-size:12px;font-weight:550;min-height:32px;padding:0 var(--agentlas-btn-pad-x);cursor:pointer}

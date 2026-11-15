@@ -723,7 +723,7 @@ function NewAutomationPage() {
                 active={!runtimeKey}
                 onClick={useAutomationRoleDefault}
                 label={locale === "ko" ? "역할 기본값 사용" : "Use role default"}
-                detail={locale === "ko" ? "Worker 풀 우선순위와 fallback을 따릅니다." : "Follows Worker pool priority and fallback."}
+                detail={locale === "ko" ? "워커 풀 우선순위와 fallback을 따릅니다." : "Follows Worker pool priority and fallback."}
               />
               {runtimeKey && (
                 <div
@@ -787,7 +787,7 @@ function NewAutomationPage() {
             {!runtimeKey && (
               <p data-testid="automation-runtime-default-semantics" style={{ margin: "7px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>
                 {locale === "ko"
-                  ? "역할 기본값 사용: Worker 풀의 우선순위와 fallback을 따릅니다. 모델을 고르면 자동화별 고정으로 전환됩니다."
+                  ? "역할 기본값 사용: 워커 풀의 우선순위와 fallback을 따릅니다. 모델을 고르면 자동화별 고정으로 전환됩니다."
                   : "Role default follows the Worker pool priority and fallback. Choosing a model switches this automation to an exact pin."}
               </p>
             )}

@@ -126,6 +126,11 @@ contextBridge.exposeInMainWorld("agentlasComposerMentions", {
 });
 
 // Optional dedicated bridge: the renderer reports its slow keystrokes (timings only) — renderer/lib/input-latency.ts.
+// Agentlas 2.0 D6: register-to-use. The character step of a registration and the one answer to "can this agent be used now" (Main decides; the screen only asks).
+contextBridge.exposeInMainWorld("agentlasRegistration", {
+  setCharacter: (input: { agentId: string; avatar: { kind: "preset"; characterId: string } | { kind: "image"; dataUrl: string } }) => ipcRenderer.invoke("agents:character:set", input),
+  usability: (input: { agentId: string } | { slug: string; source?: "local" | "hub" | "cloud" }) => ipcRenderer.invoke("agents:usability", input),
+});
 contextBridge.exposeInMainWorld("agentlasInputLatency", {
   report: (report: unknown) => ipcRenderer.invoke("diagnostics:inputLatency", report),
 });
@@ -236,6 +241,34 @@ const api: AgentlasIpc = {
     retry: () => ipcRenderer.invoke("mobileBridge:retry"),
     revokeDevice: (deviceId: string) => ipcRenderer.invoke("mobileBridge:revokeDevice", deviceId),
     revealLog: () => ipcRenderer.invoke("mobileBridge:revealLog"),
+  },
+  oneHome: {
+    status: () => ipcRenderer.invoke("oneHome:status"),
+    refresh: (input) => ipcRenderer.invoke("oneHome:refresh", input),
+    registerDevice: () => ipcRenderer.invoke("oneHome:registerDevice"),
+    reauth: (input) => ipcRenderer.invoke("oneHome:reauth", input),
+    noticeShown: (input) => ipcRenderer.invoke("oneHome:noticeShown", input),
+    requestTrustPhone: (input) => ipcRenderer.invoke("oneHome:requestTrustPhone", input),
+    requestRevokeKey: (input) => ipcRenderer.invoke("oneHome:requestRevokeKey", input),
+    // The first move of the personal agent (Agentlas 2.0 O-M3b, no screen yet). The channels that pass power (approve/reject a claim, confirm/revert a home) only REQUEST: the run is the Main-owned confirmation window's.
+    startMoveHere: () => ipcRenderer.invoke("oneHome:startMoveHere"),
+    approveMove: (input) => ipcRenderer.invoke("oneHome:approveMove", input),
+    declineMove: (input) => ipcRenderer.invoke("oneHome:declineMove", input),
+    confirmBlank: (input) => ipcRenderer.invoke("oneHome:confirmBlank", input),
+    cancelMove: (input) => ipcRenderer.invoke("oneHome:cancelMove", input),
+    answerProfile: (input) => ipcRenderer.invoke("oneHome:answerProfile", input),
+    requestShowCode: () => ipcRenderer.invoke("oneHome:requestShowCode"),
+    approveClaim: (input) => ipcRenderer.invoke("oneHome:approveClaim", input),
+    rejectClaim: (input) => ipcRenderer.invoke("oneHome:rejectClaim", input),
+    confirmHome: () => ipcRenderer.invoke("oneHome:confirmHome"),
+    revertHome: () => ipcRenderer.invoke("oneHome:revertHome"),
+    startHere: () => ipcRenderer.invoke("oneHome:startHere"),
+    acceptHomeKey: () => ipcRenderer.invoke("oneHome:acceptHomeKey"),
+    sendLeftover: () => ipcRenderer.invoke("oneHome:sendLeftover"),
+    mergeLeftover: (input) => ipcRenderer.invoke("oneHome:mergeLeftover", input),
+    forgetLeftoverFrom: (input) => ipcRenderer.invoke("oneHome:forgetLeftoverFrom", input),
+    reviewWaiting: () => ipcRenderer.invoke("oneHome:reviewWaiting"),
+    waitingCheck: () => ipcRenderer.invoke("oneHome:waitingCheck"),
   },
   productExtensions: {
     scienceStatus: () => ipcRenderer.invoke("productExtensions:scienceStatus"),
@@ -362,7 +395,7 @@ const api: AgentlasIpc = {
     retry: (providerId: UsageRetryProviderId) => ipcRenderer.invoke("usage:retry", providerId),
   },
   billing: {
-    getCredits: () => ipcRenderer.invoke("billing:getCredits"),
+    getCredits: (input?: { force?: boolean }) => ipcRenderer.invoke("billing:getCredits", input),
     getPlans: () => ipcRenderer.invoke("billing:getPlans"),
     checkoutReadiness: (input) => ipcRenderer.invoke("billing:checkoutReadiness", input ?? {}),
     transferEarnings: (credits: number) => ipcRenderer.invoke("billing:transferEarnings", credits),
@@ -418,13 +451,9 @@ const api: AgentlasIpc = {
     bookmarkAdd: (slug: string) => ipcRenderer.invoke("promptHub:bookmarkAdd", slug),
     bookmarkRemove: (slug: string) => ipcRenderer.invoke("promptHub:bookmarkRemove", slug),
   },
-  quests: {
-    list: () => ipcRenderer.invoke("quests:list"),
-    claim: (input: { questId: string; claimIntentId: string }) => ipcRenderer.invoke("quests:claim", input),
-    claimStatus: (input: { questId: string; claimIntentId: string }) => ipcRenderer.invoke("quests:claimStatus", input),
-  },
   agentMemory: {
     entries: (agentId: string, limit?: number) => ipcRenderer.invoke("agentMemory:entries", agentId, limit),
+    skippedStores: (scope: { agentId?: string | null; projectPath?: string | null; projectId?: string | null }) => ipcRenderer.invoke("agentMemory:skipped-stores", scope),
     importPreview: (agentId: string, sourcePath?: string) =>
       ipcRenderer.invoke("memory:import-preview", agentId, sourcePath),
     importApply: (agentId: string, sourcePath: string) =>
@@ -437,23 +466,17 @@ const api: AgentlasIpc = {
     usageSummary: () => ipcRenderer.invoke("agents:usage-summary"),
     exactBindings: () => ipcRenderer.invoke("agents:exact-bindings"),
     borrowedProfiles: () => ipcRenderer.invoke("agents:borrowed-profiles"),
+    heldLocal: () => ipcRenderer.invoke("agents:held-local"),
+    importHeldLocal: (ref: string) => ipcRenderer.invoke("agents:import-held-local", ref),
+    roomStats: () => ipcRenderer.invoke("agents:room-stats"),
+    rooms: (agentId: string) => ipcRenderer.invoke("agents:rooms", agentId),
+    forgetPending: () => ipcRenderer.invoke("agents:forget-pending"),
     borrowedOntologyGraph: (profileId: string) =>
       ipcRenderer.invoke("agents:borrowed-ontology-graph", profileId),
     setBookmark: (agentId: string, bookmarked: boolean) =>
       ipcRenderer.invoke("agents:set-bookmark", agentId, bookmarked),
   },
   experience: {
-    listPacks: (input) => ipcRenderer.invoke("experience:listPacks", input),
-    ontologySummary: (agentId: string) => ipcRenderer.invoke("experience:ontologySummary", agentId),
-    ontologyGraph: (agentId: string) => ipcRenderer.invoke("experience:ontologyGraph", agentId),
-    listCandidates: (packId: string) => ipcRenderer.invoke("experience:listCandidates", packId),
-    listOperationalPublicProjections: (packId: string) =>
-      ipcRenderer.invoke("experience:listOperationalPublicProjections", packId),
-    listTasteDrafts: (agentId: string) => ipcRenderer.invoke("experience:listTasteDrafts", agentId),
-    listTasteWorkflows: (agentId: string) => ipcRenderer.invoke("experience:listTasteWorkflows", agentId),
-    intakeDiagnostics: (agentId: string) => ipcRenderer.invoke("experience:intake-diagnostics", agentId),
-    listPromotionReceipts: (packId: string) => ipcRenderer.invoke("experience:listPromotionReceipts", packId),
-    listExportIntents: (packId: string) => ipcRenderer.invoke("experience:listExportIntents", packId),
     cloudList: (packId: string) => ipcRenderer.invoke("experience:cloudList", packId),
     cloudReconcile: (input) => ipcRenderer.invoke("experience:cloudReconcile", input),
     cloudWithdraw: (input) => ipcRenderer.invoke("experience:cloudWithdraw", input),
@@ -819,6 +842,7 @@ const api: AgentlasIpc = {
   getToolApprovalResolution: (id: string) =>
     ipcRenderer.invoke("runtime:getToolApprovalResolution", id),
   listToolApprovals: () => ipcRenderer.invoke("runtime:listToolApprovals"),
+  listSettledToolApprovals: (chatIds: string[]) => ipcRenderer.invoke("runtime:listSettledToolApprovals", chatIds),
   // 데몬 자동 시작(로그인 기동) — 기본 off. 값 변경 시 main 이 부팅 항목까지 정합시킨다.
   getDaemonAutostart: () => ipcRenderer.invoke("daemon:getAutostart"),
   setDaemonAutostart: (enabled: boolean) => ipcRenderer.invoke("daemon:setAutostart", enabled),
@@ -1223,16 +1247,7 @@ const api: AgentlasIpc = {
     concurrencyInfo: () => ipcRenderer.invoke("system:concurrencyInfo"),
     setConcurrency: (value: number) => ipcRenderer.invoke("system:setConcurrency", value),
   },
-  alive: {
-    resumeUncertainWake: (input) => ipcRenderer.invoke("alive:resumeUncertainWake", input),
-    getState: (input) => ipcRenderer.invoke("alive:getState", input),
-    setEnabled: (input) => ipcRenderer.invoke("alive:setEnabled", input),
-    setTokenLimit: (input) => ipcRenderer.invoke("alive:setTokenLimit", input),
-  },
   agi: {
-    getTokenLimits: () => ipcRenderer.invoke("agi:getTokenLimits"),
-    setTokenLimits: (input) => ipcRenderer.invoke("agi:setTokenLimits", input),
-    defectsForChat: (chatId) => ipcRenderer.invoke("agi:defectsForChat", chatId),
     bugReportPreview: (input) => ipcRenderer.invoke("agi:bugReportPreview", input),
     bugReportSend: (input) => ipcRenderer.invoke("agi:bugReportSend", input),
     bugReportList: () => ipcRenderer.invoke("agi:bugReportList"),
@@ -1598,8 +1613,121 @@ const api: AgentlasIpc = {
 Object.assign(api.hephaestus, {
   recoverBuildTurn: (runId: string) => ipcRenderer.invoke("hephaestus:recoverBuildTurn", runId),
 });
+// Agentlas 2.0 Build window backend: saved builds, edit session, Preview, live files. Renderer-only, outside the app-control catalog (like
+// agents:root:*); Main checks the sender on every call and answers with result objects carrying machine codes.
+Object.assign(api, {
+  buildWorkbench: {
+    list: (input?: unknown) => ipcRenderer.invoke("buildWorkbench:list", input),
+    open: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:open", buildKey),
+    openForAgent: (agentId: string) => ipcRenderer.invoke("buildWorkbench:openForAgent", agentId),
+    draft: (input?: unknown) => ipcRenderer.invoke("buildWorkbench:draft", input),
+    remove: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:remove", buildKey),
+    closeSession: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:closeSession", buildKey),
+    setName: (input: { buildKey: string; name: string }) => ipcRenderer.invoke("buildWorkbench:setName", input),
+    setAvatar: (input: { buildKey: string; dataUrl: string }) => ipcRenderer.invoke("buildWorkbench:setAvatar", input),
+    clearAvatar: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:clearAvatar", buildKey),
+    changes: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:changes", buildKey),
+    undo: (input: { buildKey: string; path: string }) => ipcRenderer.invoke("buildWorkbench:undo", input),
+    files: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:files", buildKey),
+    readFile: (input: { buildKey: string; path: string; sinceLine?: number }) => ipcRenderer.invoke("buildWorkbench:readFile", input),
+    checkScope: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:checkScope", buildKey),
+    previewSend: (input: { buildKey: string; text: string; runtime?: unknown }) => ipcRenderer.invoke("buildWorkbench:previewSend", input),
+    previewRestart: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:previewRestart", buildKey),
+    previewClose: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:previewClose", buildKey),
+    previewMessages: (buildKey: string) => ipcRenderer.invoke("buildWorkbench:previewMessages", buildKey),
+    onFiles: (runId: string, callback: (event: unknown) => void) => {
+      const channel = `buildWorkbench:files:${runId}`;
+      const listener = (_event: unknown, payload: unknown) => callback(payload);
+      ipcRenderer.on(channel, listener);
+      return () => ipcRenderer.removeListener(channel, listener);
+    },
+  },
+});
+// Agentlas 2.0 redesign backend C: the first-run cleanup's state, read once when a screen opens. Renderer-only, outside the app-control catalog (like buildWorkbench); Main checks the sender.
+Object.assign(api, {
+  firstRun: {
+    status: () => ipcRenderer.invoke("firstRun:status"),
+    // BB-1a: "ask again now" for what the cleanup is stopped on (closed answer words), and the one signal that its state changed (no payload: the screen reads `status` again).
+    retry: () => ipcRenderer.invoke("firstRun:retry"),
+    // The channel is renderer-private (outside the app-control event catalog, like buildWorkbench:files:<id>): held in a const, not a literal the catalog scan reads.
+    onChanged: (callback: () => void) => {
+      const channel = "firstRun:changed";
+      const listener = () => callback();
+      ipcRenderer.on(channel, listener);
+      return () => ipcRenderer.removeListener(channel, listener);
+    },
+  },
+});
 Object.assign(api.oneOrg, {
   readDispatchResult: (input: unknown) => ipcRenderer.invoke("oneDispatch:resultPage", input),
+});
+// Agentlas 2.0 new Agent Chat rooms. Renderer-only, outside the app-control catalog (like openOneMember) and the phone bridge.
+Object.assign(api.chats, {
+  createAgentChat: (input: unknown) => ipcRenderer.invoke("chats:createAgentChat", input),
+  addAgentChatParticipants: (input: unknown) => ipcRenderer.invoke("chats:addAgentChatParticipants", input),
+  removeAgentChatParticipant: (input: unknown) => ipcRenderer.invoke("chats:removeAgentChatParticipant", input),
+  setAgentChatLead: (input: unknown) => ipcRenderer.invoke("chats:setAgentChatLead", input),
+  agentChatState: (chatId: unknown) => ipcRenderer.invoke("chats:agentChatState", chatId),
+});
+// Agentlas 2.0 Workspace New chat / add environment / send to another conversation, and an agent's model order. Renderer-only, outside the
+// app-control catalog and the phone bridge (the phone's responses are unchanged).
+Object.assign(api.chats, {
+  attachProject: (input: unknown) => ipcRenderer.invoke("chats:attachProject", input),
+  // Desktop repair 6 (B-5): is a join kept for this conversation until its turn ends (attachProject with reserve: true)?
+  attachProjectPending: (chatId: string) => ipcRenderer.invoke("chats:attachProjectPending", chatId),
+  newChatOptions: (currentChatId?: unknown) => ipcRenderer.invoke("chats:newChatOptions", currentChatId),
+  sendToConversation: (input: unknown) => ipcRenderer.invoke("chats:sendToConversation", input),
+});
+Object.assign(api, {
+  agentModelOrder: {
+    get: (agentId: string) => ipcRenderer.invoke("agentModelOrder:get", agentId),
+    setFollow: (input: unknown) => ipcRenderer.invoke("agentModelOrder:setFollow", input),
+    setOwn: (input: unknown) => ipcRenderer.invoke("agentModelOrder:setOwn", input),
+  },
+});
+// Home's left tree: read-only, renderer-only, deliberately outside the app-control catalog and the phone bridge.
+Object.assign(api, {
+  home: {
+    tree: () => ipcRenderer.invoke("home:tree"),
+    rowsByIds: (ids: string[]) => ipcRenderer.invoke("home:rowsByIds", ids),
+    participants: (chatId: string) => ipcRenderer.invoke("home:participants", chatId),
+    search: (text: string) => ipcRenderer.invoke("home:search", text),
+    roomWaiting: (chatId: string) => ipcRenderer.invoke("home:roomWaiting", chatId),
+    stopRoom: (chatId: string) => ipcRenderer.invoke("home:stopRoom", chatId),
+    lines: (ids: string[]) => ipcRenderer.invoke("home:lines", ids),
+    openMember: (input: { roomChatId: string; agentId: string }) => ipcRenderer.invoke("home:openMember", input),
+  },
+});
+// "My rules" (Agentlas 2.0 P4): the owner's rules file on this computer. Renderer-only, outside the app-control catalog and the phone bridge. Results carry machine codes.
+Object.assign(api, {
+  workspaceRules: {
+    get: () => ipcRenderer.invoke("workspaceRules:get"),
+    save: (input: { text: string; baseFingerprint: string }) => ipcRenderer.invoke("workspaceRules:save", input),
+    clear: (input: { baseFingerprint: string }) => ipcRenderer.invoke("workspaceRules:clear", input),
+    candidates: () => ipcRenderer.invoke("workspaceRules:candidates"),
+    addPicked: (input: { ids: string[]; baseFingerprint: string }) => ipcRenderer.invoke("workspaceRules:addPicked", input),
+    pickNotice: (input: { state: "offered" | "dismissed" }) => ipcRenderer.invoke("workspaceRules:pickNotice", input),
+    // Desktop repair 6: Main opens the rules file in the computer's own editor (no argument; the answer carries no path).
+    openFile: () => ipcRenderer.invoke("workspaceRules:openFile"),
+  },
+});
+// Agent folder location and portrait: renderer-only, outside the app-control catalog and the phone bridge. Results carry machine codes.
+Object.assign(api, {
+  agentRoot: {
+    status: () => ipcRenderer.invoke("agents:root:status"),
+    preview: (target: string) => ipcRenderer.invoke("agents:root:preview", target),
+    move: (target: string) => ipcRenderer.invoke("agents:root:move", target),
+    cancel: () => ipcRenderer.invoke("agents:root:cancel"),
+    retire: () => ipcRenderer.invoke("agents:root:retire"),
+    // Desktop repair 6: the owner's two ways out of an interrupted move (a choice word only; neither deletes a folder).
+    settle: (choice: "keep_old" | "keep_new") => ipcRenderer.invoke("agents:root:settle", choice),
+    setAsideJournal: () => ipcRenderer.invoke("agents:root:set-aside-journal"),
+    reconnect: (target: string) => ipcRenderer.invoke("agents:root:reconnect", target),
+    folderStatus: (agentId: string) => ipcRenderer.invoke("agents:folder:status", agentId),
+    setLocation: (input: { agentId: string; folder: string }) => ipcRenderer.invoke("agents:folder:set-location", input),
+    avatarSet: (input: { agentId: string; dataUrl: string }) => ipcRenderer.invoke("agents:avatar:set", input),
+    avatarClear: (agentId: string) => ipcRenderer.invoke("agents:avatar:clear", agentId),
+  },
 });
 
 // The sandbox cannot import a relative preload module. Keep this role projection
@@ -1686,12 +1814,6 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, chatIds: string[]) => handler(chatIds);
     ipcRenderer.on("invoke:activeChats", wrapped);
     return () => ipcRenderer.removeListener("invoke:activeChats", wrapped);
-  },
-  // Alive (AGI toggle) lifecycle: ids only; the screen re-reads alive.getState.
-  onAliveChanged: (handler: (event: import("../shared/alive").AliveChangedEvent) => void) => {
-    const wrapped = (_evt: Electron.IpcRendererEvent, event: import("../shared/alive").AliveChangedEvent) => handler(event);
-    ipcRenderer.on("alive:changed", wrapped);
-    return () => ipcRenderer.removeListener("alive:changed", wrapped);
   },
   // Agent mail: ids and counts only; the mailbox screen re-reads what it shows.
   onAgentMailChanged: (handler: (event: import("../shared/agent-mail").AgentMailChangedEvent) => void) => {

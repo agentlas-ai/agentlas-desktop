@@ -1,4 +1,4 @@
-/* The personal agent's front: the one-time notice, the setting row, the fixed composer chip and the fallback line.
+/* The personal agent's front: the one-time notice, the setting row and the fallback line.
    Built on the One sheet tokens (OneBottomSheet.module.css) and the Personal workspace's own button language. */
 
 .rows {
@@ -164,39 +164,6 @@
 .switch:disabled {
   cursor: wait;
   opacity: 0.55;
-}
-
-/* The fixed chip in the composer */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  max-width: 100%;
-  padding: 4px 12px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 999px;
-  background: var(--paper);
-  color: var(--ink-soft);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.chip span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chip:hover {
-  border-color: var(--paper-edge-strong);
-  color: var(--ink);
-}
-
-.chip:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 
 /* The line above the composer when the newest turn went to the owner's own CLI */

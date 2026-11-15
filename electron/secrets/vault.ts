@@ -429,7 +429,13 @@ export async function listCredentialRecoveryFailures(): Promise<CredentialRecove
   const records = await readCredentialRecoveryRecords();
   const out: CredentialRecoveryFailure[] = [];
   for (const record of records) {
-    const display = recoveryDisplay(record.resource);
+    let display = recoveryDisplay(record.resource);
+    if (!display && record.resource.operation === "read" && record.resource.account.startsWith("native-auth:v1:")) {
+      try {
+        const native = await import("../daemon/native-auth-credentials");
+        if (native.nativeGuiRecoveryKind(record.resource.service, record.resource.account)) display = { kind: "native-one", operation: "read", name: null };
+      } catch { /* A mismatched installation is not a retry target. */ }
+    }
     if (!display) continue;
     const key = recoveryResourceKey(record.resource);
     let retryToken = resourceTokens.get(key);
@@ -477,6 +483,18 @@ export function retryCredentialRecoveryFromUser(retryToken: string): Promise<Cre
     if (entry.resource.operation === "list") {
       await retryEnvListFromUser(entry.resource.service);
       return { status: "restored" };
+    }
+    if (entry.resource.account.startsWith("native-auth:v1:")) {
+      const native = await import("../daemon/native-auth-credentials");
+      const nativeKind = native.nativeGuiRecoveryKind(entry.resource.service, entry.resource.account);
+      if (!nativeKind) return { status: "invalid-token" };
+      const runtime = await import("../one/supervisor-native-runtime");
+      const mode = runtime.supervisorRuntimeMode();
+      if (mode === "handoff") return { status: "unavailable" };
+      const result = mode === "daemon"
+        ? await runtime.callOneSupervisorRuntime("companion.credential.retry", { kind: nativeKind })
+        : await native.retryNativeGuiResourceFromUser(nativeKind);
+      return { status: result === "restored" ? "restored" : result === "missing" ? "missing" : "unavailable" };
     }
     const value = await retryAccountFromUser(entry.resource.service, entry.resource.account);
     return {

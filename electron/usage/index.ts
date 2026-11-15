@@ -11,9 +11,9 @@ import { developmentEffectsSuppressed } from "../development-effect-policy";
 // 로컬(Ollama)은 무제한 — 둘 다 대시보드 "연결" 칩은 runtime.detect가 담당한다.
 // 향후 프로바이더는 이 배열에 어댑터만 추가하면 됨.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type {
-  ModelRoleUsageSnapshot,
   ProviderUsage,
   UsageRetryProviderId,
   UsageRetryResult,
@@ -21,14 +21,15 @@ import type {
   UsageWindow,
 } from "../../shared/types";
 import { getDb } from "../store/db";
-import { currentClaudeUsageAccountFingerprint, getClaudeUsage } from "./claude";
-import { currentCodexUsageAccountFingerprint, getCodexUsage } from "./codex";
+import { claudeUsageIdentityFile, currentClaudeUsageAccountFingerprint, getClaudeUsage } from "./claude";
+import { codexAuthFile, currentCodexUsageAccountFingerprint, getCodexUsage } from "./codex";
 import { getGrokUsage } from "./grok";
-import { currentKimiUsageCredentialFingerprint, getKimiUsage } from "./kimi";
+import { currentKimiUsageAccountFingerprint, currentKimiUsageCredentialFingerprint, getKimiUsage, kimiUsageIdentityFiles } from "./kimi";
 import { localTokensForAsync } from "./local-logs";
 import { readProviderHealth } from "./provider-health";
 import { UsageRetryGate } from "./retry-policy";
 import { userDataPath } from "../runtime-paths";
+import { cliUserHome } from "../runtime/product-home-identity";
 import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow, providerQuotaExhausted } from "../../shared/runtime-quota";
 
 // 하이브리드 사용량(ccusage + agentcat 절충):
@@ -51,7 +52,6 @@ const backoffUntil = new Map<string, number>();
 const providerFetchInFlight = new Map<string, Promise<ProviderUsage | null>>();
 const explicitRetryGate = new UsageRetryGate(FORCE_MIN_MS);
 const explicitRetryInFlight = new Map<UsageRetryProviderId, Promise<UsageRetryResult>>();
-const MODEL_ROLE_USAGE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 /** Opt-in is local to Agentlas. It does not buy credits or change provider controls. */
 export function getSubscriptionCreditUse(): boolean {
@@ -74,226 +74,6 @@ function withSubscriptionCreditPolicy(snapshot: UsageSnapshot): UsageSnapshot {
     ["claude-code", "codex"].includes(provider.provider) ? { ...provider, allowPaidUsage: enabled } : provider) };
 }
 
-export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
-  const sinceMs = now - MODEL_ROLE_USAGE_WINDOW_MS;
-  const since = new Date(sinceMs).toISOString();
-  const until = new Date(now).toISOString();
-  const empty = (role: "orchestrator" | "worker") => ({
-    role,
-    observedTokens: 0,
-    invocationCount: 0,
-  });
-  const buckets = {
-    orchestrator: empty("orchestrator"),
-    worker: empty("worker"),
-  };
-  let outputOnlyRows = 0;
-  const byModel = new Map<string, ModelRoleUsageSnapshot["byModel"][number]>();
-
-  // `invoke_result` historically carried the model but not the applied effort.
-  // Keep a short in-memory index of the same run's runtime-selection receipts so
-  // those older rows still get the exact model/effort pair when it is available.
-  // New rows write `effort` directly; the selection join is only a compatibility
-  // bridge and never guesses an effort from a model name.
-  type SelectionRow = {
-    run_id: string;
-    node_id: string | null;
-    seq: number;
-    ts: string;
-    role: "orchestrator" | "worker" | null;
-    provider: string | null;
-    model: string | null;
-    effort: string | null;
-  };
-  // Partition by the exact run/node/role boundary before joining. A profile with
-  // many runs must not scan the whole week's selections for every invocation.
-  const selectionsByScope = new Map<string, SelectionRow[]>();
-  const selectionScope = (runId: string, nodeId: string | null, role: string | null) =>
-    JSON.stringify([runId, nodeId, role]);
-  const parseObject = (value: unknown): Record<string, unknown> | null => (
-    value && typeof value === "object" && !Array.isArray(value)
-      ? value as Record<string, unknown>
-      : null
-  );
-  const textOrNull = (value: unknown): string | null => (
-    typeof value === "string" && value.trim() ? value.trim() : null
-  );
-  const selectedEffortFor = (
-    runId: string,
-    nodeId: string | null,
-    role: "orchestrator" | "worker",
-    provider: string | null,
-    model: string | null,
-    ts: string,
-    seq: number,
-  ): { provider: string | null; model: string | null; effort: string | null } => {
-    const rows = selectionsByScope.get(selectionScope(runId, nodeId, role)) ?? [];
-    // Rows are in (ts, seq) order. Find the last eligible time by binary search,
-    // then walk backwards only inside this scope to match optional model/provider.
-    let low = 0, high = rows.length;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      const row = rows[middle]!;
-      if (row.ts < ts || (row.ts === ts && row.seq <= seq)) low = middle + 1;
-      else high = middle;
-    }
-    let hit: SelectionRow | undefined;
-    for (let index = low - 1; index >= 0; index -= 1) {
-      const row = rows[index]!;
-      if ((model == null || row.model === model) && (provider == null || row.provider === provider)) {
-        hit = row;
-        break;
-      }
-    }
-    return hit
-      ? { provider: hit.provider, model: hit.model, effort: hit.effort }
-      : { provider: null, model: null, effort: null };
-  };
-  try {
-    const db = getDb();
-    const rows = db.prepare(
-      `SELECT
-         json_extract(payload_json, '$.modelRole') AS role,
-         COUNT(*) AS invocation_count,
-         COALESCE(SUM(CASE
-           WHEN json_type(payload_json, '$.tokens') = 'integer'
-             THEN json_extract(payload_json, '$.tokens')
-           ELSE 0
-         END), 0) AS observed_tokens,
-         COALESCE(SUM(CASE
-           WHEN json_extract(payload_json, '$.measurement') IN ('output-only', 'output-delta-or-visible-estimate') THEN 1
-           ELSE 0
-         END), 0) AS output_only_rows
-       FROM run_events
-       WHERE kind = 'invoke_result'
-         AND ts >= ? AND ts <= ?
-         AND json_extract(payload_json, '$.modelRole') IN ('orchestrator', 'worker')
-       GROUP BY json_extract(payload_json, '$.modelRole')`,
-    ).all(since, until) as Array<{
-      role: "orchestrator" | "worker";
-      invocation_count: number;
-      observed_tokens: number;
-      output_only_rows: number;
-    }>;
-    for (const row of rows) {
-      const bucket = buckets[row.role];
-      bucket.invocationCount = Math.max(0, Math.trunc(Number(row.invocation_count) || 0));
-      bucket.observedTokens = Math.max(0, Math.trunc(Number(row.observed_tokens) || 0));
-      outputOnlyRows += Math.max(0, Math.trunc(Number(row.output_only_rows) || 0));
-    }
-
-    const rawSelections = db.prepare(
-      `SELECT run_id, node_id, seq, ts, payload_json
-       FROM run_events
-       WHERE kind = 'runtime_selection' AND ts >= ? AND ts <= ?
-       ORDER BY ts ASC, seq ASC`,
-    ).all(since, until) as Array<{
-      run_id: string;
-      node_id: string | null;
-      seq: number;
-      ts: string;
-      payload_json: string;
-    }>;
-    for (const row of rawSelections) {
-      let payload: Record<string, unknown> | null = null;
-      try { payload = parseObject(JSON.parse(row.payload_json)); } catch { /* malformed legacy row */ }
-      const role = textOrNull(payload?.runtimeRole);
-      const selection: SelectionRow = {
-        run_id: row.run_id,
-        node_id: row.node_id ?? null,
-        seq: Number(row.seq) || 0,
-        ts: row.ts,
-        role: role === "orchestrator" || role === "worker" ? role : null,
-        provider: textOrNull(payload?.runtimeBackend),
-        model: textOrNull(payload?.runtimeModel),
-        effort: textOrNull(payload?.runtimeEffort),
-      };
-      const key = selectionScope(selection.run_id, selection.node_id, selection.role);
-      const scoped = selectionsByScope.get(key);
-      if (scoped) scoped.push(selection);
-      else selectionsByScope.set(key, [selection]);
-    }
-
-    const rawInvocations = db.prepare(
-      `SELECT run_id, node_id, seq, ts, payload_json
-       FROM run_events
-       WHERE kind = 'invoke_result'
-         AND ts >= ? AND ts <= ?
-         AND json_extract(payload_json, '$.modelRole') IN ('orchestrator', 'worker')
-       ORDER BY ts ASC, seq ASC`,
-    ).all(since, until) as Array<{
-      run_id: string;
-      node_id: string | null;
-      seq: number;
-      ts: string;
-      payload_json: string;
-    }>;
-    for (const row of rawInvocations) {
-      let payload: Record<string, unknown> | null = null;
-      try { payload = parseObject(JSON.parse(row.payload_json)); } catch { /* malformed legacy row */ }
-      const role = textOrNull(payload?.modelRole);
-      if (role !== "orchestrator" && role !== "worker") continue;
-      const payloadProvider = textOrNull(payload?.provider);
-      const payloadModel = textOrNull(payload?.model);
-      const payloadEffort = textOrNull(payload?.effort)
-        ?? textOrNull(payload?.runtimeEffort)
-        ?? textOrNull(payload?.appliedEffort);
-      const selected = selectedEffortFor(
-        row.run_id,
-        row.node_id ?? null,
-        role,
-        payloadProvider,
-        payloadModel,
-        row.ts,
-        Number(row.seq) || 0,
-      );
-      const provider = payloadProvider ?? selected.provider ?? "unknown";
-      const model = payloadModel ?? selected.model;
-      const effort = payloadEffort ?? selected.effort;
-      const key = [role, provider, model ?? "", effort ?? ""].join("\u0000");
-      const tokens = Number.isSafeInteger(Number(payload?.tokens))
-        ? Math.max(0, Number(payload?.tokens))
-        : 0;
-      const current = byModel.get(key);
-      if (current) {
-        current.observedTokens += tokens;
-        current.invocationCount += 1;
-      } else {
-        byModel.set(key, {
-          role,
-          provider,
-          model,
-          effort,
-          observedTokens: tokens,
-          invocationCount: 1,
-        });
-      }
-    }
-  } catch {
-    // Older or partially migrated profiles get an explicit zero snapshot.
-  }
-  const totalObservedTokens =
-    buckets.orchestrator.observedTokens + buckets.worker.observedTokens;
-  return {
-    since: new Date(sinceMs).toISOString(),
-    until: new Date(now).toISOString(),
-    measurement: outputOnlyRows > 0 ? "output-only" : "total",
-    orchestrator: buckets.orchestrator,
-    worker: buckets.worker,
-    totalObservedTokens,
-    workerSharePercent: totalObservedTokens > 0
-      ? Math.round((buckets.worker.observedTokens / totalObservedTokens) * 100)
-      : 0,
-    byModel: [...byModel.values()].sort((left, right) =>
-      right.observedTokens - left.observedTokens
-      || right.invocationCount - left.invocationCount
-      || left.role.localeCompare(right.role)
-      || left.provider.localeCompare(right.provider)
-      || (left.model ?? "").localeCompare(right.model ?? "")
-      || (left.effort ?? "").localeCompare(right.effort ?? ""),
-    ),
-  };
-}
 
 // ── last-good 디스크 영속화 ────────────────────────────────────────────────
 // 메모리 전용이면 앱 재시작 직후 첫 조회가 429/네트워크 장애를 맞을 때 보여줄 게 없어
@@ -373,23 +153,35 @@ async function localFallback(id: string, base: ProviderUsage | null, now: number
  * (ipc.ts runtime:openCliLogin), so a sign-in made outside it — a terminal `claude` login, the vendor's own app — left the
  * previous account's figures in place until a usage screen happened to be opened. Production: Claude switched accounts at
  * 13:21Z while usage-last-good still held the old account's weekly 100% read at 08:18Z.
- * Main reads each provider's LOCAL identity on an interval (a file read, never the network). When it changes, that
- * provider's cache is dropped and the new account's usage is read once (fetchProvider discards an entry whose account
- * no longer matches, on disk too); `onChange` lets screens re-read.
+ * Main reads each provider's LOCAL identity (a file read, never the network) once at start and again when one of the
+ * files it is read from changes. When the identity changes, that provider's cache is dropped and the new account's usage
+ * is read once (fetchProvider discards an entry whose account no longer matches, on disk too); `onChange` lets screens
+ * re-read.
  */
-const USAGE_ACCOUNT_WATCH_MS = 30_000;
-const USAGE_ACCOUNT_READERS: ReadonlyArray<readonly [UsageRetryProviderId, () => string | undefined]> = [
-  ["claude-code", currentClaudeUsageAccountFingerprint],
-  ["codex", currentCodexUsageAccountFingerprint],
-  ["kimi", currentKimiUsageCredentialFingerprint],
+export interface UsageAccountWatchTarget {
+  id: UsageRetryProviderId;
+  /** The local account identity; undefined when signed out or unreadable. */
+  read: () => string | undefined;
+  /** The files `read` looks at. Only a change to one of them can change the identity. */
+  files: () => string[];
+}
+// Readers and paths are looked up at call time, so a host that replaces a module export is followed.
+const USAGE_ACCOUNT_TARGETS: ReadonlyArray<UsageAccountWatchTarget> = [
+  { id: "claude-code", read: () => currentClaudeUsageAccountFingerprint(), files: () => [claudeUsageIdentityFile()] },
+  { id: "codex", read: () => currentCodexUsageAccountFingerprint(), files: () => [codexAuthFile()] },
+  { id: "kimi", read: () => currentKimiUsageAccountFingerprint(), files: () => kimiUsageIdentityFiles() },
 ];
 function readAccountFingerprint(read: () => string | undefined): string | undefined {
   try { return read(); } catch { return undefined; }
 }
-export function checkUsageAccountChanges(seen: Map<string, string | undefined>, onChange: (providerId: UsageRetryProviderId) => void): UsageRetryProviderId[] {
+export function checkUsageAccountChanges(
+  seen: Map<string, string | undefined>,
+  onChange: (providerId: UsageRetryProviderId) => void,
+  targets: ReadonlyArray<UsageAccountWatchTarget> = USAGE_ACCOUNT_TARGETS,
+): UsageRetryProviderId[] {
   if (developmentEffectsSuppressed()) return [];
   const changed: UsageRetryProviderId[] = [];
-  for (const [id, read] of USAGE_ACCOUNT_READERS) {
+  for (const { id, read } of targets) {
     const current = readAccountFingerprint(read);
     if (!seen.has(id)) { seen.set(id, current); continue; }
     if (seen.get(id) === current) continue;
@@ -402,14 +194,243 @@ export function checkUsageAccountChanges(seen: Map<string, string | undefined>, 
   }
   return changed;
 }
-export function startUsageAccountWatch(onChange: (providerId: UsageRetryProviderId) => void): () => void {
+
+/** Quiet time after the last file event before the identity is read: a sign-in writes its file more than once. */
+const USAGE_ACCOUNT_DEBOUNCE_MS = 1_000;
+/** A file that never goes quiet (Claude Code rewrites ~/.claude.json all session long) is still read this soon. */
+const USAGE_ACCOUNT_MAX_WAIT_MS = 10_000;
+/** After a read that found the same account, the next read of that provider waits this long, however often its file is rewritten. */
+const USAGE_ACCOUNT_MIN_INTERVAL_MS = 30_000;
+/** Period of the timed check, which runs only for a provider whose folders cannot be watched. */
+const USAGE_ACCOUNT_FALLBACK_MS = 30_000;
+
+type UsageFolderListener = (event: string, filename: string | Buffer | null) => void;
+export interface UsageAccountWatchOptions {
+  targets?: ReadonlyArray<UsageAccountWatchTarget>;
+  debounceMs?: number;
+  maxWaitMs?: number;
+  minIntervalMs?: number;
+  fallbackMs?: number;
+  /** fs.watch, replaceable so a gate can stand in for a platform where it fails. */
+  watch?: (folder: string, options: { persistent: boolean }, listener: UsageFolderListener) => fs.FSWatcher;
+}
+interface WatchedUsageAccount {
+  target: UsageAccountWatchTarget;
+  /** Inode, size and write time of the identity files at the last read. An event that changed none of them needs no read. */
+  signature: string;
+  timer: ReturnType<typeof setTimeout> | null;
+  /** When the first event of the pending check arrived. */
+  pendingSince: number;
+  /** Earliest time of the next read while the last one found the same account. */
+  notBefore: number;
+  /** The timed check; set only while one of this provider's folders cannot be watched. */
+  fallback: ReturnType<typeof setInterval> | null;
+}
+interface WatchedUsageFolder {
+  watcher: fs.FSWatcher;
+  inode: string;
+  /** Entry name in this folder -> the providers to check when it changes. */
+  names: Map<string, Set<WatchedUsageAccount>>;
+}
+
+function existingRealPath(target: string): string | undefined {
+  try { return fs.realpathSync.native(target); } catch { /* missing, or a volume the native call cannot resolve */ }
+  try { return fs.realpathSync(target); } catch { return undefined; }
+}
+function inodeOf(target: string): string {
+  try { const stat = fs.statSync(target); return `${stat.dev}:${stat.ino}`; } catch { return "-"; }
+}
+function usageFilesSignature(files: string[]): string {
+  const now = Date.now();
+  return files.map((file) => {
+    try {
+      const stat = fs.statSync(file);
+      // A filesystem that stamps whole seconds cannot tell two quick writes of the same size apart. Such a file, written
+      // moments ago, gets a signature that equals no other, so the next event reads it.
+      const unsettled = stat.mtimeMs % 1000 === 0 && now - stat.mtimeMs < 3_000;
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}${unsettled ? `:unsettled@${now}` : ""}`;
+    } catch { return "-"; }
+  }).join("|");
+}
+/** Entry names as the folder watch reports them: the name on disk, which may differ in case from the configured path. */
+function watchedName(name: string): string {
+  return process.platform === "linux" ? name : name.toLowerCase();
+}
+/**
+ * The folders that can tell when `file` changes: its own folder, and the folder above (which sees that folder appear,
+ * vanish or be replaced), climbing further only while nothing on the way exists yet. A credential file is usually
+ * replaced by rename and may not exist yet, so the folder is watched and events are filtered by name.
+ * It never climbs above a home folder and never reaches the filesystem root: on macOS a folder watch is fed every event
+ * below that folder, so a higher folder costs more and tells nothing new.
+ */
+function usageWatchPlan(file: string, ceilings: ReadonlySet<string>): Array<{ folder: string; name: string }> {
+  const plan: Array<{ folder: string; name: string }> = [];
+  let child = path.resolve(file);
+  for (let level = 0; level < 8; level++) {
+    const folder = path.dirname(child);
+    if (folder === child || path.dirname(folder) === folder) break;
+    plan.push({ folder, name: path.basename(child) });
+    const real = existingRealPath(folder);
+    if (ceilings.has(folder) || (real && (ceilings.has(real) || level >= 1))) break;
+    child = folder;
+  }
+  return plan;
+}
+
+/**
+ * Starts the account watch and returns its stop function. It is driven by file events, not by a clock: with no change to
+ * an identity file nothing is read. Works when a file or its folder does not exist yet and when the file is replaced by
+ * rename. A provider whose folders cannot be watched (fs.watch throws: no inotify watches left on Linux, a volume without
+ * change events, a path with nothing existing on it) gets the timed check instead, for that provider only, until a watch
+ * can be set up. Nothing here throws into the caller after start.
+ */
+export function startUsageAccountWatch(
+  onChange: (providerId: UsageRetryProviderId) => void,
+  options: UsageAccountWatchOptions = {},
+): () => void {
+  const targets = options.targets ?? USAGE_ACCOUNT_TARGETS;
+  const debounceMs = options.debounceMs ?? USAGE_ACCOUNT_DEBOUNCE_MS;
+  const maxWaitMs = options.maxWaitMs ?? USAGE_ACCOUNT_MAX_WAIT_MS;
+  const minIntervalMs = options.minIntervalMs ?? USAGE_ACCOUNT_MIN_INTERVAL_MS;
+  const fallbackMs = options.fallbackMs ?? USAGE_ACCOUNT_FALLBACK_MS;
+  const watch = options.watch ?? ((folder, watchOptions, listener) => fs.watch(folder, watchOptions, listener));
   const seen = new Map<string, string | undefined>();
-  checkUsageAccountChanges(seen, onChange);
-  const timer = setInterval(() => {
-    for (const id of checkUsageAccountChanges(seen, onChange)) console.info(`[usage] ${id} account changed; usage re-read`);
-  }, USAGE_ACCOUNT_WATCH_MS);
-  timer.unref?.();
-  return () => clearInterval(timer);
+  const filesOf = (target: UsageAccountWatchTarget): string[] => { try { return target.files(); } catch { return []; } };
+  // The signature is taken before the read, so a write landing in between is read again rather than missed.
+  const accounts: WatchedUsageAccount[] = targets.map((target) => ({
+    target, signature: usageFilesSignature(filesOf(target)), timer: null, pendingSince: 0, notBefore: 0, fallback: null,
+  }));
+  checkUsageAccountChanges(seen, onChange, targets);
+  if (developmentEffectsSuppressed()) return () => undefined;
+
+  const folders = new Map<string, WatchedUsageFolder>();
+  /** Folders whose watch failed. They are tried again by the timed check, not on every event. */
+  const unwatchable = new Set<string>();
+  let stopped = false;
+
+  function closeFolder(folder: string): void {
+    const entry = folders.get(folder);
+    if (!entry) return;
+    folders.delete(folder);
+    try { entry.watcher.close(); } catch { /* already closed */ }
+  }
+  function accountsIn(entry: WatchedUsageFolder): Set<WatchedUsageAccount> {
+    const all = new Set<WatchedUsageAccount>();
+    for (const set of entry.names.values()) for (const account of set) all.add(account);
+    return all;
+  }
+  function onFolderEvent(folder: string, filename: string | Buffer | null): void {
+    const entry = folders.get(folder);
+    if (!entry || stopped) return;
+    // No name: the OS dropped detail (a full event buffer on Windows), so any entry may have changed.
+    if (filename == null) { for (const account of accountsIn(entry)) schedule(account); return; }
+    const name = watchedName(path.basename(String(filename)));
+    const hit = entry.names.get(name);
+    if (hit) for (const account of hit) schedule(account);
+    // Linux reports the removal or rename of the watched folder itself under the folder's own name.
+    else if (name === watchedName(path.basename(folder))) for (const account of accountsIn(entry)) schedule(account);
+  }
+  /** Brings the set of watched folders in line with the paths the readers use now and with what exists on disk now. */
+  function arm(retryUnwatchable: boolean): void {
+    if (retryUnwatchable) unwatchable.clear();
+    const ceilings = new Set([os.homedir(), cliUserHome()].flatMap((home) => [path.resolve(home), existingRealPath(home) ?? path.resolve(home)]));
+    const wanted = new Map<string, Map<string, Set<WatchedUsageAccount>>>();
+    const blocked = new Set<WatchedUsageAccount>();
+    for (const account of accounts) {
+      for (const file of filesOf(account.target)) {
+        const plan = usageWatchPlan(file, ceilings);
+        // A file reached through a link changes in the folder it really lives in.
+        const real = existingRealPath(file);
+        if (real) plan.push({ folder: path.dirname(real), name: path.basename(real) });
+        let reachable = false;
+        for (const { folder, name } of plan) {
+          const realFolder = existingRealPath(folder);
+          if (!realFolder) continue;
+          reachable = true;
+          let names = wanted.get(realFolder);
+          if (!names) { names = new Map(); wanted.set(realFolder, names); }
+          let set = names.get(watchedName(name));
+          if (!set) { set = new Set(); names.set(watchedName(name), set); }
+          set.add(account);
+        }
+        if (!reachable) blocked.add(account);
+      }
+    }
+    for (const folder of [...unwatchable]) if (!wanted.has(folder)) unwatchable.delete(folder);
+    for (const [folder, entry] of [...folders]) {
+      const names = wanted.get(folder);
+      // A folder removed and created again is a new folder: a watch on the old one hears nothing on Linux.
+      if (names && inodeOf(folder) === entry.inode) entry.names = names;
+      else closeFolder(folder);
+    }
+    for (const [folder, names] of wanted) {
+      if (folders.has(folder)) continue;
+      if (!unwatchable.has(folder)) {
+        try {
+          const inode = inodeOf(folder);
+          const watcher = watch(folder, { persistent: false }, (_event, filename) => {
+            try { onFolderEvent(folder, filename); } catch (error) { console.warn("[usage] account watch event failed:", error instanceof Error ? error.message : error); }
+          });
+          watcher.on("error", () => {
+            const entry = folders.get(folder);
+            if (!entry || entry.watcher !== watcher) return;
+            // The folder went away (Windows) or the watch broke: stop listening and look again from scratch.
+            closeFolder(folder);
+            unwatchable.add(folder);
+            for (const account of accountsIn(entry)) schedule(account);
+          });
+          folders.set(folder, { watcher, inode, names });
+          continue;
+        } catch { unwatchable.add(folder); }
+      }
+      for (const set of names.values()) for (const account of set) blocked.add(account);
+    }
+    for (const account of accounts) {
+      if (!blocked.has(account)) {
+        if (account.fallback) { clearInterval(account.fallback); account.fallback = null; }
+      } else if (!account.fallback && !stopped) {
+        account.fallback = setInterval(() => check(account, true), fallbackMs);
+        account.fallback.unref?.();
+      }
+    }
+  }
+  function schedule(account: WatchedUsageAccount): void {
+    if (stopped) return;
+    const now = Date.now();
+    if (account.timer) clearTimeout(account.timer);
+    else account.pendingSince = now;
+    const due = Math.max(Math.min(now + debounceMs, account.pendingSince + maxWaitMs), account.notBefore);
+    account.timer = setTimeout(() => { account.timer = null; check(account, false); }, Math.max(0, due - now));
+    account.timer.unref?.();
+  }
+  /** One look at one provider. `timed` is the fallback clock, which cannot trust events and so always reads. */
+  function check(account: WatchedUsageAccount, timed: boolean): void {
+    if (stopped) return;
+    try {
+      arm(timed);
+      const signature = usageFilesSignature(filesOf(account.target));
+      if (!timed && signature === account.signature) return;
+      account.signature = signature;
+      const changed = checkUsageAccountChanges(seen, onChange, [account.target]);
+      // A change is rare and may be followed by the rest of the sign-in, so only an unchanged read holds the next one back.
+      account.notBefore = changed.length ? 0 : Date.now() + minIntervalMs;
+      for (const id of changed) console.info(`[usage] ${id} account changed; usage re-read`);
+    } catch (error) {
+      console.warn("[usage] account watch check failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  arm(false);
+  // A write between the first read and the watch being set up raised no event here: compare once more.
+  for (const account of accounts) if (usageFilesSignature(filesOf(account.target)) !== account.signature) schedule(account);
+  return () => {
+    stopped = true;
+    for (const account of accounts) {
+      if (account.timer) { clearTimeout(account.timer); account.timer = null; }
+      if (account.fallback) { clearInterval(account.fallback); account.fallback = null; }
+    }
+    for (const folder of [...folders.keys()]) closeFolder(folder);
+  };
 }
 
 /** Main 내부에서 재로그인/실행 영수증 직후 호출 — Renderer에는 직접 노출하지 않는다.
@@ -673,7 +694,8 @@ async function buildUsageSnapshot(options?: {
   const snapshot: UsageSnapshot = {
     providers,
     fetchedAt: now,
-    modelRoleUsage: modelRoleUsageSnapshot(now),
+    // `modelRoleUsage` (the seven-day split of observed tokens by role) is not computed any more: the Dashboard that showed it is gone and nothing else reads it
+    // (not the phone, not the terminal, not the app-control catalog's consumers). The field stays optional in the shape, so an older reader sees it absent (desktop 3).
   };
   cache = { snapshot, at: now };
   return withSubscriptionCreditPolicy(snapshot);

@@ -124,3 +124,11 @@
 .dot[data-status="running"] { background: var(--ok); }
 .dot[data-status="failed"] { background: var(--danger); }
 .dot[data-status="unavailable"] { background: transparent; box-shadow: inset 0 0 0 1px var(--muted-deep); }
+
+/* A room whose members are being read (or could not be): one quiet line where the member rows will be. */
+.note {
+  padding: 4px 8px 4px 14px;
+  color: var(--muted-deep);
+  font-size: 11px;
+  list-style: none;
+}

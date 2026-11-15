@@ -45,6 +45,10 @@ export interface HostToolServer {
   readonly supersedesPlugins?: readonly string[];
   /** The minting domain's own currentness (the turn still holds the grant). Read by the prepared-config seal. */
   isCurrent(): boolean;
+  /** Seconds a runtime may wait for one tool of this server (Codex `tool_timeout_sec`; its own default is 60). Absent: the runtime's default. */
+  readonly toolTimeoutSec?: number;
+  /** Ends what the mint made for this turn (a capability file, a record): called once when the turn's config ends, whether or not any tool ran. Absent: nothing to end. */
+  release?(): void;
 }
 
 /** The registry row the shared serializer and the prepared-transport seal read. Not persisted. */

@@ -10,6 +10,8 @@ import { captureMemoryContextGeneration } from "./context-generation";
 import { readGenerationMemoryPack, recordMemoryGenerationFallback } from "./generation-pack";
 import {
   listMemoryForContext,
+  listPersonalMemoryForContext,
+  withSubStoreReadProbe,
   type MemoryEntry,
 } from "./store";
 import { automationLedgerChatIds, isAutomationLedgerChat } from "./automation-surface";
@@ -31,11 +33,19 @@ import {
   readActivatedProjectMemoryJson,
   readActivatedProjectMemoryText,
 } from "./safe-project-read";
+import {
+  codeMapDir,
+  emergencyCodeMapOut,
+  legacyIndexDir,
+  readProjectIndexJson,
+} from "./project-index";
 import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
-import { listMemoryEpisodesForContext, memoryTicketTurns } from "./tickets";
+import { listMemoryEpisodesForContext, memoryTicketTurns, previousTurnSummary } from "./tickets";
 import { recallableEpisodes } from "./episode-lifetime";
 import { nativeRecallFor } from "./native-text";
 import { filterSupersededProjectSoul, memoryBlockKey } from "./graph";
+import { registerTurnReadScope, rememberShownMemory } from "../turn-tools/memory-facts";
+import { recallQueryOf, recallReasonOfError, recallStatusLine, recallTierOf, type RecallReadReason } from "./recall-contract";
 import { filterRevokedProjectSoul } from "./revocations";
 import { readDiscoveredProjectPmTextFiles } from "./project-artifacts";
 import { looksSecret } from "../../shared/secret-patterns";
@@ -45,6 +55,8 @@ import {
   recordContextSourceMarker,
 } from "../store/run-events";
 import { previousTurnMemorySection } from "./previous-turn";
+import { memoryClassificationRules, workspaceRulesOn } from "./classification";
+import { pickAlwaysLoad, renderAlwaysLoad } from "../../shared/memory-classification";
 import { recordMemoryRecallApplied } from "./recall-receipt";
 import {
   buildProjectContextSlice,
@@ -115,8 +127,10 @@ function codeMapGenPath(): string | null {
   return null;
 }
 
-const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
-const CODE_MAP_FULL_FILE = "code-map/project-map.json";
+// The place of the map (the project folder, or the project's memory folder once the layout switch is on) is decided by project-index.ts, the same rule as the engine.
+const CODE_MAP_SEED_FILE = "project-seed.json";
+const CODE_MAP_FULL_FILE = "project-map.json";
+const CAREER_GRAPH_CODE_MAP_REF = `code-map/${CODE_MAP_FULL_FILE}`;
 
 type CodeMapSeed = {
   schemaVersion?: string;
@@ -131,12 +145,12 @@ type CodeMapSeed = {
 // project that predates the seed still works through the full map.
 function readCodeMapSeed(projectPath: string): CodeMapSeed | null {
   return (
-    readActivatedProjectMemoryJson<CodeMapSeed>(
+    readProjectIndexJson<CodeMapSeed>(
       projectPath,
       CODE_MAP_SEED_FILE,
       PROJECT_CODE_MAP_SEED_MAX_BYTES,
     ) ??
-    readActivatedProjectMemoryJson<CodeMapSeed>(
+    readProjectIndexJson<CodeMapSeed>(
       projectPath,
       CODE_MAP_FULL_FILE,
       PROJECT_CODE_MAP_MAX_BYTES,
@@ -171,11 +185,14 @@ async function ensureCodeMap(
     const gen = codeMapGenPath();
     if (!gen) return;
     codeMapFallbackTriggered.add(projectPath);
+    // With the layout switch on the emergency map goes where the engine keeps it (the project's memory folder); otherwise no value is given and the generator writes
+    // where it always did, with the same environment as before.
+    const out = emergencyCodeMapOut(projectPath);
     const child = spawn(process.execPath, [gen, projectPath], {
       detached: true,
       windowsHide: true,
       stdio: "ignore",
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", ...(out ? { CODE_MAP_OUT: out } : {}) },
       ...(signal ? { signal } : {}),
     });
     child.once("error", () => { codeMapFallbackTriggered.delete(projectPath); });
@@ -392,18 +409,21 @@ function summarizeCareerGraph(projectPath: string): string | null {
     }>(projectPath, CAREER_GRAPH_CONFIG_FILE);
     if (!config) return null;
     const dbExists = activatedProjectMemoryFileExists(projectPath, CAREER_GRAPH_DB_FILE);
+    // The code map is listed only while it sits in the project folder: once it lives in the project's memory folder it is not a file the agent can open from here.
+    const codeMapInProject = codeMapDir(projectPath) === legacyIndexDir(projectPath);
     const canonical = [
       PROJECT_SOUL_FILE,
       MEMORY_LOG_FILE,
       CURATOR_DECISIONS_FILE,
       SITEMAP_FILE,
-      "code-map/project-map.json",
+      CAREER_GRAPH_CODE_MAP_REF,
       "ledgers/routing-decisions.jsonl",
       "ledgers/executions.jsonl",
       "ledgers/agent-evolution-proposals.jsonl",
     ]
       .map((rel) => `.agentlas/${rel}`)
-      .filter((rel) => activatedProjectMemoryFileExists(projectPath, rel.slice(".agentlas/".length)))
+      .filter((rel) => (rel.endsWith(CAREER_GRAPH_CODE_MAP_REF) ? codeMapInProject : true)
+        && activatedProjectMemoryFileExists(projectPath, rel.slice(".agentlas/".length)))
       .slice(0, CAREER_GRAPH_SOURCES);
     const registered = readActivatedProjectMemoryJson<{ sources?: unknown[] }>(
       projectPath,
@@ -434,12 +454,12 @@ function summarizeCareerGraph(projectPath: string): string | null {
  * run obeyed over the owner's declared growth targets. Labelled, they read as
  * what they are; in automation recall they are also ranked lower.
  */
-interface RecallFrame {
+export interface RecallFrame {
   automationRecall: boolean;
   ledgerChatIds: Set<string>;
 }
 
-function recallFrameFor(entries: MemoryEntry[], chatId: string | null | undefined): RecallFrame {
+export function recallFrameFor(entries: MemoryEntry[], chatId: string | null | undefined): RecallFrame {
   return {
     automationRecall: isAutomationLedgerChat(chatId),
     ledgerChatIds: automationLedgerChatIds(entries.map((entry) => entry.chatId)),
@@ -473,7 +493,9 @@ function entryLines(entries: MemoryEntry[], frame?: RecallFrame): string {
           ? ` (context: ${parts.join("; ").slice(0, CONTEXT_MAX_CHARS)})`
           : "";
       const label = heuristicLabel(e, frame);
-      return `- [${e.kind}${label ? ` · ${label}` : ""}] ${e.content}${suffix} ${memoryBlockKey(e.content)}`;
+      // K2b': the id the model puts in `targets` of a memory_ticket stands in front of the line, with the kind the line was given (a Personal `identity` or `boundary` is stored folded into fact or
+      // preference: ruleset ticket.fold; the kind it came with is shown). The same key as before (memoryBlockKey), only moved; the bytes of a line stay within the old budget.
+      return `- [${memoryBlockKey(e.content)} · ${e.requestContext?.ticket_kind ?? e.kind}${label ? ` · ${label}` : ""}] ${e.content}${suffix}`;
     })
     .join("\n");
 }
@@ -482,24 +504,38 @@ function approximateMemoryTokens(text: string): number {
   return Math.ceil(Buffer.byteLength(text, "utf8") / 3);
 }
 
+/**
+ * K3'-2a: a ranked line that does not fit the byte budget is not shown, and the model must not be left thinking it does not exist (a 600-character Korean line is 1,801 bytes; the always-loaded Personal piece
+ * takes about 800 of the 2,400 bytes of the block, so the longest line a person can save is left out of the recall, silently - measured in evidence/k4b-desktop, found by the engine's a61c8a3f). The block names
+ * the id of such a line in ONE line and the model reads it with `memory_get`. The budget is NOT raised. Same words and shape as the engine's capsule line ("memory: too long to show this turn, not shown:
+ * <ids> (read one with memory.get)"), with the desktop's tool name.
+ * Which lines: the ones that did not fit AND rank above a line that was shown (a line that simply ranks below the last shown one was not "left out for its length"), or - when no line fitted at all - the ones that did not fit.
+ * 3 ids: the engine's HOOK_SKIPPED_NAMED (about 150 characters, "enough for the model to read the best ones"); reached: the fourth is not named (memory_search still finds it).
+ * Each turn this holds (the desktop sends the lines it selects every turn and the text is cached by the query; the engine names a line once per conversation).
+ */
+export const MEMORY_NOT_SHOWN_MAX_IDS = 3;
+export function memoryNotShownLine(ids: readonly string[]): string {
+  return `memory: too long to show this turn, not shown: ${ids.slice(0, MEMORY_NOT_SHOWN_MAX_IDS).join(", ")} (read one with memory_get)`;
+}
+/** The ids a select call left out for the budget, by the array it returned (a delta or a dependency read has no entry here and so no note). */
+const notShownOf = new WeakMap<readonly MemoryEntry[], string[]>();
+/** `### header` + the lines + the note line (when lines were left out for their length). No lines and no note: "". */
+function memoryBlockSection(header: string, entries: MemoryEntry[], frame: RecallFrame | undefined): string {
+  const notShown = notShownOf.get(entries) ?? [];
+  if (!entries.length && !notShown.length) return "";
+  return [header, ...(entries.length ? [entryLines(entries, frame)] : []), ...(notShown.length ? [memoryNotShownLine(notShown)] : [])].join("\n");
+}
+
 function confidencePrior(confidence: MemoryEntry["confidence"]): number {
   return confidence === "high" ? 1 : confidence === "medium" ? 0.6 : 0.2;
 }
 
-/** Scope/agent filtering happens in SQL before this ranking function. */
-function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?: RecallFrame,
-  nativeSource?: ReturnType<typeof nativeRecallFor>, tokenBudget = MEMORY_SELECTED_MAX_APPROX_TOKENS): MemoryEntry[] {
-  const query = String(taskPrompt ?? "").trim();
-  if (!query || localEmbeddingTokens(query).length === 0) return entries.slice(0, MAX_ENTRIES);
-  // English is the search/capsule surface; the original wording is a second
-  // channel (better of the two, lexical and vector) so a question in the user's
-  // language still finds a translated memory (plan §9-8 condition B — English
-  // storage with a native query — measured median rank 1,476). Measured on the
-  // owner's store copy: concatenating both into one text diluted the original's
-  // lexical match (Korean top-1 17→13 of 20); max-of-two keeps it. The capsule
-  // stays English.
-  const natives = nativeSource ?? nativeRecallFor("memory_entry", entries.map((entry) => entry.id));
-  const ranked = rankHybridLocal(query, entries.map((entry) => ({
+/**
+ * One line as the ranker sees it: its English text and kind and request context, the original wording as a second channel, its vector, the confidence prior, and the contract's tie fields (ruleset recall.tieOrder:
+ * tier from the two origin columns, then the newer date, then the id). Shared by the turn-start selection and the memory_search tool, so both order the same lines the same way.
+ */
+function rankableOfEntry(entry: MemoryEntry, natives: ReturnType<typeof nativeRecallFor>, frame?: RecallFrame) {
+  return {
     id: entry.id,
     ...(natives.has(entry.id)
       ? { altText: [natives.get(entry.id)!.text, entry.kind].join(" "), altEmbedding: natives.get(entry.id)!.vector }
@@ -517,21 +553,60 @@ function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?
     // A labelled heuristic is a recall-score input, not a gate: it can still
     // be recalled, but an owner-stated or evidenced memory outranks it.
     prior: confidencePrior(entry.confidence) * (heuristicLabel(entry, frame) ? 0.5 : 1),
+    tier: recallTierOf(entry.originClass, entry.certainty),
+    createdAt: entry.createdAt,
     entry,
-  }))).filter((result) =>
+  };
+}
+
+/** Scope/agent filtering happens in SQL before this ranking function. */
+function selectMemoryEntries(entries: MemoryEntry[], taskPrompt?: string, frame?: RecallFrame,
+  nativeSource?: ReturnType<typeof nativeRecallFor>, tokenBudget = MEMORY_SELECTED_MAX_APPROX_TOKENS): MemoryEntry[] {
+  const query = String(taskPrompt ?? "").trim();
+  if (!query || localEmbeddingTokens(query).length === 0) return entries.slice(0, MAX_ENTRIES);
+  // English is the search/capsule surface; the original wording is a second
+  // channel (better of the two, lexical and vector) so a question in the user's
+  // language still finds a translated memory (plan §9-8 condition B — English
+  // storage with a native query — measured median rank 1,476). Measured on the
+  // owner's store copy: concatenating both into one text diluted the original's
+  // lexical match (Korean top-1 17→13 of 20); max-of-two keeps it. The capsule
+  // stays English.
+  const natives = nativeSource ?? nativeRecallFor("memory_entry", entries.map((entry) => entry.id));
+  // Caller side of the contract (ruleset recall note, K4b): a Personal (user_identity) line passes without a match, so the owner's standing facts reach the personal agent's recall whatever the question is.
+  // Basis: none recorded - the rule was here before the contract and K4a' left it to the caller; K4b measured its effect and did not change it (evidence/k4b-desktop/RESULT.md: a personal-agent turn whose question matches
+  // nothing still fills all 12 lines with Personal lines, 1,503 of 1,551 bytes, when the owner has 12 or more). Reached: only a turn whose reader may read Personal lines (recall policy); matching lines rank above these.
+  const ranked = rankHybridLocal(query, entries.map((entry) => rankableOfEntry(entry, natives, frame))).filter((result) =>
     result.lexicalScore > 0 || result.semanticEligible || result.item.entry.scope === "user_identity");
   if (ranked.length === 0) return [];
   const all = ranked.map((result) => result.item.entry);
   const allText = entryLines(all, frame);
   if (approximateMemoryTokens(allText) <= tokenBudget) return all;
   const selected: MemoryEntry[] = [];
-  for (const result of ranked) {
+  const leftOut: Array<{ rank: number; entry: MemoryEntry }> = [];
+  let lastShownRank = -1;
+  for (const [rank, result] of ranked.entries()) {
     if (selected.length >= MAX_ENTRIES) break;
     const proposed = entryLines([...selected, result.item.entry], frame);
-    if (approximateMemoryTokens(proposed) > tokenBudget) continue;
+    if (approximateMemoryTokens(proposed) > tokenBudget) { leftOut.push({ rank, entry: result.item.entry }); continue; }
     selected.push(result.item.entry);
+    lastShownRank = rank;
   }
+  // K3'-2a: what did not fit is named when it ranks above a shown line, or when nothing fitted (see memoryNotShownLine).
+  const named = leftOut.filter(item => item.rank < lastShownRank || lastShownRank < 0).slice(0, MEMORY_NOT_SHOWN_MAX_IDS).map(item => memoryBlockKey(item.entry.content));
+  if (named.length) notShownOf.set(selected, named);
   return selected;
+}
+
+/**
+ * The memory_search tool's ranking (K4b): the same lines, the same formula and the same tie order as the turn-start recall, but only a CANDIDATE is returned (its words match, or its vector counts: ruleset recall.fusion.candidate) -
+ * the Personal pass-through above is the recall's own caller-side rule and is not offered to a search the model asked.
+ */
+export function rankMemoryCandidates(entries: readonly MemoryEntry[], query: string, frame?: RecallFrame): Array<{ entry: MemoryEntry; lexical: number; vector: number; score: number }> {
+  if (!entries.length || !query.trim() || localEmbeddingTokens(query).length === 0) return [];
+  const natives = nativeRecallFor("memory_entry", entries.map((entry) => entry.id));
+  return rankHybridLocal(query, entries.map((entry) => rankableOfEntry(entry, natives, frame)))
+    .filter((result) => result.lexicalScore > 0 || result.semanticEligible)
+    .map((result) => ({ entry: result.item.entry, lexical: result.lexicalScore, vector: result.vectorScore, score: result.score }));
 }
 
 /** Selection/rendering only. The authenticated surface caller supplies original
@@ -544,7 +619,7 @@ export function selectCanonicalMemoryForSurface(entries: readonly MemoryEntry[],
     ? Math.max(0, Math.min(MEMORY_SELECTED_MAX_APPROX_TOKENS, Math.floor(input.maxApproxTokens))) : 0;
   if (!budget || !entries.length) return { text: "", sourceIds: [] };
   const originals = [...entries], frame = recallFrameFor(originals, input.chatId);
-  const candidates = selectMemoryEntries(originals, input.query, frame, undefined, budget);
+  const candidates = selectMemoryEntries(originals, recallQueryOf(input.query), frame, undefined, budget);
   const selected: MemoryEntry[] = [];
   // The legacy empty-query selector returns a bounded count; the restricted
   // surface also enforces its exact requested text budget on that path.
@@ -554,23 +629,35 @@ export function selectCanonicalMemoryForSurface(entries: readonly MemoryEntry[],
   return { text: entryLines(selected, frame), sourceIds: selected.map(entry => entry.id) };
 }
 
+/**
+ * The turn records (episodes) a conversation may read: its project's, and its own conversation's. The turn-start "Recent work" section and the memory_search tool (types: episode) read through this one function, so the tool
+ * can never show a turn record the recall could not. Another conversation's turn enters only with its project-lifetime content: the host's receipt of a turn's end, a turn that left a card waiting for the owner, or a record
+ * naming that conversation's card stays in its conversation (episode-lifetime.ts). 120 = the newest turn records read: a value the timeline has always read, no measurement behind it ("decided value - no basis");
+ * reached: an older turn record is not offered by the recall or the tool (the engine's tool reads every one).
+ */
+export function readableEpisodes(
+  projectId: string | null | undefined,
+  projectPath: string | null,
+  owner?: { agentId?: string | null; chatId?: string | null },
+) {
+  const scoped = listMemoryEpisodesForContext(projectId ?? null, 120, projectPath)
+    .filter((episode) => episode.projectId || episode.projectPathHash
+      || (Boolean(owner?.chatId) && episode.chatId === owner?.chatId && episode.agentId === (owner?.agentId ?? null)));
+  const episodes = recallableEpisodes(scoped, owner?.chatId ?? null, (foreign) => ({
+    ticketTurns: memoryTicketTurns(foreign.map((episode) => episode.ticketId)),
+    ui: (require("../harness/ui-instances") as typeof import("../harness/ui-instances"))
+      .conversationUiFacts(foreign.map((episode) => episode.chatId!)),
+  }));
+  return episodes;
+}
+
 function timelineSection(
   projectId: string | null | undefined,
   projectPath: string | null,
   taskPrompt?: string,
   owner?: { agentId?: string | null; chatId?: string | null },
 ): string | null {
-  const scoped = listMemoryEpisodesForContext(projectId ?? null, 120, projectPath)
-    .filter((episode) => episode.projectId || episode.projectPathHash
-      || (Boolean(owner?.chatId) && episode.chatId === owner?.chatId && episode.agentId === (owner?.agentId ?? null)));
-  // Another conversation's turn enters only with its project-lifetime content: the host's receipt of a turn's end, a turn
-  // that left a card waiting for the owner, or a record naming that conversation's card stays in its conversation
-  // (episode-lifetime.ts).
-  const episodes = recallableEpisodes(scoped, owner?.chatId ?? null, (foreign) => ({
-    ticketTurns: memoryTicketTurns(foreign.map((episode) => episode.ticketId)),
-    ui: (require("../harness/ui-instances") as typeof import("../harness/ui-instances"))
-      .conversationUiFacts(foreign.map((episode) => episode.chatId!)),
-  }));
+  const episodes = readableEpisodes(projectId, projectPath, owner);
   if (episodes.length === 0) return null;
   const query = String(taskPrompt ?? "").trim();
   const episodeNatives = query ? nativeRecallFor("memory_episode", episodes.map((episode) => episode.id)) : new Map();
@@ -727,14 +814,23 @@ function selectSoulText(soul: string, taskPrompt: string | undefined, projectPat
 
 
 function selectedMemorySection(projectPath: string | null, agentId: string | null | undefined, taskPrompt: string | undefined,
-  options: { projectId?: string | null; chatId?: string | null; runId?: string | null; visibilityDomain?: string },
+  options: { projectId?: string | null; chatId?: string | null; runId?: string | null; visibilityDomain?: string; ownerProfile?: OwnerProfileCarry | null; guest?: boolean; personalRead?: boolean },
   selection?: { eligibleIds: Set<string>; selectedIds: Set<string> }): string {
+  // the always-loaded owner piece carries its lines on its own: they are kept out of this block (by id) and the block's budget is what is left of the
+  // same total (800 approximate tokens = 2,400 bytes minus what the piece uses). No piece = exactly the previous selection, budget and cache key.
+  const carry = options.ownerProfile && (options.ownerProfile.ids.size > 0 || options.ownerProfile.approxTokens > 0) ? options.ownerProfile : null;
+  const budgetTokens = carry ? Math.max(0, MEMORY_SELECTED_MAX_APPROX_TOKENS - carry.approxTokens) : MEMORY_SELECTED_MAX_APPROX_TOKENS;
+  // Agentlas 2.0 P5: the workspace-rules switch decides which lines the recall policy lets through, and a flip writes no memory line, so neither the selection cache's source digest nor the generation pack's change
+  // journal would see it. With the switch ON it joins the cache identity (variant); OFF leaves every key exactly as it was. Every process reads the row itself here, so the background service learns of a flip at its next read.
+  const rulesOn = (() => { try { return workspaceRulesOn() && memoryClassificationRules() !== null; } catch { return false; } })();
+  const variant = carry || rulesOn ? createHash("sha256").update(JSON.stringify(carry ? (rulesOn ? [[...carry.ids].sort(), budgetTokens, "workspace-rules"] : [[...carry.ids].sort(), budgetTokens]) : ["workspace-rules"])).digest("hex").slice(0, 16) : undefined;
+  const withoutCarried = (entries: MemoryEntry[]): MemoryEntry[] => (carry && carry.ids.size ? entries.filter(entry => !carry.ids.has(entry.id)) : entries);
   const binding = captureMemoryContextGeneration({ ...options, projectPath, agentId });
   if (binding.generation) {
     const pack = readGenerationMemoryPack(binding.generation, {
-      query: taskPrompt?.trim() ?? "", maxApproxTokens: MEMORY_SELECTED_MAX_APPROX_TOKENS,
-      select: (entries, query, budget) => selectMemoryEntries(entries, query, recallFrameFor(entries, options.chatId), undefined, budget),
-      render: entries => entries.length ? `${projectPath ? "### Relevant curated memory" : "### Curated memory (global)"}\n${entryLines(entries, recallFrameFor(entries, options.chatId))}` : "",
+      query: taskPrompt?.trim() ?? "", maxApproxTokens: budgetTokens, ...(variant ? { variant } : {}),
+      select: (entries, query, budget) => selectMemoryEntries(withoutCarried(entries), query, recallFrameFor(entries, options.chatId), undefined, budget),
+      render: entries => memoryBlockSection(projectPath ? "### Relevant curated memory" : "### Curated memory (global)", entries, recallFrameFor(entries, options.chatId)),
     });
     if (pack) {
       if (selection) { for (const id of pack.eligibleIds) selection.eligibleIds.add(id); for (const id of pack.selectedIds) selection.selectedIds.add(id); }
@@ -756,7 +852,7 @@ function selectedMemorySection(projectPath: string | null, agentId: string | nul
     if (!sameMemoryCustody(custody, source)) return "";
     identity = { ownerNamespace: source.ownerNamespace, revision: source.revision, revocationEpoch: source.revocationEpoch,
       actorId: agentId ?? null, visibilityDomain: JSON.stringify([options.visibilityDomain ?? null, options.chatId ?? null]),
-      projectId: options.projectId ?? null, projectPath, queryDigest: sha(taskPrompt?.trim() ?? ""),
+      projectId: options.projectId ?? null, projectPath, queryDigest: sha(variant ? [taskPrompt?.trim() ?? "", variant] : taskPrompt?.trim() ?? ""),
       sourceDigest: sha([entries, [...natives], frame.automationRecall, [...frame.ledgerChatIds].sort()]) };
     if (selection) for (const entry of entries) selection.eligibleIds.add(entry.id);
     const cached = selectedMemoryContextCache.getSelection(identity);
@@ -765,19 +861,19 @@ function selectedMemorySection(projectPath: string | null, agentId: string | nul
       return cached.text;
     }
   } catch { /* Cache availability never prevents the original scoped recall. */ }
-  const selected = selectMemoryEntries(entries, taskPrompt, frame, natives);
+  const selected = selectMemoryEntries(withoutCarried(entries), taskPrompt, frame, natives, budgetTokens);
   if (!sameMemoryCustody(custody, getMemoryStoreInfo())) return "";
   if (selection) {
     for (const entry of entries) selection.eligibleIds.add(entry.id);
     for (const entry of selected) selection.selectedIds.add(entry.id);
   }
-  const section = selected.length ? `${projectPath ? "### Relevant curated memory" : "### Curated memory (global)"}\n${entryLines(selected, frame)}` : "";
+  const section = memoryBlockSection(projectPath ? "### Relevant curated memory" : "### Curated memory (global)", selected, frame);
   if (identity) selectedMemoryContextCache.set(identity, section, selected.map(entry => entry.id));
   return section;
 }
 
 function globalMemorySections(agentId: string | null | undefined, taskPrompt: string | undefined,
-  options: { projectId?: string | null; chatId?: string | null; visibilityDomain?: string },
+  options: { projectId?: string | null; chatId?: string | null; visibilityDomain?: string; ownerProfile?: OwnerProfileCarry | null; guest?: boolean; personalRead?: boolean },
   applied?: Set<string>): string[] {
   const selection = { eligibleIds: new Set<string>(), selectedIds: new Set<string>() };
   const section = selectedMemorySection(null, agentId, taskPrompt, options, selection);
@@ -847,10 +943,46 @@ function projectPmSection(projectPath: string, taskPrompt?: string): string | nu
  * Returns a memory context block (or empty string). When `projectPath` is set, prefers
  * the folder's curated memory + soul + sitemap; otherwise falls back to global memory.
  */
+/** What the always-loaded owner piece already carries this turn: its line ids (kept out of the recall block) and its size (taken off the recall budget). */
+export interface OwnerProfileCarry { ids: ReadonlySet<string>; approxTokens: number }
+
+export interface OwnerProfilePiece extends OwnerProfileCarry { text: string }
+
+/**
+ * (§12-6): the owner's standing instructions, loaded on every turn instead of competing for the relevant-recall budget. The live `user_identity`
+ * lines that read as preferences (a stored decision/procedure/risk reads as one) and are at most the ruleset's line length, newest first up to its byte budget,
+ * then written in id order — the same lines give the same bytes every turn, so a runtime that keeps a session receives the piece once and again only when a line changes.
+ * It is a kept turn-context piece (stability configuration, change cause owner-profile), NOT part of the recall text.
+ *
+ * `alreadyCarried` are the texts of blocks this turn carries by another route (the approved-One-memory/profile block, the legacy One overlay): a line they hold is not
+ * loaded a second time, and its id is kept out of recall too. The piece is empty (null) when there is no such line or the ruleset has no `alwaysLoad`: the turn is then byte-identical to before.
+ */
+export function ownerProfilePiece(scope: { agentId?: string | null; projectId?: string | null; projectPath?: string | null; chatId?: string | null },
+  alreadyCarried: readonly string[] = []): OwnerProfilePiece | null {
+  try {
+    const rules = memoryClassificationRules();
+    if (!rules) return null;
+    // a line the model only concluded (`origin_class` = inferred) is recalled like any other line but is never part of what is loaded on every turn; an older line (no value) is.
+    const rows = listPersonalMemoryForContext({ agentId: scope.agentId ?? null, projectId: scope.projectId ?? null, projectPath: scope.projectPath ?? null, chatId: scope.chatId ?? null })
+      .filter(entry => entry.originClass !== "inferred")
+      .map(entry => ({ id: entry.id, kind: entry.kind as string, content: entry.content, createdAt: entry.createdAt, shownKind: entry.requestContext?.ticket_kind ?? (entry.kind as string), blockKey: memoryBlockKey(entry.content) }));
+    const carried = alreadyCarried.map(text => text.toLowerCase());
+    const inCarried = (row: { content: string }) => carried.some(block => block.includes(row.content.trim().toLowerCase()));
+    const picked = pickAlwaysLoad(rows.filter(row => !inCarried(row)), rules);
+    // A line the profile block or the legacy overlay already carries is loaded there; it stays out of this piece AND out of recall.
+    const duplicateIds = new Set(rows.filter(row => inCarried(row) && pickAlwaysLoad([row], rules).length > 0).map(row => row.id));
+    if (!picked.length && !duplicateIds.size) return null;
+    const text = renderAlwaysLoad(picked);
+    return { text, ids: new Set([...picked.map(row => row.id), ...duplicateIds]), approxTokens: text ? approximateMemoryTokens(text) : 0 };
+  } catch { return null; }
+}
+
 export async function buildMemoryContext(
   projectPath: string | null,
   agentId?: string | null,
   options: {
+    /** what the always-loaded owner piece carries this turn (see ownerProfilePiece). */
+    ownerProfile?: OwnerProfileCarry | null;
     materializeCodeMap?: boolean;
     taskPrompt?: string;
     projectId?: string | null;
@@ -861,9 +993,42 @@ export async function buildMemoryContext(
     visibilityDomain?: string;
     signal?: AbortSignal;
     recallBoundary?: "assigned-target";
+    /** P3b: the reader facts of a team-run node (borrowed guest; the host's answer to "is this the personal agent's own conversation"). They only reach the recall policy. */
+    guest?: boolean;
+    personalRead?: boolean;
   } = {},
 ): Promise<string> {
   if (options.signal?.aborted || options.recallBoundary === "assigned-target") return "";
+  // K4b: the scope this recall reads with is what the run's memory_search / memory_get tools read with (turn-tools/memory-facts.ts): never wider. Only a run that names both its conversation and its run has one;
+  // any other caller (a team node, a borrowed agent, a surface) leaves the tools reading nothing - the safe side.
+  const readKey = options.runId && options.chatId ? `${options.chatId}|${options.runId}` : null;
+  const registerRead = (readPath: string | null): void => {
+    if (!readKey) return;
+    try {
+      registerTurnReadScope(readKey, { projectId: options.projectId ?? null, projectPath: readPath, agentId: agentId ?? null, chatId: options.chatId ?? null, visibilityDomain: options.visibilityDomain ?? null,
+        ...(options.guest !== undefined ? { guest: options.guest } : {}), ...(options.personalRead !== undefined ? { personalRead: options.personalRead } : {}) });
+    } catch { /* the tools then read nothing */ }
+  };
+  registerRead(projectPath);
+  // Audit EV1 3 / K4b: a read that fails says so (the engine hook's closed words) instead of returning nothing in silence. The lines failing is `unavailable`; only the recent-work section failing is `partial`.
+  // The store already waits on a busy writer for its own busy timeout (STORE_BUSY_TIMEOUT_MS, 15,000 ms, store/db.ts) before it throws, so no second wait is added here (the engine hook has no such wait of its own, so it adds one of 0.5 s).
+  const readState: { unavailable: RecallReadReason | null; partial: RecallReadReason | null; stores: RecallReadReason | null } = { unavailable: null, partial: null, stores: null };
+  const guarded = <T>(read: () => T, fallback: T, kind: "unavailable" | "partial"): T => {
+    try { return read(); } catch (error) { readState[kind] ??= recallReasonOfError(error); return fallback; }
+  };
+  // K3'-2b: a store of this agent or project (the 2.0 layout) that could not be read - after the one more wait for a lock - is `partial`, with the engine's closed reason words; the lines of the root store are still shown.
+  const subStores = <T>(read: () => T, readPath: string | null = null): T => {
+    const out = withSubStoreReadProbe({ agentId: agentId ?? null, projectPath: readPath, projectId: options.projectId ?? null, chatId: options.chatId ?? null }, read);
+    if (out.unread) readState.stores ??= out.unread;
+    return out.value;
+  };
+  const statusSection = (): string[] => readState.unavailable ? [recallStatusLine("unavailable", readState.unavailable)]
+    : readState.stores ? [recallStatusLine("partial", readState.stores, "lines")] : readState.partial ? [recallStatusLine("partial", readState.partial)] : [];
+  // The query the recall ranks against: a long prompt keeps its first and last 1,000 characters (ruleset recall.query); a short one is untouched. The project documents below rank against the prompt as it was.
+  const memoryQuery = recallQueryOf(options.taskPrompt);
+  // K3'-2b: the lines (not the "Recent work" records, not the project documents) rank against the user text AND the previous turn's summary (ruleset recall.query order userText, previousSummary): a short follow-up
+  // ("do that again") has no word of its own. A reader that reads no lines (a borrowed guest) and a first turn have no summary, so their query is the user text exactly as before; a failed read of the one row says `partial`.
+  const linesQuery = options.guest ? memoryQuery : recallQueryOf(options.taskPrompt, memoryQuery ? guarded(() => previousTurnSummary(options.chatId, agentId, options.runId), null, "partial") : null);
   const custody = getMemoryStoreInfo();
   const stillCurrent = (): boolean => !options.signal?.aborted && sameMemoryCustody(custody, getMemoryStoreInfo());
   const sections: string[] = [];
@@ -880,7 +1045,13 @@ export async function buildMemoryContext(
   const injected: Array<{ source: ContextSourceName; text: string }> = [];
   // Canonical entry ids whose rendered section actually entered this prompt (ids only, never text).
   const appliedMemoryIds = new Set<string>();
+  // K2b': which lines this turn's prompt shows (the memory_ticket tool answers a `targets` id only for a line the model was shown); ids only, in memory, for this run.
+  const noteShown = (ids: Iterable<string>): void => {
+    if (!options.runId || !options.chatId) return;
+    try { rememberShownMemory(`${options.chatId}|${options.runId}`, [...ids, ...(options.ownerProfile?.ids ?? [])]); } catch { /* observability of the shown lines never blocks recall */ }
+  };
   const flushMarkers = (): void => {
+    noteShown(appliedMemoryIds);
     recordMemoryRecallApplied({ runId: options.runId, chatId: options.chatId ?? null, memoryIds: appliedMemoryIds });
     if (!options.runId || injected.length === 0) return;
     const projectKey = projectContextKey(options.projectId ?? null, projectPath);
@@ -901,14 +1072,16 @@ export async function buildMemoryContext(
     // the stored folder identity again immediately before touching any project
     // memory, and once more before returning the assembled prompt.
     if (!verifyActivatedFolderIdentity(projectPath)) {
+      registerRead(null);
       const fallbackApplied = new Set<string>();
-      const fallback = formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options, fallbackApplied)));
+      const fallback = formatMemorySections(withPreviousTurn([...guarded(() => subStores(() => globalMemorySections(agentId, linesQuery, options, fallbackApplied)), [] as string[], "unavailable"), ...statusSection()]));
       if (!stillCurrent()) return "";
+      noteShown(fallbackApplied);
       recordMemoryRecallApplied({ runId: options.runId, chatId: options.chatId ?? null, memoryIds: fallbackApplied });
       return fallback;
     }
     const selection = { eligibleIds: new Set<string>(), selectedIds: new Set<string>() };
-    const memorySection = selectedMemorySection(projectPath, agentId, options.taskPrompt, options, selection);
+    const memorySection = guarded(() => subStores(() => selectedMemorySection(projectPath, agentId, linesQuery, options, selection), projectPath), "", "unavailable");
     const rawSoul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
     const soul = rawSoul ? filterRevokedProjectSoul(
       filterSupersededProjectSoul(rawSoul, options.projectId, projectPath, selection), options.projectId, projectPath,
@@ -965,25 +1138,27 @@ export async function buildMemoryContext(
       injected.push({ source: "memory", text: memorySection });
       for (const id of selection.selectedIds) appliedMemoryIds.add(id);
     }
-    const timeline = timelineSection(options.projectId, projectPath, options.taskPrompt, { agentId, chatId: options.chatId });
+    const timeline = guarded(() => timelineSection(options.projectId, projectPath, memoryQuery, { agentId, chatId: options.chatId }), null, "partial");
     if (timeline) sections.push(timeline);
     if (!verifyActivatedFolderIdentity(projectPath)) {
+      registerRead(null);
       const fallbackApplied = new Set<string>();
-      const fallback = formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options, fallbackApplied)));
+      const fallback = formatMemorySections(withPreviousTurn([...guarded(() => subStores(() => globalMemorySections(agentId, linesQuery, options, fallbackApplied)), [] as string[], "unavailable"), ...statusSection()]));
       if (!stillCurrent()) return "";
+      noteShown(fallbackApplied);
       recordMemoryRecallApplied({ runId: options.runId, chatId: options.chatId ?? null, memoryIds: fallbackApplied });
       return fallback;
     }
   } else {
-    const globalSections = globalMemorySections(agentId, options.taskPrompt, options, appliedMemoryIds);
+    const globalSections = guarded(() => subStores(() => globalMemorySections(agentId, linesQuery, options, appliedMemoryIds)), [] as string[], "unavailable");
     sections.push(...globalSections);
     if (globalSections.length > 0) injected.push({ source: "memory", text: globalSections.join("\n\n") });
-    const timeline = timelineSection(options.projectId, null, options.taskPrompt, { agentId, chatId: options.chatId });
+    const timeline = guarded(() => timelineSection(options.projectId, null, memoryQuery, { agentId, chatId: options.chatId }), null, "partial");
     if (timeline) sections.push(timeline);
   }
 
   if (previousTurn) injected.push({ source: "memory", text: previousTurn });
   if (!stillCurrent()) return "";
   flushMarkers();
-  return formatMemorySections(withPreviousTurn(sections));
+  return formatMemorySections(withPreviousTurn([...sections, ...statusSection()]));
 }

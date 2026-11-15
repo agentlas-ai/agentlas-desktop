@@ -50,7 +50,6 @@ const READ_TTL_MS: Record<string, number> = {
   "billing.getCredits": 60_000,
   "app.getVersion": 3_600_000,
   "updater.getState": 30_000,
-  "quests.list": 30_000,
   "automations.list": 15_000,
   "appFactory.listApps": 15_000,
   // One 홈은 5초 폴링을 유지하되, 고차원 메모리 투영은 변경 전까지 재사용한다.
@@ -95,6 +94,10 @@ const READ_TTL_MS: Record<string, number> = {
   "automations.get": 0,
   "automations.getGraphReconciliation": 0,
 };
+
+/** Namespaces whose cached reads belong to the signed-in account: billing.getCredits, auth.getSession, marketplace.listMine / bookmarks / status,
+ * agents.borrowedProfiles (rows of the account's borrowed-owner scope, electron/agents/borrowed-owner-scope.ts). */
+const ACCOUNT_BOUND_NAMESPACES = ["auth", "billing", "marketplace", "agents"] as const;
 
 const MAX_CACHE_ENTRIES = 200;
 
@@ -324,6 +327,14 @@ if (typeof window !== "undefined") {
   window.addEventListener("agentlas:tasks-changed", () => {
     invalidateIpcCache("tasks");
     invalidateViewData("dashboard.tasks");
+  });
+  // An account change (sign-in, sign-out, a session that ended) makes every read bound to the account wrong at once:
+  // the balance, the session itself, my published agents, the Hub bookmarks and status, the borrowed-agent profiles. Dropped together here so a
+  // reader never has to remember its own namespace (defect 3: the sidebar kept the last account's balance
+  // for 60 s after a sign-out). Local reads (team, projects, runtime ...) do not depend on the account and stay.
+  window.addEventListener("agentlas:auth-changed", () => {
+    for (const namespace of ACCOUNT_BOUND_NAMESPACES) invalidateIpcCache(namespace);
+    invalidateViewData("shell.credit-balance");
   });
   window.addEventListener("agentlas:attention-refresh", () => {
     invalidateIpcCache("confirm");

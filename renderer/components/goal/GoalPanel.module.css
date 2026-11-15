@@ -42,7 +42,6 @@
 .facts { margin: 4px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; color: var(--muted-deep); font-size: 12px; font-variant-numeric: tabular-nums; }
 .link { border: 0; background: none; padding: 0; font: inherit; color: var(--muted-deep); cursor: pointer; text-decoration: underline; text-decoration-color: var(--paper-edge); text-underline-offset: 2px; }
 .link:hover, .link:focus-visible { color: var(--ink); outline: none; }
-.limits { padding: 6px 0 2px; }
 .note { margin: 0; color: var(--muted-deep); font-size: 12px; }
 
 .shape { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 12px 2px; border-bottom: 1px solid var(--paper-3, var(--paper-edge)); }
@@ -104,17 +103,23 @@
 }
 .editorField textarea:focus, .editorField input:focus { outline: none; }
 .editorActions { display: flex; justify-content: flex-end; gap: 6px; }
-.editorActions button, .shape button, .suggestionActions button {
+.editorActions button, .shape button {
   min-height: 26px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--paper-edge); background: var(--paper); color: var(--ink-soft); font: inherit; font-size: 12px; cursor: pointer;
 }
-.editorActions button:hover, .suggestionActions button:hover { color: var(--ink); }
+.editorActions button:hover { color: var(--ink); }
 .primary { background: var(--ink) !important; color: var(--paper) !important; border-color: var(--ink) !important; }
 .primary:disabled { opacity: 0.45; cursor: default; }
 
-.suggestions { list-style: none; margin: 4px 0 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-.suggestions li { display: grid; gap: 4px; padding: 6px 0 2px; border-top: 1px dashed var(--paper-edge); font-size: 12px; }
-.suggestionText { color: var(--ink-soft); overflow-wrap: anywhere; }
-.suggestionActions { display: inline-flex; gap: 6px; }
 
 .error { margin: 10px 2px 0; color: var(--danger, var(--accent)); font-size: 12px; }
 .ok { margin: 10px 2px 0; color: var(--muted-deep); font-size: 12px; }
+
+/* Stuck card (F-D12, picture desktop-states-pieces 5): white card, no colour fill. "Next check" is not drawn: the panel's read model carries no such value. */
+.stuck { margin: 14px 0; padding: 20px 22px; border: 1px solid var(--paper-edge); border-radius: 16px; background: var(--paper); }
+.stuckKicker { margin: 0 0 10px; color: var(--muted-deep); font-size: 12px; font-weight: 600; }
+.stuck h3 { margin: 0; color: var(--ink); font-size: 18px; line-height: 1.35; font-weight: 650; overflow-wrap: anywhere; }
+.stuckReason { margin: 12px 0 0; color: var(--ink-soft); font-size: 13.5px; line-height: 1.55; }
+.stuckActions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+.stuckButton { min-height: 34px; padding: 0 16px; border: 1px solid var(--paper-edge); border-radius: 99px; background: var(--paper); color: var(--ink); font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.stuckButton:disabled { opacity: 0.45; cursor: default; }
+.stuckPrimary { background: var(--ink); border-color: var(--ink); color: var(--paper) !important; }

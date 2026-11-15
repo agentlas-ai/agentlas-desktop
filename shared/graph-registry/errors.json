@@ -28,7 +28,8 @@
         "approve",
         "reject"
       ],
-      "status": "implemented"
+      "status": "specified",
+      "note": "승인 게이트 폐지(오너 이사회 결정 2026-08-10)로 커널이 더 이상 내지 않는다. 옛 실행 기록과 카드 어휘를 읽기 위한 선언으로만 유지."
     },
     {
       "code": "APPROVAL_TIMED_OUT",
@@ -239,6 +240,15 @@
       "note": "검증할 값이 비어 있는데, 그 값을 만드는 앞의 갈림길이 \"비어 있을 수 있다\"고 말한다 — 그래프 자신이 모순이다. 예전에는 \"앞 단계가 값을 만들어 주지 않았습니다\"로 나가서, 계산도 결과도 옳은데 사람이 있지도 않은 배선 문제를 찾았다(실측 2026-08-20: 임계값 감시 자동화가 조용한 날마다 여기서 죽었다). 모순을 이름으로 말해 고칠 곳을 가리킨다."
     },
     {
+      "code": "EVAL_NOT_RUN_INPUT_MISSING",
+      "since": "1.3",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "검증할 값을 앞 단계가 만들지 않아 검증을 하지 않았다 — 통과로 세지 않고 '실행 안 함'으로 기록한다(run-graph.ts)."
+    },
+    {
       "code": "EVAL_STUCK",
       "since": "1.1",
       "severity": "node",
@@ -258,6 +268,42 @@
       ],
       "status": "implemented",
       "note": "판정 불가는 실패가 아니다 — 일어나지 않은 판정을 결과로 쓰지 않는다."
+    },
+    {
+      "code": "GRAPH_APPLY_FAILED",
+      "since": "1.2",
+      "severity": "authoring",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "제안을 현재 저장본에 적용하지 못했다(ipc.ts 응답)."
+    },
+    {
+      "code": "GRAPH_PROPOSAL_INVALID",
+      "since": "1.2",
+      "severity": "authoring",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "제안한 그래프가 구조 검증을 통과하지 못했다(ipc.ts 응답)."
+    },
+    {
+      "code": "GRAPH_REPAIR_UNAVAILABLE",
+      "since": "1.2",
+      "severity": "authoring",
+      "retryable": true,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "자동 고치기가 지금 불가능하다(ipc.ts 그래프 고치기 응답). 사유는 응답이 싣는다."
+    },
+    {
+      "code": "GRAPH_SHAPE_INVALID",
+      "since": "1.2",
+      "severity": "authoring",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "그래프 구조 검증을 통과하지 못했다(graph-supervision.ts·ipc.ts 응답)."
     },
     {
       "code": "INPUT_MAPPING_INVALID",
@@ -358,6 +404,15 @@
         "set_loop_bound"
       ],
       "status": "implemented"
+    },
+    {
+      "code": "LOOP_COUNTERS_UNCONFIRMED",
+      "since": "1.2",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "이어 달리는 기록에 반복이 몇 번 돌았는지 없다 — 모르는 한도를 새 한도로 바꾸지 않고 그 반복의 단계를 이름으로 멈춘다(run-graph.ts). 사유와 다음 행동은 실패가 직접 싣는다."
     },
     {
       "code": "LOOP_LIMIT_REACHED",
@@ -497,6 +552,15 @@
       "status": "implemented",
       "note": "AI 제안 패치의 코드 단계에 스크립트 없음 — CODE_NODE_EMPTY로 실행에서 죽기 전에 저장 시점에 막는다.",
       "verbatim": true
+    },
+    {
+      "code": "PATCH_CONDITION_IGNORED",
+      "since": "1.3",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "수정 요청의 조건을 해석할 수 없다 — 조용히 무시하면 사람은 고쳐진 줄 안다(graph-patch.ts)."
     },
     {
       "code": "PATCH_EDGE_CONFLICT",
@@ -818,6 +882,15 @@
       "retryable": false,
       "verbatim": true,
       "status": "implemented"
+    },
+    {
+      "code": "TARGET_PENDING",
+      "since": "1.2",
+      "severity": "node",
+      "retryable": false,
+      "verbatim": true,
+      "status": "implemented",
+      "note": "기본 대상이 사라졌다 — 대상을 쓰는 단계는 고정 런타임으로 이어 가고 진단 한 줄만 남긴다(run-graph.ts, disposition continue)."
     },
     {
       "code": "TOOL_BROKER_CALL_UNREADABLE",

@@ -93,6 +93,21 @@ function plainRecovery(actions: RequiredActionOption[], locale: "ko" | "en"): St
 }
 
 /**
+ * D10 (trial): a startup failure whose cause is a machine code the app itself raised (`media_video_operation_corrupt`, `memory_migration_source_collision`, `memory_store_schema_incompatible`...)
+ * needs no model to be told what it is: the recovery screen shows the same three actions without the model's wording, and no model call is made (the call was a connected runtime at high effort, 30 s and more).
+ * Only a message that is itself one machine word counts; any other failure (system error text, an exception nobody named) is still judged as before.
+ */
+export function isCodedStartupFailure(error: unknown): boolean {
+  return error instanceof Error && /^[a-z][a-z0-9_]{2,80}$/.test(error.message);
+}
+
+let recoveryAbort: AbortController | null = null;
+/** The app is quitting: a recovery judgment still running is cancelled, so the quit does not wait for a model (D10). Never throws. */
+export function cancelStartupRecovery(): void {
+  try { recoveryAbort?.abort(new Error("startup_recovery_cancelled")); } catch { /* nothing to cancel */ }
+}
+
+/**
  * DB-independent One recovery loop. Subsystems expose facts and executable
  * capabilities; One chooses. Code contains no error-case router, dictionary,
  * default action, or customer-facing diagnosis.
@@ -104,7 +119,10 @@ export async function recoverDesktopStartup(input: {
   locale?: RuntimeLocale;
 }): Promise<boolean> {
   let currentError = input.error;
+  const abort = recoveryAbort = new AbortController();
+  try {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    if (abort.signal.aborted) return false;
     const cacheTargets = containedDisposableDirs();
     const actions: RequiredActionOption[] = [
       {
@@ -125,12 +143,18 @@ export async function recoverDesktopStartup(input: {
         authority: "observe",
       },
     ];
-    const decision = await judgeRequiredAction({
-      kind: "desktop-startup-recovery",
-      observation: observation(currentError, attempt, cacheTargets),
-      actions,
-      ...(input.locale ? { locale: input.locale } : {}),
-    });
+    const coded = isCodedStartupFailure(currentError);
+    if (coded) console.info(`[startup-recovery] no model judgment for a coded failure (${(currentError as Error).message})`);
+    const decision: Awaited<ReturnType<typeof judgeRequiredAction>> = coded
+      ? { actionId: null, summary: "", question: null, options: [], source: "unavailable" }
+      : await judgeRequiredAction({
+        kind: "desktop-startup-recovery",
+        observation: observation(currentError, attempt, cacheTargets),
+        actions,
+        signal: abort.signal,
+        ...(input.locale ? { locale: input.locale } : {}),
+      });
+    if (abort.signal.aborted) return false;
     /*
      * ★판정이 없다고 화면까지 없애지 않는다 (실측 2026-08-27).
      *
@@ -166,4 +190,5 @@ export async function recoverDesktopStartup(input: {
     }
   }
   return false;
+  } finally { if (recoveryAbort === abort) recoveryAbort = null; }
 }

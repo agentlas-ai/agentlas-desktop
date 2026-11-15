@@ -1,1 +1,26 @@
 .briefHeading{font-size:13px;font-weight:650;margin:12px 0 6px}.briefGap{min-height:8px}.evidence{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.raw{white-space:pre-wrap;overflow-wrap:anywhere}
+
+/* F-D17: one monitor = one row. Status is a dot and a word (never a coloured background, never a side bar); only `error` is a red dot. */
+.row{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:32px;row-gap:16px;align-items:center}
+.main{min-width:0;display:grid;gap:6px}
+.side{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:nowrap}
+.panel{grid-column:1/-1;min-width:0;padding-top:16px;border-top:1px solid var(--paper-edge)}
+.panel[hidden]{display:none}
+.title{display:flex;align-items:center;gap:10px;min-width:0}
+.title .name{margin:0;font-size:15px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;background:color-mix(in srgb,var(--ink-soft) 50%,transparent)}
+.dot[data-status="active"]{background:var(--ok)}
+.dot[data-status="error"]{background:var(--danger)}
+.status{font-size:12px;color:var(--ink-soft);white-space:nowrap}.status[data-status="active"]{color:var(--ok)}.status[data-status="error"]{color:var(--danger);font-weight:600}
+.question{font-size:13px;color:var(--ink);opacity:.82;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.last{display:flex;align-items:center;gap:6px;min-width:0;margin-top:4px;font-size:12.5px;color:var(--ink-soft)}
+.last b{color:var(--ink);font-weight:600;white-space:nowrap}
+.when{white-space:nowrap}
+.summary{min-width:0;flex:0 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.line{margin:0;font-size:12px;line-height:1.6;color:var(--ink-soft)}
+.alert{display:flex;align-items:center;gap:8px;margin:0;font-size:12px;line-height:1.6;color:var(--ink)}
+.linkButton{composes:agentlas-btn from global;border:0;background:none;color:var(--ink-soft);font:inherit;font-size:12.5px;padding:0 var(--agentlas-btn-pad-x-sm);flex:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px}
+.linkButton:hover{color:var(--ink)}
+.chev{display:inline-block;transition:transform .12s}.chev[data-open]{transform:rotate(90deg)}
+@media(prefers-reduced-motion:reduce){.chev{transition:none}}
+@container(max-width:760px){.row{grid-template-columns:minmax(0,1fr)}.side{justify-content:flex-start;flex-wrap:wrap}}

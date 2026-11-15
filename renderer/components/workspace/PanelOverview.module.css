@@ -1,0 +1,28 @@
+/* The panel's Overview (F-D7). Values from workspace-v6-panels-1: body padding 12px 14px, sections separated by a 1px line with 10px above and below,
+   section title 11.5px / 650 / muted with 6px under it, rows 28px high with a 15px muted icon, a 9px gap and ink-soft 12.5px text,
+   sub rows 26px high, 24px in, 12px; counts and times muted. No colour fills, no left bars. */
+.overview { display: flex; flex-direction: column; padding: 12px 14px; font-size: 12.5px; }
+.sec { padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid var(--paper-edge); }
+.sec:last-of-type { border-bottom: 0; margin-bottom: 0; }
+.sec h4 { margin: 0 0 6px; font-size: 11.5px; font-weight: 650; color: var(--muted-deep); display: flex; align-items: center; }
+.row { display: flex; align-items: center; gap: 9px; min-height: 28px; width: 100%; color: var(--ink-soft); font: inherit; text-align: left; background: none; border: 0; padding: 0; border-radius: 7px; }
+.row > svg { flex: none; color: var(--muted-deep); }
+.press { cursor: pointer; }
+.press:hover { color: var(--ink); }
+.press:focus-visible { outline: 2px solid var(--paper-edge-strong); outline-offset: 1px; }
+.grow { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.grow[data-open="true"] { color: var(--ink); font-weight: 600; }
+.grow[data-mono="true"] { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+.num { color: var(--muted-deep); white-space: nowrap; }
+.sub { padding-left: 24px; min-height: 26px; font-size: 12px; }
+.sub small { color: var(--muted-deep); font-size: 11.5px; flex: none; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted); opacity: 1; }
+.dot[data-state="running"] { background: var(--attention); opacity: 1; }
+.dot[data-state="done"] { background: var(--ok); opacity: 1; }
+.dot[data-state="failed"] { background: var(--red); opacity: 1; }
+.iconButton { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; background: none; border: 0; color: var(--muted-deep); cursor: pointer; flex: none; margin-right: -6px; }
+.iconButton:hover { background: var(--paper-3); color: var(--ink); }
+.earlier { margin-left: auto; font: inherit; font-weight: 500; color: var(--muted-deep); background: none; border: 0; padding: 0 2px; cursor: pointer; }
+.earlier:hover { color: var(--ink); }
+.empty { margin: 0; color: var(--muted-deep); min-height: 28px; display: flex; align-items: center; }
+.earlierBody { margin-top: 6px; }

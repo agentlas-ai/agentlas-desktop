@@ -1,4 +1,5 @@
 import { RUNTIME_OVERLOADED_CODE, RUNTIME_SERVER_ERROR_CODE, serverFailureCodeForStatus } from "./provider-overload";
+import { memoryDeathCause } from "./child-death";
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { beginAdapterEffectRun } from "../invocation/adapter-effect-context";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -46,7 +47,11 @@ import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { normalEndToolEvidence, READ_ANSWER_ONLY_EMPTY_CODE, settleNormalEnd } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliToolSilenceWindowMs, wrapSystemPrompt, markRefusedBeforeDispatch, preDispatchRefusal, runnerRefusedBeforeDispatch } from "./runner";
-import { announceToolDenied } from "./tool-approval";
+import { announceToolDenied, toolApprovalSessionKey } from "./tool-approval";
+import { SHELL_GATE_CONTROL_ENV, SHELL_GATE_HANDLE_ENV, openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
+import { installAgyDeleteGatePlugin } from "./antigravity-delete-gate";
+import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
+import { mcpProxyControlInfoPath } from "../mcp-tools/proxy-channel";
 import {
   acknowledgeStableTurnContext,
   cliHistoryContextTokens,
@@ -70,6 +75,7 @@ import { stageCliImageAttachments } from "./image-attachments";
 import { parseAgyModels, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { resolveEffectiveContextWindow, UNKNOWN_CONTEXT_WINDOW } from "../../shared/models";
 import { settleDiscovery } from "./model-discovery-store";
+import { failedDiscoveryRetryWaitMs } from "./failed-discovery-retry";
 import { clearRuntimeSession, getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import { createHash } from "node:crypto";
 import {
@@ -237,18 +243,20 @@ async function probeAgyModels(binary: string): Promise<DiscoveryOutcome> {
  * 띄웠고, 그게 12초 타임아웃에 걸리는 날(main.log 2026-09-20..26, 하루 한 번 꼴 — 매번 직전
  * 성공 25~40초 뒤)에는 그 모든 호출자가 12초씩 함께 멈췄다. 목록은 거의 안 바뀐다.
  *   - 성공: 10분 동안 그대로 쓴다.
- *   - 실패: 1분 뒤에 다시 본다(지난 성공 목록은 settleDiscovery 가 stale 로 이미 채운다).
+ *   - 실패: 1·2·4·8·16분 뒤에 다시 보고, 그 뒤로는 로그인·CLI 교체·"다시 확인"이 캐시를 비울 때만 다시 본다
+ *     (failed-discovery-retry.ts. 지난 성공 목록은 settleDiscovery 가 stale 로 이미 채운다).
  *   - 만료됐지만 값이 있으면 기다리지 않는다 — 그 값을 바로 주고 뒤에서 한 번만 새로 본다.
  *   - 값이 없을 때(첫 탐지·바이너리 변경)만 기다린다.
  */
 export const ANTIGRAVITY_MODEL_DISCOVERY_FRESH_MS = 10 * 60_000;
-export const ANTIGRAVITY_MODEL_DISCOVERY_FAILED_RETRY_MS = 60_000;
-let agyModelsCache: { binary: string; at: number; outcome: DiscoveryOutcome } | null = null;
+/** The first wait after a failed listing; later waits grow and then stop (failed-discovery-retry.ts). */
+export const ANTIGRAVITY_MODEL_DISCOVERY_FAILED_RETRY_MS = failedDiscoveryRetryWaitMs(1);
+let agyModelsCache: { binary: string; at: number; outcome: DiscoveryOutcome; failures: number } | null = null;
 let agyModelsFlight: { binary: string; promise: Promise<DiscoveryOutcome> } | null = null;
 
 /** 런타임 교체·재로그인 등 감지 캐시를 비울 때 — 값은 남기고 다음 탐지에서 뒤에서 새로 본다. */
 export function invalidateAntigravityModelDiscovery(): void {
-  if (agyModelsCache) agyModelsCache = { ...agyModelsCache, at: 0 };
+  if (agyModelsCache) agyModelsCache = { ...agyModelsCache, at: 0, failures: 0 };
 }
 
 export function cachedAgyModelDiscovery(
@@ -260,7 +268,8 @@ export function cachedAgyModelDiscovery(
     if (agyModelsFlight?.binary === binary) return agyModelsFlight.promise;
     const promise = probe(binary)
       .then((outcome) => {
-        agyModelsCache = { binary, at: Date.now(), outcome };
+        const failures = outcome.status === "ok" ? 0 : (agyModelsCache?.binary === binary ? agyModelsCache.failures : 0) + 1;
+        agyModelsCache = { binary, at: Date.now(), outcome, failures };
         return outcome;
       })
       .finally(() => { if (agyModelsFlight?.promise === promise) agyModelsFlight = null; });
@@ -269,7 +278,7 @@ export function cachedAgyModelDiscovery(
   };
   const cached = agyModelsCache?.binary === binary ? agyModelsCache : null;
   if (!cached) return refresh();
-  const ttl = cached.outcome.status === "ok" ? ANTIGRAVITY_MODEL_DISCOVERY_FRESH_MS : ANTIGRAVITY_MODEL_DISCOVERY_FAILED_RETRY_MS;
+  const ttl = cached.outcome.status === "ok" ? ANTIGRAVITY_MODEL_DISCOVERY_FRESH_MS : failedDiscoveryRetryWaitMs(cached.failures);
   if (now - cached.at >= ttl) void refresh().catch(() => undefined);
   return Promise.resolve(cached.outcome);
 }
@@ -2560,6 +2569,20 @@ async function runPreparedAntigravityAttempt(
     try { return withAgyProductHome(env, selectionFor(runReq.agentId, undefined, runReq.chatId)); }
     catch { return env; }
   };
+  // A write run's shell asks the owner's card before it deletes (shell-delete-gate.ts): a plugin hook in the product mirror (antigravity-delete-gate.ts), the wire and handle in the environment.
+  const agyShellGateWanted = req.permission === "write" && !req.browserOnly && !req.untrustedNoTools;
+  const agyShellGateKey = `${ANTIGRAVITY_KIND}\0${req.chatId ?? ""}\0${req.cwd ?? agentRunCwd()}\0${req.runtimeSessionOwnerId ?? req.agentId ?? ""}`;
+  if (agyShellGateWanted) { try { await ensureMcpProxyApprovalServer(); } catch { /* the hook refuses a delete it cannot ask about */ } }
+  const agyGatedEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+    const out = agyProductEnv(env);
+    if (!agyShellGateWanted) return out;
+    if (!agySpawnsInPersonalHome(out) && installAgyDeleteGatePlugin(agySpawnHome(out))) {
+      out[SHELL_GATE_CONTROL_ENV] = mcpProxyControlInfoPath();
+      out[SHELL_GATE_HANDLE_ENV] = shellDeleteGateHandle(agyShellGateKey);
+      out.AGENTLAS_SHELL_GATE_REQUIRED = "1";
+    } else events.onStatus("[shell-delete-gate] runtime=antigravity unavailable (no product mirror or script): shell deletes are not asked about");
+    return out;
+  };
   const agyRunEnv = agyProductEnv({ ...(req.env ?? process.env) });
   const agyRunHome = agySpawnHome(agyRunEnv);
   if (agySpawnsInPersonalHome(agyRunEnv)) {
@@ -2696,7 +2719,7 @@ async function runPreparedAntigravityAttempt(
     req.outputSchema?.schema, agyResumeId ?? undefined, browserProject ?? undefined, undefined, effortPlan.args,
   );
   const oneShotSpawnEnv = (): NodeJS.ProcessEnv => {
-    const env: NodeJS.ProcessEnv = agyProductEnv({ ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" });
+    const env: NodeJS.ProcessEnv = agyGatedEnv({ ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" });
     if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
     if (!env.COLORTERM) env.COLORTERM = "truecolor";
     return env;
@@ -2765,6 +2788,12 @@ async function runPreparedAntigravityAttempt(
    */
   let mcpReconcile: Awaited<ReturnType<typeof reconcileAgyMcpServers>> = { cleanup: async () => {} };
   let residentProtocolFallback = false;
+  const agyShellGate = agyShellGateWanted ? openShellDeleteGate(agyShellGateKey, {
+    runtime: ANTIGRAVITY_KIND, sessionKey: toolApprovalSessionKey(ANTIGRAVITY_KIND, req.chatId, agyWorkDir),
+    ...((req.approvalChatId ?? req.chatId) ? { chatId: (req.approvalChatId ?? req.chatId)! } : {}),
+    ...(req.agentId ? { agentId: req.agentId } : {}), cwd: agyWorkDir,
+    ...(req.unattended ? { unattended: true } : {}), ...(req.signal ? { signal: req.signal } : {}),
+  }) : null;
   try {
     req.signal?.throwIfAborted();
     if (agyToolsAllowed) mcpReconcile = await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env, req.signal, agyMcpConfigPath(agyRunHome));
@@ -2869,7 +2898,7 @@ async function runPreparedAntigravityAttempt(
             reaperExempt: isResidencyExemptAgent(runReq.agentId),
           },
           async () => {
-            const residentEnv = agyProductEnv({ ...(runReq.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" });
+            const residentEnv = agyGatedEnv({ ...(runReq.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" });
             ensureBrowserReadPolicy(residentEnv);
             return openAntigravityResidentSession({
             executableOwner: residentOwner,
@@ -2949,7 +2978,7 @@ async function runPreparedAntigravityAttempt(
       throw error;
     }
   } finally {
-    try { await mcpReconcile.cleanup(); } finally { cleanupAgyPrompt(); }
+    try { await mcpReconcile.cleanup(); } finally { agyShellGate?.close(); cleanupAgyPrompt(); }
   }
 
   function runAgyProcess(
@@ -3533,10 +3562,12 @@ async function runPreparedAntigravityAttempt(
             : {}),
         });
       } else {
+        // Desktop R part 2 (DD sibling of claude-code, codex and ACP): a child the computer's memory shortage ended (a machine fact, runtime/child-death.ts) is that turn's typed cause; any other ending keeps what it had.
+        const memoryCause = memoryDeathCause(child, "antigravity");
         resolve({
           text: "",
           ownerControlTerminal: "uncertain",
-          failure: {
+          failure: memoryCause ?? {
             kind: "exit",
             message: `Antigravity exited without a structured provider failure.${childExitReason(code, stderr) ? ` ${childExitReason(code, stderr)}` : ""}`,
             runtime: "antigravity",

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
+import { isElectronMainProcess } from "../main-process-host";
 import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
 import { getChatGoalRevision } from "../store/chat-goals";
@@ -22,7 +23,8 @@ function bound(input:{goalId:string;attemptId:string;invocationRunId:string;chat
 }
 export async function browserDownloadAvailable(chatId?:string,agentId?:string):Promise<boolean>{
   const scope=contexts.getStore();
-  if(!process.versions.electron||!scope||scope.signal.aborted||scope.chatId!==chatId||scope.agentId!==agentId||!scope.readOwner())return false;
+  // `process.versions.electron` is also set in the background service, which has no task browser to download with.
+  if(!isElectronMainProcess()||!scope||scope.signal.aborted||scope.chatId!==chatId||scope.agentId!==agentId||!scope.readOwner())return false;
   const {canUseAgentBrowserDownload}=await import("../browser/agent-download");
   return canUseAgentBrowserDownload(scope.chatId);
 }
@@ -86,6 +88,8 @@ export async function currentBrowserDownloadProofs(input:{goalId:string;invocati
   // Never silently select the newest subset and call that a complete packet.
   if(rows.length>32)return unavailable("download_proof_packet_limit");
   if(!rows.length)return unavailable("download_proof_missing");
+  // The download registry lives in the window host; the background service cannot read a download back, so it has no proof to give.
+  if(!isElectronMainProcess())return unavailable("download_proof_unavailable");
   const {readAgentBrowserDownload}=await import("../browser/download-registry"),proofs:CurrentDownloadProof[]=[];
   for(const row of rows)try{
     if(input.signal?.aborted)return unavailable("download_proof_aborted");

@@ -76,7 +76,7 @@ export async function resolveCreativeChannel(
       labels: CREATIVE_CHANNELS,
       input: prompt.slice(0, 2_000),
       guidance: "Judge in any language. When the channel is unstated or unclear, choose Instagram Reels.",
-      timeoutMs: opts.timeoutMs ?? 8_000,
+      timeoutMs: opts.timeoutMs,
       signal: opts.signal,
     });
     return verdict.source === "llm" ? normalizeCreativeChannel(verdict.verdict) : DEFAULT_CREATIVE_CHANNEL;

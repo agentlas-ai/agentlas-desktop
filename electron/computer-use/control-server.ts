@@ -29,6 +29,7 @@ import { learnTap } from "./learn-tap";
 import { launchApp, waitUntil } from "../reach/launch";
 import { nodeExec } from "../reach/host";
 import { isSensitiveApp } from "../reach/explore-policy";
+import { noteScreenControl } from "../one/screen-control";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
@@ -818,6 +819,7 @@ export function startComputerUseControlServer(): Promise<number> {
           return;
         }
         if (req.url === "/capture") {
+          noteScreenControl("computer-use"); // O-M3a: pairing records note whether the window was being operated (one/screen-control.ts)
           const sourceId = typeof body.sourceId === "string" ? body.sourceId.slice(0, 256) : undefined;
           let lifetime: ReturnType<typeof linkedAbortSignals>;
           try { lifetime = executionLifetime(body, requestController.signal); }
@@ -878,6 +880,7 @@ export function startComputerUseControlServer(): Promise<number> {
           return;
         }
         if (req.url === "/observe") {
+          noteScreenControl("computer-use"); // O-M3a: pairing records note whether the window was being operated (one/screen-control.ts)
           const execute = actionQueue.then(() => observeApp(body, requestController.signal), () => observeApp(body, requestController.signal));
           actionQueue = execute.then(() => undefined, () => undefined);
           void execute.then((result) => writeJson(res, result.ok ? 200 : 409, result), () => {
@@ -886,6 +889,7 @@ export function startComputerUseControlServer(): Promise<number> {
           return;
         }
         if (req.url === "/action") {
+          noteScreenControl("computer-use"); // O-M3a: pairing records note whether the window was being operated (one/screen-control.ts)
           const execute = actionQueue.then(() => runAction(body, requestController.signal), () => runAction(body, requestController.signal));
           actionQueue = execute.then(() => undefined, () => undefined);
           void execute.then((result) => writeJson(res, result.ok ? 200 : 409, result), () => {

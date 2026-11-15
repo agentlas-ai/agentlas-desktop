@@ -378,9 +378,10 @@ function LiveText({ id, text, typing, cursor, placeholder }: { id: string; text:
 }
 
 /** Click to edit in place; Esc cancels, blur or Cmd/Ctrl+Enter commits. Enter inserts a line break. */
-function EditableText({ id, text, typing, cursor, editable, className, style, placeholder, onCommit, onSelect }: {
+function EditableText({ id, text, typing, cursor, editable, className, style, placeholder, label, onCommit, onSelect }: {
   id: string; text: string; typing: LiveTyping | null; cursor: LiveCursor | null; editable: boolean; className?: string; style?: CSSProperties;
-  placeholder?: string; onCommit: (text: string) => void; onSelect?: () => void;
+  /** Accessible name of the in-place editor (the text itself is not a name: it changes while typing). */
+  label: string; placeholder?: string; onCommit: (text: string) => void; onSelect?: () => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -397,7 +398,7 @@ function EditableText({ id, text, typing, cursor, editable, className, style, pl
     setDraft(null);
   };
   if (draft !== null) {
-    return <textarea ref={area} className={`${styles.inlineEditor} ${className ?? ""}`} style={style} value={draft} rows={1}
+    return <textarea ref={area} className={`${styles.inlineEditor} ${className ?? ""}`} style={style} value={draft} rows={1} aria-label={label}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => finish(true)}
       onKeyDown={(event) => {
@@ -452,6 +453,7 @@ function FlowBlock({ block, cursor, typing, ko, selected, selectedId, onSelect, 
         {block.rows.map((row, r) => <tr key={r}>{row.map((cell, c) => cell
           ? <td key={c} colSpan={cell.colSpan} rowSpan={cell.rowSpan} data-selected={selectedId === cell.id ? "true" : "false"} style={cell.format?.fill ? { backgroundColor: cell.format.fill } : undefined}>
             <EditableText id={cell.id} text={cell.text} typing={typing} cursor={cursor} editable={editable} className={styles.cellText} style={formatCss(cell.format)}
+              label={ko ? "표 셀 텍스트" : "Table cell text"}
               onSelect={() => onSelect(cell.id)} onCommit={(text) => onCommit(cell.id, text)} />
           </td>
           : null)}</tr>)}
@@ -459,7 +461,7 @@ function FlowBlock({ block, cursor, typing, ko, selected, selectedId, onSelect, 
     </div>;
   }
   const level = block.heading;
-  return <EditableText id={block.id} text={block.text} typing={typing} cursor={cursor} editable={editable}
+  return <EditableText id={block.id} text={block.text} typing={typing} cursor={cursor} editable={editable} label={ko ? "문서 텍스트" : "Document text"}
     className={`${styles.paragraph} ${level ? styles[`h${Math.min(level, 3)}`] : ""}`}
     style={{ ...formatCss(block.format), ...(selected ? { boxShadow: "inset 2px 0 0 var(--attention)" } : {}) }}
     onSelect={() => onSelect(block.id)} onCommit={(text) => onCommit(block.id, text)} />;
@@ -528,7 +530,7 @@ function SheetView({ model, cursor, typing, locale, focusSheet, focusSeq, onSele
           const isSel = sel === address;
           if (editing === address) {
             return <td key={col} className={styles.gridCell} data-selected="true">
-              <input className={styles.cellInput} autoFocus value={bar} onChange={(event) => setBar(event.target.value)}
+              <input className={styles.cellInput} autoFocus value={bar} aria-label={ko ? `${address} 셀` : `Cell ${address}`} onChange={(event) => setBar(event.target.value)}
                 onBlur={() => commit(address, bar)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === "Tab") { event.preventDefault(); commit(address, bar); move(event.key === "Tab" ? 1 : 0, event.key === "Enter" ? 1 : 0); gridRef.current?.focus(); }
@@ -654,7 +656,7 @@ function SlideCanvas({ slide, aspect, cursor, typing, interactive, ko, selected,
       };
       // Thumbnails show the text (and live typing) but carry no data-live-id: the AI cursor and clicks target the stage.
       if (!interactive) return <div key={shape.id} className={styles.slideText} style={text}><LiveText id={shape.id} text={shape.text} typing={typing} cursor={null} /></div>;
-      return <EditableText key={shape.id} id={shape.id} text={shape.text} typing={typing} cursor={cursor} editable={interactive}
+      return <EditableText key={shape.id} id={shape.id} text={shape.text} typing={typing} cursor={cursor} editable={interactive} label={ko ? "슬라이드 텍스트" : "Slide text"}
         className={`${styles.slideText} ${shape.role === "body" ? styles.slideBody : ""}`} style={text}
         placeholder={interactive ? (shape.role === "title" ? (ko ? "제목을 입력하세요" : "Title") : (ko ? "내용을 입력하세요" : "Text")) : undefined}
         onSelect={() => onSelectTarget?.(shape.id)} onCommit={(value) => onCommit?.(shape.id, value)} />;

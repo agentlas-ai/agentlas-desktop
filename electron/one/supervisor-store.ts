@@ -1,4 +1,5 @@
 import { supervisorError } from "../../shared/one-supervisor";
+import { homeCauseEnded } from "./home-signal";
 import { createHash } from "node:crypto";
 import { isHostCheckinInstruction } from "./host-checkin-instructions";
 import { purgeCheckinSessions, purgeOrphanCheckinSessions } from "./checkin-session";
@@ -180,11 +181,17 @@ export class OneSupervisorStore {
     })();
   }
   receive(input: { commandId: string; oneId: string; kind: SupervisorCommandReceipt["kind"]; payload: unknown; originChatId: string; taskId?: string; runId?: string }, persist?: () => string | void): SupervisorRequestRow {
+    const received = this.receiveOnce(input, persist);
+    this.activity();
+    return received;
+  }
+  private receiveOnce(input: { commandId: string; oneId: string; kind: SupervisorCommandReceipt["kind"]; payload: unknown; originChatId: string; taskId?: string; runId?: string }, persist?: () => string | void): SupervisorRequestRow {
     const hash = supervisorHash([input.oneId,input.kind,input.payload]);
     return this.db.transaction(() => {
       const prior = this.get(input.commandId);
       if (prior) {
-        if (prior.one_id !== input.oneId || prior.payload_hash !== hash) throw supervisorError('supervisor_command_identity_conflict');
+        if (prior.one_id !== input.oneId || prior.origin_chat_id !== input.originChatId || prior.payload_hash !== hash)
+          throw supervisorError('supervisor_command_identity_conflict');
         return prior;
       }
       const now = new Date().toISOString();
@@ -207,13 +214,23 @@ export class OneSupervisorStore {
     const changed = this.db.prepare(`UPDATE one_supervisor_requests SET state=?,task_id=?,run_id=?,receipt_json=?,updated_at=? WHERE command_id=? AND one_id=? AND state=?`)
       .run(receipt.state,receipt.taskId,receipt.runId,JSON.stringify(receipt),new Date().toISOString(),row.command_id,row.one_id,expectedState);
     if (changed.changes !== 1) throw supervisorError('supervisor_request_state_conflict');
+    // Audit 62 (home D2): a request that leaves the states the move machine reads as "the personal agent is working" ends that cause: one signal (later task, no timer).
+    if (!["stored","dispatching","accepted"].includes(receipt.state)) homeCauseEnded("personal_agent");
     return receipt;
   }
   list(oneId: string, state?: SupervisorRequestState): SupervisorRequestRow[] {
     return this.db.prepare(`SELECT * FROM one_supervisor_requests WHERE one_id=? ${state ? "AND state=?" : ""} ORDER BY rowid ${state ? "ASC" : "DESC"} LIMIT 100`).all(...(state ? [oneId,state] : [oneId])) as SupervisorRequestRow[];
   }
+  /** Internal approval receipts remain exactly queryable without crowding older clients' visible request window. */
+  listForSnapshot(oneId:string):SupervisorRequestRow[] {
+    return this.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND kind<>'reconfirmation' ORDER BY rowid DESC LIMIT 100").all(oneId) as SupervisorRequestRow[];
+  }
   forRun(runId: string): SupervisorRequestRow[] {
     return this.db.prepare("SELECT * FROM one_supervisor_requests WHERE run_id=? AND state IN ('dispatching','accepted','held')").all(runId) as SupervisorRequestRow[];
+  }
+  /** One read: a request of this One is still open (the 30 s beat has something to read). */
+  hasOpenRequest(oneId:string):boolean {
+    return !!this.db.prepare("SELECT 1 FROM one_supervisor_requests WHERE one_id=? AND state IN ('stored','dispatching','accepted','held') LIMIT 1").get(oneId);
   }
   pending(oneId:string):SupervisorRequestRow[] {
     return this.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND state IN ('stored','dispatching','accepted','held') ORDER BY rowid ASC").all(oneId) as SupervisorRequestRow[];
@@ -222,9 +239,11 @@ export class OneSupervisorStore {
    * The owner's own cancellation needs no report back. */
   notice(row: SupervisorRequestRow, state: string): boolean {
     if (!row.task_id || !row.run_id) return false;
-    return this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
+    const written = this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
       VALUES(?,?,?,?,?,?,?,?,?)`).run(supervisorHash([row.one_id,row.task_id,row.run_id]),row.one_id,row.task_id,row.origin_chat_id,row.run_id,state,new Date().toISOString(),
       state === "cancelled" ? "skipped" : "pending", state === "cancelled" ? "owner_cancelled" : null).changes === 1;
+    if (written) this.activity();
+    return written;
   }
   /** A hand-off's outcome carried by a later run of the same worker conversation: the turn that brought the reports of sessions the
    * worker delegated back, after the hand-off's own turn ended with them still running (supervisor-service noticeDelegatedOutcome). */
@@ -245,7 +264,35 @@ export class OneSupervisorStore {
     return {id:row.id,instruction:row.instruction,cadence:JSON.parse(row.cadence_json) as OneCheckinCadence,notify:row.notify,
       nextAt:new Date(row.next_at).toISOString(),lastFiredAt:row.last_fired_at ? new Date(row.last_fired_at).toISOString() : null,fires:row.fires};
   }
+  /** The earliest time an active check-in of this One is due, or null with none (one indexed read: the check-in timer is aimed with it). */
+  nextCheckinDueAt(oneId: string): number | null {
+    const row = this.db.prepare("SELECT MIN(next_at) AS at FROM one_supervisor_checkins WHERE one_id=? AND active=1").get(oneId) as {at: number | null} | undefined;
+    return typeof row?.at === "number" ? row.at : null;
+  }
+  private readonly activityListeners = new Set<() => void>();
+  /** A request or a notice was written (a command, a settled result): the timer that waits for something to do looks again. Runs after the commit. */
+  onActivity(listener: () => void): () => void {
+    this.activityListeners.add(listener);
+    return () => { this.activityListeners.delete(listener); };
+  }
+  private activity(): void {
+    for (const listener of [...this.activityListeners]) queueMicrotask(() => { try { listener(); } catch { /* a listener never decides */ } });
+  }
+  private readonly checkinActivatedListeners = new Set<() => void>();
+  /** A check-in became active (added, or an owner proposal turned on): the timer that waits for the next due time looks again. Runs after the commit. */
+  onCheckinActivated(listener: () => void): () => void {
+    this.checkinActivatedListeners.add(listener);
+    return () => { this.checkinActivatedListeners.delete(listener); };
+  }
+  private checkinActivated(): void {
+    for (const listener of [...this.checkinActivatedListeners]) queueMicrotask(() => { try { listener(); } catch { /* a listener never decides */ } });
+  }
   addCheckin(oneId: string, input: {commandId: string; instruction: string; cadence: OneCheckinCadence; notify: "important" | "always"}, now = Date.now()): OneCheckin {
+    const added = this.addCheckinOnce(oneId, input, now);
+    this.checkinActivated();
+    return added;
+  }
+  private addCheckinOnce(oneId: string, input: {commandId: string; instruction: string; cadence: OneCheckinCadence; notify: "important" | "always"}, now: number): OneCheckin {
     return this.db.transaction(() => {
       const prior = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE command_id=?").get(input.commandId) as Parameters<OneSupervisorStore["checkinRow"]>[0] & {one_id:string} | undefined;
       if (prior) { if (prior.one_id !== oneId) throw supervisorError('supervisor_command_identity_conflict'); return this.checkinRow(prior); }
@@ -267,8 +314,10 @@ export class OneSupervisorStore {
   }
   /** An unanswered proposal expires with its card: nothing reads it after that, so it is deleted (called by every reader and by the sweep). */
   purgeExpiredProposals(oneId: string, now = Date.now()): number {
-    return Number(this.db.prepare("DELETE FROM one_supervisor_checkins WHERE one_id=? AND active=2 AND created_at<?")
-      .run(oneId, new Date(now - ONE_CHECKIN_POLICY.proposalTtlMs).toISOString()).changes);
+    const before = new Date(now - ONE_CHECKIN_POLICY.proposalTtlMs).toISOString();
+    // A read first: with no expired proposal (the usual case) the beat writes nothing.
+    if (!this.db.prepare("SELECT 1 FROM one_supervisor_checkins WHERE one_id=? AND active=2 AND created_at<? LIMIT 1").get(oneId, before)) return 0;
+    return Number(this.db.prepare("DELETE FROM one_supervisor_checkins WHERE one_id=? AND active=2 AND created_at<?").run(oneId, before).changes);
   }
   /**
    * A check-in the model asked for is stored inactive (active=2) until the owner turns it on from the card. The same command id, or the same
@@ -324,6 +373,11 @@ export class OneSupervisorStore {
    * the first run is one cadence step from now. decline: the proposal is deleted. Both answer "missing" for an expired or already decided one.
    */
   decideCheckin(oneId: string, id: string, decision: "enable" | "decline", now = Date.now()): {state: "enabled"; checkin: OneCheckin} | {state: "declined" | "missing" | "limit"} {
+    const decided = this.decideCheckinOnce(oneId, id, decision, now);
+    if (decided.state === "enabled") this.checkinActivated();
+    return decided;
+  }
+  private decideCheckinOnce(oneId: string, id: string, decision: "enable" | "decline", now: number): {state: "enabled"; checkin: OneCheckin} | {state: "declined" | "missing" | "limit"} {
     return this.db.transaction(() => {
       this.purgeExpiredProposals(oneId, now);
       type Row = Parameters<OneSupervisorStore["checkinRow"]>[0];

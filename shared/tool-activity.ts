@@ -17,8 +17,9 @@ import { classifyTool } from "./tool-taxonomy";
 const HOST_PREFLIGHT_PREFIX = "Agentlas Plugins";
 
 /**
- * Host supervisor notices (electron/hephaestus/stormbreaker-supervisor.ts) ride the tool-use
- * channel so the person sees them, but the host writes them itself: no provider operation id,
+ * Host supervisor notices ride the tool-use channel so the person sees them, but the host writes
+ * them itself (today only "· paused" from mcp/client.ts; the supervisor that wrote armed/route/
+ * final-gate rows was removed and its stored rows keep this prefix): no provider operation id,
  * no arguments, nothing dispatched outside. Measured 2026-09-24: four of them per turn were
  * counted as "unidentified" operations with unknown outcome, so every supervised Goal turn —
  * a read-only One answer included — ended with effects "uncertain" and blocked.
@@ -31,6 +32,19 @@ const HOST_GOAL_NOTICE_PREFIX = "Goal Loop ·";
 export function isHostSupervisorNotice(toolName: string | null | undefined): boolean {
   const name = String(toolName ?? "").trim();
   return name.startsWith(HOST_SUPERVISOR_NOTICE_PREFIX) || name.startsWith(HOST_GOAL_NOTICE_PREFIX);
+}
+
+/**
+ * A "Agentlas Plugins · …" row: the host's own receipt of what it prepared before the turn (the optional tools it attached, a degraded
+ * connection, a browser it could not reach, the routed plugin). It is not work the owner asked for: the owner timeline drops it
+ * (renderer/lib/one-activity.ts) and so does the phone link (mobile-bridge/authority.ts, every place an event is projected for the phone):
+ * a phone that listed it showed an internal diagnostic under every answer ("Agentlas Plugins · Auto Select", "· Degraded Capabilities").
+ * The row stays in the run record: completion and effect checks read the name (isHostPreflightTool).
+ */
+export function isHostPluginPreflightRow(event: { kind?: string; tool?: { name?: unknown } | null }): boolean {
+  if (event.kind !== "tool-use") return false;
+  const name = event.tool?.name;
+  return typeof name === "string" && name.trim().startsWith(`${HOST_PREFLIGHT_PREFIX} ·`);
 }
 
 /** 편성 감사용 읽기 전용 호출 — 바깥을 바꾸지 않는다. */

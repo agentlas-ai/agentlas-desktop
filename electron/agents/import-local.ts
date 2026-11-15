@@ -4,6 +4,7 @@
 //   - 단일 에이전트인지 팀인지 (TEAM.md / ceo / hr-departments)
 //   - 이름·태그라인·시스템 프롬프트
 // 원본은 그대로 두고, 위치를 routes.json에 라우팅 저장한다 (앱이 그 폴더를 그대로 사용).
+import { agentNameFromHeading } from "./heading-name";
 import fs from "node:fs";
 import path from "node:path";
 import { FOLDER_SCAN_AGENT_DEFINITION_FILES } from "../../shared/upload-scan-catalog.generated";
@@ -498,7 +499,7 @@ function readName(dir: string): string {
     }
     const m = text.match(/^#\s+(.+)$/m);
     if (!m) continue;
-    const name = cleanHeading(m[1]).slice(0, 60);
+    const name = agentNameFromHeading(cleanHeading(m[1])).slice(0, 60);
     // 비었거나 어댑터/도구 문서 제목이면 이 파일은 스킵하고 다음 후보로.
     if (!name || ADAPTER_HEADING.test(name)) continue;
     return name;
@@ -624,21 +625,38 @@ const localImportInFlight = new Map<string, Promise<LocalImportResult>>();
 export function importLocalFolder(
   absPath: string,
   locale: "ko" | "en" = currentUiLocale(),
+  options: ImportLocalOptions = {},
 ): Promise<LocalImportResult> {
   const key = path.resolve(absPath);
   const existing = localImportInFlight.get(key);
   if (existing) return existing;
-  const task = importLocalFolderOnce(key, locale).finally(() => {
+  const task = importLocalFolderOnce(key, locale, options).then((result) => {
+    // Agentlas 2.0 D6: a registration carries a character (default when no screen asked; switch off: nothing).
+    try { if (result?.agent?.id) { const { ensureRegistrationCharacter } = require("./registration-character") as typeof import("./registration-character"); ensureRegistrationCharacter(result.agent.id); } } catch { /* the registration stands */ } // eslint-disable-line @typescript-eslint/no-require-imports
+    return result;
+  }).finally(() => {
     if (localImportInFlight.get(key) === task) localImportInFlight.delete(key);
   });
   localImportInFlight.set(key, task);
   return task;
 }
 
+/** `asNewAgent`: 같은 정의(지문)·같은 내용의 고아 행을 이어받지 않고 새 에이전트로 등록한다 — 설치된 에이전트 폴더를 복사해 등록한 경우. */
+export interface ImportLocalOptions {
+  asNewAgent?: boolean;
+  /**
+   * Re-read the folder's instructions, tagline and requirements but leave the registered name as it is. The refresh before a run
+   * (local-freshness.ts) must not rename an agent mid-conversation because a document inside its folder changed or reads differently from
+   * the name the row was registered under; only the owner's explicit (re-)import renames it.
+   */
+  keepName?: boolean;
+}
+
 /** 로컬 폴더를 분석·등록하고 라우팅 저장. 원본 파일은 건드리지 않는다. */
 async function importLocalFolderOnce(
   absPath: string,
   locale: "ko" | "en",
+  options: ImportLocalOptions = {},
 ): Promise<LocalImportResult> {
   const ko = locale === "ko";
   const selected = path.resolve(absPath);
@@ -753,7 +771,7 @@ async function importLocalFolderOnce(
   });
   // 지문 매칭은 폴더가 사라졌거나 옮겨진 라우트까지 회수한다. 폴더 일치가 있으면
   // 그쪽이 우선 — 사용자가 방금 가리킨 그 폴더가 가장 구체적인 의도다.
-  const sameDefinition = sameFolder || !definitionHash
+  const sameDefinition = sameFolder || !definitionHash || options.asNewAgent
     ? undefined
     : routes.find((r) => Boolean(r.definitionHash) && r.definitionHash === definitionHash);
   // Presentation metadata is not a durable ownership key: two unrelated
@@ -785,7 +803,7 @@ async function importLocalFolderOnce(
   // `Upload Gate Probe` 11행. 라우트를 잃은 고아 행은 실행 폴더가 없으므로,
   // 내용(종류·이름·프롬프트 전문·slug 밑동)이 같으면 새로 만들지 말고 되찾는다.
   // 되찾으면 아래 replaceRoute 가 그 행에 폴더를 다시 붙여 신원이 복구된다.
-  if (!row) {
+  if (!row && !options.asNewAgent) {
     const orphanId = findAdoptableOrphanAgentId({ kind, name: nameKo, slug: baseSlug, systemPrompt });
     if (orphanId) {
       row = getDb().prepare("SELECT id, slug, tone FROM installed_agents WHERE id = ?").get(orphanId) as
@@ -825,7 +843,11 @@ async function importLocalFolderOnce(
   replaceRoute(nextRoute, staleRouteIds);
   try {
     db.transaction(() => {
-      if (row) {
+      if (row && options.keepName) {
+        db.prepare(
+          "UPDATE installed_agents SET tagline = ?, tagline_en = ?, system_prompt = ?, env_requirements_json = ?, visibility = 'visible', entity_kind = ? WHERE id = ?",
+        ).run(taglineKo, taglineEn, systemPrompt, envReqsJson, kind, id);
+      } else if (row) {
         db.prepare(
           "UPDATE installed_agents SET name = ?, name_en = ?, tagline = ?, tagline_en = ?, system_prompt = ?, env_requirements_json = ?, visibility = 'visible', entity_kind = ? WHERE id = ?",
         ).run(nameKo, nameEn, taglineKo, taglineEn, systemPrompt, envReqsJson, kind, id);

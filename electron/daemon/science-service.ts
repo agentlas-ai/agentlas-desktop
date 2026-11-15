@@ -14,6 +14,7 @@ import { sendRefusalCode, startOwnerSendOrAcceptRefusal } from "../../shared/tra
 import { randomUUID } from "node:crypto";
 import { captureScienceAliveOwnerControl, recordScienceAliveOwnerControl, recordScienceHostGoalOwnerControl, readScienceHostGoalWake } from "../science-host/goal-wake";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
+import { approvalIsMoney } from "../../shared/approval-card";
 import { dispatchSciencePublicationCommand, type DaemonSciencePublicationCommand } from "./science-publication-commands";
 type Science = typeof import("agentlas-science");
 type Store = ReturnType<Science["scienceStore"]>;
@@ -849,6 +850,9 @@ export function createDaemonScienceService(options: {
           grants!.grantChatAlwaysApproval(scope.runtimeChatId, "science-dropdown");
           for (const request of approvals!.listPendingToolApprovals()) {
             if (request.chatId !== scope.runtimeChatId) continue;
+            // A payment / transfer card already on screen stays for the owner to answer (shared/approval-card.ts): turning
+            // the switch on does not press it (a waiting transfer would have run as "allowed once"). Money is asked every time.
+            if (approvalIsMoney(request)) continue;
             approvalProjection(request);
             approvals!.resolveToolApproval(request.id, "allow_session", toolApprovalActionId(request.id, "allow_session"));
           }

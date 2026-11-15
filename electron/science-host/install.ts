@@ -69,7 +69,7 @@ import { commitSurfaceViewMessage, importSurfaceConversation, readSurfaceConvers
 import { SCIENCE_SURFACE_PACK } from "../store/surface-conversation-schema";
 import { evictRuntimeSessionsForChat } from "../store/runtime-sessions";
 import { listPendingScienceRuntimeOutboxEvents, markScienceRuntimeOutboxDelivered } from "../store/run-events";
-import { agentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles } from "../agents/files";
+import { currentAgentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles } from "../agents/files";
 import { activeScienceExtension, resolveExactVerifiedScienceRenderer, resolveExactVerifiedScienceRendererExecutor,
   resolveExactVerifiedScienceRendererExecutorBinding, resolveVerifiedScienceRenderer, resolveVerifiedScienceRendererExecutor } from "../extensions/science";
 import { registerPreparedMcpConfig } from "../mcp-tools/prepared-transport";
@@ -247,7 +247,8 @@ export function installScienceHostFor(input: ScienceHostInstallInput): ScienceHo
     setMeta: (...args: Parameters<typeof setMeta>) => { fence.assertExecution(); return setMeta(...args); },
     getDb, evictRuntimeSessionsForChat, listPendingScienceRuntimeOutboxEvents, markScienceRuntimeOutboxDelivered,
     // 에이전트 파일
-    agentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles,
+    // 호스트 계약의 이름은 그대로(`agentFolderPath`) — 값은 "지금 폴더가 있는 곳"(폴더 이동 뒤에도 Science 확장이 같은 폴더를 연다).
+    agentFolderPath: currentAgentFolderPath, buildEffectiveAgentSystemPrompt, materializeAgentFiles,
     // 모델 호출
     invocationService: fencedInvocation, captureScienceInvocationBinding,
     // 플랫폼

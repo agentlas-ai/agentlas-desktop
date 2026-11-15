@@ -790,6 +790,18 @@
       "unknown": "Reject missing id, exact version, or argument contract",
       "status": "implemented",
       "note": "{toolchainId, version: positive integer, args: JSON object}; id is independent of source Graph identity."
+    },
+    {
+      "name": "mcpCall",
+      "on": "node.config",
+      "appliesTo": ["agent", "action"],
+      "grade": "critical",
+      "type": "object",
+      "writer": "Blueprint compiler / editor",
+      "reader": "Kernel direct MCP call (runGraphMcpCall)",
+      "unknown": "Reject: a call the kernel cannot read as {catalogId, toolName, arguments} does not run",
+      "status": "implemented",
+      "note": "{catalogId, toolName, arguments, schemaDigest?} (graph-blueprint.ts). A step with this field calls one MCP tool directly instead of asking a model; resume treats it as a held direct transport."
     }
   ]
 }

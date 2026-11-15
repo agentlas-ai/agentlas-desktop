@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, lstatSync } from "node:fs";
 import fs, { type FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { BrowserWindow, screen, session as electronSession, shell } from "electron";
+import type { BrowserWindow } from "electron";
 import { fitWindowToWorkArea } from "../window-lifecycle";
 import { userDataDir } from "../runtime-paths";
 import { ownerFailureReason } from "../../shared/owner-visible-activity-text";
@@ -18,6 +18,7 @@ import {
 } from "./judged-intents";
 import { runMcpInvocation } from "../mcp/client";
 import { invocationErrorAsksOwner, invocationService } from "../invocation/service";
+import { markOwnerSpoke } from "../invocation/owner-spoke";
 import { captureTelegramOneInvocationBinding } from "../invocation/workspace-binding";
 import { latestInvocationBrowserLoginWait } from "../invocation/browser-login-wait";
 import { CONTINUATION_REFUSED_NOTICE_CODE } from "../../shared/continuation-refusal-notice";
@@ -61,7 +62,7 @@ import type {
   TelegramConnectTargetKind,
   TelegramLegacyCleanupResult,
 } from "../../shared/types";
-import { TELEGRAM_ONE_TARGET_ID } from "../../shared/types";
+import { TELEGRAM_ONE_TARGET_ID, type McpInvocationRequest } from "../../shared/types";
 import { telegramPairingCommand, telegramPairingLink } from "../../shared/telegram-pairing";
 import { sameFileIdentity } from "../../shared/file-identity";
 
@@ -126,6 +127,11 @@ export interface TelegramMessage {
   reply_to_message?: {
     from?: TelegramUser;
   };
+  /** A forwarded message (the sender wrote none of its words); any one of these fields marks it. */
+  forward_origin?: unknown;
+  forward_from?: unknown;
+  forward_from_chat?: unknown;
+  forward_date?: number;
 }
 
 interface TelegramPhotoSize {
@@ -2394,6 +2400,16 @@ function telegramSenderAuthorized(
   return typeof senderId === "number" && senderId === pairedUserId;
 }
 
+/**
+ * Whether this message is the OWNER's own words (`ownerSpoke`, #10): the connection records the paired person and this message was sent by exactly
+ * that person, and it is not a forwarded message. A connection that records nobody (an old one: anybody in the chat may run it) never says "the owner wrote this" — what
+ * cannot be confirmed is false. The authorization above is a different question (who may RUN the connection), unchanged.
+ */
+export function telegramMessageIsPairedOwner(pairedUserId: number | null, message: Pick<TelegramMessage, "from" | "forward_origin" | "forward_from" | "forward_from_chat" | "forward_date">): boolean {
+  if (pairedUserId === null || typeof message.from?.id !== "number" || message.from.id !== pairedUserId) return false;
+  return message.forward_origin === undefined && message.forward_from === undefined && message.forward_from_chat === undefined && message.forward_date === undefined;
+}
+
 /** 거절은 보낸 사람마다 한 번만 말한다. 그룹에서 매 메시지마다 답하면 방을 도배한다. */
 async function refuseTelegramSender(
   token: string,
@@ -2845,6 +2861,7 @@ async function runOneBindingInvocation(
   // 사람이 실제로 한 말만 userPrompt 로 보낸다. 표면 안내는 executionContext 로 분리한다.
   const surfaceContext = buildTelegramSurfaceContext(binding, message, mode);
   const workspaceBinding = captureTelegramOneInvocationBinding(getChatWorkingFolder(chat.id));
+  // The owner wrote this in their paired Telegram chat (ownerSpoke, invocation/owner-spoke.ts).
   const request = {
     runId: randomUUID(),
     chatId: chat.id,
@@ -2858,6 +2875,8 @@ async function runOneBindingInvocation(
     taskIntent: "conversation" as const,
     oneMode: true,
   };
+  // Only the paired person's own words are the owner's (#10: a connection that records nobody, or another sender, is not).
+  if (telegramMessageIsPairedOwner(pairedTelegramUserId(binding.id), message)) markOwnerSpoke(request);
   // 동기 start 경로가 들여다보는 판정을 미리 데운다(모바일/렌더러 진입점과 동일).
   await awaitTelegramInvocation(withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
     prejudgeOneRequestIntent(request, { timeoutMs: 300_000 }),
@@ -2974,14 +2993,17 @@ async function runLegacyBindingInvocation(
   let finalFromEvents = "";
   let errorFromEvents = "";
   markHandling?.(); // runMcpInvocation below is the first thing that acts
-  const result = await awaitTelegramInvocation(runMcpInvocation({
+  const legacyRequest: McpInvocationRequest = {
     chatId: chat.id,
     userPrompt: userText,
     images: attachments.map((attachment) => attachment.image).filter((image): image is ImageAttachment => Boolean(image)),
     locale: replyLocale,
     permissions: mode.permissions,
     goalMode: mode.goalMode,
-  }, (event: McpInvocationEvent) => {
+  };
+  // The paired owner wrote this (#3: the old agent/company connection carried no marker); anybody else in the chat, or an unpaired connection, did not (#10).
+  if (telegramMessageIsPairedOwner(pairedTelegramUserId(binding.id), message)) markOwnerSpoke(legacyRequest);
+  const result = await awaitTelegramInvocation(runMcpInvocation(legacyRequest, (event: McpInvocationEvent) => {
     const text = event.kind === "final" ? event.text?.trim() : "";
     if (text) {
       finalFromEvents = text;
@@ -3347,6 +3369,8 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 function createTelegramWebWindow(title: string): BrowserWindow {
+  // Only the window host opens this window; loaded here so the background service can use the rest of this module (bot messages).
+  const { BrowserWindow, screen, session: electronSession, shell } = require("electron") as typeof import("electron");
   const ses = electronSession.fromPartition(TELEGRAM_WEB_PARTITION);
   // A 900x640 minimum ran off a 1024x768 @125 % work area (819x576) behind the taskbar (Windows audit ui.md #10).
   let workArea: { width: number; height: number } | null = null;

@@ -1,0 +1,57 @@
+/* Home's left tree. The rows are the v1.3.139 Work sidebar's (globals.css .project-sidebar-*); this file only holds what that
+   sidebar never had: the Agent Chats / Work Sessions sub-label row, the pin, the drop marker and the "show more" row. */
+.list .subLabel { display: flex; align-items: center; justify-content: space-between; padding-top: 6px; padding-bottom: 3px; padding-left: 24px; }
+.list .subLabel > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list .more { min-height: 28px; padding-left: 34px; font-size: 11px; color: var(--rd-ink-3); }
+.note { padding: 6px 12px; color: var(--rd-ink-3); font-size: 11px; }
+.list .pin { flex: 0 0 auto; display: inline-flex; color: var(--rd-ink-3); overflow: visible; }
+.row[data-drop="before"] { box-shadow: inset 0 2px 0 var(--rd-ink-2); }
+.row[data-drop="after"] { box-shadow: inset 0 -2px 0 var(--rd-ink-2); }
+/* A running chat: its task-row dot turns dark (no spinner - the v1.3.139 row has none); the label is for screen readers only. */
+.list .row[data-running="true"]::before { background: var(--rd-ink-2); }
+.list .running { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+/* AGENT CHATS rows are the One Session list's rows (data-sidebar-rows="one"); the menu only adds the drop marker and the pin mark. */
+.list .agentRows [data-drop="before"] { box-shadow: inset 0 2px 0 var(--rd-ink-2); }
+.list .agentRows [data-drop="after"] { box-shadow: inset 0 -2px 0 var(--rd-ink-2); }
+.list .agentRows .pin { position: absolute; right: 10px; bottom: 6px; pointer-events: none; }
+
+/* F-D3 (workspace-v3-two): name-only rows, one "+" per project row, a red dot for what waits for the owner. No coloured bar anywhere. */
+.projectsLabel { display: flex; align-items: center; justify-content: space-between; padding-bottom: 4px; }
+.projectsLabel .labelPlus { width: 24px; height: 24px; min-height: 24px; display: inline-flex; align-items: center; justify-content: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--rd-ink-3); cursor: pointer; }
+.projectsLabel .labelPlus:hover, .projectsLabel .labelPlus:focus-visible { background: var(--rd-surface-2); color: var(--rd-ink); }
+.list .note { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.retry { composes: agentlas-btn from global; } /* CSS modules allow composes only in a single-class rule, so the global button class is added here and the look stays in the next rule */
+.list .retry { width: auto; display: inline-flex; align-items: center; padding: 0 var(--agentlas-btn-pad-x-sm); border: 1px solid var(--rd-hair-2); border-radius: 8px; background: var(--rd-surface); color: var(--rd-ink); font: inherit; font-size: 11px; cursor: pointer; }
+.list .retry:hover, .list .retry:focus-visible { background: var(--rd-surface-2); }
+/* Agent chat rows: the One Session row with only the title line (no date, no preview): a tight row (workspace-v3-two .conv: 7px + 28px face + 7px = 42px).
+   The 38px the One list keeps on the right for its delete cross is not kept here (no cross), so the name may use the whole row. */
+.list .agentRows button[data-plain="true"] { min-height: 42px; padding: 7px 8px; gap: 9px; grid-template-columns: auto minmax(0, 1fr); }
+.list .agentRows button[data-plain="true"] > :first-child { align-self: center; }
+.list .agentRows button[data-plain="true"] strong { font-size: 13px; font-weight: 650; }
+/* One face of 28px, no status dot (the picture draws none); a group's faces are 24px in one overlapped line, 9px over each other. */
+.list .agentRows button[data-plain="true"] span[data-state] > span[aria-hidden="true"] { display: none; }
+.list .agentRows button[data-plain="true"] > span[data-state] { width: 28px; height: 28px; }
+.list .agentRows button[data-plain="true"] > span[data-faces="group"] { position: static; width: auto; height: 24px; display: flex; align-items: center; }
+.list .agentRows button[data-plain="true"] > span[data-faces="group"] > span { position: static; transform: none; width: 24px; height: 24px; margin-left: -9px; }
+.list .agentRows button[data-plain="true"] > span[data-faces="group"] > span:first-child { margin-left: 0; }
+
+/* Members behind a room: the guide line is a left bar - not drawn (selection and openness never use one). */
+.list .agentRows ul[id^="one-session-members-"] { border-left: 0; margin-left: 40px; padding-left: 0; }
+/* What waits for the owner is red (approval / question); an unseen result keeps the neutral attention colour. */
+.list [data-attention-dot="approval"] { background: #d6453d; } /* the picture's red (workspace-v3-two .dot.red); no token holds it */
+/* A long name cuts at the end; the folder icon and the session dot keep their size. */
+.list :global(.project-sidebar-project-link) svg { flex: 0 0 auto; }
+.list .row::before { flex: 0 0 5px; }
+/* The "+" shows on an open project, and on a folded one while it is pointed at or focused (workspace-v3-two). Still reachable by keyboard. */
+.list [data-folded="true"] .rowPlus { opacity: 0; }
+.list [data-folded="true"]:hover .rowPlus, .list [data-folded="true"]:focus-within .rowPlus { opacity: 1; }
+
+/* F-D3 audit-65 values (workspace-v3-two): section labels are quiet grey letters; a project name is dark and 550; session rows 12.5px / --ink-soft, 30px, a 7px dot;
+   members 12.5px / --ink-soft, plain weight. */
+.list .subLabel, .projectsLabel { color: var(--muted-deep); }
+.list button:global(.project-sidebar-project-link) { font-size: 14px; font-weight: 550; color: var(--ink); }
+.list button.row { min-height: 30px; font-size: 12.5px; color: var(--ink-soft); }
+.list button.row::before { width: 7px; height: 7px; flex: 0 0 7px; margin-left: -16px; }
+.list button.row[data-active="true"] { color: var(--ink); font-weight: 600; }
+.list .agentRows ul[id^="one-session-members-"] button[data-one-tree-child] { font-size: 12.5px; font-weight: 400; color: var(--ink-soft); }
+.list .agentRows ul[id^="one-session-members-"] button[data-one-tree-child] > span:last-child { width: 7px; height: 7px; }

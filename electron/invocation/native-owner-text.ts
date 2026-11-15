@@ -17,7 +17,7 @@ export const NATIVE_OWNER_TEXT_CONTEXT_OMITTED = Object.freeze([
   "runId","userPrompt","steeringMode","images","fileGroupId","preflightSubmissionId",
   "oneTeamPreflightRef","oneMemoryUseOnceRef","oneBriefingActionRef","oneAttachmentRef",
   "agentAppMode","agentAppRuntimeToolGrant","oneProfileContext","oneMachineTurnContext","oneTeamExecutionPolicy",
-  "oneTeamRuntimeBinding","oneAttachmentContext","oneAttachmentRedactions","oneTeamReportTurn","forceBrowserCredentialRefresh","earlierAttemptUncertain","earlierAttemptVerify","hostRecovery",
+  "oneTeamRuntimeBinding","oneAttachmentContext","oneAttachmentRedactions","oneTeamReportTurn","forceBrowserCredentialRefresh","earlierAttemptUncertain","earlierAttemptVerify","hostRecovery","ownerSpoke","peerChain",
 ]);
 export function nativeOwnerTextChoices(request: McpInvocationRequest): Record<string,unknown> {
   return Object.fromEntries(Object.entries(request).filter(([key,value]) => value !== undefined && !NATIVE_OWNER_TEXT_CONTEXT_OMITTED.includes(key)));

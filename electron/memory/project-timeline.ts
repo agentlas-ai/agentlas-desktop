@@ -24,14 +24,21 @@ import {
   readActivatedProjectMemoryText,
   readActivatedProjectMemoryTextAsync,
 } from "./safe-project-read";
+import {
+  projectIndexFileExists,
+  projectIndexFileExistsAsync,
+  readProjectIndexJson,
+  readProjectIndexJsonAsync,
+} from "./project-index";
 import { listProjectMemoryEpisodes } from "./tickets";
 import { summarizeCompletedWork } from "./work-summary";
 import { localizePolicyTurnSummary } from "./policy-turn-summary";
 import { currentUiLocale } from "../ui-locale";
 import { nativeTextsFor } from "./native-text";
 
-const CODE_MAP_SEED_FILE = "code-map/project-seed.json";
-const CODE_MAP_FULL_FILE = "code-map/project-map.json";
+// Where the map sits (project folder, or the project's memory folder once the layout switch is on) is project-index.ts's one rule.
+const CODE_MAP_SEED_FILE = "project-seed.json";
+const CODE_MAP_FULL_FILE = "project-map.json";
 const MESSAGE_LOOKBACK = 600;
 
 // 채팅당 최근 600행 읽기가 이 스냅샷의 지배 비용인데, 우측 패널은 실행 중
@@ -120,12 +127,12 @@ function inspectProjectKnowledge(projectPath: string | null): ProjectKnowledgeSo
       ? sourceState("sitemap", "invalid", "invalid-json-or-shape")
       : sourceState("sitemap", "missing");
 
-  const seed = readActivatedProjectMemoryJson<CodeMapShape>(
+  const seed = readProjectIndexJson<CodeMapShape>(
     projectPath,
     CODE_MAP_SEED_FILE,
     PROJECT_CODE_MAP_SEED_MAX_BYTES,
   );
-  const full = seed ?? readActivatedProjectMemoryJson<CodeMapShape>(
+  const full = seed ?? readProjectIndexJson<CodeMapShape>(
     projectPath,
     CODE_MAP_FULL_FILE,
     PROJECT_CODE_MAP_MAX_BYTES,
@@ -136,8 +143,8 @@ function inspectProjectKnowledge(projectPath: string | null): ProjectKnowledgeSo
     ?? (Array.isArray(full?.symbols) ? full.symbols.length : null);
   const hasCodeMapShape = Boolean(full && (full.stats || Array.isArray(full.files) || Array.isArray(full.symbols)));
   const hasCodeMapFile =
-    activatedProjectMemoryFileExists(projectPath, CODE_MAP_SEED_FILE, PROJECT_CODE_MAP_SEED_MAX_BYTES)
-    || activatedProjectMemoryFileExists(projectPath, CODE_MAP_FULL_FILE, PROJECT_CODE_MAP_MAX_BYTES);
+    projectIndexFileExists(projectPath, CODE_MAP_SEED_FILE, PROJECT_CODE_MAP_SEED_MAX_BYTES)
+    || projectIndexFileExists(projectPath, CODE_MAP_FULL_FILE, PROJECT_CODE_MAP_MAX_BYTES);
   const codeDetail = [
     codeFiles !== null ? `files:${codeFiles}` : null,
     symbols !== null ? `symbols:${symbols}` : null,
@@ -192,12 +199,12 @@ export async function getProjectKnowledgeSourcesAsync(
       ? sourceState("sitemap", "invalid", "invalid-json-or-shape")
       : sourceState("sitemap", "missing");
 
-  const seed = await readActivatedProjectMemoryJsonAsync<CodeMapShape>(
+  const seed = await readProjectIndexJsonAsync<CodeMapShape>(
     projectPath,
     CODE_MAP_SEED_FILE,
     PROJECT_CODE_MAP_SEED_MAX_BYTES,
   );
-  const full = seed ?? await readActivatedProjectMemoryJsonAsync<CodeMapShape>(
+  const full = seed ?? await readProjectIndexJsonAsync<CodeMapShape>(
     projectPath,
     CODE_MAP_FULL_FILE,
     PROJECT_CODE_MAP_MAX_BYTES,
@@ -208,8 +215,8 @@ export async function getProjectKnowledgeSourcesAsync(
     ?? (Array.isArray(full?.symbols) ? full.symbols.length : null);
   const hasCodeMapShape = Boolean(full && (full.stats || Array.isArray(full.files) || Array.isArray(full.symbols)));
   const hasCodeMapFile =
-    await activatedProjectMemoryFileExistsAsync(projectPath, CODE_MAP_SEED_FILE, PROJECT_CODE_MAP_SEED_MAX_BYTES)
-    || await activatedProjectMemoryFileExistsAsync(projectPath, CODE_MAP_FULL_FILE, PROJECT_CODE_MAP_MAX_BYTES);
+    await projectIndexFileExistsAsync(projectPath, CODE_MAP_SEED_FILE, PROJECT_CODE_MAP_SEED_MAX_BYTES)
+    || await projectIndexFileExistsAsync(projectPath, CODE_MAP_FULL_FILE, PROJECT_CODE_MAP_MAX_BYTES);
   const codeDetail = [
     codeFiles !== null ? `files:${codeFiles}` : null,
     symbols !== null ? `symbols:${symbols}` : null,

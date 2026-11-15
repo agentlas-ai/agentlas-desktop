@@ -14,11 +14,14 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
+import { absolutePythonPathEntries, safeModuleArgs } from "./safe-python-launch";
+import { resolveBareCommand } from "../runtime/safe-executable";
 import { survivingHiddenSpawn } from "../runtime/windows-hidden-detach";
 import { resolveManagedNodeRuntimeAsync } from "../runtime/managed-node";
 import { withPythonCacheBoundary, withPythonRuntimeBoundary } from "../runtime/python-cache";
 import { systemNetworkChildEnv } from "../net/system-network-core";
 import { optionalElectronAppPath } from "../runtime-paths";
+import { agentlasHomeEnvForChildren } from "../agents/home";
 import { currentUiLocale } from "../ui-locale";
 import { compareHephaestusVersions, hephaestusRoot, hephaestusRootDetail, hephaestusRuntimeBases, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
@@ -27,16 +30,7 @@ import { retainTrustedMemoryOwnerEnvironment, trustedMemoryOwnerEnvironment } fr
 
 export { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion } from "./root";
 
-// bin/hephaestus 의 `run_python_module` 과 바이트 동일한 부트스트랩.
-// `python -c <BOOTSTRAP> <module> <args...>` 형태로 호출하면 sys.argv[0] 이 모듈명이 되고,
-// runpy 가 해당 패키지의 __main__ 을 실행한다(= agentlas_cloud.cli.main / ontology.cli / career_graph.cli).
-const PY_BOOTSTRAP =
-  "import os, runpy, sys; " +
-  'cwd=os.getcwd(); root=os.environ["HEPHAESTUS_RUNTIME_ROOT"]; ' +
-  'sys.path=[p for p in sys.path if p not in ("", cwd, root)]; ' +
-  "sys.path.insert(0, root); " +
-  "sys.argv=sys.argv[1:]; " +
-  'runpy.run_module(sys.argv[0], run_name="__main__", alter_sys=True)';
+// 엔진 모듈 실행 인자는 safe-python-launch.ts 한 곳에서 만든다(작업 폴더가 sys.path 에 들어가지 않는 부트스트랩).
 
 export type HephaestusModule = "agentlas_cloud" | "ontology" | "career_graph";
 
@@ -55,6 +49,8 @@ export interface HephaestusRunOptions {
   onStdout?: (line: string) => void;
   /** UI 표시 언어 — 에러 문자열을 이 언어로 낸다. 미지정 시 currentUiLocale() 스냅샷. */
   locale?: "ko" | "en";
+  /** Standard input, written once and closed (the engine commands that read their answers from `-`). Absent = no standard input, as before. */
+  input?: string;
 }
 
 export interface HephaestusResult<T = unknown> {
@@ -90,6 +86,24 @@ function bundledPythonPaths(): string[] {
   });
 }
 
+/**
+ * Windows: where a Python of the python.org installer lives when it is not on PATH, the highest version first (desktop repair 6). The two paths this list used to hold (`Python312`, `Python311`) left a user whose only
+ * Python is 3.13 or 3.14 with nothing to find unless `py` was on PATH. `Python3NN` and the ARM64 build's `Python3NN-arm64` (and `-32`) under `%LOCALAPPDATA%\Programs\Python` and `%ProgramFiles%` are read from the
+ * folder itself, 3.9 and up (the engine's floor; the probe still checks the real version). The folders are only listed, nothing is created. The order of the rest of the candidate list is unchanged.
+ */
+export function windowsPythonInstalls(env: NodeJS.ProcessEnv = process.env, readDir: (dir: string) => string[] = (dir) => { try { return fs.readdirSync(dir); } catch { return []; } }): string[] {
+  const out: string[] = [];
+  for (const base of [env.LOCALAPPDATA ? path.win32.join(env.LOCALAPPDATA, "Programs", "Python") : "", env.ProgramFiles ?? "", env["ProgramFiles(x86)"] ?? ""]) {
+    if (!base) continue;
+    const found = readDir(base)
+      .map((name) => { const m = /^Python3(\d{1,2})(?:-(?:arm64|32))?$/i.exec(name); return m && Number(m[1]) >= 9 ? { name, minor: Number(m[1]) } : null; })
+      .filter((item): item is { name: string; minor: number } => item !== null)
+      .sort((a, b) => b.minor - a.minor || (a.name.length - b.name.length));
+    for (const item of found) out.push(path.win32.join(base, item.name, "python.exe"));
+  }
+  return out;
+}
+
 /** GUI 앱의 최소 PATH 환경에서도 python3.9+ 를 찾기 위한 후보 목록. */
 function pythonCandidates(root: string | null): string[] {
   const home = os.homedir();
@@ -100,8 +114,7 @@ function pythonCandidates(root: string | null): string[] {
   if (root) list.push(path.join(root, "bin", "python3")); // 엔진 자체 셰임(있으면)
   if (process.platform === "win32") {
     list.push("python", "python3", "py");
-    list.push(path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Python", "Python312", "python.exe"));
-    list.push(path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Python", "Python311", "python.exe"));
+    list.push(...windowsPythonInstalls());
   } else {
     list.push("python3", "python");
     list.push(
@@ -117,8 +130,25 @@ function pythonCandidates(root: string | null): string[] {
   return [...new Set(list.filter(Boolean))];
 }
 
+/**
+ * A bare candidate (`python`, `python3`, `py`) as the absolute file PATH names, or null when PATH has none. Windows looks
+ * in the child's working folder (the chat's project) before PATH for a bare name, so every later start of this
+ * interpreter uses the absolute file; an explicit path is unchanged. The 3.9 probe and the engine start share this.
+ */
+export function concretePythonCandidate(candidate: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string | null {
+  if (path.isAbsolute(candidate)) return candidate;
+  const found = resolveBareCommand(candidate, env, platform);
+  return found.kind === "missing" ? null : found.command;
+}
+
+/** The Windows `py` launcher needs `-3` before the script arguments. */
+export function isPyLauncher(python: string): boolean {
+  const base = path.basename(python.replace(/\\/g, "/")).toLowerCase();
+  return base === "py" || base === "py.exe";
+}
+
 /** 단일 python 후보가 3.9+ 인지 프로브하고 버전을 반환(아니면 null). */
-function probePython(candidate: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string | null> {
+function probePython(candidate: string, env: NodeJS.ProcessEnv, signal?: AbortSignal, requested: string = candidate): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
@@ -134,7 +164,7 @@ function probePython(candidate: string, env: NodeJS.ProcessEnv, signal?: AbortSi
     if (signal?.aborted) { done(null); return; }
     try {
       const probe = "import sys; sys.stdout.write('%d.%d.%d' % sys.version_info[:3]) if sys.version_info >= (3,9) else sys.exit(3)";
-      const args = candidate === "py" ? ["-3", "-c", probe] : ["-c", probe];
+      const args = isPyLauncher(candidate) ? ["-3", "-c", probe] : ["-c", probe];
       const child = crossSpawn(candidate, args, { env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
       onAbort = () => { try { child.kill(); } catch {} done(null); };
       signal?.addEventListener("abort", onAbort, { once: true });
@@ -147,7 +177,7 @@ function probePython(candidate: string, env: NodeJS.ProcessEnv, signal?: AbortSi
       // misreport a valid configured Python as missing after only 2.5 seconds.
       const isBundledRuntime = path.isAbsolute(candidate) &&
         candidate.split(path.sep).includes("python-runtime");
-      const timeoutMs = candidate === process.env.HEPHAESTUS_PYTHON || isBundledRuntime
+      const timeoutMs = requested === process.env.HEPHAESTUS_PYTHON || isBundledRuntime
         ? 10_000
         : 2_500;
       timer = setTimeout(() => {
@@ -183,10 +213,12 @@ export async function resolveHephaestusPython(options: { signal?: AbortSignal; c
         continue;
       }
     }
-    const version = await probePython(candidate, env, options.signal);
+    const concrete = concretePythonCandidate(candidate, env);
+    if (!concrete) continue;
+    const version = await probePython(concrete, env, options.signal, candidate);
     if (options.signal?.aborted) return null;
     if (version) {
-      const resolved = { python: candidate, version };
+      const resolved = { python: concrete, version };
       if (options.cacheResult !== false) cachedPython = resolved;
       return resolved;
     }
@@ -195,10 +227,20 @@ export async function resolveHephaestusPython(options: { signal?: AbortSignal; c
   return null;
 }
 
+const engineResetListeners = new Set<() => void>();
+/** A signal, not data: the engine may be usable (or have changed) now. The 2.0 first-run migration looks again when it fires. Returns the unsubscribe. */
+export function onHephaestusEngineReset(listener: () => void): () => void {
+  engineResetListeners.add(listener);
+  return () => { engineResetListeners.delete(listener); };
+}
+
 /** 캐시 무효화(런타임 설치 후 재탐지용). */
 export function resetHephaestusCache(): void {
   resetHephaestusRootCache();
   cachedPython = undefined;
+  for (const listener of [...engineResetListeners]) { try { listener(); } catch { /* a listener cannot break the reset */ } }
+  // The engine may be usable now (a runtime was installed or updated): the deletions it could not finish (memory forgets of removed agents and projects) get one more try. Not awaited; a failure waits for the next signal.
+  void import("../memory/forget-stores").then((forget) => forget.retryEngineForgetsOnce()).catch(() => undefined);
 }
 
 export interface HephaestusStdioLaunch {
@@ -257,7 +299,10 @@ export function withDesktopEngineHost(env: NodeJS.ProcessEnv): Record<string, st
     if (key.toUpperCase() === "AGENTLAS_HOST_RUNTIME" || isDesktopEnginePolicyKey(key)) continue;
     if (typeof value === "string") sanitized[key] = value;
   }
-  return { ...sanitized, ...desktopEngineUserEnvironment(env), AGENTLAS_HOST_RUNTIME: "desktop" };
+  // Main 이 정한 `~/.agentlas` 가 홈 기본값과 다르면(임시 userData 로 격리한 실행) 엔진에도 명시적으로 알린다 — 안 그러면 엔진 자식은 실제 홈에 쓴다(감사 35-8).
+  // 정식 실행은 빈 조각이라 엔진이 보는 경로는 변경 전과 같다. 이미 `AGENTLAS_HOME` 이 있으면 그 값이 상속된다.
+  const home = Object.keys(sanitized).some((key) => key.toUpperCase() === "AGENTLAS_HOME" && sanitized[key].trim()) ? {} : agentlasHomeEnvForChildren();
+  return { ...sanitized, ...desktopEngineUserEnvironment(env), ...home, AGENTLAS_HOST_RUNTIME: "desktop" };
 }
 
 function pythonInvocation(candidate: string): { command: string; prefix: string[] } {
@@ -308,7 +353,9 @@ export function resolveHephaestusSyncLaunch(
         continue;
       }
     }
-    const invocation = pythonInvocation(candidate);
+    const concrete = concretePythonCandidate(candidate, env);
+    if (!concrete) continue;
+    const invocation = pythonInvocation(concrete);
     try {
       const checked = spawnSync(
         invocation.command,
@@ -323,7 +370,7 @@ export function resolveHephaestusSyncLaunch(
       if (checked.status !== 0) continue;
       return {
         command: invocation.command,
-        args: [...invocation.prefix, "-c", PY_BOOTSTRAP, module, ...args],
+        args: safeModuleArgs(runtimeRoot, module, args, invocation.prefix),
         env,
         runtimeRoot,
       };
@@ -381,9 +428,7 @@ export async function resolveHephaestusStdioLaunch(
   }
   const py = await resolveHephaestusPython({ signal: options?.signal, cacheResult: options?.cachePythonResult });
   if (options?.signal?.aborted || !py) return null;
-  const pythonArgs = py.python === "py"
-    ? ["-3", "-c", PY_BOOTSTRAP, module, ...args]
-    : ["-c", PY_BOOTSTRAP, module, ...args];
+  const pythonArgs = safeModuleArgs(runtimeRoot, module, args, isPyLauncher(py.python) ? ["-3"] : []);
   // Let the embedded OS runtime's resident judge use this desktop's connected
   // local model (Ollama / LM Studio / MLX). Absent for CLI / networked BYOK — the
   // OS side then reports the honest "connect a model" outcome, never a keyword.
@@ -436,6 +481,7 @@ export async function resolveHephaestusStdioLaunch(
  */
 export async function startHephaestusRuntimeAutoUpdate(options: { signal?: AbortSignal } = {}): Promise<boolean> {
   if (options.signal?.aborted) return false;
+  if (autoUpdateChild) return true;   // DR-4b: one worker of this process at a time (the conductor may ask again)
   // Prewarm the exact packaged Node receipt outside Electron Main even when
   // update checks are disabled. Later provider discovery and CLI launches use
   // the process cache instead of hashing the full runtime tree on first Work.
@@ -444,37 +490,130 @@ export async function startHephaestusRuntimeAutoUpdate(options: { signal?: Abort
   if (
     process.env.HEPHAESTUS_AUTO_UPDATE === "0" ||
     process.env.HEPHAESTUS_UPDATE_CHECK === "0"
-  ) return false;
+  ) return updaterNeverComes();
   const runtimeRoot = hephaestusRoot();
-  if (!runtimeRoot || !hephaestusRuntimeBase(runtimeRoot)) return false;
+  const runtimeBase = runtimeRoot ? hephaestusRuntimeBase(runtimeRoot) : null;
+  if (!runtimeRoot || !runtimeBase) return updaterNeverComes();
   const launch = await resolveHephaestusStdioLaunch(
     "agentlas_cloud.update",
     ["--auto-update-worker", runtimeRoot],
     undefined,
     { includeJudgeRuntime: false, signal: options.signal, cachePythonResult: false },
   );
-  if (!launch || options.signal?.aborted) return false;
+  if (options.signal?.aborted) return false;
+  if (!launch) return updaterNeverComes();
   try {
     // It keeps running after Desktop quits (its lock and staged switch make that safe). On Windows `detached` alone
     // meant DETACHED_PROCESS: no console, so each console program it started opened a new visible window (first
     // Windows run, 2026-10-24). survivingHiddenSpawn keeps it running past Desktop with a hidden console instead.
+    lastSwitchFingerprint = engineSwitchFingerprint(runtimeBase);   // DR-4b: before the worker can touch the journal
     const plan = survivingHiddenSpawn({
       command: launch.command, args: launch.args, cwd: safeCwd(),
       env: withCliPath({ ...process.env, ...launch.env }), stdio: "ignore",
     });
     const child = crossSpawn(plan.command, plan.args, plan.options);
+    autoUpdateChild = child;
+    autoUpdateEnded = false;
+    // DR-4b: the worker's end is a signal. It used to end unseen (stdio ignored, only `error` heard), so the 2.0 first-run conductor, which had found the engine too old and
+    // had nothing to wait for, never learned that the engine on disk was new enough now and sat still until some other signal (a chat created) looked again.
+    let finished = false;
+    const ended = (): void => {
+      if (finished) return;   // `error` and `exit` can both come for one worker
+      finished = true;
+      if (autoUpdateChild === child) autoUpdateChild = null;
+      autoUpdateEnded = true;
+      announceEngineSwitch(true);
+    };
     child.once("error", (error) => {
       console.error("[hephaestus] Agentlas OS auto-update worker failed to start:", error.message);
+      ended();
     });
+    child.once("exit", ended);
     child.unref();
+    watchEngineSwitch(runtimeBase);
     return true;
   } catch (error) {
     console.error(
       "[hephaestus] Agentlas OS auto-update worker failed to start:",
       error instanceof Error ? error.message : String(error),
     );
-    return false;
+    return updaterNeverComes();
   }
+}
+
+// --- DR-4b: what became of the engine updater, as a signal (never a poll) ---------------------------------------------------------------
+/** This process's detached updater worker while it runs. */
+let autoUpdateChild: ChildProcess | null = null;
+/** The worker of this process ended (any outcome), or none can ever start. Reset when a worker starts. */
+let autoUpdateEnded = false;
+let lastSwitchFingerprint: string | null = null;
+let switchWatcher: fs.FSWatcher | null = null;
+let switchWatchedBase: string | null = null;
+let switchTimer: NodeJS.Timeout | null = null;
+
+function updaterNeverComes(): false {
+  if (!autoUpdateEnded) { autoUpdateEnded = true; announceEngineSwitch(true); }
+  return false;
+}
+
+/**
+ * `pending` no worker was started yet (the app arms it shortly after the window is up) - `running` this process's worker is alive or another process holds the updater's lock -
+ * `gave_up` the worker of this process ended or cannot start, so nothing is on its way until the next one is started (the next app start, or the conductor asking once more).
+ * Reads two things only; no process, no download.
+ */
+export function hephaestusUpdaterOutlook(): "pending" | "running" | "gave_up" {
+  if (autoUpdateChild) return "running";
+  const base = hephaestusRuntimeBase();
+  if (base && updaterLockHeld(base)) return "running";
+  return autoUpdateEnded ? "gave_up" : "pending";
+}
+
+/** What the engine selection and the updater's own journal say, in one short string: when it changes, the engine on disk or what became of the update changed. */
+function engineSwitchFingerprint(base: string | null): string {
+  let root = "-", version = "-";
+  try { const detail = hephaestusRootDetail(); if (detail) { root = detail.root; version = readHephaestusVersion(detail.root) ?? "-"; } } catch { /* no engine */ }
+  const journal = base ? readHephaestusUpdateJournalAt(base) : null;
+  return [root, version, journal?.status ?? "-", journal?.current ?? "-", journal?.lastCheckedEpoch ?? "-"].join("|");
+}
+
+/** Tells the listeners (`onHephaestusEngineReset`) when the engine on disk or the updater's journal differ from the last time anyone looked. `force`: the worker's own end, whatever it left. */
+function announceEngineSwitch(force: boolean): void {
+  if (switchTimer) { clearTimeout(switchTimer); switchTimer = null; }
+  const base = hephaestusRuntimeBase();
+  const next = engineSwitchFingerprint(base);
+  if (!force && next === lastSwitchFingerprint) return;
+  lastSwitchFingerprint = next;
+  resetHephaestusCache();
+}
+
+/**
+ * The updater may be another process's (an earlier app run still downloading, a Claude Code or Codex plugin updating the same engine): the journal, the `current` link and the
+ * updater's lock live in one folder, so one non-persistent watch on it, a one-second settle, and a look only when the fingerprint moved. Not a poll; where the folder cannot be
+ * watched the worker's own end (above) is the signal.
+ */
+function watchEngineSwitch(base: string): void {
+  if (switchWatcher && switchWatchedBase === base) return;
+  try { switchWatcher?.close(); } catch { /* already closed */ }
+  switchWatcher = null; switchWatchedBase = null;
+  try {
+    const watcher = fs.watch(base, { persistent: false }, (_event, name) => {
+      const file = typeof name === "string" ? name : "";
+      if (file && file !== "current" && file !== "auto-update.json" && file !== ".update.lock") return;
+      if (switchTimer) return;   // already settling: the look reads the state as it is then
+      switchTimer = setTimeout(() => { switchTimer = null; announceEngineSwitch(false); }, 1_000);
+      switchTimer.unref?.();
+    });
+    watcher.on("error", () => { try { watcher.close(); } catch { /* gone */ } if (switchWatcher === watcher) { switchWatcher = null; switchWatchedBase = null; } });
+    switchWatcher = watcher; switchWatchedBase = base;
+  } catch { /* the folder cannot be watched here: the worker's end still signals */ }
+}
+
+/** Test seam: the module's updater memory back to a fresh process. */
+export function resetHephaestusUpdaterStateForTests(): void {
+  autoUpdateChild = null; autoUpdateEnded = false; lastSwitchFingerprint = null;
+  try { switchWatcher?.close(); } catch { /* closed */ }
+  switchWatcher = null; switchWatchedBase = null;
+  if (switchTimer) { clearTimeout(switchTimer); switchTimer = null; }
 }
 
 /**
@@ -794,12 +933,13 @@ export async function runHephaestus<T = unknown>(
     ...mergeEnginePolicyEnv(process.env, opts.env ?? {}),
     AGENTLAS_HOST_RUNTIME: "desktop",
     HEPHAESTUS_RUNTIME_ROOT: pinnedRoot,
-    PYTHONPATH: pinnedRoot + (process.env.PYTHONPATH ? path.delimiter + process.env.PYTHONPATH : ""),
+    // Only absolute inherited entries: a relative one (`.`) would resolve against this folder, the chat's project.
+    PYTHONPATH: [pinnedRoot, absolutePythonPathEntries(process.env.PYTHONPATH, path.delimiter, path.isAbsolute)].filter(Boolean).join(path.delimiter),
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
   })));
 
-  const fullArgs = py.python === "py" ? ["-3", "-c", PY_BOOTSTRAP, module, ...args] : ["-c", PY_BOOTSTRAP, module, ...args];
+  const fullArgs = safeModuleArgs(pinnedRoot, module, args, isPyLauncher(py.python) ? ["-3"] : []);
 
   return new Promise<HephaestusResult<T>>((resolve) => {
     let child: ChildProcess;
@@ -807,10 +947,12 @@ export async function runHephaestus<T = unknown>(
       child = crossSpawn(py.python, fullArgs, {
         cwd: safeCwd(opts.cwd),
         env,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         ...detachedSpawnOpts(),
       });
       trackRunChild(child);
+      // A child that exits before reading its input closes the pipe: that is its answer's business, never an error of ours.
+      if (opts.input !== undefined && child.stdin) { child.stdin.on("error", () => undefined); child.stdin.end(opts.input, "utf8"); }
     } catch (e) {
       resetHephaestusCache(); // 스폰 실패(경로/바이너리 문제) → 다음 호출에서 인터프리터/루트 재탐지
       resolve({ ok: false, exitCode: null, json: null, stdout: "", stderr: "", error: (e as Error).message });

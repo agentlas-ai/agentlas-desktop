@@ -51,6 +51,8 @@ export interface HarnessCallContext {
   /** Main-only: the calling run's sealed MCP config (mcp-config.ts, prepared-transport.ts). Host-channel built-ins are
    * described and called only through it; absent (UI, mobile, SDK) they are refused, never launched bare. */
   mcpConfigPath?: string;
+  /** Main-only: nobody is there to answer a card (an automation, a headless Goal pass). Read by the app-operation approval (harness/app-call-approval.ts). */
+  unattended?: boolean;
 }
 
 export interface HarnessPortResult {
@@ -83,6 +85,8 @@ interface PortDefinition {
   callTimeoutMs?: number;
   /** A harness_search narrowed to kind "tool" also finds this operation: it stands in for a tool a model names (Science's literature tools). */
   foundAsTool?: true;
+  /** Host-only native One admission, declared explicitly by its owning read port. */
+  oneNativeReadAdmission?: string;
   /** Only reads: the handler changes nothing the owner or the outside world sees, and shows nothing the owner must act on. Main-work
    *  recovery (mcp-tools/main-work-read-actions.ts) may close a call of this port that lost its answer as a failed read and run its
    *  identical repeat. Absent means an effect (fail closed). Approval does not read this (mcpToolIsMutating). */
@@ -1281,7 +1285,34 @@ const PORTS: PortDefinition[] = [
           return nested.status === "ok" ? ok(nested.data)
             : { status: nested.status, reason: nested.reason ?? nested.status, ...(nested.next ? { next: nested.next } : {}), ...(nested.data !== undefined ? { data: nested.data } : {}) };
         }
-        const result = await (await import("../app-control/service")).appControlCall({ ownerTurn: await harnessOwnerTurn(ctx), permission: ctx.permission ?? "read" }, { operation: read.operation, args: read.args });
+        // Who may reach what (harness/tool-isolation.ts, one table) and the card for a delete or a send (harness/app-call-approval.ts,).
+        if (typeof read.operation === "string") {
+          const isolation = await import("./tool-isolation");
+          const denied = await isolation.gateAppOperation({ chatId: ctx.chatId, runId: ctx.runId }, read.operation, read.args && typeof read.args === "object" && !Array.isArray(read.args) ? read.args as Record<string, unknown> : {});
+          if (denied) return refused(denied.reason!, isolation.ISOLATION_REFUSAL_NEXT[denied.reason!]);
+          if (ctx.chatId !== "ui") {
+            const approval = await (await import("./app-call-approval")).approveAppOperation({ operation: read.operation, chatId: ctx.chatId, permission: ctx.permission ?? "read", unattended: ctx.unattended === true, ...(ctx.signal ? { signal: ctx.signal } : {}) });
+            if (!approval.ok) return refused(approval.reason, approval.text);
+          }
+        }
+        const terminal=typeof read.operation === "string" && (await import("../app-control/policy")).isAppControlTerminalOperation(read.operation,read.args);
+        if (typeof read.operation === "string" && read.operation.startsWith("science.")) {
+          const origin = await import("../one/science-reply-origin");
+          let desktop = ctx.chatId === "ui" && !ctx.runId.startsWith("mobile:");
+          if (!terminal && !desktop && ctx.chatId !== "ui") {
+            const host = await import("../one/supervisor");
+            if (host.isPersonalSupervisorConversation(ctx.chatId)) {
+              const service = host.supervisorRunsInDaemon() ? host.oneSupervisor() : (await import("../one/supervisor-native-runtime")).oneSupervisorEndpoint();
+              desktop = Boolean(await service.scienceAllowedForReply(ctx.runId));
+            } else {
+              desktop = !origin.scienceHostRunBlocked((await import("../store/db")).getDb(), ctx.chatId, ctx.runId);
+            }
+          }
+          if (!origin.scienceAppCallAllowed(read.operation, desktop, read.args)) return refused("science_mobile_disabled");
+        }
+        const result = terminal
+          ? await (await import("../app-control/service")).appControlCall({ ownerTurn: false, permission: ctx.permission ?? "read" }, { operation: read.operation, args: read.args })
+          : await (await import("../app-control/service")).appControlCall({ ownerTurn: await harnessOwnerTurn(ctx), permission: ctx.permission ?? "read" }, { operation: read.operation, args: read.args });
         return ok(read.resolved.length ? { ...result, resolved: read.resolved } : result);
       } catch (error) {
         const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "operation_failed";
@@ -1486,6 +1517,19 @@ export function isFixedTerminalHarnessAction(operationId: string, fixedArgs: Rec
   return Boolean(keys?.length && keys.every(key => typeof fixedArgs[key] === "string" && (fixedArgs[key] as string).trim().length > 0));
 }
 
+/** Read-only ports explicitly allowed to cross the personal native relay. */
+export function oneNativeReadPolicies(): readonly { operationId: string; admissionName: string; area: string }[] {
+  const policies = PORTS.filter((port) => port.oneNativeReadAdmission && port.kind === "query" && port.effectFreeRead === true)
+    .map((port) => ({ operationId: port.operationId, admissionName: port.oneNativeReadAdmission!, area: port.operationId.split(".")[0] }));
+  const names = new Set<string>(), operations = new Set<string>();
+  for (const policy of policies) {
+    if (!/^__one_[a-z0-9_]{1,120}$/.test(policy.admissionName) || !policy.area || names.has(policy.admissionName) || operations.has(policy.operationId))
+      throw new Error("native_read_policy_invalid");
+    names.add(policy.admissionName); operations.add(policy.operationId);
+  }
+  return policies;
+}
+
 export function harnessPortIds(): string[] {
   return PORTS.map((port) => port.operationId);
 }
@@ -1624,6 +1668,9 @@ async function nearOperations(id: string): Promise<string> {
   return `${near ? `.${near}` : ""}${app}`;
 }
 
+/** Ports whose act is a delete the approval rule asks about (the act is read from the name: approval-rule.ts classifyHostOperation). */
+const PORTS_ASKING_A_CARD: ReadonlySet<string> = new Set(["agent.uninstall"]);
+
 /**
  * Every answer a port gives, to the model (the agentlas-turn gateway of all seven CLI runtimes, the API and local tool loops, Science's
  * Reach tools) and to the UI, SDK and phone, leaves through here, so a refusal is never a bare code: it carries `tellOwner`
@@ -1654,6 +1701,17 @@ async function callHarnessPortUnworded(operationId: string, rawArgs: Record<stri
   // An argument sent under a wrong name is the usual cause: name the missing field it is closest to.
   if (missing.length) return { ...base, status: "refused", reason: "arguments_missing", next: missingArgumentsMessage(missing, Object.keys(rawArgs), [...port.required, ...Object.keys((port.inputSchema?.properties ?? {}) as object)]), receiptId: `hr_${randomUUID()}` };
   if (!port.handler) return { ...base, status: "unavailable", reason: port.unavailable!.reason, next: port.unavailable!.next, receiptId: `hr_${randomUUID()}` };
+  // Who may reach what (harness/tool-isolation.ts): a port that reaches another conversation, an agent or the owner's configuration is declared there.
+  {
+    const isolation = await import("./tool-isolation");
+    const denied = await isolation.gateHarnessPort(operationId, args, { chatId: ctx.chatId, runId: ctx.runId });
+    if (denied) return { ...base, status: "refused", reason: denied.reason!, next: isolation.ISOLATION_REFUSAL_NEXT[denied.reason!], receiptId: `hr_${randomUUID()}` };
+    // A port that deletes an agent with its memory store and folder asks the same delete card an app operation of that kind asks (; harness/app-call-approval.ts).
+    if (PORTS_ASKING_A_CARD.has(operationId) && ctx.chatId !== "ui" && !ctx.dryRun) {
+      const approval = await (await import("./app-call-approval")).approveAppOperation({ operation: operationId, chatId: ctx.chatId, permission: ctx.permission ?? "read", unattended: ctx.unattended === true, ...(ctx.signal ? { signal: ctx.signal } : {}) });
+      if (!approval.ok) return { ...base, status: "refused", reason: approval.reason, next: approval.text, receiptId: `hr_${randomUUID()}` };
+    }
+  }
   let outcome: PortOutcome;
   try {
     outcome = await port.handler(args, ctx);

@@ -76,7 +76,6 @@ function makeCopy(ko: boolean) {
     trialTag: (days: number) => `${days}일 무료`,
     perMonth: "/월",
     credits: (n: string) => `월 ${n} AI 크레딧`,
-    alive: "Alive 에이전트",
     mail: (n: string) => `에이전트 메일 ${n}개`,
     soon: "곧 출시",
     freeNote: (credits: string | null) => `Free는 결제 없이 쓰는 플랜입니다${credits ? ` (월 ${credits} AI 크레딧)` : ""}. 내 AI 구독 연결과 로컬 실행도 Free에서 그대로 쓸 수 있어요.`,
@@ -131,7 +130,6 @@ function makeCopy(ko: boolean) {
     trialTag: (days: number) => `${days} days free`,
     perMonth: "/mo",
     credits: (n: string) => `${n} AI credits / month`,
-    alive: "Alive agent",
     mail: (n: string) => `${n} agent mail address${n === "1" ? "" : "es"}`,
     soon: "Coming soon",
     freeNote: (credits: string | null) => `Free needs no payment${credits ? ` and includes ${credits} AI credits a month` : ""}. Connecting your own AI subscription and running locally also work on Free.`,
@@ -385,7 +383,6 @@ function FirstRunPaywall({ onFinish }: { onFinish: (outcome: PaywallOutcome | nu
   const planLine = (plan: BillingPlanOffer) => {
     const soon = new Set(plan.comingSoon ?? []);
     const parts = [copy.credits(num(plan.monthlyCredits))];
-    if (plan.aliveAgent) parts.push(soon.has("aliveAgent") ? `${copy.alive} (${copy.soon})` : copy.alive);
     if ((plan.agentMailAddresses ?? 0) > 0) parts.push(soon.has("agentMail") ? `${copy.mail(num(plan.agentMailAddresses ?? 0))} (${copy.soon})` : copy.mail(num(plan.agentMailAddresses ?? 0)));
     return parts.join(" · ");
   };

@@ -78,12 +78,14 @@ export function ConnectorDetail({
     if (!server) return null;
     if (current === "keys") return { label: ko ? "키 입력" : "Enter key", run: () => onEnterKeys(server, status?.missingEnv ?? []) };
     if (current === "login") return { label: ko ? "로그인" : "Sign in", run: () => onVerify(server, "login") };
+    if (current === "rejected") return { label: ko ? "키 입력" : "Enter key", run: () => onEnterKeys(server, server.envKeys) };
+    if (current === "saved" || current === "down") return { label: ko ? "다시 확인" : "Recheck", run: () => onVerify(server) };
     if (current === "ready") return { label: ko ? "다시 확인" : "Recheck", run: () => onVerify(server) };
     if (current === "off" && transport === "stdio") return { label: ko ? "허용하고 연결" : "Allow and connect", run: () => onVerify(server) };
     return { label: ko ? "연결" : "Connect", run: () => onVerify(server) };
   };
   const action = state ? actionFor(state) : null;
-  const tone = state === "ready" ? "ready" : state === "keys" || state === "login" ? "warn" : undefined;
+  const tone = state === "ready" ? "ready" : state === "keys" || state === "login" || state === "rejected" ? "warn" : undefined;
 
   const headerActions = server ? <>
     <MoreMenu label={ko ? "더 보기" : "More"} items={[

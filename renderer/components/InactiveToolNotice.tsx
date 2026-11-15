@@ -20,7 +20,7 @@ export function InactiveToolNotice({ name, command, envKeys, locale, onEnable, o
       <details style={{ display: "contents" }}>
         <summary style={{ cursor: "pointer", padding: "3px 5px" }}>{ko ? "자세히" : "Details"}</summary>
         <div style={{ flexBasis: "100%", padding: "2px 0 6px 18px" }}>
-          <div>{ko ? "켜면 다음 대화부터 이 컴퓨터에서 실행됩니다." : "Runs on this computer from the next conversation when enabled."}</div>
+          <div>{ko ? "켜면 다음 대화부터 이 데스크탑에서 실행돼요." : "Runs on this computer from the next conversation when enabled."}</div>
           <code style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{command}</code>
           {envKeys.length > 0 && <div>{ko ? "필요한 키: " : "Required keys: "}{envKeys.join(", ")}</div>}
         </div>

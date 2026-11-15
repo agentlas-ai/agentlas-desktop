@@ -4,25 +4,21 @@
 // 예전 배너는 항상 /dashboard#approval-inbox 로 스크롤만 했다 — 에이전트가 기다리는 곳은
 // 대시보드가 아니라 그 대화다(오너 지적 2026-09-26).
 //
-// 경로 규칙(인박스 "답하기" 가 이미 쓰던 것을 그대로 옮겨 왔다):
-//   One 에서 시작한 대화  → /one?task=<task>  (task 가 없으면 /one?chat=<chat>)
-//   Work 대화(프로젝트 포함) → /workspace/task?id=<chat>
+// 경로 규칙(Agentlas 2.0 오너): 방이든 Work 대화든 질문이 있는 곳은 Space 의 그 대화 탭이다.
+//   → /workspace?open=<chat>  (Space 가 탭을 열고 주소의 open 을 지운다. 한도에 닿으면 안내가 뜬다.)
 // 자동화·부서(division) 대화는 승인 목록 대상이 아니다(listRecentChats 가 kind='user' 만 본다).
 "use client";
 import { ipc } from "./ipc";
 import { navigate } from "./navigation";
 import type { PendingConfirmation } from "./types";
 
+/** The screen address that opens this chat's tab in Space. Async only to keep the old signature (callers `await` it). */
 export async function pendingConfirmationHref(item: Pick<PendingConfirmation, "chatId">): Promise<string> {
+  // A member's child session asks in the name of its room: the tab to open is the room's.
   const api = ipc();
   const chat = api ? await api.chats.get(item.chatId).catch(() => null) : null;
-  if (chat?.originSurface === "one") {
-    const task = api ? await api.tasks.findForChat(item.chatId).catch(() => null) : null;
-    return task
-      ? `/one?task=${encodeURIComponent(task.id)}`
-      : `/one?chat=${encodeURIComponent(item.chatId)}`;
-  }
-  return `/workspace/task?id=${encodeURIComponent(item.chatId)}`;
+  const target = chat?.parentChatId ?? item.chatId;
+  return `/workspace?open=${encodeURIComponent(target)}`;
 }
 
 /**
@@ -36,7 +32,7 @@ function focusQuestionWhenReady(timeoutMs = 8_000): void {
   const started = Date.now();
   const tick = () => {
     const card = document.querySelector<HTMLElement>(
-      '[data-testid="one-decision-inline"] [data-ask-card], [data-composer-decision-card] [data-ask-card]',
+      '[data-testid="one-decision-inline"] [data-ask-card], [data-composer-decision-card] [data-ask-card], [data-room-pane-question] [data-ask-card]',
     );
     if (card && card.getClientRects().length > 0) {
       card.scrollIntoView({ block: "nearest", behavior: "smooth" });

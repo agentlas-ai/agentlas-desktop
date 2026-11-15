@@ -16,11 +16,11 @@
  *    "{방} · 방 열기", 카드 머리 줄에 "1/3 · 다음". 답하면 즉시 다음 건이 같은 자리에 온다(lib/tool-approvals useApprovalDeck).
  * 선례: OneDispatchNotice(팀원 방 카드를 그 방 chatId 로 그리고 markChatVisible 로 보이는 대화로 등록).
  */
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { ipc } from "@/lib/ipc";
 import { markChatVisible, useApprovalDeck, useToolApprovals } from "@/lib/tool-approvals";
+import { usePendingBrowserApprovals } from "@/lib/attention";
 import { pendingConfirmationHref } from "@/lib/open-pending-confirmation";
-import type { BrowserApprovalRequestEvent } from "@/lib/types";
 import type { SupervisedRoom } from "../../../shared/one-supervisor";
 import { ToolApprovalCard } from "@/components/ToolApprovalInline";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
@@ -28,43 +28,12 @@ import { IconShield } from "@/components/Icon";
 
 const ROOM_REFRESH_MS = 15_000;
 
-/** Browser approvals Main is still waiting on (same list + events the room's own sheet reads), each with its room. */
+/** Browser approvals Main is still waiting on (the list attention.ts already reads, with the same push events), each with its room. */
 function usePendingBrowserRequests(exclude: string | null): Array<{ id: string; chatId: string }> {
-  const [pending, setPending] = useState<ReadonlyMap<string, BrowserApprovalRequestEvent>>(new Map());
-  // A request Main already closed (answered anywhere, or expired) never comes back from a slower list read.
-  const closed = useRef(new Set<string>());
-  useEffect(() => {
-    let active = true;
-    const merge = (incoming: BrowserApprovalRequestEvent[], replace: boolean) => setPending((prior) => {
-      const now = Date.now();
-      const next = replace ? new Map<string, BrowserApprovalRequestEvent>() : new Map(prior);
-      for (const item of incoming) {
-        if (item.expiresAt <= now) { closed.current.add(item.requestId); next.delete(item.requestId); }
-        else if (!closed.current.has(item.requestId)) next.set(item.requestId, item);
-      }
-      for (const [id, item] of next) if (item.expiresAt <= now) next.delete(id);
-      return next;
-    });
-    const off = ipcEvents()?.onBrowserApproval?.((request) => merge([request], false));
-    const read = () => {
-      void ipc()?.browser?.listPendingApprovals?.()
-        .then((list) => { if (active && Array.isArray(list)) merge(list, true); })
-        .catch(() => { /* push events remain */ });
-    };
-    read();
-    const timer = window.setInterval(read, ROOM_REFRESH_MS);
-    return () => { active = false; off?.(); window.clearInterval(timer); };
-  }, []);
-  useEffect(() => {
-    const soonest = Math.min(...[...pending.values()].map((item) => item.expiresAt));
-    if (!Number.isFinite(soonest)) return;
-    const timer = window.setTimeout(() => setPending((prior) => new Map([...prior].filter(([, item]) => item.expiresAt > Date.now()))),
-      Math.max(0, soonest - Date.now()) + 50);
-    return () => window.clearTimeout(timer);
-  }, [pending]);
+  const pending = usePendingBrowserApprovals();
   return useMemo(() => {
     const requests: Array<{ id: string; chatId: string }> = [];
-    for (const item of pending.values()) {
+    for (const item of pending) {
       const owner = item.owner;
       if (owner && owner.context !== "build" && owner.chatId && owner.chatId !== exclude) requests.push({ id: item.requestId, chatId: owner.chatId });
     }

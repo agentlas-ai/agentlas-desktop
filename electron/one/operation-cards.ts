@@ -48,8 +48,6 @@ const TOOL_KIND: Readonly<Record<string, OperationCardKind>> = {
   one_graph_set_enabled: "graph.set_enabled", one_app_call: "app.change",
 };
 
-const NOW_KO: Record<string, string> = { idle: "대기", working: "작업 중", waiting_for_owner: "답변 대기", locked: "잠김" };
-const NOW_EN: Record<string, string> = { idle: "Idle", working: "Working", waiting_for_owner: "Waiting for you", locked: "Locked" };
 const clip = (value: unknown, limit: number): string => {
   const text = typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : "";
   const flat = text.replace(/\s+/gu, " ").trim();
@@ -191,11 +189,12 @@ export function operationCardFor(event: OperationToolEvent, locale: OperationCar
   if (kind === "team.list") {
     const teammates = (Array.isArray(body.teammates) ? body.teammates : []).map(record).filter((item): item is Record<string, unknown> => Boolean(item && item.name));
     if (!teammates.length) return null;
-    const nowLabel = ko ? NOW_KO : NOW_EN;
     const shown = teammates.slice(0, 12);
     const startable = shown.filter((item) => item.can_start !== false).slice(0, 4);
+    // A stored card is never redrawn, so a "now" column would read as a state it no longer has once the teammate works or has finished (mac-daily-1 H-01:
+    // "대기" after the file was made; show only what is confirmed). The card lists who can be handed work; the model reads each teammate's state from the result itself.
     return card(kind, ko, ko ? `팀원 ${teammates.length}명` : `${teammates.length} teammates`, [
-      { type: "table", columns: [ko ? "이름" : "Name", ko ? "지금" : "Now"], rows: shown.map((item) => [clip(item.name, 60), nowLabel[String(item.now)] ?? clip(item.now, 20)]) },
+      { type: "table", columns: [ko ? "이름" : "Name"], rows: shown.map((item) => [clip(item.name, 60)]) },
       ...startable.map((item) => followup(ko ? `${clip(item.name, 30)}에게 맡기기` : `Hand to ${clip(item.name, 30)}`,
         ko ? `${clip(item.name, 60)}에게 맡길 일: ` : `Work for ${clip(item.name, 60)}: `)),
     ], "ready", "result");

@@ -11,7 +11,7 @@ const finite=(value:unknown):value is number=>typeof value==="number"&&Number.is
 const value=(amount:number|null|undefined,ko:boolean)=>finite(amount)?amount.toLocaleString(ko?"ko-KR":"en-US",{maximumFractionDigits:2}):"—";
 const change=(amount:number|null|undefined,ko:boolean)=>finite(amount)?`${new Intl.NumberFormat(ko?"ko-KR":"en-US",{minimumFractionDigits:2,maximumFractionDigits:2,signDisplay:"exceptZero"}).format(Math.abs(amount)<.005?0:amount)}%`:"—";
 const asOfDay=(value:string|null|undefined,ko:boolean)=>{if(!value)return "";const stamp=new Date(value);return Number.isFinite(stamp.getTime())?new Intl.DateTimeFormat(ko?"ko-KR":"en-US",{month:"short",day:"numeric",...(stamp.getFullYear()!==new Date().getFullYear()?{year:"numeric"}:{})}).format(stamp):"";};
-export function FinanceMarketOverview({result,loading,ko,watchlist,quotes,sources,onFind,onAsset,onRetry,worldMap,composer,children,feeds}:{result:FinanceWorldMarketsResult|null;loading:boolean;ko:boolean;watchlist:FinanceAsset[];quotes:FinanceQuote[];sources:FinanceSource[];onFind:()=>void;onAsset:(asset:FinanceAsset)=>void;onRetry?:()=>void;worldMap:ReactNode;composer:ReactNode;children?:ReactNode;feeds?:ReactNode}){
+export function FinanceMarketOverview({result,loading,ko,watchlist,quotes,sources,onFind,onAsset,onRetry,worldMap,composer,children,feeds,actions}:{result:FinanceWorldMarketsResult|null;loading:boolean;ko:boolean;watchlist:FinanceAsset[];quotes:FinanceQuote[];sources:FinanceSource[];onFind:()=>void;onAsset:(asset:FinanceAsset)=>void;onRetry?:()=>void;worldMap:ReactNode;composer:ReactNode;children?:ReactNode;feeds?:ReactNode;/** The dashboard's own buttons (build with AI, edit view …): top right, next to the watchlist star. */actions?:ReactNode}){
  const markets=result?.markets??[],top=["US","GB","DE","JP"].map(code=>markets.find(market=>market.countryCode===code)).filter(market=>!!market);
  const failed=!loading&&!!result&&(result.status==="unavailable"||(top.length>0&&top.every(market=>!finite(market.index.value))));
  const [watchlistOpen,setWatchlistOpen]=useState(false);
@@ -23,9 +23,10 @@ export function FinanceMarketOverview({result,loading,ko,watchlist,quotes,source
  return <div className={styles.layout}><div className={styles.main}><section>
   <div className={styles.overviewHead} onBlur={event=>{if(event.relatedTarget instanceof Node&&!event.currentTarget.contains(event.relatedTarget))setWatchlistOpen(false);}}>
    <h2>{ko?"상위 자산":"Top assets"}</h2>
+   <div className={styles.headEnd}>{actions}
    <button ref={watchlistTrigger} type="button" className={styles.iconButton} aria-label={ko?"관심목록":"Watchlist"} title={ko?"관심목록":"Watchlist"} aria-expanded={watchlistOpen} aria-controls={watchlistOpen?watchlistId:undefined} aria-haspopup="dialog" onClick={()=>setWatchlistOpen(open=>!open)}>
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m12 3 2.8 5.7 6.3.9-4.6 4.4 1.1 6.3-5.6-3-5.6 3 1.1-6.3L2.9 9.6l6.3-.9Z"/></svg>
-   </button>
+   </button></div>
    {watchlistOpen&&<div ref={watchlistRoot} id={watchlistId} className={`${popup.panelPopover} ${styles.watchlist}`} role="dialog" aria-label={ko?"관심목록":"Watchlist"}>
     <div className={styles.watchHead}><h2>{ko?"관심목록":"Watchlist"}</h2><div className={styles.watchActions}><button ref={addTrigger} type="button" className={styles.iconButton} onClick={findAsset} aria-label={ko?"관심 자산 추가":"Add watchlist asset"} title={ko?"관심 자산 추가":"Add watchlist asset"}><IconPlus size={18}/></button><button type="button" className={styles.iconButton} onClick={closeWatchlist} aria-label={ko?"관심목록 닫기":"Close watchlist"} title={ko?"관심목록 닫기":"Close watchlist"}><IconClose size={18}/></button></div></div>
     <div className={styles.watchBody}>{watchlist.length?watchlist.slice(0,30).map(asset=>{const quote=quotes.filter(item=>item.assetId===asset.id&&item.priceBasis==="price"&&item.currency===asset.currency).sort((a,b)=>b.asOf.localeCompare(a.asOf))[0];// A price the owner entered is not a market quote: one small word marks it; a market price carries no mark.

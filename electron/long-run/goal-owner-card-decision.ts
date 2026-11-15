@@ -1,6 +1,5 @@
 import { getDb } from "../store/db";
-import { getChat, setChatContinuousMode, setChatGoalBinding } from "../store/chats";
-import { completeChatGoalContract } from "../store/chat-goals";
+import { closeGoal } from "../store/goal-close";
 import { appendLongRunEvent, getLongRunByGoalId, transitionLongRun, type LongRunRecord } from "../store/long-runs";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { hostOwnerCardDecisionForReply, type HostOwnerCardDecision, type HostOwnerCardKind } from "./goal-owner-card";
@@ -32,9 +31,9 @@ export interface PendingHostOwnerCard {
 }
 
 /** Ledger fact: the host posted this card for this Goal, as this chat message. Written right after the message. */
-export function recordHostOwnerCardPosted(input: { longRunId: string; cardKind: HostOwnerCardKind; sourceMessageId: string; invocationRunId: string }): void {
+export function recordHostOwnerCardPosted(input: { longRunId: string; cardKind: HostOwnerCardKind; sourceMessageId: string; invocationRunId?: string }): void {
   appendLongRunEvent({ runId: input.longRunId, kind: HOST_OWNER_CARD_POSTED_KIND, actorKind: "host",
-    payload: { cardKind: input.cardKind, sourceMessageId: input.sourceMessageId, invocationRunId: input.invocationRunId } });
+    payload: { cardKind: input.cardKind, sourceMessageId: input.sourceMessageId, ...(input.invocationRunId ? { invocationRunId: input.invocationRunId } : {}) } });
 }
 
 /** The newest card the host posted for this run that no decision has answered yet. */
@@ -47,7 +46,7 @@ export function pendingHostOwnerCard(longRunId: string): PendingHostOwnerCard | 
   if (decided) return null;
   try {
     const payload = JSON.parse(posted.payload_json) as { cardKind?: unknown; sourceMessageId?: unknown };
-    if (payload.cardKind !== "goal_idle_stop" || typeof payload.sourceMessageId !== "string" || !payload.sourceMessageId) return null;
+    if ((payload.cardKind !== "goal_idle_stop" && payload.cardKind !== "owner_stop") || typeof payload.sourceMessageId !== "string" || !payload.sourceMessageId) return null;
     return { cardKind: payload.cardKind, sourceMessageId: payload.sourceMessageId, seq: posted.seq };
   } catch { return null; }
 }
@@ -74,6 +73,54 @@ export function hostOwnerCardAnswer(input: { goalId: string | null | undefined; 
   return decision ? { run, card, decision } : null;
 }
 
+/**
+ * "Keep it stopped" on the Goal's "Stopped goal" card (#2: the pick used to reach the Goal only as words, the turn that
+ * answered it started a new attempt, the replay barrier lifted and the Goal ran again every minute). The Goal goes on the owner's pause
+ * once (paused, user): the sweep and every wake leave an owner pause alone, and the owner's next message or the chip resumes it as for
+ * any pause. Only a Goal that rests now (waiting, queued, blocked) is paused here; a Goal a turn runs is not the card's subject any more.
+ */
+function holdGoalForOwner(answer: HostOwnerCardAnswer, input: { chatId: string; via: string }): boolean {
+  const goalId = answer.run.goalId;
+  const held = getDb().transaction((): boolean => {
+    const current = getLongRunByGoalId(goalId);
+    if (!current || current.id !== answer.run.id || !["waiting_tool", "queued", "blocked"].includes(current.status)) return false;
+    if (pendingHostOwnerCard(current.id)?.seq !== answer.card.seq) return false;
+    recordDecision(answer, input.via);
+    appendLongRunEvent({ runId: current.id, kind: "run.user_control", actorKind: "user",
+      payload: { action: "pause", decision: answer.decision, source: "owner_card", sourceMessageId: answer.card.sourceMessageId,
+        chatId: input.chatId, goalId } });
+    // Appending a ledger event advances the run's version: fence the transition on the row as it is now.
+    let run = getLongRunByGoalId(goalId) ?? current;
+    // The same two steps as the Goal's own Pause control (service.ts controlGoal): a resting Goal with no turn passes through "pausing".
+    if (run.status === "waiting_tool") {
+      run = transitionLongRun({ runId: run.id, to: "pausing", actorKind: "user", reason: "user", expectedVersion: run.version });
+      transitionLongRun({ runId: run.id, to: "paused", actorKind: "host", reason: "user", expectedVersion: run.version });
+    } else {
+      transitionLongRun({ runId: run.id, to: "paused", actorKind: "user", reason: "user", expectedVersion: run.version });
+    }
+    return true;
+  })();
+  if (held) switchOffGoalContinuation(answer, input.chatId);
+  return held;
+}
+
+/**
+ * The Goal's own continuation automation (if this Goal was started by one) stops with it, exactly as the Goal's Stop and Pause controls
+ * do; a row whose creation owner is not this Goal is never touched.
+ */
+function switchOffGoalContinuation(answer: HostOwnerCardAnswer, chatId: string): void {
+  try {
+    const { findAutomationByGoalId, toggleAutomation } = require("../store/automations") as typeof import("../store/automations");
+    const { currentAutomationGoalExecutionOwnerMatches } = require("../automation-execution-control") as typeof import("../automation-execution-control");
+    const continuation = findAutomationByGoalId(answer.run.goalId);
+    if (continuation?.enabled && currentAutomationGoalExecutionOwnerMatches(continuation.id, answer.run.goalId, chatId, answer.run.id)) {
+      toggleAutomation(continuation.id, false);
+    }
+  } catch (error) {
+    console.warn("[goal-owner-card] continuation automation could not be switched off:", error instanceof Error ? error.message : String(error));
+  }
+}
+
 function recordDecision(answer: HostOwnerCardAnswer, via: string): void {
   appendLongRunEvent({ runId: answer.run.id, kind: HOST_OWNER_CARD_DECIDED_KIND, actorKind: "user",
     payload: { cardKind: answer.card.cardKind, decision: answer.decision, sourceMessageId: answer.card.sourceMessageId, via: via.slice(0, 40) } });
@@ -81,10 +128,12 @@ function recordDecision(answer: HostOwnerCardAnswer, via: string): void {
 
 /**
  * Apply the owner's decision. Returns "stopped" when the Goal was ended here (the caller's turn is then an ordinary turn of
- * the room), "continue" when it was only recorded. A stop never waits on a judge, a verifier, a runtime or a live turn of
+ * the room), "held" when the Goal was put on the owner's pause here (the turn is again an ordinary turn and must not resume it),
+ * "continue" when it was only recorded. A stop never waits on a judge, a verifier, a runtime or a live turn of
  * another chat; the only thing that can refuse it is the Goal having moved on (ended, rebound) — then nothing is written.
  */
-export function applyHostOwnerCardDecision(answer: HostOwnerCardAnswer, input: { chatId: string; via: string }): "stopped" | "continue" | "unchanged" {
+export function applyHostOwnerCardDecision(answer: HostOwnerCardAnswer, input: { chatId: string; via: string }): "stopped" | "held" | "continue" | "unchanged" {
+  if (answer.decision === "keep_stopped") return holdGoalForOwner(answer, input) ? "held" : "unchanged";
   if (answer.decision !== "stop_and_summarize") {
     recordDecision(answer, input.via);
     return "continue";
@@ -98,31 +147,11 @@ export function applyHostOwnerCardDecision(answer: HostOwnerCardAnswer, input: {
     appendLongRunEvent({ runId: current.id, kind: "run.user_control", actorKind: "user",
       payload: { action: "stop", decision: answer.decision, source: "owner_card", sourceMessageId: answer.card.sourceMessageId,
         chatId: input.chatId, goalId } });
-    // Appending a ledger event advances the run's version: fence the transitions on the row as it is now.
-    let run = getLongRunByGoalId(goalId) ?? current;
-    if (!["draft", "paused", "blocked", "cancelling"].includes(run.status)) {
-      run = transitionLongRun({ runId: run.id, to: "cancelling", actorKind: "user", reason: OWNER_CARD_STOP_REASON, expectedVersion: run.version });
-    }
-    transitionLongRun({ runId: run.id, to: "cancelled", actorKind: "user", reason: OWNER_CARD_STOP_REASON, expectedVersion: run.version });
-    completeChatGoalContract(goalId, "cancelled");
-    if (getChat(input.chatId)?.goalId === goalId) {
-      setChatGoalBinding(input.chatId, null);
-      setChatContinuousMode(input.chatId, false);
-    }
+    // The one close (store/goal-close.ts): the run, the contract, the chat link and continuous mode, the open tasks, the due line.
+    closeGoal(goalId, "cancelled", "owner-card", { reason: OWNER_CARD_STOP_REASON });
     return true;
   })();
   if (!ended) return "unchanged";
-  // The Goal's own continuation automation (if this Goal was started by one) stops with it, exactly as the Goal's Stop control
-  // does; a row whose creation owner is not this Goal is never touched.
-  try {
-    const { findAutomationByGoalId, toggleAutomation } = require("../store/automations") as typeof import("../store/automations");
-    const { currentAutomationGoalExecutionOwnerMatches } = require("../automation-execution-control") as typeof import("../automation-execution-control");
-    const continuation = findAutomationByGoalId(goalId);
-    if (continuation?.enabled && currentAutomationGoalExecutionOwnerMatches(continuation.id, goalId, input.chatId, answer.run.id)) {
-      toggleAutomation(continuation.id, false);
-    }
-  } catch (error) {
-    console.warn("[goal-owner-card] continuation automation could not be switched off:", error instanceof Error ? error.message : String(error));
-  }
+  switchOffGoalContinuation(answer, input.chatId);
   return "stopped";
 }

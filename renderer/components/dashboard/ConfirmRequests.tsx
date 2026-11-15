@@ -1,17 +1,17 @@
 // 대시보드 "승인 인박스" 모듈 — 에이전트가 챗에서 사용자 결정을 기다리는 항목(메일함 메타포).
-// confirm.listPending() 폴링. 가장 오래 기다린(가장 멈춰 있는) 항목을 위로 정렬해 통제의 대가(stall)를
+// 목록은 attention.ts 가 이미 읽는 것을 함께 쓴다(질문이 열려 있으면 3초, 없으면 신호·33초 안전망) — 이 모듈은 따로 읽지 않는다. 가장 오래 기다린(가장 멈춰 있는) 항목을 위로 정렬해 통제의 대가(stall)를
 // 긴급성으로 드러낸다. "답하기"로 해당 채팅에 가서 응답하면 자동 해소된다 — 인라인 응답은 챗에서 이뤄진다
 // (단일 상태: 워크스페이스 인라인 게이트와 같은 confirm 소스를 공유).
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
-import { useVisibleInterval } from "@/lib/useVisibleInterval";
+import { attentionLabel, openAttentionEntry, useAttention, usePendingConfirmationList } from "@/lib/attention";
 import { useT } from "@/lib/i18n";
 import { openPendingConfirmation } from "@/lib/open-pending-confirmation";
-import { loadViewData, readViewData } from "@/lib/view-data-cache";
+import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import type { PendingConfirmation } from "@/lib/types";
-
-const POLL_MS = 10_000;
+import { COPY, pick } from "./dashboard-copy";
+import s from "./Dashboard.module.css";
 
 function stallLabel(iso: string, ko: boolean): string {
   const t = new Date(iso).getTime();
@@ -54,97 +54,78 @@ export function ConfirmRequests() {
     }
   }, []);
 
-  // 초기 1회 load는 유지, 주기 폴링(10s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
-  // 답변 확정 직후에는 폴링을 기다리지 않고 즉시 목록을 갱신한다(AppShell 배지와 동일 신호).
+  // 목록은 attention.ts 의 읽기를 함께 쓴다: 새 질문은 chat 변경 신호, 답은 `agentlas:attention-refresh`·열린 질문 3초 읽기·
+  // 화면 복귀로 그쪽이 다시 읽는다. 여기서 따로 읽는 것은 attention 이 아직 답하지 않았을 때의 첫 한 번과 "다시 시도"뿐이다.
+  const shared = usePendingConfirmationList();
+  const sharedAtMount = useRef(shared);
+  useEffect(() => { if (sharedAtMount.current === null) void load(); }, [load]);
   useEffect(() => {
-    const refresh = () => void load(true);
-    window.addEventListener("agentlas:attention-refresh", refresh);
-    return () => window.removeEventListener("agentlas:attention-refresh", refresh);
-  }, [load]);
-  // 주기 폴링은 캐시 신선도(10s)에 맡긴다 — force 는 명시적 새로고침 이벤트에만(같은 페이지의 다른 폴러와 왕복이 겹쳤다).
-  useVisibleInterval(() => load(false), POLL_MS, { initial: load });
+    if (!shared) return;
+    const list = [...shared].sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+    writeViewData("dashboard.confirm.pending", list);
+    setItems(list);
+    setError(null);
+  }, [shared]);
 
   // 행마다 그 질문이 있는 정확한 대화로 — 상단 배너와 같은 단일 경로(open-pending-confirmation).
   const openConfirmation = useCallback((item: PendingConfirmation) => openPendingConfirmation(item), []);
 
-  const count = items?.length ?? 0;
+  // Everything else that waits for the owner (a tool approval, a runner question, a browser approval) is already held by attention.ts:
+  // one row per chat or place, the same entries the old product switcher listed. A chat whose question is shown above is not listed twice.
+  const attention = useAttention("/dashboard");
+  const questionChats = new Set((items ?? []).map((item) => item.chatId));
+  const extra = attention.entries.filter((entry) => entry.approvals > 0 && !(entry.chatId && questionChats.has(entry.chatId)));
+  const count = (items?.length ?? 0) + extra.length;
+
+  // Nothing waits (or nothing was read yet): there is no inbox. A read that failed is not "nothing": it says so and offers a retry.
+  if (!error && (items === null || count === 0)) return null;
 
   return (
-    <div id="approval-inbox" className="dashboard-module" data-alert={count > 0 ? "true" : "false"}>
-      <div
-        className="dashboard-module-head"
-        data-alert={count > 0 ? "true" : "false"}
-        role="status"
-        aria-live="polite"
-      >
-        <span>{ko ? "승인 인박스" : "Approval inbox"}</span>
-        {count > 0 && <span className="dashboard-count-pill">{count}</span>}
+    <section id="approval-inbox" className={s.card} data-alert={count > 0 ? "true" : "false"} data-tour-id="dashboard.approvals" aria-labelledby="dashboard-inbox-title">
+      <div className={s.inboxHead} role="status" aria-live="polite">
+        <h2 className={s.h} id="dashboard-inbox-title" style={{ flex: 1 }}>{pick(ko, COPY.approvalInbox)}</h2>
+        {count > 0 && <span className={s.count}>{count}</span>}
       </div>
-
-      {items === null ? (
-        <div className="dashboard-module-empty">{ko ? "불러오는 중…" : "Loading…"}</div>
-      ) : error ? (
-        <div className="dashboard-module-empty" style={{ display: "grid", gap: 8 }}>
-          <span>
-            {ko ? "승인 목록을 불러오지 못했습니다." : "Could not load approval requests."}
-          </span>
-          <button
-            type="button"
-            onClick={() => void load()}
-            className="titlebar-nodrag"
-            data-dashboard-action="true"
-            style={{ justifySelf: "start" }}
-          >
-            {ko ? "다시 시도" : "Retry"}
-          </button>
+      {error && (
+        <div className={s.inboxRow} role="alert">
+          <span className={s.inboxCopy}>{pick(ko, COPY.inboxFailed)}</span>
+          <button type="button" onClick={() => void load()} className={s.open}>{pick(ko, COPY.retry)}</button>
         </div>
-      ) : items.length === 0 ? (
-        <div className="dashboard-module-empty">
-          {ko ? "기다리는 승인이 없어요 — 멈춰 있는 에이전트 없음." : "Nothing waiting — no stalled workers."}
-        </div>
-      ) : (
-        items.map((it) => (
-          <div key={it.chatId} className="dashboard-module-row" data-pending-chat-id={it.chatId}>
-            <div className="dashboard-row-copy">
-              <div>{it.question}</div>
-              <div>
-                {confirmationKindLabel(it.question, ko)}
-                {it.chatTitle || (ko ? "채팅" : "Chat")}
-                {it.optionCount > 0 ? ` · ${it.optionCount}${ko ? "개 선택지" : " options"}` : ""}
-                {it.createdAt ? ` · ${stallLabel(it.createdAt, ko)}` : ""}
-              </div>
-              <div style={{ display: "grid", gap: 2, marginTop: 6, fontSize: 11 }}>
-                <span>
-                  {ko ? "요청자" : "Requester"}: {it.requesterLabel}
-                  {" · "}
-                  {ko ? "권한 상태: 아직 승인되지 않음" : "Authority: not authorized yet"}
-                </span>
-                <span>
-                  {ko ? "예정 작업" : "Intended action"}: {it.header || it.question}
-                </span>
-                <span>
-                  {ko
-                    ? "데이터 범위와 크레딧 영향은 요청에 명시되지 않았습니다. 선택 전에 채팅에서 확인하세요."
-                    : "Data scope and credit impact were not declared. Review the chat before choosing."}
-                </span>
-                {it.createdAt && (
-                  <time dateTime={it.createdAt}>
-                    {ko ? "요청 시각" : "Requested"}: {new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(it.createdAt))}
-                  </time>
-                )}
-              </div>
-            </div>
-            <button
-              onClick={() => void openConfirmation(it)}
-              className="titlebar-nodrag"
-              data-dashboard-action="true"
-            >
-              {ko ? "답하기" : "Respond"}
-            </button>
-          </div>
-        ))
       )}
-    </div>
+      {(items ?? []).map((it) => (
+        <div key={it.chatId} className={s.inboxRow} data-pending-chat-id={it.chatId}>
+          <div className={s.inboxCopy}>
+            <div>{it.question}</div>
+            <small>
+              {confirmationKindLabel(it.question, ko)}
+              {it.chatTitle || pick(ko, COPY.chat)}
+              {it.optionCount > 0 ? ` · ${it.optionCount}${ko ? "개 선택지" : " options"}` : ""}
+              {it.createdAt ? ` · ${stallLabel(it.createdAt, ko)}` : ""}
+            </small>
+            <span className={s.detail}>
+              <span>{pick(ko, COPY.requester)}: {it.requesterLabel} · {pick(ko, COPY.notAuthorized)}</span>
+              <span>{pick(ko, COPY.intended)}: {it.header || it.question}</span>
+              <span>{pick(ko, COPY.scopeUndeclared)}</span>
+              {it.createdAt && (
+                <time dateTime={it.createdAt}>
+                  {pick(ko, COPY.requested)}: {new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(it.createdAt))}
+                </time>
+              )}
+            </span>
+          </div>
+          <button type="button" onClick={() => void openConfirmation(it)} className={s.open}>{ko ? "답하기" : "Respond"}</button>
+        </div>
+      ))}
+      {extra.map((entry, index) => (
+        <div key={`${entry.chatId ?? entry.href ?? "orphan"}:${index}`} className={s.inboxRow} data-pending-entry="true">
+          <div className={s.inboxCopy}>
+            <div>{entry.label || pick(ko, COPY.chat)}</div>
+            <small>{attentionLabel({ approvals: entry.approvals, results: 0 }, ko ? "ko" : "en")}</small>
+          </div>
+          <button type="button" onClick={() => void openAttentionEntry(entry)} className={s.open}>{pick(ko, COPY.open)}</button>
+        </div>
+      ))}
+    </section>
   );
 }
 

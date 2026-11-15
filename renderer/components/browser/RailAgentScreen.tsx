@@ -42,14 +42,14 @@ export function RailAgentScreen({
       <AgentScreenFooter screen={screen} ko={ko} />
       <style jsx>{`
         .rail-agent-screen { display: flex; flex-direction: column; min-height: 0; height: 100%; }
-        header { flex-shrink: 0; height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 8px 0 12px; border-bottom: 1px solid color-mix(in srgb, var(--line) 75%, transparent); }
+        header { flex-shrink: 0; height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 8px 0 12px; border-bottom: 1px solid color-mix(in srgb, var(--paper-edge) 75%, transparent); }
         .title { min-width: 0; display: flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700; }
         .title > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .title small { color: var(--accent); font-size: 9.5px; white-space: nowrap; }
         .modes { flex-shrink: 0; display: flex; align-items: center; gap: 2px; }
         .modes button { height: 26px; border: 0; border-radius: 7px; padding: 0 8px; background: transparent; color: var(--ink); font-size: 10.5px; font-weight: 650; cursor: pointer; }
         .modes button.selected { background: var(--black); color: var(--white); }
-        .notice { flex-shrink: 0; min-height: 28px; display: flex; align-items: center; padding: 5px 10px; border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent); color: var(--muted-deep); font-size: 10px; line-height: 1.35; }
+        .notice { flex-shrink: 0; min-height: 28px; display: flex; align-items: center; padding: 5px 10px; border-top: 1px solid color-mix(in srgb, var(--paper-edge) 75%, transparent); color: var(--muted-deep); font-size: 10px; line-height: 1.35; }
       `}</style>
       {/* Shared screen canvas and source controls. */}
       <style jsx global>{`
@@ -64,7 +64,7 @@ export function RailAgentScreen({
         .rail-agent-screen .cua-empty > span:last-child { max-width: 280px; font-size: 10.5px; line-height: 1.45; opacity: 0.5; }
         .rail-agent-screen .cua-empty-screen { width: 28px; height: 19px; border: 1.5px solid var(--white-faint); border-radius: 4px; position: relative; margin-bottom: 3px; }
         .rail-agent-screen .cua-empty-screen::after { content: ""; position: absolute; left: 9px; right: 9px; bottom: -5px; height: 1.5px; background: var(--white-faint); }
-        .rail-agent-screen footer { flex-shrink: 0; min-height: 31px; display: flex; align-items: center; gap: 7px; padding: 5px 10px; font-size: 9.5px; color: var(--muted-deep); border-top: 1px solid color-mix(in srgb, var(--line) 75%, transparent); }
+        .rail-agent-screen footer { flex-shrink: 0; min-height: 31px; display: flex; align-items: center; gap: 7px; padding: 5px 10px; font-size: 9.5px; color: var(--muted-deep); border-top: 1px solid color-mix(in srgb, var(--paper-edge) 75%, transparent); }
         .rail-agent-screen footer select { max-width: 120px; border: 0; background: transparent; color: var(--ink); font-size: 9.5px; }
         .rail-agent-screen footer .ok { color: var(--green-deep); font-weight: 700; }
         .rail-agent-screen footer .warn { color: var(--warn); font-weight: 700; }

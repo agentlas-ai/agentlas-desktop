@@ -1,17 +1,17 @@
 /*
  * One typed seam for "an AI asked the owner and is waiting for the answer" that did not come out of a run's own settlement
  * (owner 2026-10-20: "묻는건 무조건 카드로 주고 알림 울리게해"). A model-authored card rings through the run's settlement
- * (run-alerts onSettled → pendingQuestion, the phone's final-message push). A card the HOST writes — the AGI monitor's
- * ask — has no such settlement, so it reports here and every listener rings the same way: Main's desktop alert, the
+ * (run-alerts onSettled → pendingQuestion, the phone's final-message push). A card the HOST writes (askOwnerOnce)
+ * has no such settlement, so it reports here and every listener rings the same way: Main's desktop alert, the
  * phone push. No electron import: gates load this file directly.
  */
 export interface OwnerAskAlert {
   chatId: string;
   /**
-   * Who asked: the AGI monitor's host-written card, a model's live ask_user question that holds its run open, or the Goal
+   * Who asked: a host-written card (harness/owner-ask.ts), a model's live ask_user question that holds its run open, or the Goal
    * turn's host card after a verification that did not close an idle Goal (invocation service askOwnerAfterIdleYield).
    */
-  source: "agi" | "ask_user" | "goal";
+  source: "ask_user" | "goal";
   /** Dedupe key for one card (the action that posted it). */
   key: string;
 }

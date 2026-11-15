@@ -9,6 +9,10 @@ import { getChat } from '../store/chats';
 import { userDataPath } from '../runtime-paths';
 import type { FinanceScope } from './store';
 import { sameFileIdentity } from "../../shared/file-identity";
+import { registerSpecialStoreAgent } from '../memory/special-store-agents';
+
+// Finance keeps its own memory store like any agent (the engine's memory-scopes.json `specialAgentIds`): registered here, not in common code.
+registerSpecialStoreAgent('builtin-agentlas-finance');
 
 const PREFIX = 'finance.work-project.v1:';
 const MARKER = '.agentlas-finance-owner.json';

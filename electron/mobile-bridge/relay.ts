@@ -125,9 +125,9 @@ export class MainLoopStallMonitor {
  *      두 줄이 번갈아 나와 상태 중복 제거(logControl)도 한 번도 효과가 없었다.
  *
  * ★ 지금
- *   - 401/403/410 = 인증 거절: 같은 쿠키로는 네트워크에 다시 가지 않는다. 쿠키가 바뀌면(다시
- *     로그인) 즉시 붙고, 안 바뀌면 30분→60분→120분(상한) 에 한 번만 확인한다. 쿠키 비교는
- *     메모리 안이라 공짜다.
+ *   - 401/403/410 + 닫힌 사유 낱말(RELAY_TERMINAL_REFUSALS) = 끝난 거절: 같은 쿠키로는 네트워크에 다시 가지 않는다. 쿠키가
+ *     바뀌면(다시 로그인) 즉시 붙고, 안 바뀌면 30분→60분→120분(상한) 에 한 번만 확인한다. 쿠키 비교는 메모리 안이라 공짜다.
+ *     (2.0 S3: 낱말이 없거나 끝난 사유가 아닌 401/403/410 은 아래 일시 장애와 같이 짧게 스스로 다시 한다.)
  *   - 그 밖(타임아웃·503·429·끊김) = 일시 장애: 1초부터 두 배, 상한 2분, 반은 고정 반은 지터
  *     ("equal jitter") — 중계 재배포 때 모든 데스크탑이 같은 초에 몰리지 않게.
  *   - 연결에 성공하면 둘 다 처음으로 돌아간다.
@@ -139,9 +139,29 @@ export const RELAY_AUTH_REFUSED_CAP_MS = 120 * 60_000;
 /** 인증 거절 동안 "쿠키가 바뀌었나"만 보는 로컬 확인 주기 — 네트워크를 쓰지 않는다. */
 export const RELAY_AUTH_RECHECK_MS = 30_000;
 
-/** 다시 로그인하기 전엔 같은 결과가 나오는 HTTP 상태. */
+/** 인증 계열 HTTP 상태(401/403/410). 이 상태만으로는 "끝난 사유"인지 알 수 없다 — 사유 낱말은 `isRelayTerminalRefusal`. */
 export function isRelayAuthRefusal(status: number | null): boolean {
   return status === 401 || status === 403 || status === 410;
+}
+
+/*
+ * 긴 쉼(30→120분)은 "같은 쿠키·같은 비밀로는 다시 해도 안 되는" 닫힌 사유일 때만 쓴다 (Agentlas 2.0 desktop values S3, audit 가-4).
+ * 전에는 401/403/410 한 번이면 사유와 무관하게 30분을 쉬었다: 중계 재배포 중의 403, 앞 데스크탑 등록이 아직 안 지워진 `relay_host_authority_changed`,
+ * 관리형 호스트 토큰이 돌아가는 사이의 `managed_host_invalid`가 일시 장애여도 원격 접속이 30~120분 멈췄다.
+ * 판정은 서버가 보낸 상태 코드와 `X-Agentlas-Refusal` 닫힌 낱말(mobile-relay.mjs REFUSAL_CODES)로만 한다 — 응답 글은 읽지 않는다.
+ * 아래 일곱은 모두 "이 쿠키(또는 이 중계 비밀) 자체가 틀렸다"는 뜻이라 같은 값으로 다시 해도 같은 답이다.
+ * 낱말이 없거나(옛 중계·앞단 프록시) 그 밖의 낱말이면 일시 장애와 같이 짧게 스스로 다시 한다(relayTransientDelayMs: 1초→2분 상한).
+ * 근거: 낱말 목록은 서버 소스(mobile-relay.mjs:362-363)에서 옮김 ② / 짧은 재시도 값은 있는 값 재사용 — 새 숫자 없음.
+ * 닿으면: 끝난 사유 = 쿠키가 바뀌면 30초 안에(로컬 확인), 아니면 30→60→120분에 한 번 확인(이전과 같음) / 그 밖 = 최악 2분 간격(8시간 약 320번).
+ */
+export const RELAY_TERMINAL_REFUSALS: ReadonlySet<string> = new Set([
+  "session_missing", "session_malformed", "session_signature_invalid", "session_type_invalid",
+  "session_expired", "session_revoked", "relay_credential_invalid",
+]);
+
+/** 같은 쿠키로 다시 해도 안 되는 끝난 사유인가: 인증 계열 상태 + 닫힌 낱말. */
+export function isRelayTerminalRefusal(status: number | null, refusal: string | null): boolean {
+  return isRelayAuthRefusal(status) && refusal !== null && RELAY_TERMINAL_REFUSALS.has(refusal);
 }
 
 /** 일시 장애 재시도 대기. attempt 는 0부터. random 은 [0,1). */
@@ -460,6 +480,8 @@ export class MobileBridgeCloudRelay {
   // 환경변수로 못 박아 둔 경우에는 서버에 묻지 않는다 — 명시적 지정이 항상 이긴다.
   private readonly endpointIsPinned: boolean;
   private endpointCheckedAt = 0;
+  private endpointLookupGeneration = 0;
+  private pendingEndpoint: string | null = null;
   private readonly secret: string;
   private control: RelaySocket | null = null;
   private controlCookie: string | null = null;
@@ -487,7 +509,7 @@ export class MobileBridgeCloudRelay {
   private lastSystemResumeAt = -Infinity;
   private powerWatch: (() => void) | null = null;
   // 한 번에 몰려 온 relay.device 를 기기 토큰별로 모은다(가장 새 것만 연다).
-  private readonly pendingDevices = new Map<string, { channelId: string; deviceToken: string; superseded: number }>();
+  private readonly pendingDevices = new Map<string, { channelId: string; deviceToken: string; superseded: number; control: RelaySocket; endpoint: string }>();
   private deviceFlush: NodeJS.Immediate | null = null;
 
   constructor(private readonly options: MobileBridgeCloudRelayOptions) {
@@ -548,6 +570,17 @@ export class MobileBridgeCloudRelay {
     });
   }
 
+  /** A phone tunnel (or the pairing tunnel) opened: the stall measurement that explains late 401s runs; the last one closing stops it. */
+  private trackTunnel(socket: RelaySocket): void {
+    this.tunnels.add(socket);
+    if (!this.stopped) this.stallMonitor.start();
+  }
+
+  private untrackTunnel(socket: RelaySocket): void {
+    this.tunnels.delete(socket);
+    if (this.tunnels.size === 0) this.stallMonitor.stop();
+  }
+
   private settlePushes(): void {
     for (const pending of this.pushPending.values()) { clearTimeout(pending.timer); pending.resolve("unavailable"); }
     this.pushPending.clear();
@@ -556,7 +589,7 @@ export class MobileBridgeCloudRelay {
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
-    this.stallMonitor.start();
+    // The 500 ms stall measurement runs while a phone (or a pairing) has a tunnel open: with none it has nothing to explain (P5-7).
     this.watchSystemResume();
     this.scheduleConnect(0);
   }
@@ -597,6 +630,9 @@ export class MobileBridgeCloudRelay {
 
   stop(): void {
     this.stopped = true;
+    this.endpointLookupGeneration += 1;
+    this.endpointCheckedAt = 0;
+    this.pendingEndpoint = null;
     this.stallMonitor.stop();
     this.powerWatch?.();
     this.powerWatch = null;
@@ -652,16 +688,45 @@ export class MobileBridgeCloudRelay {
     const now = Date.now();
     if (now - this.endpointCheckedAt < 300_000) return;
     this.endpointCheckedAt = now;
+    const generation = ++this.endpointLookupGeneration;
     const resolved = await fetchRelayEndpoint();
-    if (!resolved || resolved === this.endpoint) return;
-    console.info(`[mobile-bridge-relay] relay endpoint moved to ${new URL(resolved).host}`);
-    this.endpoint = resolved;
+    if (this.stopped || generation !== this.endpointLookupGeneration || !resolved) return;
+    if (resolved === this.endpoint) { this.pendingEndpoint = null; return; }
+    // Do not move tunnels to a different relay while their control is alive.
+    // Defer the move until the next control generation; existing tunnels live on.
+    this.pendingEndpoint = resolved;
+    if (this.control !== null) {
+      this.tryMigrateEndpoint();
+    } else if (this.applyPendingEndpoint()) {
+      if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
+      this.scheduleConnect(0);
+    }
+  }
+
+  private tryMigrateEndpoint(): void {
+    if (this.pendingEndpoint && this.control?.readyState === WS_OPEN && !this.renewing) {
+      this.openControl(true, this.pendingEndpoint, true);
+    }
+  }
+
+  private applyPendingEndpoint(): boolean {
+    const endpoint = this.pendingEndpoint;
+    if (!endpoint || endpoint === this.endpoint) { this.pendingEndpoint = null; return false; }
+    this.pendingEndpoint = null;
+    this.endpoint = endpoint;
+    // A refusal from the old relay is not a verdict by the new relay.
+    this.clearAuthRefusal();
+    this.retryAttempt = 0;
+    console.info(`[mobile-bridge-relay] relay endpoint moved to ${new URL(endpoint).host}`);
+    return true;
   }
 
   private connectControl(): void {
     if (this.stopped || this.control) return;
-    // 주소 확인은 붙는 것을 막지 않는다. 실패해도 그대로 진행한다.
-    void this.refreshEndpoint().finally(() => this.openControl());
+    // Connect to the last known endpoint immediately. Discovery is independent;
+    // a new endpoint is activated only between control generations.
+    void this.refreshEndpoint();
+    this.openControl();
   }
 
   /**
@@ -678,7 +743,7 @@ export class MobileBridgeCloudRelay {
     this.openControl(true);
   }
 
-  private openControl(renew = false): void {
+  private openControl(renew = false, requestedEndpoint = this.endpoint, migration = false): void {
     if (this.stopped || (renew ? this.renewing !== null : this.control !== null)) return;
     const authentication = this.authentication();
     const cookie = authentication?.epoch;
@@ -700,7 +765,8 @@ export class MobileBridgeCloudRelay {
         return;
       }
     }
-    const controlUrl = relayUrl(this.endpoint, {
+    const controlEndpoint = requestedEndpoint;
+    const controlUrl = relayUrl(controlEndpoint, {
       role: "desktop",
       hostId: this.options.hostId,
     });
@@ -721,11 +787,20 @@ export class MobileBridgeCloudRelay {
     let controlAlive = true;
     socket.on("open", () => {
       opened = true;
+      if (cookie !== this.authenticationEpoch()) {
+        socket.terminate();
+        return;
+      }
       if (renew) {
         if (this.renewing !== socket || this.stopped) { socket.terminate(); return; }
         const previous = this.control;
         this.renewing = null;
         this.control = socket;
+        if (migration) {
+          this.endpoint = controlEndpoint;
+          if (this.pendingEndpoint === controlEndpoint) this.pendingEndpoint = null;
+          console.info(`[mobile-bridge-relay] relay endpoint moved to ${new URL(controlEndpoint).host}`);
+        }
         this.controlCookie = cookie;
         this.pushPlatforms = [];
         if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
@@ -765,19 +840,27 @@ export class MobileBridgeCloudRelay {
         }
       }, CONTROL_HEARTBEAT_MS);
       this.controlHeartbeatTimer.unref?.();
+      if (!migration) this.tryMigrateEndpoint();
     });
     socket.on("pong", () => {
       controlAlive = true;
     });
     let refusedStatus: number | null = null;
+    // 끝난 사유(같은 쿠키로 다시 해도 안 됨)인지. 아니면 거절도 일시 장애처럼 짧게 다시 한다.
+    let refusedTerminal = false;
     socket.on("unexpected-response", (_request, response) => {
+      if (this.stopped || (renew ? this.renewing !== socket : this.control !== socket) || cookie !== this.authenticationEpoch()) {
+        socket.terminate();
+        return;
+      }
       const status = upgradeStatusCode(response);
       refusedStatus = status ?? 0;
       const refusal = upgradeRefusal(response);
+      refusedTerminal = isRelayTerminalRefusal(status, refusal);
       // Server-side reason, no secrets: 401 = bad relay credential/session,
       // 503 = relay endpoint unavailable, 429 = too many devices. The relay also
       // names the reason in X-Agentlas-Refusal (session_expired, …).
-      if (isRelayAuthRefusal(status)) {
+      if (refusedTerminal && !(migration && this.control)) {
         this.authRefusedCookie = cookie;
         this.authRefusals += 1;
         const wait = relayAuthRefusedDelayMs(this.authRefusals);
@@ -791,7 +874,8 @@ export class MobileBridgeCloudRelay {
       } else {
         this.logControl(
           "rejected",
-          `remote access control channel rejected by server (HTTP ${status ?? "unknown"}${refusal ? `, refusal=${refusal}` : ""})`,
+          `remote access control channel rejected by server (HTTP ${status ?? "unknown"}${refusal ? `, refusal=${refusal}` : ""})` +
+            (isRelayAuthRefusal(status) && !refusedTerminal ? "; the reason may pass, retrying shortly" : ""),
           true,
         );
       }
@@ -799,17 +883,36 @@ export class MobileBridgeCloudRelay {
       // 매달렸다가 "Opening handshake has timed out" 을 한 줄 더 남긴다. 지금 끊는다.
       socket.terminate();
     });
-    socket.on("message", (data) => { if (this.control === socket) this.handleControlMessage(data); });
+    socket.on("message", (data) => { if (this.control === socket) this.handleControlMessage(data, socket, controlEndpoint); });
     const disconnected = (...args: unknown[]) => {
       if (renew && this.renewing === socket) {
         // 새 자격으로 못 열었다. 인증 거절이면 지금 채널의 세션도 중계가 받지 않는다는 뜻이므로 그 채널을 닫고
         // 기존 인증 거절 경로(쿠키가 바뀌면 즉시, 아니면 30분~)로 넘긴다. 일시 장애면 지금 채널을 그대로 쓴다.
         this.renewing = null;
-        if (refusedStatus !== null && isRelayAuthRefusal(refusedStatus)) {
+        if (migration && this.control && this.pendingEndpoint === controlEndpoint) {
+          // A failed candidate is not a verdict on the still-live relay.
+          this.pendingEndpoint = null;
+        }
+        if (!this.control) {
+          if (migration) {
+            this.endpoint = controlEndpoint;
+            if (this.pendingEndpoint === controlEndpoint) this.pendingEndpoint = null;
+          } else if (this.applyPendingEndpoint()) {
+            this.scheduleConnect(0);
+            return;
+          }
+          if (refusedTerminal) {
+            this.scheduleConnect(Math.min(RELAY_AUTH_RECHECK_MS, Math.max(1_000, this.authRetryAt - Date.now())));
+          } else {
+            this.scheduleConnect();
+          }
+        } else if (!migration && refusedTerminal) {
           console.warn("[mobile-bridge-relay] the relay refused this Desktop's sign-in while renewing; remote access waits for a new sign-in");
           this.control?.close(1000, "desktop sign-in refused");
         } else {
           console.info("[mobile-bridge-relay] control channel renewal did not open; keeping the current channel");
+          const currentEpoch = this.authenticationEpoch();
+          if (currentEpoch !== null && currentEpoch !== this.controlCookie) this.renewControl("credential_changed");
         }
         return;
       }
@@ -833,7 +936,11 @@ export class MobileBridgeCloudRelay {
         );
       }
       this.options.onStatusChanged?.();
-      if (refusedStatus !== null && isRelayAuthRefusal(refusedStatus)) {
+      if (this.renewing && this.pendingEndpoint) {
+        // Let the in-flight endpoint migration settle before starting another control.
+      } else if (this.applyPendingEndpoint()) {
+        this.scheduleConnect(0);
+      } else if (refusedTerminal) {
         this.scheduleConnect(Math.min(RELAY_AUTH_RECHECK_MS, Math.max(1_000, this.authRetryAt - Date.now())));
       } else {
         this.scheduleConnect();
@@ -843,7 +950,7 @@ export class MobileBridgeCloudRelay {
     socket.on("error", disconnected);
   }
 
-  private handleControlMessage(data: unknown): void {
+  private handleControlMessage(data: unknown, control: RelaySocket, endpoint: string): void {
     let parsed: unknown;
     try { parsed = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data)); } catch { return; }
     if (!parsed || typeof parsed !== "object") return;
@@ -866,24 +973,24 @@ export class MobileBridgeCloudRelay {
     }
     if (message.type === "relay.pair") {
       if (typeof message.channelId !== "string" || !CHANNEL_PATTERN.test(message.channelId)) return;
-      this.openPairTunnel(message.channelId);
+      this.openPairTunnel(message.channelId, endpoint);
       return;
     }
     if (message.type !== "relay.device") return;
     if (typeof message.channelId !== "string" || !CHANNEL_PATTERN.test(message.channelId)) return;
     if (typeof message.deviceToken !== "string" || !TOKEN_PATTERN.test(message.deviceToken)) return;
-    this.queueDeviceTunnel(message.channelId, message.deviceToken);
+    this.queueDeviceTunnel(message.channelId, message.deviceToken, control, endpoint);
   }
 
   /**
    * 같은 틱에 몰려 온 relay.device 를 폰(기기 토큰)마다 모아 가장 새 것 하나만 연다. Main 이 멈췄다 풀리면 그 사이 쌓인
    * 요청이 한꺼번에 오는데, 폰은 호스트당 소켓 하나라 앞 요청들의 통로는 폰이 이미 버렸다(실측 401 ×5, 같은 밀리초).
    */
-  private queueDeviceTunnel(channelId: string, deviceToken: string): void {
+  private queueDeviceTunnel(channelId: string, deviceToken: string, control: RelaySocket, endpoint: string): void {
     const key = this.repairLatchKey(deviceToken);
     const previous = this.pendingDevices.get(key);
     this.pendingDevices.delete(key);
-    this.pendingDevices.set(key, { channelId, deviceToken, superseded: previous ? previous.superseded + 1 : 0 });
+    this.pendingDevices.set(key, { channelId, deviceToken, superseded: previous && previous.control === control ? previous.superseded + 1 : 0, control, endpoint });
     if (this.deviceFlush) return;
     this.deviceFlush = setImmediate(() => {
       this.deviceFlush = null;
@@ -891,6 +998,7 @@ export class MobileBridgeCloudRelay {
       this.pendingDevices.clear();
       if (this.stopped) return;
       for (const entry of batch) {
+        if (entry.control !== this.control) continue;
         if (entry.superseded > 0) {
           const stall = this.stallMonitor.recentStallMs(TUNNEL_LATE_LOOKBACK_MS);
           console.info(
@@ -898,7 +1006,7 @@ export class MobileBridgeCloudRelay {
               `a newer one arrived with them${stall ? ` (this Desktop's main thread was blocked ${Math.round(stall / 1000)}s)` : ""}`,
           );
         }
-        this.openTunnel(entry.channelId, entry.deviceToken);
+        this.openTunnel(entry.channelId, entry.deviceToken, entry.endpoint);
       }
     });
   }
@@ -963,12 +1071,12 @@ export class MobileBridgeCloudRelay {
    * 첫 페어링 한 번을 위한 터널. 폰의 요청 한 프레임을 받아 페어링 창구에 넘기고, 응답 한
    * 프레임을 돌려준 뒤 닫는다. 로컬 브리지로 이어 붙이지 않는다 — 아직 기기 토큰이 없다.
    */
-  private openPairTunnel(channelId: string): void {
+  private openPairTunnel(channelId: string, endpoint: string): void {
     const onPairFrame = this.options.onPairFrame;
     const authentication = this.authentication();
     const cookie = authentication?.epoch;
     if (!onPairFrame || !cookie || this.stopped) return;
-    const tunnelUrl = relayUrl(this.endpoint, {
+    const tunnelUrl = relayUrl(endpoint, {
       role: "tunnel",
       hostId: this.options.hostId,
       channelId,
@@ -979,14 +1087,14 @@ export class MobileBridgeCloudRelay {
       handshakeTimeout: 8_000,
       perMessageDeflate: false,
     });
-    this.tunnels.add(cloud);
+    this.trackTunnel(cloud);
     let handled = false;
     let finished = false;
     const finish = (why: string) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
-      this.tunnels.delete(cloud);
+      this.untrackTunnel(cloud);
       console.info(`[mobile-bridge-relay] pairing tunnel ${channelId} closed: ${why}`);
       if (cloud.readyState === WS_OPEN) cloud.close(1000, "pairing done");
     };
@@ -1016,7 +1124,7 @@ export class MobileBridgeCloudRelay {
     });
   }
 
-  private openTunnel(channelId: string, deviceToken: string): void {
+  private openTunnel(channelId: string, deviceToken: string, endpoint: string): void {
     const authentication = this.authentication();
     const cookie = authentication?.epoch;
     if (!cookie || this.stopped) return;
@@ -1027,7 +1135,7 @@ export class MobileBridgeCloudRelay {
       );
       return;
     }
-    const tunnelUrl = relayUrl(this.endpoint, {
+    const tunnelUrl = relayUrl(endpoint, {
       role: "tunnel",
       hostId: this.options.hostId,
       channelId,
@@ -1038,7 +1146,7 @@ export class MobileBridgeCloudRelay {
       handshakeTimeout: 8_000,
       perMessageDeflate: false,
     });
-    this.tunnels.add(cloud);
+    this.trackTunnel(cloud);
     let local: RelaySocket | null = null;
     let pending: Array<{ data: unknown; binary: boolean }> = [];
     let pendingBytes = 0;
@@ -1052,7 +1160,7 @@ export class MobileBridgeCloudRelay {
       if (closed) return;
       closed = true;
       pending = [];
-      this.tunnels.delete(cloud);
+      this.untrackTunnel(cloud);
       const reachedLocal = local !== null;
       console.warn(
         `[mobile-bridge-relay] tunnel ${channelId} closed: ${why}` +

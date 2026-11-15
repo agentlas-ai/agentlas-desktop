@@ -2,16 +2,16 @@
 // 기획안 비평 5번(통제의 대가): 키 사망은 가장 흔한 실패인데 화면에서 미설계였다. 이 컴포넌트가
 // usage.snapshot() 실측에서 상태를 도출해 정상은 헤더 pill, 한도임박/오류는 배너로 책임진다.
 "use client";
-import { useCallback, useState } from "react";
-import { ipc } from "@/lib/ipc";
-import { useVisibleInterval } from "@/lib/useVisibleInterval";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { deriveKeyStatus } from "@/lib/key-status";
 import type { RuntimeStatus, UsageSnapshot } from "@/lib/types";
 import { IconBolt, IconShield, IconCheck } from "@/components/Icon";
 
-const REFRESH_MS = 60_000;
+// A read older than this is refreshed when the window comes back (this was the old poll interval).
+const STALE_MS = 60_000;
 
 export function KeyStatusBanner({
   mode = "banner",
@@ -33,7 +33,9 @@ export function KeyStatusBanner({
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
   const [dismissed, setDismissed] = useState<string | null>(null);
 
+  const readAt = useRef(0);
   const load = useCallback(async () => {
+    readAt.current = Date.now();
     try {
       const snap = await ipc()?.usage.snapshot();
       setSnapshot(snap ?? null);
@@ -42,8 +44,32 @@ export function KeyStatusBanner({
     }
   }, []);
 
-  // 초기 1회 load는 유지, 주기 폴링(60s)은 탭 보일 때만 — useVisibleInterval이 hidden 시 정지.
-  useVisibleInterval(() => load(), REFRESH_MS, { initial: load });
+  // No polling (each usage read makes Main probe the installed CLIs). Read once on mount, then on a signal:
+  // Main's "runtime" change (sign-in or sign-out, install, CLI update), a run finishing (it spent quota or was
+  // refused), and the window coming back after the status is older than the old poll interval.
+  useEffect(() => {
+    void load();
+    const events = ipcEvents();
+    const offStore = events?.onStoreChanged?.((change) => { if (change.entity === "runtime") void load(); });
+    let active: ReadonlySet<string> | null = null;
+    const offActive = events?.onActiveChats?.((chatIds) => {
+      const next = new Set(chatIds);
+      const settled = active !== null && [...active].some((chatId) => !next.has(chatId));
+      active = next;
+      if (settled) void load();
+    });
+    const whenStale = () => {
+      if (document.visibilityState !== "hidden" && Date.now() - readAt.current >= STALE_MS) void load();
+    };
+    window.addEventListener("focus", whenStale);
+    document.addEventListener("visibilitychange", whenStale);
+    return () => {
+      offStore?.();
+      offActive?.();
+      window.removeEventListener("focus", whenStale);
+      document.removeEventListener("visibilitychange", whenStale);
+    };
+  }, [load]);
 
   const status = deriveKeyStatus(snapshot, relevantRuntime === undefined
     ? undefined

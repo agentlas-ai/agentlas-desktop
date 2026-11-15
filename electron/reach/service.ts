@@ -1,3 +1,5 @@
+import * as nodeFs from "node:fs";
+import * as nodePath from "node:path";
 import type { Actuator } from "./actuator";
 import { exploreApp, type ExploreReport } from "./explorer";
 import { isSensitiveApp } from "./explore-policy";
@@ -67,6 +69,10 @@ export interface ReachServicePorts {
   installSignature?(): Promise<string>;
   // An app whose dictionary could only be read while it runs is running now (so a scan can read it, without starting anything).
   dictionaryWaiting?(): Promise<boolean>;
+  // Calls onChange when the folders the map is drawn from change (an app installed or removed). onLost is called if the watch can no longer
+  // be kept; the service then goes back to its timer. Returns the stop function, or null where a watch cannot be set up (timer fallback).
+  // Absent: the service keeps its old timer. See watchFolders below for the implementation the host uses.
+  watchInputs?(onChange: () => void, onLost: () => void): (() => void) | null;
   writeScan(scan: ReachScan): Promise<void>;
   readMap(): Promise<ReachMap | null>;
   registry: CapabilityRegistry;
@@ -113,6 +119,54 @@ const DEFAULTS: Required<ReachServiceOptions> = {
   revisitsPerApp: 3,
 };
 
+// ---- watching folders ------------------------------------------------------------------------------------------------------------
+export interface FolderWatcherLike { close(): void; on?(event: "error", listener: () => void): unknown }
+export interface FolderWatchDeps {
+  watch(folder: string, listener: (event: string, name: string | Buffer | null) => void): FolderWatcherLike;
+  exists(folder: string): boolean;
+}
+const realFolderWatch: FolderWatchDeps = {
+  watch: (folder, listener) => nodeFs.watch(folder, { persistent: false }, listener),
+  exists: (folder) => { try { return nodeFs.statSync(folder).isDirectory(); } catch { return false; } },
+};
+
+/**
+ * Watches each folder (not its subfolders) and calls onChange when an entry is added, removed or renamed. A folder that does not exist
+ * yet is watched through its parent, filtered by its name, and swapped for the real watch when it appears. Returns null when any
+ * folder cannot be watched at all (the caller then keeps a timer); onLost is called if a watch breaks later and cannot be re-armed.
+ */
+export function watchFolders(folders: readonly string[], onChange: () => void, onLost: () => void, deps: FolderWatchDeps = realFolderWatch): (() => void) | null {
+  let closed = false;
+  const open = new Map<string, FolderWatcherLike>();
+  const drop = (key: string): void => { const w = open.get(key); open.delete(key); try { w?.close(); } catch { /* already closed */ } };
+  const arm = (folder: string): boolean => {
+    drop(folder);
+    const broken = (): void => { if (closed) return; drop(folder); if (arm(folder)) onChange(); else onLost(); };
+    try {
+      if (deps.exists(folder)) {
+        const w = deps.watch(folder, () => { if (!closed) onChange(); });
+        w.on?.("error", broken);
+        open.set(folder, w);
+        return true;
+      }
+      const parent = nodePath.dirname(folder);
+      if (parent === folder || !deps.exists(parent)) return false;
+      const name = nodePath.basename(folder);
+      const w = deps.watch(parent, (_event, changed) => {
+        if (closed || (changed != null && String(changed) !== name)) return;
+        if (deps.exists(folder) && arm(folder)) onChange();
+      });
+      w.on?.("error", broken);
+      open.set(folder, w);
+      return true;
+    } catch { return false; }
+  };
+  for (const folder of folders) {
+    if (!arm(folder)) { for (const key of [...open.keys()]) drop(key); closed = true; return null; }
+  }
+  return () => { closed = true; for (const key of [...open.keys()]) drop(key); };
+}
+
 export class ReachService {
   private readonly o: Required<ReachServiceOptions>;
   private timer: unknown = null;
@@ -124,6 +178,12 @@ export class ReachService {
   private provisionBackoffUntil = 0;
   private status: ReachStatus = { enabled: false, mapAt: null, apps: 0, green: 0, amber: 0, gray: 0, usable: 0, exploring: false, lastError: null };
   private mapBuilding = false;
+  // Map refresh is signal-driven when the host can watch the folders the map is drawn from: a change, the start, a consumer's request, or the
+  // map's own due time (mapCheckAt) re-reads it; without a watch the timer reads it every tick as before.
+  private stopWatch: (() => void) | null = null;
+  private watching = false;
+  private mapDirty = true;
+  private mapCheckAt = 0;
   // One entry per job that last failed; a job clears its own entry when it works again, so one job's success never hides another's failure.
   private readonly errors = new Map<string, string>();
 
@@ -134,13 +194,34 @@ export class ReachService {
   start(): void {
     if (!this.p.allowed() || !this.stopped) return;
     this.stopped = false;
+    this.mapDirty = true;
+    try {
+      this.stopWatch = this.p.watchInputs?.(() => this.noteInputsChanged(), () => { this.watching = false; if (!this.working) this.schedule(this.o.tickMs); }) ?? null;
+    } catch { this.stopWatch = null; }
+    this.watching = this.stopWatch !== null;
     this.schedule(this.o.firstDelayMs);
+  }
+
+  /** The folders the map reads from changed, or a consumer wants a current map. One pass soon; the 10-minute rebuild floor still applies. */
+  noteInputsChanged(): void {
+    if (this.stopped) return;
+    this.mapDirty = true;
+    if (!this.working) this.schedule(2_000);
+  }
+
+  /** The machine woke up: a due time that passed during sleep is looked at now. */
+  notifyWake(): void {
+    if (this.stopped || this.working || this.p.now() < this.mapCheckAt) return;
+    this.schedule(1_000);
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer !== null) this.p.timers.clearTimeout(this.timer);
     this.timer = null;
+    try { this.stopWatch?.(); } catch { /* already gone */ }
+    this.stopWatch = null;
+    this.watching = false;
     this.stopWatchdog();
     this.abort?.abort();
     await this.p.actuator.release();
@@ -153,6 +234,7 @@ export class ReachService {
       this.abort?.abort();
       void this.p.actuator.release();
       this.publish({ exploring: false, enabled: false });
+      if (!this.working) this.aimNext();
       return;
     }
     this.publish({ enabled: true });
@@ -183,7 +265,8 @@ export class ReachService {
     if (this.stopped || this.working) { this.schedule(this.o.tickMs); return; }
     this.working = true;
     try {
-      await this.ensureMap();
+      // With a watch, the map is read again only when asked: a signal, or its own due time. Without one, every tick as before.
+      if (!this.watching || this.mapDirty || this.p.now() >= this.mapCheckAt) await this.ensureMap();
       const enabled = this.p.exploreEnabled();
       this.publish({ enabled });
       if (!enabled) { await this.p.actuator.release(); this.publish({ exploring: false }); return; }
@@ -195,8 +278,17 @@ export class ReachService {
       await this.safely("upload", () => this.p.flushUploads());
     } finally {
       this.working = false;
-      this.schedule(this.o.tickMs);
+      this.aimNext();
     }
+  }
+
+  // Where the next wake goes. Exploring needs the owner's idle time, which has no signal, so with the switch on the tick stays. With the
+  // switch off and a watch in place the only wakes are a signal and the map's own due time; no fixed-period wake.
+  private aimNext(): void {
+    if (this.stopped) return;
+    if (this.watching && this.mapDirty) { this.schedule(2_000); return; }
+    if (this.p.exploreEnabled() || !this.watching) { this.schedule(this.o.tickMs); return; }
+    this.schedule(Math.max(1_000, this.mapCheckAt - this.p.now()));
   }
 
   private async prepareDriver(): Promise<void> {
@@ -219,31 +311,39 @@ export class ReachService {
   // ---- the map ------------------------------------------------------------------------------------------------------------------
   private async ensureMap(): Promise<void> {
     if (this.mapBuilding || this.stopped) return;
+    // Cleared before reading, so a change that lands while the map is being read or drawn sets it again.
+    const asked = this.mapDirty;
+    this.mapDirty = false;
     const stamp = await this.p.stamp.get();
-    // Read before anything is built: an app installed while the map is being drawn moves the signature, and the next tick sees it.
+    // Read before anything is built: an app installed while the map is being drawn moves the signature, and the next pass sees it.
     const signature = await this.p.installSignature?.().catch(() => undefined);
-    const installed = !!stamp && stamp.installSignature !== undefined && signature !== undefined && signature !== stamp.installSignature
-      && this.p.now() - stamp.completedAt >= this.o.installRebuildMinMs;
+    const gapOk = !!stamp && this.p.now() - stamp.completedAt >= this.o.installRebuildMinMs;
+    const installed = !!stamp && stamp.installSignature !== undefined && signature !== undefined && signature !== stamp.installSignature && gapOk;
     // Drawn for a new feature version (a first install and an update that changes Reach both bring one), when the apps on the machine
     // changed, and at the latest once a day. None of this needs the switch and none of it says anything to the owner.
     const aged = !stamp || stamp.feature < REACH_FEATURE_VERSION || installed || this.p.now() - stamp.completedAt > this.o.refreshMs;
     // An app the owner just opened whose dictionary is only readable while it runs: draw again (at most as often as for an installation).
-    const waiting = !aged && !!stamp && this.p.now() - stamp.completedAt >= this.o.installRebuildMinMs && (await this.p.dictionaryWaiting?.().catch(() => false)) === true;
+    const waiting = !aged && gapOk && (await this.p.dictionaryWaiting?.().catch(() => false)) === true;
     const due = aged || waiting;
+    // The next time this needs looking at without a signal: the daily time; a signal that came inside the rebuild floor waits for the floor to end.
+    const dailyAt = stamp ? stamp.completedAt + this.o.refreshMs + 1 : this.p.now() + this.o.tickMs;
+    this.mapCheckAt = stamp && asked && !gapOk ? Math.min(dailyAt, stamp.completedAt + this.o.installRebuildMinMs) : dailyAt;
     if (!due) {
       // A stamp written before the signature existed learns it now, without drawing the map again.
       if (stamp && stamp.installSignature === undefined && signature !== undefined) await this.p.stamp.set({ ...stamp, installSignature: signature });
       await this.refreshStatusFromDisk();
       return;
     }
-    if (this.p.power.busy()) return; // try again next tick
+    if (this.p.power.busy()) { this.mapCheckAt = this.p.now() + this.o.tickMs; return; } // try again soon
     this.mapBuilding = true;
     try {
       const scan = await this.p.buildMap();
       await this.p.writeScan(scan);
       await this.p.stamp.set({ feature: REACH_FEATURE_VERSION, appVersion: this.p.appVersion, completedAt: this.p.now(), ...(signature !== undefined ? { installSignature: signature } : {}) });
+      this.mapCheckAt = this.p.now() + this.o.refreshMs + 1;
       this.publishMap(scan.map);
     } catch (error) {
+      this.mapCheckAt = this.p.now() + this.o.tickMs; // a failed drawing is tried again at the old pace
       this.p.log(`[reach] map failed: ${error instanceof Error ? error.name : "error"}`);
     } finally {
       this.mapBuilding = false;
@@ -445,7 +545,8 @@ export class ReachService {
   async onInvokeOutcome(appKey: string, fingerprint: string, capabilityId: string, outcome: { ok: boolean; code?: string; repairable?: boolean }): Promise<void> {
     try {
       await this.p.registry.recordOutcome(appKey, fingerprint, capabilityId, outcome, this.p.day());
-      if (!this.stopped) this.schedule(this.p.exploreEnabled() ? 2 * 60_000 : this.o.tickMs);
+      // A failed call is repaired by exploration, which needs the switch; with it off and a watch in place nothing is waiting, so no wake is set.
+      if (!this.stopped && (this.p.exploreEnabled() || !this.watching)) this.schedule(this.p.exploreEnabled() ? 2 * 60_000 : this.o.tickMs);
     } catch (error) {
       this.p.log(`[reach] outcome not recorded: ${error instanceof Error ? error.name : "error"}`);
     }

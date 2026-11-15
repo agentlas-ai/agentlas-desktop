@@ -47,5 +47,9 @@ export async function heldCheckinIds(): Promise<string[]> {
 }
 
 export async function admitCheckinReview(runId: string): Promise<void> {
+  // The personal agent's write gate (Agentlas 2.0 O-M3b): a sealed computer waits (the move may be cancelled), an away computer is not the home any more.
+  const refused = (await import("./home")).oneWriteRefusal();
+  if (refused === "one_sealed") throw new CheckinAdmissionDeferred(refused);
+  if (refused === "one_away") throw new CheckinAdmissionDenied(refused);
   for (const load of CHECKIN_ADMISSION_GATES) await (await load()).admitReview(runId);
 }

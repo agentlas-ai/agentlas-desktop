@@ -1,33 +1,44 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
-  IconAlertTriangle, IconBrain, IconCheck, IconChevronDown, IconChevronRight, IconClock, IconClose,
-  IconFileText, IconFileUp, IconFolder, IconCloud, IconLayers, IconMonitor, IconMoreHorizontal, IconPlus, IconRefresh, IconSearch,
-  IconSettings, IconShield, IconSidebar, IconTrash,
+  IconAlertTriangle, IconBrain, IconCheck, IconChevronDown, IconChevronRight, IconClose,
+  IconFileText, IconFolder, IconLayers, IconMoreHorizontal, IconPlus, IconRefresh, IconSearch,
+  IconShield, IconSidebar, IconTrash, IconSparkles, IconArrowLeft,
 } from "@/components/Icon";
-import { AgentAvatar } from "@/components/AgentAvatar";
 import { ipc } from "@/lib/ipc";
+import { llmLogoSrc } from "@/lib/llm-logo";
+import { navigate } from "@/lib/navigation";
 import { agentWorkspaceFailure } from "@/lib/agent-workspace-error";
 import { approveReviewedChange } from "@/lib/agent-workspace-review";
-import type { AgentRuntimeOverride, InstalledAgent, InstalledAgentExactBinding, InstalledFirm, MemoryImportPreviewUi, ResolvedOrg, RuntimeStatus } from "@shared/types";
+import type { AgentModelOrderView, InstalledAgent, MemoryImportPreviewUi, RuntimeStatus } from "@shared/types";
+import type { DesktopMemoryListEntry } from "@shared/desktop-memory-inspector";
 import type {
-  AgentWorkspaceComparison, AgentWorkspaceDiff as WorkspaceDiff, AgentWorkspaceChangeSummary, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceMemoryCandidate, AgentWorkspaceRevisionOutcome,
+  AgentWorkspaceComparison, AgentWorkspaceDiff as WorkspaceDiff, AgentWorkspaceChangeSummary, AgentWorkspaceFile, AgentWorkspaceLearningCard, AgentWorkspaceRevisionOutcome,
   AgentWorkspaceProposal, AgentWorkspaceReadFile, AgentWorkspaceRecovery, AgentWorkspaceSnapshot,
 } from "@shared/agent-workspace";
 import { AgentWorkspaceDiff } from "./AgentWorkspaceDiff";
-import { AgentWorkspaceInspector } from "./AgentWorkspaceInspector";
+import { AgentModelPopover } from "./AgentModelRouting";
+import { skillFiles } from "./AgentWorkspaceTabs";
 import { AgentWorkspaceRecoveryReview } from "./AgentWorkspaceRecoveryReview";
 import { AgentMemoryImportDialog } from "./AgentMemoryImportDialog";
+import { AgentEditDialog, AgentProfileHead, type HeadFacts } from "./AgentProfileHead";
+import { AgentTimeline } from "./AgentTimeline";
+import { AgentMemoryTab, AgentSkillsTab, ForgetDialog } from "./AgentManageTabs";
+import { AgentSyncTab } from "./AgentSyncTab";
+import { AgentFolderNotes, AgentFolderPopover, useFolderStatus } from "./AgentFolder";
+import { useAgentMemory, AGENT_MEMORY_FIRST_READ } from "./useAgentMemory";
+import { IconHistoryClock } from "./agent-manage-icons";
+import { effortLabel, lineLabels, shortDate, SCIENCE_AGENT_SLUG } from "./agent-manage-model";
 import { PopupAction, PopupFacts, PopupFrame, PopupSteps } from "@/components/Popup";
 import { confirmPopup } from "@/lib/popup";
-import { isTechnicalEvidence, memoryKindLabel, plainMemoryText, plainMemoryTitle } from "@/lib/agent-memory-explain";
 import styles from "./AgentWorkspace.module.css";
-import { Select } from "@/components/Select";
+import manage from "./AgentManage.module.css";
 import { shortcutLabel, useUiPlatform } from "@/lib/platform-copy";
 
-export type AgentWorkspaceView = "files" | "memory" | "changes" | "sync" | "history";
+/** The five tabs of Manage agents (Timeline, Memory, Skills, Files, Sync) and "changes": the review of one change, opened from a Timeline / Skills / Sync post (it is not a tab). */
+export type AgentWorkspaceView = "timeline" | "memory" | "skills" | "files" | "sync" | "changes";
+type AgentTab = Exclude<AgentWorkspaceView, "changes">;
 
 const KO_STATE: Record<string, string> = {
   eligible: "반영 가능", watching: "지켜보는 중", scope_review: "범위 확인 필요", needs_evidence: "근거 부족", proposed: "변경안 있음", applied: "반영됨",
@@ -53,21 +64,21 @@ function editorContent(value: string, baseline: string): string {
 }
 function comparisonReason(reason: string, ko: boolean): string {
   const copy: Record<string, [string, string]> = {
-    cloud_not_linked: ["이 에이전트를 Cloud에 먼저 저장하세요.", "Save this agent to Cloud first."],
-    hub_not_linked: ["연결된 Hub 릴리스가 없습니다.", "No Hub release is connected."],
-    remote_unavailable: ["원격 상태를 확인하지 못했습니다. 연결을 확인한 뒤 다시 조회하세요.", "Remote state could not be checked. Verify the connection and refresh."],
-    common_ancestor_unverified: ["공통 변경 이력을 확인하지 못했습니다. 파일 차이를 검토하세요.", "A shared history is unverified. Review the file differences."],
-    public_source_subset: ["Hub가 공개한 파일만 비교했습니다. 나머지 파일은 비교할 수 없습니다.", "Only source files shared by Hub are compared. Other files remain unknown."],
-    verified_sync_base: ["확인된 동기화 기준과 비교했습니다.", "Compared with the verified sync baseline."],
+    cloud_not_linked: ["이 에이전트를 Cloud에 먼저 저장해 주세요.", "Save this agent to Cloud first."],
+    hub_not_linked: ["연결된 Hub 릴리스가 없어요.", "No Hub release is connected."],
+    remote_unavailable: ["원격 상태를 확인하지 못했어요. 연결을 확인한 뒤 다시 시도해 주세요.", "Remote state could not be checked. Verify the connection and refresh."],
+    common_ancestor_unverified: ["변경 이력을 확인하지 못했어요. 파일 차이를 검토해 주세요.", "A shared history is unverified. Review the file differences."],
+    public_source_subset: ["Hub가 공개한 파일만 비교했어요. 나머지 파일은 비교할 수 없어요.", "Only source files shared by Hub are compared. Other files remain unknown."],
+    verified_sync_base: ["확인된 동기화 기준과 비교했어요.", "Compared with the verified sync baseline."],
     same_tree_different_history: ["파일 내용은 같고 변경 이력은 다릅니다.", "File contents match; revision histories differ."],
-    reviewed_public_projection: ["공개용 파일 사본을 검토합니다.", "Review the public file copy."],
-    public_projection_current: ["현재 공개용 파일 사본과 같습니다.", "The public file copy is current."],
-    public_release_verified: ["공개 릴리스의 실제 파일을 확인했습니다.", "The published release files were verified."],
-    cloud_publish_base_required: ["지금 로컬 버전을 Cloud에 먼저 저장한 뒤 Hub 공개를 검토하세요.", "Save the current local version to Cloud before reviewing Hub publication."],
-    source_not_licensed: ["게시자가 소스 공유를 허용하지 않았습니다. Hub 원본의 소스 공개 여부를 확인하세요.", "The publisher has not shared source files. Check source availability on the Hub release."],
-    publisher_required: ["이 Hub 릴리스의 게시 권한이 없습니다. 게시 권한이 있는 에이전트를 선택하세요.", "You do not have publishing rights for this Hub release. Choose an agent you can publish."],
-    sign_in_required: ["Agentlas에 로그인한 뒤 원격 상태를 다시 조회하세요.", "Sign in to Agentlas, then refresh the remote state."],
-    sync_outcome_pending: ["이전 동기화가 끝났는지 아직 알 수 없습니다. 원격 상태를 먼저 다시 조회하세요.", "The previous sync outcome is unconfirmed. Refresh remote state first."],
+    reviewed_public_projection: ["공개용 파일 사본을 검토해요.", "Review the public file copy."],
+    public_projection_current: ["현재 공개용 파일 사본과 같아요.", "The public file copy is current."],
+    public_release_verified: ["공개 릴리스의 실제 파일을 확인했어요.", "The published release files were verified."],
+    cloud_publish_base_required: ["지금 로컬 버전을 Cloud에 먼저 저장한 뒤 Hub 공개를 검토해 주세요.", "Save the current local version to Cloud before reviewing Hub publication."],
+    source_not_licensed: ["게시자가 소스 공유를 허용하지 않았어요. Hub 원본의 소스 공개 여부를 확인해 주세요.", "The publisher has not shared source files. Check source availability on the Hub release."],
+    publisher_required: ["이 Hub 릴리스의 게시 권한이 없어요. 게시 권한이 있는 에이전트를 선택해 주세요.", "You do not have publishing rights for this Hub release. Choose an agent you can publish."],
+    sign_in_required: ["Agentlas에 로그인한 뒤 다시 시도해 주세요.", "Sign in to Agentlas, then refresh the remote state."],
+    sync_outcome_pending: ["이전 동기화 완료 여부를 알 수 없어요. 원격 상태를 먼저 다시 확인해 주세요.", "The previous sync outcome is unconfirmed. Refresh remote state first."],
   };
   return (copy[reason] ?? copy.remote_unavailable)[ko ? 0 : 1];
 }
@@ -99,16 +110,15 @@ function treeEntries(files: AgentWorkspaceFile[], expanded: Set<string>): TreeEn
   return result;
 }
 
-const REVISION_OPERATION_KO: Record<string, string> = { baseline: "처음 상태", external_edit: "직접 수정", apply: "변경 적용", sync: "동기화", rollback: "되돌림" };
-const REVISION_OPERATION_EN: Record<string, string> = { baseline: "Initial state", external_edit: "Edited outside", apply: "Change applied", sync: "Synced", rollback: "Rolled back" };
-function revisionOperationLabel(operation: string, ko: boolean): string { return (ko ? REVISION_OPERATION_KO : REVISION_OPERATION_EN)[operation] ?? ""; }
-export function AgentWorkspace({ agent, name, locale, initialView = "files", onToggleRoster, projectControl,
-  firm, org, binding, runtimes, overrides, onRename, onRemove, onOverridesChange, onDirtyChange, onMemoryCountChange,
+/** The written name of a file's role (the value itself stays). */
+const FILE_ROLE_WORDS: Record<string, [string, string]> = { instruction: ["지침", "Instruction"], skill: ["스킬", "Skill"], knowledge: ["지식", "Knowledge"], manifest: ["설명서", "Manifest"], tool: ["도구", "Tool"], asset: ["자료", "Asset"] };
+function fileRoleLabel(role: string | undefined, ko: boolean): string { return role ? (FILE_ROLE_WORDS[role]?.[ko ? 0 : 1] ?? role) : ""; }
+
+export function AgentWorkspace({ agent, name, locale, initialView = "timeline", onToggleRoster, runtimes, onRename, onDirtyChange, onMemoryCountChange,
 }: {
   agent: InstalledAgent; name: string; locale: string; initialView?: AgentWorkspaceView;
-  onToggleRoster: () => void; projectControl?: ReactNode; firm?: InstalledFirm | null; org?: ResolvedOrg | null;
-  binding?: InstalledAgentExactBinding | null; runtimes: RuntimeStatus[]; overrides: AgentRuntimeOverride[];
-  onRename: (value: string) => Promise<void>; onRemove: () => Promise<void>; onOverridesChange: (overrides: AgentRuntimeOverride[]) => void;
+  onToggleRoster: () => void; runtimes: RuntimeStatus[];
+  onRename: (value: string) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
   onMemoryCountChange?: (agentId: string, count: number) => void;
 }) {
@@ -127,7 +137,6 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   const [content, setContent] = useState("");
   const [fileLoading, setFileLoading] = useState(false);
   const [newFile, setNewFile] = useState(false);
-  const [inspector, setInspector] = useState(false);
   const [treeWidth, setTreeWidth] = useState(210);
   const [quickOpen, setQuickOpen] = useState(false);
   const [quickQuery, setQuickQuery] = useState("");
@@ -135,21 +144,16 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   const [newPath, setNewPath] = useState("");
   const [renamePathDialog, setRenamePathDialog] = useState(false);
   const [fileMenu, setFileMenu] = useState(false);
-  const [memoryQuery, setMemoryQuery] = useState("");
-  const [memoryState, setMemoryState] = useState("all");
-  const [memorySelection, setMemorySelection] = useState(new Set<string>());
-  const [memoryId, setMemoryId] = useState("");
-  const [openGroups, setOpenGroups] = useState(new Set<string>());
   const [memoryImportPreview, setMemoryImportPreview] = useState<MemoryImportPreviewUi | null>(null);
-  const [targetPath, setTargetPath] = useState("");
   const [review, setReview] = useState<WorkspaceDiff | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewPath, setReviewPath] = useState<string | null>(null);
   const [recovery, setRecovery] = useState<AgentWorkspaceRecovery | null>(null);
   const [syncTarget, setSyncTarget] = useState<"cloud" | "hub">("cloud");
-  const [syncDirection, setSyncDirection] = useState<"receive" | "send">("receive");
+  const [syncDirection, setSyncDirection] = useState<"receive" | "send">("send");
   const [comparison, setComparison] = useState<AgentWorkspaceComparison | null>(null);
   const [compareLoading, setCompareLoading] = useState(false);
+  const [compareFailed, setCompareFailed] = useState(false);
   const fileGeneration = useRef(0);
   const workspaceGeneration = useRef(0);
   const reviewGeneration = useRef(0);
@@ -164,18 +168,17 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   const dirty = Boolean(fileRead && (content !== fileRead.content || newFile));
   const api = () => {
     const bridge = ipc()?.agentWorkspace;
-    if (!bridge) throw new Error(ko ? "Agent Workspace 브리지를 사용할 수 없습니다. 앱을 업데이트한 뒤 다시 열어 주세요." : "Agent Workspace bridge is unavailable. Update and reopen the app.");
+    if (!bridge) throw new Error(ko ? "에이전트 작업 공간을 열 수 없어요. 앱을 업데이트해 주세요." : "Agent Workspace is unavailable. Update the app.");
     return bridge;
   };
   const refresh = useCallback(async () => {
     const generation = ++workspaceGeneration.current;
     const bridge = ipc()?.agentWorkspace;
-    if (!bridge) throw new Error(ko ? "Agent Workspace 브리지를 사용할 수 없습니다." : "Agent Workspace bridge is unavailable.");
+    if (!bridge) throw new Error(ko ? "에이전트 작업 공간을 열 수 없어요." : "Agent Workspace is unavailable.");
     const next = await bridge.getWorkspace(agent.id);
     if (workspaceGeneration.current !== generation) return next;
     setSnapshot(next); setFiles(next.files);
     onMemoryCountChange?.(agent.id, next.memoryCandidates.filter(candidate => candidate.state === "eligible").length);
-    setMemorySelection((previous) => new Set([...previous].filter((id) => next.memoryCandidates.some((candidate) => candidate.id === id && candidate.state === "eligible"))));
     return next;
   }, [agent.id, ko, onMemoryCountChange]);
   useEffect(() => { setView(initialView); }, [initialView]);
@@ -280,33 +283,33 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       if (quickOpen || newPathDialog || renamePathDialog || memoryImportPreview || document.querySelector('[aria-modal="true"]')) { if (["p", "s"].includes(event.key.toLowerCase())) event.preventDefault(); return; }
       if (event.key.toLowerCase() === "p") { event.preventDefault(); setQuickOpen(true); setQuickQuery(""); }
       if (event.key.toLowerCase() === "s") { event.preventDefault(); if (view === "files") void prepareFileRef.current(); }
-      if (event.key === "\\") { event.preventDefault(); setInspector((current) => !current); }
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   }, [view, quickOpen, newPathDialog, renamePathDialog, memoryImportPreview]);
   const compare = useCallback(async () => {
     const generation = ++comparisonGeneration.current;
-    setCompareLoading(true); setComparison(null);
+    setCompareLoading(true); setComparison(null); setCompareFailed(false);
     try {
       const bridge = ipc()?.agentWorkspace;
-      if (!bridge) throw new Error(ko ? "브리지를 사용할 수 없습니다." : "Bridge unavailable.");
+      if (!bridge) throw new Error(ko ? "사용할 수 없어요." : "Unavailable.");
       const result = await bridge.compare({ agentId: agent.id, target: syncTarget, direction: syncDirection });
       if (comparisonGeneration.current === generation) setComparison(result);
-    } catch (failure) { if (comparisonGeneration.current === generation) setError(agentWorkspaceFailure(failure, ko)); }
+    } catch (failure) { if (comparisonGeneration.current === generation) { setCompareFailed(true); setError(agentWorkspaceFailure(failure, ko)); } }
     finally { if (comparisonGeneration.current === generation) setCompareLoading(false); }
   }, [agent.id, syncTarget, syncDirection, ko]);
-  useEffect(() => { if (view === "sync") void compare(); }, [view, compare]);
+  // The head says how many changes wait to be saved to Cloud, so a linked agent compares once when it opens (and again when the owner changes the direction), not on a timer.
+  useEffect(() => { if (view === "sync" || snapshot?.cloudId) void compare(); }, [view, compare, snapshot?.cloudId]);
   const verifyApplied = async (proposal: AgentWorkspaceProposal) => {
     const next = await refresh();
     if (proposal.status !== "applied") { await openReview(proposal.id); return; }
-    if (next.treeDigest !== proposal.proposedTreeDigest) throw new Error(ko ? "적용 후 파일 트리가 다시 변경되었습니다. 현재 파일을 새로 검토하세요." : "The file tree changed after apply. Review the current files again.");
+    if (next.treeDigest !== proposal.proposedTreeDigest) throw new Error(ko ? "적용 뒤 파일이 다시 변경됐어요. 현재 파일을 다시 검토해 주세요." : "The file tree changed after apply. Review the current files again.");
     for (const change of proposal.changes) {
       if (change.operation === "delete") {
-        if (next.files.some((file) => file.path === change.path)) throw new Error(ko ? "삭제 후 파일 확인이 일치하지 않습니다." : "Deleted-file verification does not match.");
+        if (next.files.some((file) => file.path === change.path)) throw new Error(ko ? "삭제 결과가 검토한 내용과 달라요." : "Deleted-file verification does not match.");
       } else {
         const readback = await api().readFile(agent.id, change.path);
-        if (readback.blobHash !== change.afterHash) throw new Error(ko ? "적용 후 파일 해시가 검토한 변경과 일치하지 않습니다." : "The applied file hash differs from the reviewed change.");
+        if (readback.blobHash !== change.afterHash) throw new Error(ko ? "적용 후 파일이 검토한 변경과 달라요." : "The applied file differs from the reviewed change.");
       }
     }
     setReview({ ...proposal, reviewedHash: proposal.proposalDigest });
@@ -314,44 +317,36 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     else if (proposal.changes.some((change) => change.path === path && change.operation === "delete")) { setPath(""); setFileRead(null); setContent(""); }
     setNotice(ko ? "실제 파일 확인 완료 · 다음 실행부터 적용" : "Actual files verified · Used from the next run");
   };
-  const approve = () => run("apply", async () => {
-    if (!review?.reviewToken || review.status !== "review_ready") return;
+  const applyReviewed = async (review: WorkspaceDiff) => {
+    if (!review.reviewToken || review.status !== "review_ready") return;
     // A review pass that ran out while the owner was away asks Main for the same diff again (agent-workspace-review.ts).
     const result = await approveReviewedChange(api(), review);
     if (result.kind === "changed") {
       setReview(result.review); setReviewPath(result.review.changes[0]?.path ?? null);
-      setNotice(ko ? "그 사이 변경안이 바뀌어 새 내용을 보여 드려요. 확인한 뒤 다시 승인해 주세요." : "The change moved meanwhile, so the new one is shown. Review it and approve again.");
+      setView("changes");
+      setNotice(ko ? "변경안이 바뀌었어요. 새 내용을 확인한 뒤 다시 승인해 주세요." : "The change moved meanwhile, so the new one is shown. Review it and approve again.");
       return;
     }
     if (result.proposal.applyWhenIdle) {
       // A run holds this agent's files; Main keeps the approval for this exact change and applies it when the run ends.
       await openReview(result.proposal.id);
-      setNotice(ko ? "실행 중인 작업이 끝나면 이 변경을 자동으로 적용해요. 승인은 기억해 두었어요." : "A run is using this agent. This change will be applied automatically when it ends; your approval is kept.");
+      setNotice(ko ? "실행 중인 작업이 끝나면 자동으로 적용해요." : "A run is using this agent. This change will be applied automatically when it ends; your approval is kept.");
       return;
     }
     await verifyApplied(result.proposal);
+  };
+  const approve = () => run("apply", async () => { if (review) await applyReviewed(review); });
+  const addSkill = (proposal: AgentWorkspaceProposal) => run("apply", async () => {
+    const diff = await api().getDiff(proposal.id);
+    if (diff.status !== "review_ready" || !diff.reviewToken) { await openReview(proposal.id); return; }
+    await applyReviewed(diff);
   });
-  const memoryCandidates = useMemo(() => (snapshot?.memoryCandidates ?? []).filter((candidate) => {
-    return (memoryState === "all" || candidate.state === memoryState) && (!memoryQuery.trim() || [candidate.title, candidate.content, candidate.contentNative ?? ""].some((text) => text.toLocaleLowerCase().includes(memoryQuery.trim().toLocaleLowerCase())));
-  }), [snapshot?.memoryCandidates, memoryState, memoryQuery]);
-  // Near-duplicate learnings arrive with a shared groupId from the service; the list shows one lesson per group.
-  const memoryGroups = useMemo(() => {
-    const groups = new Map<string, AgentWorkspaceMemoryCandidate[]>();
-    for (const candidate of memoryCandidates) { const key = candidate.groupId ?? candidate.id; groups.set(key, [...(groups.get(key) ?? []), candidate]); }
-    return [...groups.values()];
-  }, [memoryCandidates]);
-  const selectedMemory = snapshot?.memoryCandidates.find((candidate) => candidate.id === memoryId) ?? memoryCandidates[0];
-  const selectedGroup = selectedMemory ? (snapshot?.memoryCandidates ?? []).filter((candidate) => (candidate.groupId ?? candidate.id) === (selectedMemory.groupId ?? selectedMemory.id)) : [];
+  const dismissProposal = (proposal: AgentWorkspaceProposal) => run("reject", async () => { await api().reject({ proposalId: proposal.id }); await refresh(); });
+  const undoChange = (revisionId: string) => run("prepare-rollback", async () => { const proposal = await api().prepareRollback({ agentId: agent.id, revisionId }); await refresh(); await openReview(proposal.id); });
+  const readDiff = useCallback((proposalId: string): Promise<WorkspaceDiff> => { const bridge = ipc()?.agentWorkspace; return bridge ? bridge.getDiff(proposalId) : Promise.reject(new Error("bridge")); }, []);
   const rows = useMemo(() => treeEntries(files, expanded), [files, expanded]);
   const lineCount = Math.max(1, content.split("\n").length);
-  const instructionFiles = files.filter((file) => file.kind === "file" && ["instruction", "skill", "knowledge"].includes(file.role));
-  // The footer prepares a change from lessons that are "Ready for review". With none (or on an agent that cannot be written) its button could never be pressed.
-  const canPrepare = Boolean(snapshot?.writable);
-  const showPrepare = canPrepare && (snapshot?.memoryCandidates ?? []).some((candidate) => candidate.state === "eligible");
-  // The entry file unless the owner picked another; the picker only appears when there is another file to pick.
-  const prepareTarget = instructionFiles.some((file) => file.path === targetPath) ? targetPath : snapshot?.canonicalEntry ?? instructionFiles[0]?.path ?? "";
   const pendingCount = snapshot?.proposals.filter((proposal) => proposal.status === "review_ready").length ?? 0;
-  const eligibleCount = new Set((snapshot?.memoryCandidates ?? []).filter((candidate) => candidate.state === "eligible" || candidate.state === "proposed").map((candidate) => candidate.groupId ?? candidate.id)).size;
   const toggleDirectory = async (entry: TreeEntry) => {
     const isExpanded = expanded.has(entry.path);
     setExpanded((previous) => { const next = new Set(previous); if (isExpanded) next.delete(entry.path); else next.add(entry.path); return next; });
@@ -366,31 +361,100 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     const end = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", end); };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", end, { once: true });
   };
-  const renderMemory = () => <>
-    <aside className={styles.listPane}>
-      <div className={styles.paneHeader}><IconBrain size={14} /><strong>{ko ? "배운 것" : "Learned"}</strong><span title={ko ? `기록 ${snapshot?.memoryCandidates.length ?? 0}건` : `${snapshot?.memoryCandidates.length ?? 0} records`}>{new Set((snapshot?.memoryCandidates ?? []).map((candidate) => candidate.groupId ?? candidate.id)).size}</span><button className={styles.iconButton} disabled={Boolean(busy)} aria-label={ko ? "기존 메모리 가져오기" : "Import existing memory"} title={ko ? "기존 메모리 가져오기" : "Import existing memory"} onClick={() => void run("memory-import-preview", async () => { const memory = ipc()?.agentMemory; if (!memory) throw new Error(ko ? "메모리 브리지를 사용할 수 없습니다." : "Memory bridge unavailable."); setMemoryImportPreview(await memory.importPreview(agent.id)); })}><IconFileUp size={13} /></button></div>
-      {snapshot?.autoEvolution && <label className={styles.autoEvolve} title={ko ? "켜 두면 반복된 절차형 교훈 중 안전한 것은 자동으로 반영하고, 실행이 나빠지면 되돌립니다. 나머지는 지금처럼 변경안을 직접 검토합니다." : "When on, safe repeated procedure lessons are applied automatically and rolled back if runs get worse. Everything else stays a change you review."}><input type="checkbox" checked={snapshot.autoEvolution.enabled} disabled={!snapshot.writable || Boolean(busy)} onChange={(event) => void run("auto-evolution", async () => { await api().setAutoEvolution({ agentId: agent.id, enabled: event.target.checked }); await refresh(); })} /><span>{ko ? "자동 진화" : "Auto-evolve"}</span></label>}
-      <div className={styles.search}><IconSearch size={13} /><input aria-label={ko ? "메모리 검색" : "Search memories"} placeholder={ko ? "메모리 검색" : "Search memories"} value={memoryQuery} onChange={(event) => setMemoryQuery(event.target.value)} /></div>
-      <div className={styles.rosterFilters}><Select aria-label={ko ? "반영 상태" : "Status"} value={memoryState} onChange={(event) => setMemoryState(event.target.value)} className={styles.button}><option value="all">{ko ? "전체" : "All"}</option>{["eligible", "watching", "scope_review", "needs_evidence", "proposed", "applied"].map((state) => <option value={state} key={state}>{stateLabel(state, ko)}</option>)}</Select></div>
-      <div className={styles.listRows}>
-        {memoryGroups.map((group) => { const lead = group[0], key = lead.groupId ?? lead.id, eligible = group.filter((member) => member.state === "eligible"), open = openGroups.has(key);
-          const picked = eligible.length > 0 && eligible.every((member) => memorySelection.has(member.id));
-          return <div key={key}>
-            <div className={styles.checkRow}>
-              <input type="checkbox" aria-label={`${ko ? "지침에 반영할 학습 선택" : "Select learning to add"}: ${plainMemoryTitle(lead.contentNative || lead.content || lead.title, ko)}`} checked={picked} disabled={!eligible.length || !snapshot?.writable || Boolean(busy)} onChange={(event) => setMemorySelection((previous) => { const next = new Set(previous); for (const member of eligible) { if (event.target.checked) next.add(member.id); else next.delete(member.id); } return next; })} />
-              <button className={`${styles.listItem} ${group.some((member) => member.id === selectedMemory?.id) ? styles.selected : ""}`} onClick={() => setMemoryId(lead.id)}><span className={styles.listItemTitle}><span>{plainMemoryTitle(lead.contentNative || lead.content || lead.title, ko)}</span></span><span className={styles.listItemSub}><State value={lead.state} ko={ko} /><span>{memoryKindLabel(lead.kind, ko)}</span>{group.length > 1 && <span className={styles.groupCount}>{ko ? `비슷한 기록 ${group.length}건` : `${group.length} similar records`}</span>}</span></button>
-              {group.length > 1 && <button className={styles.iconButton} aria-expanded={open} aria-label={ko ? "묶인 기록 보기" : "Show grouped records"} title={ko ? "묶인 기록 보기" : "Show grouped records"} onClick={() => setOpenGroups((previous) => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next; })}>{open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}</button>}
+  const [order, setOrder] = useState<AgentModelOrderView | null>(null);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [folderOpen, setFolderOpen] = useState(false);
+  const [chatBusy, setChatBusy] = useState(false);
+  const [forgetEntries, setForgetEntries] = useState<DesktopMemoryListEntry[] | null>(null);
+  const [forgetAll, setForgetAll] = useState(false);
+  const [forgetBusy, setForgetBusy] = useState(false);
+  const [forgetFailed, setForgetFailed] = useState(false);
+  const lastTab = useRef<AgentTab>("timeline");
+  useEffect(() => { if (view !== "changes") lastTab.current = view; }, [view]);
+  const memory = useAgentMemory(agent.id, view === "timeline" || view === "memory");
+  const folder = useFolderStatus(agent.id);
+  const isScience = agent.slug === SCIENCE_AGENT_SLUG;
+  // The model order is read when an agent opens; a Science agent has none to choose (it picks its own model).
+  useEffect(() => {
+    setOrder(null); setModelOpen(false);
+    if (isScience) return;
+    let alive = true;
+    void Promise.resolve(ipc()?.agentModelOrder?.get(agent.id)).then((answer) => { if (alive && answer?.ok) setOrder(answer.order); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [agent.id, isScience]);
+  const localeKey: "ko" | "en" = ko ? "ko" : "en";
+  const modelText = (() => {
+    const first = order?.effective.first;
+    if (!first) return null;
+    const names = lineLabels(first, runtimes, localeKey);
+    const effort = effortLabel(first, runtimes, localeKey);
+    return effort ? `${names.model} · ${effort}` : names.model;
+  })();
+  const skillCount = skillFiles(files).length;
+  const sendCompare = comparison && comparison.agentId === agent.id && comparison.target === "cloud" && comparison.direction === "send" ? comparison : null;
+  const toSave = snapshot?.cloudId && sendCompare ? (sendCompare.outgoingChanges?.length ?? 0) : null;
+  const waitingCount = (snapshot?.proposals ?? []).filter((proposal) => proposal.status === "review_ready").length;
+  const facts: HeadFacts = {
+    working: snapshot?.activation === "run_active", builtAt: agent.installedAt ? shortDate(agent.installedAt) || null : null, modelText, modelLogo: order?.effective.first ? llmLogoSrc({ model: order.effective.first.model, backend: order.effective.first.backend, kind: order.effective.first.kind }) : null, toSave,
+    memories: memory.result ? memory.result.total : null, skills: snapshot ? skillCount : null, files: snapshot ? files.filter((file) => file.kind === "file").length : null,
+  };
+  const chat = async () => {
+    const create = ipc()?.chats?.createAgentChat;
+    if (!create || chatBusy) return;
+    setChatBusy(true); setError("");
+    try { const receipt = await create({ agentIds: [agent.id] }); navigate(`/workspace?open=${encodeURIComponent(receipt.chat.id)}`); }
+    catch (failure) { setError(agentWorkspaceFailure(failure, ko)); } finally { setChatBusy(false); }
+  };
+  const confirmForget = async () => {
+    if (!forgetEntries) return;
+    setForgetBusy(true); setForgetFailed(false);
+    try {
+      let result = await memory.forget(forgetEntries);
+      // "Forget all" with a list cut at the newest lines: read the next lines and go on while the count falls (a round that forgot nothing stops it).
+      for (let round = 0; forgetAll && !result.failed && result.remaining > 0 && result.forgotten > 0 && round < 40; round++) {
+        const next = await ipc()?.oneMemory?.inspector?.query({ actorId: agent.id, limit: AGENT_MEMORY_FIRST_READ, status: "active" }).catch(() => null);
+        if (!next || next.entries.length === 0) break;
+        result = await memory.forget(next.entries);
+      }
+      if (result.failed || (forgetAll && result.remaining > 0)) { setForgetFailed(true); return; }
+      setForgetEntries(null); setForgetAll(false);
+      setNotice(ko ? "기억에서 지웠어요." : "Removed from memory.");
+    } finally { setForgetBusy(false); }
+  };
+  const canSync = comparison && comparison.agentId === agent.id && comparison.target === syncTarget && comparison.direction === syncDirection && (syncDirection === "send" ? comparison.canSend : comparison.canReceive) && Boolean(comparison.reviewedHash && comparison.reviewToken);
+  const comparisonText = comparison?.reason ? comparisonReason(comparison.reason, ko) : null;
+  // Learnings that are ready but have no change prepared yet (a lesson that is not a skill): the Skills tab offers to prepare the change.
+  const unpreparedLessons = useMemo(() => {
+    const prepared = new Set((snapshot?.proposals ?? []).filter((proposal) => proposal.status === "review_ready").flatMap((proposal) => proposal.memoryEntryIds));
+    const groups = new Map<string, string[]>();
+    for (const candidate of snapshot?.memoryCandidates ?? []) {
+      if (candidate.state !== "eligible" || prepared.has(candidate.id)) continue;
+      const key = candidate.groupId ?? candidate.id;
+      groups.set(key, [...(groups.get(key) ?? []), candidate.id]);
+    }
+    return [...groups.entries()].map(([key, ids]) => { const lead = (snapshot?.memoryCandidates ?? []).find((candidate) => candidate.id === ids[0]); return { key, ids, text: lead?.contentNative || lead?.content || "" }; });
+  }, [snapshot]);
+  const prepareLesson = (ids: string[]) => run("prepare-memory", async () => {
+    let proposal;
+    try { proposal = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: ids }); } catch (failure) { await refresh().catch(() => undefined); throw failure; }
+    await refresh(); await openReview(proposal.id);
+  });
+  const renderFiles = (snapshot: AgentWorkspaceSnapshot) => <>
+          <aside className={styles.tree}><div className={styles.paneHeader}><strong>{ko ? "파일" : "Files"}</strong><button className={styles.iconButton} title={ko ? `파일 찾기 ${shortcutLabel("P", uiOs)}` : `Find file ${shortcutLabel("P", uiOs)}`} aria-label={ko ? "파일 찾기" : "Find file"} onClick={() => { setQuickOpen(true); setQuickQuery(""); }}><IconSearch size={13} /></button><button className={styles.iconButton} disabled={!snapshot.writable || Boolean(busy) || snapshot.activation === "recovery_required"} title={ko ? "새 파일 초안" : "New file draft"} aria-label={ko ? "새 파일 초안" : "New file draft"} onClick={() => { setNewPathDialog(true); setNewPath(""); }}><IconPlus size={13} /></button></div>
+            <div className={styles.treeRows} role="tree" aria-label={ko ? "에이전트 파일 트리" : "Agent file tree"}>
+              {rows.map((entry) => <button className={`${styles.treeRow} ${entry.path === path ? styles.selected : ""}`} key={entry.path} role="treeitem" aria-level={entry.depth + 1} aria-selected={entry.path === path} aria-expanded={entry.kind === "directory" ? expanded.has(entry.path) : undefined} style={{ paddingLeft: 8 + entry.depth * 13 }} onClick={() => entry.kind === "directory" ? void toggleDirectory(entry) : void openFile(entry.path)} onKeyDown={(event) => {
+                if (event.key === "ArrowRight" && entry.kind === "directory" && !expanded.has(entry.path)) { event.preventDefault(); void toggleDirectory(entry); }
+                if (event.key === "ArrowLeft" && entry.kind === "directory" && expanded.has(entry.path)) { event.preventDefault(); void toggleDirectory(entry); }
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); const row = event.currentTarget; if (event.key === "ArrowDown") (row.nextElementSibling as HTMLElement | null)?.focus(); else (row.previousElementSibling as HTMLElement | null)?.focus(); }
+              }}>{entry.kind === "directory" ? (expanded.has(entry.path) ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />) : <span style={{ width: 11 }} />}{entry.kind === "directory" ? <IconFolder size={13} /> : <IconFileText size={13} />}<span className={styles.treeName}>{entry.name}</span>{entry.role === "instruction" && <span className={styles.treeRole}>{ko ? "규칙" : "rule"}</span>}</button>)}
+              {!rows.length && <div className={styles.empty}>{ko ? "파일 없음" : "No files"}</div>}
             </div>
-            {open && group.slice(1).map((member) => <button key={member.id} className={`${styles.listItem} ${styles.groupMember} ${selectedMemory?.id === member.id ? styles.selected : ""}`} onClick={() => setMemoryId(member.id)}><span className={styles.listItemTitle}><span>{plainMemoryTitle(member.contentNative || member.content || member.title, ko)}</span></span><span className={styles.listItemSub}><State value={member.state} ko={ko} /></span></button>)}
-          </div>; })}
-        {!memoryCandidates.length && <div className={styles.empty}>{ko ? "메모리 없음" : "No memories"}</div>}
-      </div>
-      {showPrepare && <div className={styles.footerActions}>
-        {instructionFiles.length > 1 && <Select value={prepareTarget} aria-label={ko ? "반영할 파일" : "File to update"} onChange={(event) => setTargetPath(event.target.value)}>{instructionFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}</Select>}
-        <button className={`${styles.button} ${styles.primary}`} disabled={!memorySelection.size || !snapshot?.writable || Boolean(busy) || snapshot.activation === "recovery_required"} onClick={() => void run("prepare-memory", async () => { let proposal; try { proposal = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: [...memorySelection], ...(prepareTarget ? { targetPath: prepareTarget } : {}) }); } catch (failure) { setMemorySelection(new Set()); await refresh().catch(() => undefined); throw failure; } await refresh(); setMemorySelection(new Set()); await openReview(proposal.id); })}>{busy === "prepare-memory" && <span className={styles.loading} />}{ko ? `변경안 만들기${memorySelection.size ? ` (${memorySelection.size})` : ""}` : `Prepare change${memorySelection.size ? ` (${memorySelection.size})` : ""}`}</button>
-      </div>}
-    </aside>
-    {selectedMemory ? <MemoryDetail candidate={selectedMemory} group={selectedGroup} locale={locale} agentName={name} agentRole={agent.tagline} canPrepare={canPrepare} proposal={(snapshot?.proposals ?? []).find((proposal) => proposal.memoryEntryIds.includes(selectedMemory.id))} onOpenProposal={(id) => void openReview(id)} /> : <div className={styles.empty}><IconBrain size={35} /><strong>{ko ? "에이전트가 일하며 배운 내용이 여기에 쌓입니다" : "What the agent learns while working collects here"}</strong></div>}
+          </aside><button className={styles.resizeHandle} aria-label={ko ? "파일 트리 너비" : "Resize file tree"} onPointerDown={startResize} onKeyDown={(event) => { if (event.key === "ArrowLeft") setTreeWidth((width) => Math.max(160, width - 10)); if (event.key === "ArrowRight") setTreeWidth((width) => Math.min(300, width + 10)); }} />
+          <div className={styles.editor}>{path ? <><div className={styles.fileToolbar}><IconFileText size={14} /><span className={styles.filePath} title={path}>{path}{dirty ? " ●" : ""}</span><span className={styles.fileRole}>{newFile ? (ko ? "새 파일 초안" : "New draft") : fileRoleLabel(files.find((file) => file.path === path)?.role, ko)}</span>{!newFile && files.some((file) => file.path === path) && <button className={styles.iconButton} data-agent-file-actions aria-label={ko ? "파일 작업" : "File actions"} title={ko ? "파일 작업" : "File actions"} aria-expanded={fileMenu} disabled={Boolean(busy) || !snapshot.writable || snapshot.activation === "recovery_required"} onClick={() => setFileMenu((current) => !current)}><IconMoreHorizontal size={16} /></button>}<button className={`${styles.button} ${styles.primary}`} disabled={!dirty || Boolean(busy) || !snapshot.writable || snapshot.activation === "recovery_required" || !fileRead || fileRead.binary || fileRead.truncated} onClick={() => void prepareFile()}>{busy === "prepare-file" && <span className={styles.loading} />}{ko ? "변경 검토" : "Review change"}</button></div>{fileMenu && <div className={styles.fileMenu} data-agent-file-menu role="menu"><button role="menuitem" onClick={() => { setFileMenu(false); setRenamePathDialog(true); setNewPath(path); }}><IconFileText size={16} />{ko ? "이름 변경 검토…" : "Review rename…"}</button><button role="menuitem" className={styles.danger} onClick={() => { setFileMenu(false); void run("prepare-delete", async () => { if (!snapshot.writable || snapshot.activation === "recovery_required" || !await mayLeaveFile()) return; const proposal = await api().prepareFileOperation({ agentId: agent.id, operation: "delete", path }); setContent(fileRead?.content ?? ""); await refresh(); await openReview(proposal.id); }); }}><IconTrash size={16} />{ko ? "삭제 검토…" : "Review deletion…"}</button></div>}
+            {fileLoading ? <div className={styles.empty}><span className={styles.loading} /></div> : fileRead?.binary ? <div className={styles.empty}><IconFileText size={28} />{ko ? "바이너리 파일 · 텍스트 편집 불가" : "Binary file · Text editing unavailable"}<span>{fileRead.byteLength.toLocaleString()} bytes</span></div> : fileRead ? <>{fileRead.truncated && <div className={styles.banner}>{ko ? "파일이 커서 일부만 표시합니다. 편집은 잠겨 있습니다." : "Partial preview of a large file. Editing is locked."}</div>}<div className={styles.codeEditor}><pre className={styles.editorGutter} ref={codeGutter} aria-hidden="true">{Array.from({ length: lineCount }, (_, index) => index + 1).join("\n")}</pre><textarea ref={codeInput} className={styles.codeInput} value={content} spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-label={`${path} ${ko ? "파일 내용" : "file content"}`} readOnly={!snapshot.writable || snapshot.activation === "recovery_required" || fileRead.truncated || Boolean(busy)} onChange={(event) => setContent(editorContent(event.target.value, fileRead.content))} onScroll={(event) => { if (codeGutter.current) codeGutter.current.scrollTop = event.currentTarget.scrollTop; }} onKeyDown={(event) => {
+              if (event.key === "Tab" && !event.currentTarget.readOnly) { event.preventDefault(); const element = event.currentTarget; const start = element.selectionStart; const end = element.selectionEnd; setContent(editorContent(element.value.slice(0, start) + "  " + element.value.slice(end), fileRead.content)); requestAnimationFrame(() => { element.selectionStart = element.selectionEnd = start + 2; }); }
+            }} /></div></> : <div className={styles.empty}>{ko ? "파일 읽기 실패" : "Could not read the file"}</div>}</> : <div className={styles.empty}><IconFolder size={35} /><strong>{ko ? "파일을 선택하세요" : "Select a file"}</strong></div>}</div>
   </>;
   const renderChanges = () => <>
     <aside className={styles.listPane}><div className={styles.paneHeader}><IconLayers size={14} /><strong>{ko ? "변경" : "Changes"}</strong><span>{snapshot?.proposals.length ?? 0}</span></div><div className={styles.listRows}>
@@ -400,7 +464,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     <div className={styles.reviewPane}>{reviewLoading ? <div className={styles.empty}><span className={styles.loading} />{ko ? "변경 파일 확인 중" : "Reading proposed files"}</div> : review ? <>
       <div className={styles.reviewSummary}><IconLayers size={16} /><div><strong>{review.summary}</strong><div className={styles.meta}><State value={review.status} ko={ko} /><span>{review.changes.length}{ko ? "개 파일" : " files"}</span></div></div><button className={styles.iconButton} disabled={Boolean(busy)} onClick={() => void openReview(review.id)} title={ko ? "변경 다시 확인" : "Reload diff"} aria-label={ko ? "변경 다시 확인" : "Reload diff"}><IconRefresh size={14} /></button></div>
       {review.lastError && <div className={`${styles.banner} ${styles.error}`}>{review.lastError}</div>}
-      {review.status === "stale" && <div className={styles.banner}><span>{ko ? "원본이 바뀌었습니다. 새 원본에서 변경안을 다시 만들어야 합니다." : "The source changed. Prepare a new proposal against the current files."}</span>{review.memoryEntryIds.length > 0 && <button className={styles.button} disabled={Boolean(busy) || dirty} onClick={() => void run("reprepare-memory", async () => { const next = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: review.memoryEntryIds }); await refresh(); await openReview(next.id); })}>{ko ? "다시 만들기" : "Prepare again"}</button>}</div>}
+      {review.status === "stale" && <div className={styles.banner}><span>{ko ? "원본이 바뀌었어요. 변경안을 다시 만들어 주세요." : "The source changed. Prepare a new proposal against the current files."}</span>{review.memoryEntryIds.length > 0 && <button className={styles.button} disabled={Boolean(busy) || dirty} onClick={() => void run("reprepare-memory", async () => { const next = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: review.memoryEntryIds }); await refresh(); await openReview(next.id); })}>{ko ? "다시 만들기" : "Prepare again"}</button>}</div>}
       {alwaysOnSentence(review.alwaysOn, ko) && <div className={`${styles.banner} ${review.alwaysOn?.overHard ? styles.error : ""}`}>{alwaysOnSentence(review.alwaysOn, ko)}</div>}
       {review.card && <LearningCardView card={review.card} ko={ko} />}
       <ChangeSummaryView changes={review.changeSummary} ko={ko} />
@@ -409,80 +473,64 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       <div className={styles.reviewFooter}><span>{ko ? "전체 파일 변경 · 다음 실행부터 적용" : "Whole file changes · Used from the next run"}</span>
         {review.status === "review_ready" && <><button className={styles.button} disabled={Boolean(busy)} onClick={() => void run("reject", async () => { const result = await api().reject({ proposalId: review.id }); setReview({ ...result, reviewedHash: result.proposalDigest }); await refresh(); })}>{ko ? "거절" : "Reject"}</button><button className={`${styles.button} ${styles.primary}`} disabled={Boolean(busy) || !snapshot?.writable || !review.reviewToken || dirty || snapshot.activation === "recovery_required"} onClick={() => void approve()}>{busy === "apply" ? <span className={styles.loading} /> : <IconCheck size={13} />}{ko ? "승인·적용" : "Approve and apply"}</button></>}
       </div>
-      {dirty && <div className={styles.banner}>{ko ? "파일 초안을 변경안으로 저장하거나 버린 뒤 승인하세요." : "Save or discard your open file draft before approving."}</div>}
+      {dirty && <div className={styles.banner}>{ko ? "파일 초안을 변경안으로 저장하거나 버린 뒤 승인해 주세요." : "Save or discard your open file draft before approving."}</div>}
     </> : <div className={styles.empty}><IconLayers size={35} /><strong>{ko ? "검토할 변경을 선택하세요" : "Select a change to review"}</strong></div>}</div>
   </>;
-  // 해시·리비전 ID 같은 기록은 사람에게 보이지 않고 로그로만 남긴다.
-  useEffect(() => {
-    if (snapshot) console.info("[agent-workspace] snapshot", { agentId: agent.id, revision: snapshot.currentRevisionId, treeDigest: snapshot.treeDigest });
-  }, [agent.id, snapshot?.currentRevisionId, snapshot?.treeDigest]); // eslint-disable-line react-hooks/exhaustive-deps
-  const renderSync = () => {
-    const canSync = comparison && comparison.agentId === agent.id && comparison.target === syncTarget && comparison.direction === syncDirection && (syncDirection === "send" ? comparison.canSend : comparison.canReceive) && Boolean(comparison.reviewedHash && comparison.reviewToken);
-    const diff = syncDirection === "send" ? comparison?.outgoingChanges ?? comparison?.changes.map((change) => ({ ...change, operation: change.operation === "create" ? "delete" as const : change.operation === "delete" ? "create" as const : "modify" as const, beforeContent: change.afterContent, afterContent: change.beforeContent, beforeHash: change.afterHash, afterHash: change.beforeHash, beforeExecutable: change.afterExecutable, afterExecutable: change.beforeExecutable })) ?? [] : comparison?.changes ?? [];
-    return <div className={styles.sync}>
-      <div className={styles.syncControls}><strong>{ko ? "버전 비교 · 동기화" : "Compare · Sync"}</strong><Select value={syncTarget} aria-label={ko ? "비교 위치" : "Compare target"} onChange={(event) => { setSyncTarget(event.target.value as "cloud" | "hub"); setSyncDirection("receive"); }}><option value="cloud">Cloud</option><option value="hub">Hub</option></Select><Select value={syncDirection} aria-label={ko ? "동기화 방향" : "Sync direction"} onChange={(event) => setSyncDirection(event.target.value as "receive" | "send")}><option value="receive">{ko ? "로컬로 받기" : "Receive locally"}</option><option value="send">{syncTarget === "cloud" ? (ko ? "Cloud에 저장" : "Save to Cloud") : (ko ? "Hub 공개 검토" : "Review Hub publication")}</option></Select><button className={styles.iconButton} disabled={compareLoading || Boolean(busy)} onClick={() => void compare()} title={ko ? "원격 상태 조회" : "Refresh remote state"} aria-label={ko ? "원격 상태 조회" : "Refresh remote state"}><IconRefresh size={15} /></button></div>
-      <div className={styles.syncGraph}><div className={styles.syncNode}><IconMonitor size={23} /><span>Local</span></div><div className={styles.syncEdge}>{compareLoading ? <span className={styles.loading} /> : <State value={comparison?.state ?? "unknown"} ko={ko} />}<svg viewBox="0 0 90 15" aria-hidden="true"><path d="M0 7.5H90" /></svg></div><div className={styles.syncNode}>{syncTarget === "hub" ? <IconCloud size={23} /> : <IconLayers size={23} />}<span>{syncTarget === "hub" ? "Hub" : "Cloud"}</span></div></div>
-      {comparison?.reason && <div className={styles.banner}><IconAlertTriangle size={13} /><span>{comparisonReason(comparison.reason, ko)}</span>{["cloud_not_linked", "hub_not_linked"].includes(comparison.reason) && <Link className={styles.button} href={firm ? `/cloud?team=${encodeURIComponent(firm.id)}` : `/cloud?agent=${encodeURIComponent(agent.parentTeamId || agent.id)}`}>{syncTarget === "cloud" ? (ko ? "Cloud에 처음 저장…" : "First Cloud save…") : (ko ? "Hub에 처음 게시…" : "First Hub publication…")}</Link>}{comparison.reason === "cloud_publish_base_required" && <button className={styles.button} onClick={() => { setSyncTarget("cloud"); setSyncDirection("send"); }}>{ko ? "Cloud 저장 검토" : "Review Cloud save"}</button>}{comparison.reason === "sign_in_required" && <button className={styles.button} disabled={Boolean(busy)} onClick={() => void run("sign-in", async () => { const bridge = ipc(); if (!bridge) throw new Error(ko ? "로그인 브리지를 사용할 수 없습니다." : "Sign-in bridge unavailable."); await bridge.auth.signInWithGoogle(); await compare(); })}>{ko ? "로그인" : "Sign in"}</button>}{comparison.reason === "sync_outcome_pending" && <button className={styles.button} disabled={compareLoading || Boolean(busy)} onClick={() => void compare()}>{ko ? "원격 상태 다시 확인" : "Recheck remote state"}</button>}</div>}
-      {diff.length ? <AgentWorkspaceDiff files={diff} locale={locale} beforeLabel={syncDirection === "send" ? `${syncTarget === "hub" ? "Hub" : "Cloud"} · ${ko ? "현재" : "Current"}` : `Local · ${ko ? "현재" : "Current"}`} afterLabel={syncDirection === "send" ? (ko ? "전송 후" : "After transfer") : (ko ? "로컬 적용 후" : "After local apply")} /> : <div className={styles.empty}>{compareLoading ? (ko ? "원격 파일 비교 중" : "Comparing remote files") : stateLabel(comparison?.state ?? "unknown", ko)}</div>}
-      <div className={styles.reviewFooter}><span>{syncTarget === "hub" && syncDirection === "send" ? (ko ? "검토한 공개용 파일만 게시합니다." : "Publish only the reviewed public files.") : (ko ? "검토한 파일만 동기화합니다." : "Sync only the reviewed files.")}</span>{comparison?.proposalId && <button className={styles.button} onClick={() => void openReview(comparison.proposalId!)}>{ko ? "변경안 검토" : "Review proposal"}</button>}<button className={`${styles.button} ${styles.primary}`} disabled={!canSync || Boolean(busy) || dirty || (syncDirection === "receive" && !snapshot?.writable) || snapshot?.activation === "recovery_required"} onClick={() => void run("sync", async () => {
+  const tabs: Array<{ key: AgentTab; label: string; icon: JSX.Element; count?: number | null }> = [
+    { key: "timeline", label: ko ? "타임라인" : "Timeline", icon: <IconHistoryClock size={15} /> },
+    { key: "memory", label: ko ? "기억" : "Memory", icon: <IconBrain size={15} />, count: memory.result ? memory.result.total : null },
+    { key: "skills", label: ko ? "스킬" : "Skills", icon: <IconSparkles size={15} />, count: waitingCount + unpreparedLessons.length || null },
+    { key: "files", label: ko ? "파일" : "Files", icon: <IconFolder size={15} /> },
+    { key: "sync", label: ko ? "동기화" : "Sync", icon: <IconRefresh size={15} />, count: toSave || null },
+  ];
+  const body = () => {
+    if (loading) return <div className={styles.empty}><span className={styles.loading} />{ko ? "에이전트 파일 읽는 중" : "Reading agent files"}</div>;
+    if (!snapshot) return <div className={styles.empty}><IconFolder size={35} /><strong>{ko ? "파일을 확인할 수 없어요" : "Files could not be read"}</strong><button className={styles.button} onClick={() => void run("refresh", async () => { await refresh(); })}>{ko ? "다시 읽기" : "Retry"}</button></div>;
+    if (view === "timeline") return <AgentTimeline agentId={agent.id} name={name} slug={agent.slug} ko={ko} snapshot={snapshot} memory={memory.entries} memoryFailed={memory.failed} onRetryMemory={() => void memory.reload()} busy={Boolean(busy)} canWrite={snapshot.writable && snapshot.activation !== "recovery_required"} readDiff={readDiff}
+      onAddSkill={(proposal) => void addSkill(proposal)} onDismiss={(proposal) => void dismissProposal(proposal)} onReview={(proposal) => void openReview(proposal.id)} onOpenMemory={() => setView("memory")} onForget={(entries) => { setForgetFailed(false); setForgetEntries(entries); }} onUndo={(revisionId) => void undoChange(revisionId)} />;
+    if (view === "memory") return <AgentMemoryTab ko={ko} result={memory.result} failed={memory.failed} skipped={memory.skipped} onForget={(entries, all) => { setForgetFailed(false); setForgetAll(Boolean(all)); setForgetEntries(entries); }} onRetry={() => void memory.reload()}
+      onImport={() => void run("memory-import-preview", async () => { const bridge = ipc()?.agentMemory; if (!bridge) throw new Error(ko ? "기억을 사용할 수 없어요." : "Memory is unavailable."); setMemoryImportPreview(await bridge.importPreview(agent.id)); })} />;
+    if (view === "skills") return <AgentSkillsTab ko={ko} files={files} proposals={snapshot.proposals} writable={snapshot.writable && snapshot.activation !== "recovery_required"} busy={Boolean(busy)} cloudLinked={Boolean(snapshot.cloudId)} readDiff={readDiff}
+      onAddSkill={(proposal) => void addSkill(proposal)} onDismiss={(proposal) => void dismissProposal(proposal)} onReview={(proposal) => void openReview(proposal.id)} onOpenFile={(skillPath) => { setView("files"); void openFile(skillPath); }}
+      lessons={unpreparedLessons} onPrepare={(ids) => void prepareLesson(ids)}
+      autoEvolution={snapshot.autoEvolution} onAutoEvolution={(enabled) => void run("auto-evolution", async () => { await api().setAutoEvolution({ agentId: agent.id, enabled }); await refresh(); })} />;
+    if (view === "files") return renderFiles(snapshot);
+    if (view === "sync") return <AgentSyncTab ko={ko} locale={locale} agentId={agent.id} parentId={agent.parentTeamId ?? ""} snapshot={snapshot} comparison={comparison} loading={compareLoading} compareFailed={compareFailed} target={syncTarget} direction={syncDirection}
+      onTarget={(value) => { setSyncTarget(value); }} onDirection={setSyncDirection} files={files.filter((file) => file.kind === "file").length} skills={skillCount} memoryTotal={memory.result ? memory.result.total : null} busy={Boolean(busy)} dirty={dirty}
+      canApprove={Boolean(canSync)} comparisonReason={comparisonText} onRefresh={() => void compare()} onOpenProposal={(id) => void openReview(id)}
+      onSignIn={() => void run("sign-in", async () => { const bridge = ipc(); if (!bridge) throw new Error(ko ? "로그인할 수 없어요." : "Sign-in is unavailable."); await bridge.auth.signInWithGoogle(); await compare(); })}
+      onApprove={() => void run("sync", async () => {
         if (!comparison?.reviewToken || !comparison.reviewedHash) return;
         const result = await api().sync({ agentId: agent.id, target: syncTarget, direction: syncDirection, reviewedHash: comparison.reviewedHash, reviewToken: comparison.reviewToken });
         if ("status" in result) await verifyApplied(result);
         else { await refresh(); setComparison(result); if (result.state === "in_sync" || result.state === "content_equal") setNotice(ko ? "원격 파일 확인 완료" : "Remote files verified"); }
         await compare();
-      })}>{busy === "sync" && <span className={styles.loading} />}{syncDirection === "send" ? syncTarget === "hub" ? (ko ? "승인·Hub 공개" : "Approve · Publish to Hub") : (ko ? "승인·Cloud 저장" : "Approve · Save to Cloud") : (ko ? "승인·로컬 적용" : "Approve · Apply locally")}</button></div>
-      {dirty && <div className={styles.banner}>{ko ? "열린 파일 초안을 먼저 변경안으로 저장하세요." : "Save the open file draft as a proposal first."}</div>}
+      })} />;
+    return <div className={manage.changesWrap}>
+      <div className={manage.backBar}><button type="button" className={manage.btn} onClick={() => setView(lastTab.current)}><IconArrowLeft size={14} />{ko ? "돌아가기" : "Back"}</button></div>
+      <div className={manage.changesBody}>{recovery ? <AgentWorkspaceRecoveryReview recovery={recovery} locale={locale} busy={Boolean(busy)} dirty={dirty} onClose={() => setRecovery(null)} onRetain={() => void run("recovery-acknowledge", async () => { if (!recovery.reviewToken) return; const next = await api().acknowledgeRecovery({ agentId: agent.id, reviewedHash: recovery.reviewedHash, reviewToken: recovery.reviewToken }); if (next.treeDigest !== recovery.currentTreeDigest || next.activation === "recovery_required") throw new Error(ko ? "복구 결과가 현재 파일과 달라요. 다시 검토해 주세요." : "Recovery differs from the reviewed files. Review again."); setSnapshot(next); setFiles(next.files); setRecovery(null); setView("files"); if (path && next.files.some((file) => file.path === path)) await openFile(path, true); else { setPath(""); setFileRead(null); setContent(""); setNewFile(false); } setNotice(ko ? "현재 파일 확인 완료 · 실행 잠금 해제" : "Current files verified · Execution unlocked"); })} /> : renderChanges()}</div>
     </div>;
   };
-  const renderHistory = () => {
-    const history = [...(snapshot?.history ?? [])].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    return <div className={styles.history}><div className={styles.paneHeader}><IconClock size={14} /><strong>{ko ? "파일 변경 이력" : "File revision history"}</strong><span>{history.length}</span></div>{history.map((revision, index) => {
-      const linked = revision.parentRevisionIds.includes(history[index + 1]?.id);
-      return <div className={styles.historyRow} key={revision.id}><div className={styles.revisionGraph}><svg viewBox="0 0 25 80" aria-hidden="true">{linked && <path d="M12.5 14V80" />}<circle cx="12.5" cy="14" r="4" /></svg></div><div className={styles.revisionBody}><div className={styles.revisionTitle}><strong>{revision.summary}</strong>{snapshot?.currentRevisionId === revision.id && <span className={styles.state}>HEAD</span>}{revision.proposalId && <button className={styles.button} onClick={() => void openReview(revision.proposalId!)}>{ko ? "변경 보기" : "View change"}</button>}{snapshot?.currentRevisionId !== revision.id && <button className={styles.button} disabled={Boolean(busy) || dirty || !snapshot?.writable} onClick={() => void run("prepare-rollback", async () => { const proposal = await api().prepareRollback({ agentId: agent.id, revisionId: revision.id }); await refresh(); await openReview(proposal.id); })}>{ko ? "되돌리기 검토" : "Review rollback"}</button>}</div><div className={styles.meta}><span>{revisionOperationLabel(revision.operation, ko)}</span><span>{timeLabel(revision.createdAt, locale)}</span></div>{outcomeSentence(revision.outcome, ko) && <div className={styles.meta}><span>{outcomeSentence(revision.outcome, ko)}</span></div>}</div></div>;
-    })}{!history.length && <div className={styles.empty}>{ko ? "파일 이력 없음" : "No file revisions"}</div>}</div>;
-  };
-  const navigation: Array<{ key: AgentWorkspaceView; label: string; icon: ReactNode; count?: number }> = [
-    { key: "files", label: ko ? "파일" : "Files", icon: <IconFolder size={21} /> },
-    { key: "memory", label: ko ? "메모리" : "Memory", icon: <IconBrain size={21} />, count: eligibleCount },
-    { key: "changes", label: ko ? "변경" : "Changes", icon: <IconLayers size={21} />, count: pendingCount },
-    { key: "sync", label: ko ? "동기화" : "Sync", icon: <IconRefresh size={21} /> },
-    { key: "history", label: ko ? "이력" : "History", icon: <IconClock size={21} /> },
-  ];
   return <section ref={root} className={styles.workspace} aria-label={`${name} Agent Workspace`} data-testid="agent-workspace" style={{ "--workspace-tree-width": `${treeWidth}px` } as CSSProperties}>
-    <header className={styles.toolbar}>
-      <button className={styles.iconButton} aria-label={ko ? "에이전트 목록 접기/펴기" : "Toggle agent roster"} title={ko ? "에이전트 목록" : "Agent roster"} onClick={onToggleRoster}><IconSidebar size={17} /></button>
-      <div className={styles.agentTitle}><AgentAvatar name={name} agentId={agent.id} size={25} /><strong>{name}</strong>{agent.sourceMissingSince && <IconAlertTriangle size={13} />}</div>
-      <div className={styles.locations}><button className={`${styles.location} ${snapshot ? styles.locationConnected : ""}`} title={ko ? "이 설치의 로컬 파일" : "Local files for this installation"} onClick={() => setView("files")}><IconMonitor size={12} />Local</button>{snapshot?.cloudId && <button className={`${styles.location} ${styles.locationConnected}`} title={ko ? "연결된 Cloud 버전 비교" : "Compare the linked Cloud version"} onClick={() => { setSyncTarget("cloud"); setView("sync"); }}><IconLayers size={12} />Cloud</button>}{snapshot?.hubRef && <button className={`${styles.location} ${styles.locationConnected}`} title={ko ? "연결된 Hub 릴리스 비교" : "Compare the linked Hub release"} onClick={() => { setSyncTarget("hub"); setSyncDirection("receive"); setView("sync"); }}><IconCloud size={12} />Hub</button>}</div>
-      {projectControl}<button className={styles.iconButton} disabled={loading || Boolean(busy)} aria-label={ko ? "파일 새로고침" : "Refresh workspace"} title={ko ? "파일 새로고침" : "Refresh workspace"} onClick={() => void run("refresh", async () => { await refresh(); if (path && !dirty) await openFile(path, true); })}><IconRefresh size={15} /></button><button className={`${styles.iconButton} ${inspector ? styles.selected : ""}`} onClick={() => setInspector((current) => !current)} title={ko ? "속성" : "Inspector"} aria-label={ko ? "속성" : "Inspector"} aria-pressed={inspector}><IconSettings size={17} /></button>
-    </header>
+    <AgentProfileHead agentId={agent.id} name={name} slug={agent.slug} tagline={ko ? agent.tagline : (agent.taglineEn || agent.tagline)} big={view === "timeline"} facts={facts} ko={ko} modelOpen={modelOpen}
+      onModel={isScience || !order ? null : () => setModelOpen((value) => !value)} onFolder={() => setFolderOpen((value) => !value)} onEdit={() => setEditOpen(true)} onChat={() => void chat()} folderOpen={folderOpen} chatBusy={chatBusy}
+      modelPopover={modelOpen && order ? <AgentModelPopover agentId={agent.id} locale={localeKey} runtimes={runtimes} order={order} onOrder={setOrder} onClose={() => setModelOpen(false)} /> : null}>
+      {folderOpen && <AgentFolderPopover agentName={name} ko={ko} status={folder.status} working={snapshot?.activation === "run_active"} onClose={() => setFolderOpen(false)}
+        onReveal={(target) => void ipc()?.fs.showItemInFolder?.(target)} onChanged={() => void folder.reload()} />}
+    </AgentProfileHead>
+    <nav className={manage.tabs} aria-label={ko ? "에이전트 탭" : "Agent tabs"}>
+      <button type="button" className={`${manage.ib} ${manage.rosterToggle}`} aria-label={ko ? "에이전트 목록 접기/펴기" : "Toggle agent roster"} onClick={onToggleRoster}><IconSidebar size={16} /></button>
+      {tabs.map((tab) => <button key={tab.key} type="button" className={`${manage.tab} ${view === tab.key ? manage.tabOn : ""}`} aria-pressed={view === tab.key} onClick={() => setView(tab.key)}>{tab.icon}{tab.label}{typeof tab.count === "number" && <span className={tab.key === "memory" ? `${manage.count} ${manage.countPlain}` : manage.count}>{tab.count}</span>}</button>)}
+    </nav>
+    <AgentFolderNotes agentId={agent.id} agentName={name} ko={ko} status={folder.status} reload={folder.reload} working={snapshot?.activation === "run_active"} />
     {error && <div className={`${styles.banner} ${styles.error}`} role="alert"><IconAlertTriangle size={14} /><span>{error}</span><button className={styles.iconButton} aria-label={ko ? "오류 닫기" : "Dismiss error"} onClick={() => setError("")}><IconClose size={13} /></button></div>}
     {notice && <div className={`${styles.banner} ${styles.notice}`} role="status"><IconCheck size={14} /><span>{notice}</span><button className={styles.iconButton} aria-label={ko ? "알림 닫기" : "Dismiss notice"} onClick={() => setNotice("")}><IconClose size={13} /></button></div>}
-    {agent.sourceMissingSince && <div className={styles.banner}><IconAlertTriangle size={14} /><span>{ko ? "원본 폴더 연결이 끊어졌습니다." : "The source folder is disconnected."}</span></div>}
+    {agent.sourceMissingSince && <div className={styles.banner}><IconAlertTriangle size={14} /><span>{ko ? "원본 폴더 연결이 끊어졌어요." : "The source folder is disconnected."}</span></div>}
     {snapshot && !snapshot.writable && <div className={styles.banner}><IconShield size={13} /><span>{ko ? "읽기 전용 에이전트" : "Read-only agent"}</span></div>}
-    {snapshot?.activation === "recovery_required" && <div className={styles.banner}><IconAlertTriangle size={13} /><span>{ko ? "파일 복구가 필요합니다. 새 변경 적용이 잠겨 있습니다." : "File recovery is required. New changes are locked."}</span><button className={styles.button} disabled={Boolean(busy)} onClick={() => void run("recovery-diff", async () => { const actual = await api().getRecoveryDiff(agent.id); initialReviewAttempted.current = true; setReview(null); setRecovery(actual); setView("changes"); })}>{ko ? "복구 검토" : "Review recovery"}</button></div>}
+    {snapshot?.activation === "recovery_required" && <div className={styles.banner}><IconAlertTriangle size={13} /><span>{ko ? "파일 복구 필요 · 새 변경 적용 잠김" : "File recovery is required. New changes are locked."}</span><button className={styles.button} disabled={Boolean(busy)} onClick={() => void run("recovery-diff", async () => { const actual = await api().getRecoveryDiff(agent.id); initialReviewAttempted.current = true; setReview(null); setRecovery(actual); setView("changes"); })}>{ko ? "복구 검토" : "Review recovery"}</button></div>}
     <div className={styles.body}>
-      <nav className={styles.rail} aria-label={ko ? "워크스페이스 도구" : "Workspace tools"}>{navigation.map((item) => <button className={`${styles.railButton} ${view === item.key ? styles.railActive : ""}`} key={item.key} title={item.label} aria-label={item.label} aria-pressed={view === item.key} onClick={() => setView(item.key)}>{item.icon}{Boolean(item.count) && <span className={styles.badge}>{item.count}</span>}</button>)}</nav>
-      <main className={styles.content}>
-        {loading ? <div className={styles.empty}><span className={styles.loading} />{ko ? "에이전트 파일 읽는 중" : "Reading agent files"}</div> : !snapshot ? <div className={styles.empty}><IconFolder size={35} /><strong>{ko ? "파일을 확인할 수 없습니다" : "Files could not be read"}</strong><button className={styles.button} onClick={() => void run("refresh", async () => { await refresh(); })}>{ko ? "다시 읽기" : "Retry"}</button></div> : view === "files" ? <>
-          <aside className={styles.tree}><div className={styles.paneHeader}><strong>{ko ? "파일" : "Files"}</strong><button className={styles.iconButton} title={ko ? `파일 찾기 ${shortcutLabel("P", uiOs)}` : `Find file ${shortcutLabel("P", uiOs)}`} aria-label={ko ? "파일 찾기" : "Find file"} onClick={() => { setQuickOpen(true); setQuickQuery(""); }}><IconSearch size={13} /></button><button className={styles.iconButton} disabled={!snapshot.writable || Boolean(busy) || snapshot.activation === "recovery_required"} title={ko ? "새 파일 초안" : "New file draft"} aria-label={ko ? "새 파일 초안" : "New file draft"} onClick={() => { setNewPathDialog(true); setNewPath(""); }}><IconPlus size={13} /></button></div>
-            <div className={styles.treeRows} role="tree" aria-label={ko ? "에이전트 파일 트리" : "Agent file tree"}>
-              {rows.map((entry) => <button className={`${styles.treeRow} ${entry.path === path ? styles.selected : ""}`} key={entry.path} role="treeitem" aria-level={entry.depth + 1} aria-selected={entry.path === path} aria-expanded={entry.kind === "directory" ? expanded.has(entry.path) : undefined} style={{ paddingLeft: 8 + entry.depth * 13 }} onClick={() => entry.kind === "directory" ? void toggleDirectory(entry) : void openFile(entry.path)} onKeyDown={(event) => {
-                if (event.key === "ArrowRight" && entry.kind === "directory" && !expanded.has(entry.path)) { event.preventDefault(); void toggleDirectory(entry); }
-                if (event.key === "ArrowLeft" && entry.kind === "directory" && expanded.has(entry.path)) { event.preventDefault(); void toggleDirectory(entry); }
-                if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); const row = event.currentTarget; if (event.key === "ArrowDown") (row.nextElementSibling as HTMLElement | null)?.focus(); else (row.previousElementSibling as HTMLElement | null)?.focus(); }
-              }}>{entry.kind === "directory" ? (expanded.has(entry.path) ? <IconChevronDown size={11} /> : <IconChevronRight size={11} />) : <span style={{ width: 11 }} />}{entry.kind === "directory" ? <IconFolder size={13} /> : <IconFileText size={13} />}<span className={styles.treeName}>{entry.name}</span>{entry.role === "instruction" && <span className={styles.treeRole}>rule</span>}</button>)}
-              {!rows.length && <div className={styles.empty}>{ko ? "파일 없음" : "No files"}</div>}
-            </div>
-          </aside><button className={styles.resizeHandle} aria-label={ko ? "파일 트리 너비" : "Resize file tree"} onPointerDown={startResize} onKeyDown={(event) => { if (event.key === "ArrowLeft") setTreeWidth((width) => Math.max(160, width - 10)); if (event.key === "ArrowRight") setTreeWidth((width) => Math.min(300, width + 10)); }} />
-          <div className={styles.editor}>{path ? <><div className={styles.fileToolbar}><IconFileText size={14} /><span className={styles.filePath} title={path}>{path}{dirty ? " ●" : ""}</span><span className={styles.fileRole}>{newFile ? (ko ? "새 파일 초안" : "New draft") : files.find((file) => file.path === path)?.role}</span>{!newFile && files.some((file) => file.path === path) && <button className={styles.iconButton} data-agent-file-actions aria-label={ko ? "파일 작업" : "File actions"} title={ko ? "파일 작업" : "File actions"} aria-expanded={fileMenu} disabled={Boolean(busy) || !snapshot.writable || snapshot.activation === "recovery_required"} onClick={() => setFileMenu((current) => !current)}><IconMoreHorizontal size={16} /></button>}<button className={`${styles.button} ${styles.primary}`} disabled={!dirty || Boolean(busy) || !snapshot.writable || snapshot.activation === "recovery_required" || !fileRead || fileRead.binary || fileRead.truncated} onClick={() => void prepareFile()}>{busy === "prepare-file" && <span className={styles.loading} />}{ko ? "변경 검토" : "Review change"}</button></div>{fileMenu && <div className={styles.fileMenu} data-agent-file-menu role="menu"><button role="menuitem" onClick={() => { setFileMenu(false); setRenamePathDialog(true); setNewPath(path); }}><IconFileText size={16} />{ko ? "이름 변경 검토…" : "Review rename…"}</button><button role="menuitem" className={styles.danger} onClick={() => { setFileMenu(false); void run("prepare-delete", async () => { if (!snapshot.writable || snapshot.activation === "recovery_required" || !await mayLeaveFile()) return; const proposal = await api().prepareFileOperation({ agentId: agent.id, operation: "delete", path }); setContent(fileRead?.content ?? ""); await refresh(); await openReview(proposal.id); }); }}><IconTrash size={16} />{ko ? "삭제 검토…" : "Review deletion…"}</button></div>}
-            {fileLoading ? <div className={styles.empty}><span className={styles.loading} /></div> : fileRead?.binary ? <div className={styles.empty}><IconFileText size={28} />{ko ? "바이너리 파일 · 텍스트 편집 불가" : "Binary file · Text editing unavailable"}<span>{fileRead.byteLength.toLocaleString()} bytes</span></div> : fileRead ? <>{fileRead.truncated && <div className={styles.banner}>{ko ? "파일이 커서 일부만 표시합니다. 편집은 잠겨 있습니다." : "Partial preview of a large file. Editing is locked."}</div>}<div className={styles.codeEditor}><pre className={styles.editorGutter} ref={codeGutter} aria-hidden="true">{Array.from({ length: lineCount }, (_, index) => index + 1).join("\n")}</pre><textarea ref={codeInput} className={styles.codeInput} value={content} spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-label={`${path} ${ko ? "파일 내용" : "file content"}`} readOnly={!snapshot.writable || snapshot.activation === "recovery_required" || fileRead.truncated || Boolean(busy)} onChange={(event) => setContent(editorContent(event.target.value, fileRead.content))} onScroll={(event) => { if (codeGutter.current) codeGutter.current.scrollTop = event.currentTarget.scrollTop; }} onKeyDown={(event) => {
-              if (event.key === "Tab" && !event.currentTarget.readOnly) { event.preventDefault(); const element = event.currentTarget; const start = element.selectionStart; const end = element.selectionEnd; setContent(editorContent(element.value.slice(0, start) + "  " + element.value.slice(end), fileRead.content)); requestAnimationFrame(() => { element.selectionStart = element.selectionEnd = start + 2; }); }
-            }} /></div></> : <div className={styles.empty}>{ko ? "파일 읽기 실패" : "Could not read the file"}</div>}</> : <div className={styles.empty}><IconFolder size={35} /><strong>{ko ? "파일을 선택하세요" : "Select a file"}</strong></div>}</div>
-        </> : view === "memory" ? renderMemory() : view === "changes" ? recovery ? <AgentWorkspaceRecoveryReview recovery={recovery} locale={locale} busy={Boolean(busy)} dirty={dirty} onClose={() => setRecovery(null)} onRetain={() => void run("recovery-acknowledge", async () => { if (!recovery.reviewToken) return; const next = await api().acknowledgeRecovery({ agentId: agent.id, reviewedHash: recovery.reviewedHash, reviewToken: recovery.reviewToken }); if (next.treeDigest !== recovery.currentTreeDigest || next.activation === "recovery_required") throw new Error(ko ? "현재 파일 확인과 복구 결과가 일치하지 않습니다. 다시 검토하세요." : "Recovery differs from the reviewed files. Review again."); setSnapshot(next); setFiles(next.files); setRecovery(null); setView("files"); if (path && next.files.some((file) => file.path === path)) await openFile(path, true); else { setPath(""); setFileRead(null); setContent(""); setNewFile(false); } setNotice(ko ? "현재 파일 확인 완료 · 실행 잠금 해제" : "Current files verified · Execution unlocked"); })} /> : renderChanges() : view === "sync" ? renderSync() : renderHistory()}
-      </main>
-      {inspector && <><button className={`${styles.scrim} ${styles.inspectorScrim}`} aria-label={ko ? "속성 닫기" : "Close inspector"} onClick={() => setInspector(false)} /><AgentWorkspaceInspector agent={agent} name={name} locale={locale} snapshot={snapshot} firm={firm} org={org} binding={binding} runtimes={runtimes} overrides={overrides} onClose={() => setInspector(false)} onRename={onRename} onRemove={onRemove} onOverridesChange={onOverridesChange} onNotice={setNotice} /></>}
+      <main className={styles.content}>{body()}</main>
     </div>
-    <footer className={styles.statusbar}><span>{busy ? (ko ? "처리 중…" : "Working…") : dirty ? (ko ? "저장 전 파일 초안" : "Unsaved file draft") : snapshot?.activation === "run_active" ? (ko ? "실행 중 · 새 변경은 다음 실행부터" : "Run active · Changes apply to the next run") : snapshot ? (ko ? "로컬 파일 확인됨" : "Local files read") : (ko ? "파일 상태 알 수 없음" : "File state unknown")}</span><span>{path ? `${lineCount} ${ko ? "줄" : "lines"}` : ""}</span></footer>
     {quickOpen && <PopupFrame title={ko ? "파일 찾기" : "Find file"} icon={<IconSearch size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={() => setQuickOpen(false)} busy={Boolean(busy)}>
       <div className={styles.popupSearch}><IconSearch size={17} /><input autoFocus value={quickQuery} aria-label={ko ? "파일 이름" : "File name"} placeholder={ko ? "이름 또는 경로" : "Name or path"} onChange={(event) => setQuickQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { const first = files.find((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())); if (first) void openFile(first.path).then((opened) => { if (opened) { setQuickOpen(false); setView("files"); } }); } }} /><kbd>↵</kbd></div>
       <div className={styles.popupFiles}>{files.filter((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())).map((file) => <button className={styles.popupFile} key={file.path} onClick={() => void openFile(file.path).then((opened) => { if (opened) { setQuickOpen(false); setView("files"); } })}><IconFileText size={18} /><span><strong>{file.path.split("/").at(-1)}</strong><small>{file.path}</small></span></button>)}{!files.some((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())) && <div className={styles.empty}><IconSearch size={24} />{ko ? "일치하는 파일 없음" : "No matching files"}</div>}</div>
@@ -490,16 +538,19 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     {newPathDialog && <PopupFrame title={ko ? "새 파일 초안" : "New file draft"} icon={<IconPlus size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={() => setNewPathDialog(false)} busy={Boolean(busy)} footer={<><PopupAction onClick={() => setNewPathDialog(false)} disabled={Boolean(busy)}>{ko ? "취소" : "Cancel"}</PopupAction><PopupAction primary icon={<IconFileText size={16} />} disabled={Boolean(busy) || !validNewPath || !snapshot?.writable || snapshot.activation === "recovery_required"} onClick={() => void openDraft()}>{ko ? "초안 열기" : "Open draft"}</PopupAction></>}>
       <label className={styles.popupPath}>{ko ? "폴더 내 경로" : "Path inside folder"}<input autoFocus value={newPath} placeholder="skills/my-skill/SKILL.md" onChange={(event) => setNewPath(event.target.value)} /></label>
       <PopupSteps steps={[{label: ko ? "초안" : "Draft", icon:<IconFileText size={18} />,active:true},{label: ko ? "변경 검토" : "Review diff",icon:<IconLayers size={18} />},{label: ko ? "승인·저장" : "Approve & save",icon:<IconCheck size={18} />}]} />
-      <p className={styles.popupNote}><IconShield size={15} />{ko ? "승인 전 실제 파일은 바뀌지 않습니다." : "Actual files change only after approval."}</p>
+      <p className={styles.popupNote}><IconShield size={15} />{ko ? "승인 전 실제 파일은 바뀌지 않아요." : "Actual files change only after approval."}</p>
     </PopupFrame>}
     {renamePathDialog && <PopupFrame title={ko ? "이름 변경 검토" : "Review rename"} icon={<IconFileText size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={() => setRenamePathDialog(false)} busy={Boolean(busy)} footer={<><PopupAction disabled={Boolean(busy)} onClick={() => setRenamePathDialog(false)}>{ko ? "취소" : "Cancel"}</PopupAction><PopupAction primary icon={busy ? <span className={styles.loading} /> : <IconLayers size={16} />} disabled={Boolean(busy) || !validNewPath || newPath.trim() === path || !snapshot?.writable || snapshot.activation === "recovery_required"} onClick={() => void run("prepare-rename", async () => { if (!validNewPath || !await mayLeaveFile()) return; const proposal = await api().prepareFileOperation({ agentId: agent.id, operation: "rename", path, newPath: newPath.trim() }); setRenamePathDialog(false); setContent(fileRead?.content ?? ""); await refresh(); await openReview(proposal.id); })}>{ko ? "변경 검토" : "Review change"}</PopupAction></>}>
       <PopupFacts items={[{label:ko ? "현재 파일" : "Current file",value:<code>{path}</code>,icon:<IconFileText size={17} />}]}/>
       <label className={styles.popupPath}>{ko ? "새 경로" : "New path"}<input autoFocus value={newPath} placeholder="skills/my-skill/SKILL.md" onChange={(event) => setNewPath(event.target.value)} /></label>
-      <p className={styles.popupNote}><IconShield size={15} />{ko ? "변경안을 먼저 검토합니다. 승인 후 이름이 바뀝니다." : "Review the proposal first. Rename happens after approval."}</p>
+      <p className={styles.popupNote}><IconShield size={15} />{ko ? "승인 후 이름이 변경돼요." : "Review the proposal first. Rename happens after approval."}</p>
     </PopupFrame>}
-    {memoryImportPreview && <AgentMemoryImportDialog preview={memoryImportPreview} agentId={agent.id} locale={locale} onClose={() => setMemoryImportPreview(null)} onImported={async (count, remainingFiles) => { await refresh(); setNotice(ko ? `메모리 ${count}건을 가져왔습니다.${remainingFiles > 0 ? ` 파일 ${remainingFiles}개가 남아 있어 다시 가져오면 이어집니다.` : ""}` : `Imported ${count} memories.${remainingFiles > 0 ? ` ${remainingFiles} more files remain; import again to continue.` : ""}`); }} />}
+    {memoryImportPreview && <AgentMemoryImportDialog preview={memoryImportPreview} agentId={agent.id} locale={locale} onClose={() => setMemoryImportPreview(null)} onImported={async (count, remainingFiles) => { await refresh(); void memory.reload(); setNotice(ko ? `메모리 ${count}건을 가져왔습니다.${remainingFiles > 0 ? ` 파일 ${remainingFiles}개가 남아 있어 다시 가져오면 이어집니다.` : ""}` : `Imported ${count} memories.${remainingFiles > 0 ? ` ${remainingFiles} more files remain; import again to continue.` : ""}`); }} />}
+    {editOpen && <AgentEditDialog agentId={agent.id} name={name} ko={ko} onRename={onRename} onClose={() => setEditOpen(false)} onSaved={() => setNotice(ko ? "저장했어요." : "Saved.")} />}
+    {forgetEntries && <ForgetDialog ko={ko} agentName={name} entries={forgetEntries} total={forgetAll ? memory.result?.total : undefined} busy={forgetBusy} failed={forgetFailed} onCancel={() => { setForgetEntries(null); setForgetAll(false); }} onConfirm={() => void confirmForget()} />}
   </section>;
 }
+
 
 function LearningCardView({ card, ko }: { card: AgentWorkspaceLearningCard; ko: boolean }) {
   const rows: Array<[string, string]> = [
@@ -521,16 +572,11 @@ function changeLine(change: AgentWorkspaceChangeSummary, ko: boolean): string {
 }
 function ChangeSummaryView({ changes, ko }: { changes: AgentWorkspaceChangeSummary[] | undefined; ko: boolean }) {
   if (!changes?.length) return null;
-  return <div className={styles.changeSummary}><h3>{ko ? "바뀌는 것" : "What changes"}</h3><ul>{changes.map((change) => <li key={change.path}><code>{change.path}</code> · {changeLine(change, ko)}</li>)}</ul></div>;
-}
-function outcomeSentence(outcome: AgentWorkspaceRevisionOutcome | undefined, ko: boolean): string | null {
-  if (!outcome?.runs) return null;
-  return ko ? `실행 ${outcome.runs}회 · 완료 ${outcome.completed} · 실패 ${outcome.failed} · 도구 오류 ${outcome.errors} · 중간 정정 ${outcome.steering}`
-    : `${outcome.runs} runs · ${outcome.completed} completed · ${outcome.failed} failed · ${outcome.errors} tool errors · ${outcome.steering} mid-run corrections`;
+  return <div className={styles.changeSummary}><h3>{ko ? "변경 내용" : "What changes"}</h3><ul>{changes.map((change) => <li key={change.path}><code>{change.path}</code> · {changeLine(change, ko)}</li>)}</ul></div>;
 }
 /** Side-by-side numbers for the revision a change replaced and the one it produced. No verdict: the owner judges. */
 function OutcomeComparison({ before, after, ko }: { before?: AgentWorkspaceRevisionOutcome; after?: AgentWorkspaceRevisionOutcome; ko: boolean }) {
-  if (!before?.runs || !after?.runs) return <div className={styles.banner}>{ko ? "반영 전후를 비교할 실행 기록이 아직 없습니다. 반영 뒤 실행이 쌓이면 여기서 숫자로 비교합니다." : "There are no runs to compare yet. Once runs accumulate after the change, they are compared here."}</div>;
+  if (!before?.runs || !after?.runs) return <div className={styles.banner}>{ko ? "반영 전후를 비교할 실행 기록이 아직 없어요." : "There are no runs to compare yet. Once runs accumulate after the change, they are compared here."}</div>;
   const per = (outcome: AgentWorkspaceRevisionOutcome, value: number) => (value / outcome.runs).toFixed(2);
   const rows: Array<[string, (o: AgentWorkspaceRevisionOutcome) => string]> = [
     [ko ? "실행" : "Runs", (o) => String(o.runs)], [ko ? "실패" : "Failed", (o) => `${o.failed} (${per(o, o.failed)}${ko ? "/회" : "/run"})`],
@@ -546,39 +592,4 @@ function alwaysOnSentence(change: AgentWorkspaceProposal["alwaysOn"], ko: boolea
   const warn = change.overHard ? (ko ? ` · 일부 실행기가 읽는 한도(${change.hardBytes}바이트)를 넘습니다` : ` · over the ${change.hardBytes}-byte limit some runtimes read`)
     : change.overSoft ? (ko ? ` · 권장 ${change.softLines}줄을 넘습니다` : ` · over the recommended ${change.softLines} lines`) : "";
   return head + warn;
-}
-function supportSentence(group: AgentWorkspaceMemoryCandidate[], ko: boolean): string {
-  const sum = (pick: (support: NonNullable<AgentWorkspaceMemoryCandidate["support"]>) => number) => group.reduce((total, member) => total + (member.support ? pick(member.support) : 0), 0);
-  const records = sum((support) => support.records), absorbed = sum((support) => support.absorbed);
-  const promotion = group.find((member) => member.promotion)?.promotion;
-  const parts = ko
-    ? [promotion ? `서로 다른 실행 ${promotion.runs}회에서 나왔습니다.` : "", group.length > 1 ? `비슷한 기록 ${group.length}건이 이 교훈으로 묶였습니다.` : "", records ? `근거 기록 ${records}건.` : "", absorbed ? `이전에 합쳐진 학습 ${absorbed}건 포함.` : "",
-      promotion?.ownerCorrections ? `그 실행들에서 사용자가 일하는 도중 방향을 바로잡은 적이 ${promotion.ownerCorrections}번 있습니다.` : "", promotion?.failures ? `같은 실행들에서 도구 오류·실패가 ${promotion.failures}건 기록됐습니다(이 교훈 때문이라는 뜻은 아닙니다).` : ""]
-    : [promotion ? `Came from ${promotion.runs} separate runs.` : "", group.length > 1 ? `${group.length} similar records are grouped as this lesson.` : "", records ? `${records} evidence records.` : "", absorbed ? `Includes ${absorbed} earlier learnings merged into it.` : "",
-      promotion?.ownerCorrections ? `You corrected course ${promotion.ownerCorrections} time(s) while those runs worked.` : "", promotion?.failures ? `${promotion.failures} tool errors or failures were recorded in the same runs (not necessarily because of this lesson).` : ""];
-  return parts.filter(Boolean).join(" ");
-}
-function MemoryDetail({ candidate, group, locale, agentName, agentRole, canPrepare, proposal, onOpenProposal }: { candidate: AgentWorkspaceMemoryCandidate; group: AgentWorkspaceMemoryCandidate[]; locale: string; agentName: string; agentRole?: string; canPrepare: boolean; proposal?: AgentWorkspaceProposal; onOpenProposal: (id: string) => void }) {
-  const ko = locale === "ko";
-  const learned = plainMemoryText(candidate.contentNative || candidate.content, ko);
-  const technical = candidate.evidence.filter(isTechnicalEvidence);
-  useEffect(() => { if (technical.length) console.info("[agent-workspace] memory technical evidence", { memoryId: candidate.id, technical }); }, [candidate.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  const readable = candidate.evidence.filter((line) => !isTechnicalEvidence(line)).map((line) => plainMemoryText(line, ko));
-  const role = (agentRole ?? "").trim();
-  return <article className={styles.detail}><h2>{plainMemoryTitle(candidate.contentNative || candidate.content || candidate.title, ko, 90)}</h2><div className={styles.meta}><State value={candidate.state} ko={ko} /><span>{memoryKindLabel(candidate.kind, ko)}</span></div>
-    {candidate.state === "scope_review" && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? "특정 프로젝트에서 얻은 내용입니다. 다른 일에도 써도 되는지 먼저 확인하세요." : "This came from one project. Check that it is safe to reuse elsewhere first."}</div>}
-    {candidate.state === "watching" && candidate.promotion && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? `같은 교훈이 서로 다른 실행 ${candidate.promotion.runs}회에서 나왔습니다. ${candidate.promotion.needRuns}회가 되면 변경안을 만듭니다. 한 번의 일에서 나온 메모를 지침으로 올리지 않기 위해서입니다.` : `This lesson has come from ${candidate.promotion.runs} separate runs. A change is prepared at ${candidate.promotion.needRuns}, so one task's note is not promoted into instructions.`}</div>}
-    {candidate.state === "needs_evidence" && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? "뒷받침하는 기록이 부족해 아직 반영할 수 없습니다." : "There is not enough supporting record to add this yet."}</div>}
-    <h3>{ko ? "이 에이전트는 원래" : "What this agent does"}</h3>
-    <p className={styles.detailContent}>{role && role !== "One Team teammate" ? `${agentName} — ${role}` : agentName}</p>
-    <h3>{ko ? "일하면서 배운 것" : "What it learned"}</h3>
-    <p className={styles.detailContent}>{learned}</p>
-    {(proposal?.card || (canPrepare && candidate.state === "eligible")) && <><h3>{ko ? "지침에 반영하면" : "If you add it to its instructions"}</h3>
-    {proposal?.card ? <LearningCardView card={proposal.card} ko={ko} /> : <p className={styles.detailContent}>{ko ? "변경안을 만들면 실제 기록을 바탕으로, 어떤 상황에서 지금과 무엇이 달라지는지 보여 드립니다. 근거가 부족하면 아무것도 바꾸지 않는 것이 정상 결과입니다. 승인하기 전에는 아무것도 바뀌지 않습니다." : "Prepare a change to see, from the actual records, when it applies and what changes from today. When the records do not support a change, no change is the normal result. Nothing changes until you approve."}</p>}</>}
-    {(group.length > 1 || candidate.support) && <><h3>{ko ? "얼마나 반복됐나" : "How often it came up"}</h3>
-      <p className={styles.detailContent}>{supportSentence(group, ko)}</p>
-      {group.length > 1 && <ul className={styles.evidence}>{group.filter((member) => member.id !== candidate.id).map((member) => <li key={member.id}>{plainMemoryTitle(member.contentNative || member.content || member.title, ko, 120)}</li>)}</ul>}</>}
-    {readable.length > 0 && <><h3>{ko ? "이렇게 알게 됐어요" : "How it found out"}</h3><ul className={styles.evidence}>{readable.map((line, index) => <li key={index}>{line}</li>)}</ul></>}
-    {proposal && <><h3>{ko ? "연결된 변경안" : "Linked proposal"}</h3><button className={styles.button} onClick={() => onOpenProposal(proposal.id)}><IconLayers size={13} />{proposal.summary}</button></>}
-  </article>;
 }

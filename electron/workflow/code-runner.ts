@@ -39,6 +39,7 @@ import {
   agentRunCwd,
   detachedSpawnOpts,
   killCliTree,
+  nodeCommandToStart,
   nodeExecPathForCode,
   trackRunChild,
   withCliPath,
@@ -462,7 +463,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     interpreter = py.python;
     harness = pythonHarness(input.code);
   } else {
-    interpreter = nodeExecPathForCode();
+    interpreter = nodeCommandToStart(nodeExecPathForCode());
     harness = jsHarness(input.code);
   }
 

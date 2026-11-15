@@ -1,0 +1,96 @@
+/*
+ * The personal agent's home screens (F-D15 settings Home / Trusted devices / Sign in again, F-D16 move cards).
+ * Existing tokens only. Rules from the owner: no colored fill behind a state line, no left color bar, roomy padding (a tall page rather than tight rows),
+ * buttons never wrap (the one rule `agentlas-btn` in globals.css), a device or computer name is smaller than the number or title it sits under.
+ */
+.section { display: grid; gap: 0; margin: 0 0 28px; color: var(--ink); font-size: 13px; word-break: keep-all; }
+.h2 { margin: 0 0 10px; font-family: var(--font-head); font-size: 17px; font-weight: 700; letter-spacing: -0.01em; display: flex; align-items: baseline; gap: 10px; }
+.h2 small { font-family: var(--rd-f-body, inherit); font-size: 12.5px; font-weight: 400; color: var(--muted-deep, var(--ink-soft)); }
+
+.rows { display: grid; border-top: 1px solid var(--paper-edge); }
+.row { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 16px 4px; border-bottom: 1px solid var(--paper-edge); }
+.row[data-plain="true"] { grid-template-columns: 150px minmax(0, 1fr) auto; }
+.rowIcon { display: grid; place-items: center; color: var(--muted-deep, var(--ink-soft)); }
+.rowTitle { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.rowSub { margin: 3px 0 0; font-size: 12.5px; line-height: 1.45; color: var(--muted-deep, var(--ink-soft)); overflow-wrap: anywhere; }
+.rowSub code, .code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; color: var(--muted-deep, var(--ink-soft)); background: var(--paper-2); padding: 1px 6px; border-radius: 5px; }
+.groupHead { margin: 22px 0 4px; padding: 0 4px; display: flex; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 650; color: var(--ink); }
+.groupHead small { font-size: 11.5px; font-weight: 400; color: var(--muted-deep, var(--ink-soft)); }
+.warnIcon { display: inline-flex; vertical-align: -2px; margin-right: 6px; color: #9c8430; }
+.rowLabel { margin: 0; font-size: 13px; color: var(--muted-deep, var(--ink-soft)); }
+.actions { display: inline-flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
+
+/* A card: the white block a decision sits in (move request, waiting, count check, end, stopped). */
+.card { display: grid; gap: 12px; padding: 20px 22px; border: 1px solid var(--paper-edge); border-radius: var(--rd-r-md, 14px); background: var(--paper); box-shadow: var(--shadow-1); }
+.cardHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.cardTitle { display: flex; align-items: center; gap: 12px; margin: 0; font-size: 15px; font-weight: 700; line-height: 1.35; color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.cardTitle > span:first-child { flex: 0 0 auto; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--paper-2); color: var(--ink); }
+.cardMeta { flex: 0 0 auto; font-size: 12px; color: var(--muted-deep, var(--ink-soft)); font-variant-numeric: tabular-nums; }
+.cardBody { margin: 0; font-size: 13px; line-height: 1.55; color: var(--ink-soft); overflow-wrap: anywhere; }
+.cardClose { flex: 0 0 auto; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--muted-deep, var(--ink-soft)); cursor: pointer; }
+.cardClose:hover { background: var(--paper-2); color: var(--ink); }
+.cardActions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.stack { display: grid; gap: 12px; }
+
+/* One small line under a button or inside a card: the closed word's sentence, then the word itself in small type. Plain: no fill. */
+.note { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 12px 14px; border: 1px solid var(--paper-edge); border-radius: var(--rd-r-sm, 10px); background: transparent; font-size: 12.5px; line-height: 1.5; color: var(--ink-soft); }
+.note b { display: block; color: var(--ink); font-size: 13px; font-weight: 600; }
+.noteIcon { color: var(--muted-deep, var(--ink-soft)); display: grid; place-items: center; padding-top: 2px; }
+
+.bar { height: 5px; border-radius: 3px; background: var(--paper-3); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--black); border-radius: 3px; }
+
+.count { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px; align-items: center; padding: 14px 16px; border-radius: var(--rd-r-sm, 10px); background: var(--paper-2); }
+.count strong { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; }
+.countRow { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 12px 2px; border-top: 1px solid var(--paper-edge); font-size: 13px; }
+.countRow span small { margin-left: 8px; font-size: 11.5px; color: var(--muted-deep, var(--ink-soft)); }
+.countRow b { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* The two-line input lock that replaces the composer while this computer's move runs. */
+.lock { display: flex; align-items: center; gap: 12px; margin: 0; padding: 14px 18px; border-radius: var(--rd-r-md, 14px); background: var(--paper-2); color: var(--muted-deep, var(--ink-soft)); font-size: 13px; }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; background: var(--paper-2); color: var(--ink-soft); font-size: 12.5px; white-space: nowrap; }
+
+/* Buttons: the one rule (globals.css "Button rule") sets nowrap / keep-all / min height / padding floor.
+   The doubled class names lift the specificity above host rules like `.composerDock button` (the personal agent's composer area), which would otherwise flatten the fills. */
+.btn, .btnPrimary, .btnDanger { composes: agentlas-btn from global; }
+.btn.btn, .btnPrimary.btnPrimary, .btnDanger.btnDanger { min-height: 34px; padding: 0 max(16px, var(--agentlas-btn-pad-x)); border-radius: var(--rd-r-sm, 10px); border: 0; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s ease; text-align: center; justify-content: center; }
+.btn.btn { background: var(--paper); color: var(--ink); box-shadow: inset 0 0 0 1px var(--paper-edge); }
+.btn.btn:hover:not(:disabled) { background: var(--paper-2); color: var(--ink); }
+.btnPrimary.btnPrimary { background: var(--black); color: var(--white); box-shadow: var(--shadow-1); }
+.btnPrimary.btnPrimary:hover:not(:disabled) { background: var(--black-soft); color: var(--white); }
+:global(:root[data-theme="dark"]) .btnPrimary.btnPrimary { background: var(--ink); color: var(--paper); box-shadow: none; }   /* the same rule as the confirmation window (OneHomeConfirm.module.css): the main button is told from the plain one next to it */
+:global(:root[data-theme="dark"]) .btnPrimary.btnPrimary:hover:not(:disabled) { background: color-mix(in srgb, var(--ink) 88%, var(--paper)); color: var(--paper); }
+.btnDanger.btnDanger { background: var(--paper); color: var(--danger, #8a3b2a); box-shadow: inset 0 0 0 1px var(--paper-edge); }
+.btn:disabled, .btnPrimary:disabled, .btnDanger:disabled { opacity: 0.45; cursor: default; }
+
+/* The modal the owner is asked ONCE in (profile choice, old records). */
+.scrim { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; background: rgba(38, 49, 39, 0.28); }
+.dialog { width: min(520px, calc(100vw - 48px)); display: grid; gap: 16px; padding: 26px 28px; border-radius: var(--rd-r-lg, 18px); background: var(--paper); box-shadow: 0 24px 60px rgba(20, 28, 22, 0.22); }
+.dialog h3 { margin: 0; font-size: 17px; font-weight: 700; }
+.choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.choice { display: grid; gap: 4px; padding: 16px; text-align: left; font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--paper-edge); border-radius: var(--rd-r-md, 14px); cursor: pointer; }
+.choice[aria-checked="true"] { box-shadow: inset 0 0 0 2px var(--black); }
+.choice strong { font-size: 14px; }
+.choice small { font-size: 12px; color: var(--muted-deep, var(--ink-soft)); }
+.dialogFoot { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12.5px; color: var(--muted-deep, var(--ink-soft)); }
+
+/* ── The line for what waits (pictures desktop-impl-gaps-6 AI-1 / AI-2) and the dot on the face. No colored fill behind a state line; the x only closes the line; buttons never wrap. ── */
+.waitStack { display: grid; gap: 8px; margin: 0 0 10px; }
+.waitLine { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto; align-items: center; gap: 12px; min-height: 52px; box-sizing: border-box; padding: 8px 12px 8px 16px; border: 1px solid var(--paper-edge); border-radius: var(--rd-r-md, 14px); background: var(--paper); color: var(--ink); }
+.waitIcon { display: grid; place-items: center; color: var(--ink-soft); }
+.waitText { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex-wrap: wrap; font-size: 13px; line-height: 1.4; }
+.waitText b { font-weight: 700; white-space: nowrap; color: var(--ink); }
+.waitText span { min-width: 0; color: var(--muted-deep, var(--ink-soft)); overflow-wrap: anywhere; }
+.waitPrimary, .waitBtn { composes: agentlas-btn from global; }
+.waitPrimary.waitPrimary, .waitBtn.waitBtn { min-height: 34px; padding: 0 max(16px, var(--agentlas-btn-pad-x)); border-radius: var(--rd-r-sm, 10px); border: 0; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s ease; justify-content: center; text-align: center; }
+.waitPrimary.waitPrimary { background: var(--black); color: var(--white); box-shadow: var(--shadow-1); }
+.waitPrimary.waitPrimary:hover:not(:disabled) { background: var(--black-soft); color: var(--white); }
+.waitPrimary.waitPrimary:disabled { background: var(--paper-2); color: var(--muted-deep, var(--ink-soft)); box-shadow: none; opacity: 1; cursor: default; }
+.waitBtn.waitBtn { background: var(--paper); color: var(--ink); box-shadow: inset 0 0 0 1px var(--paper-edge); }
+.waitBtn.waitBtn:hover:not(:disabled) { background: var(--paper-2); }
+.waitX { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted-deep, var(--ink-soft)); cursor: pointer; }
+.waitX:hover, .waitX:focus-visible { background: var(--fill-1); color: var(--ink); }
+.waitLine:not(:has(.waitPrimary, .waitBtn, .waitX)) { grid-template-columns: 22px minmax(0, 1fr); }
+.waitDot { position: absolute; top: -3px; right: -3px; width: 10px; height: 10px; border-radius: 50%; background: var(--danger, #c0392b); border: 2px solid var(--paper-2, var(--paper)); box-sizing: content-box; pointer-events: none; }

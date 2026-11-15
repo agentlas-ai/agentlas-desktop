@@ -4,8 +4,8 @@ import { oneSupervisorEndpoint } from "./supervisor-native-runtime";
 export function registerOneSupervisorIpc(input:{ipc:Pick<IpcMain,"handle">;assertTrustedSender:(event:IpcMainInvokeEvent)=>void}):void {
   for (const [method,action] of Object.entries({
     snapshot:()=>oneSupervisorEndpoint().snapshot(),
-    send:(value:any)=>oneSupervisorEndpoint().send(value),
-    startWork:(value:any)=>oneSupervisorEndpoint().startWork(value),
+    send:(value:any)=>oneSupervisorEndpoint().send(value,{surface:"desktop"}),
+    startWork:(value:any)=>oneSupervisorEndpoint().startWork(value,{surface:"desktop"}),
     startScience:(value:any)=>oneSupervisorEndpoint().startScience(value),
     control:(value:any)=>oneSupervisorEndpoint().control(value),
     stopReply:(value:any)=>oneSupervisorEndpoint().stopReply(value),

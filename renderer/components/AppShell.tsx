@@ -14,9 +14,10 @@ import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
+import { bindSpaceAccount } from "@/lib/space-store";
 import { PROJECT_SETTINGS_EVENT, type ProjectSettingsRequest } from "@/lib/project-settings";
 import { startInputLatencyRecorder } from "@/lib/input-latency";
-import { usePendingConfirmationCount } from "@/lib/attention";
+import { usePendingApprovalCount } from "@/lib/attention";
 import { AttentionCoveredSwitcherDot } from "./AttentionDot";
 import { useT } from "@/lib/i18n";
 import { IconLayers, IconBug, IconCheck } from "./Icon";
@@ -47,7 +48,7 @@ import {
 
 const ImportAgentsModal = dynamic(() => import("./ImportAgentsModal").then((module) => module.ImportAgentsModal), { ssr: false });
 const TelegramOneDialog = dynamic(() => import("./connect/TelegramOneDialog"), { ssr: false });
-const AgiBugReportDialog = dynamic(() => import("./agi/AgiBugReport").then((module) => module.AgiBugReportDialog), { ssr: false });
+const DefectReportDialog = dynamic(() => import("./support/DefectReport").then((module) => module.DefectReportDialog), { ssr: false });
 
 // Load optional dialogs on their first request and retain them after closing:
 // a background connection or an unfinished report must keep its existing state.
@@ -104,8 +105,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const previousPathname = useRef(pathname);
   const { locale } = useT();
   // 승인 대기 수는 전역 주의 저장소가 센다(폴링·독 배지 포함 — 라우트 트리와 무관하게 돈다).
-  // 대시보드 항목의 알림 수는 예전 그대로 "대화 질문(승인 인박스)"만 센다.
-  const pendingConfirmations = usePendingConfirmationCount();
+  // Dashboard 줄의 수는 오너가 답해야 할 것 전부다: 도구 승인 + 러너 질문 + 브라우저 승인 + 대화 질문(옛 제품 전환기가 세던 집합 그대로, 지금 보는 화면의 것은 뺀다).
+  const pendingConfirmations = usePendingApprovalCount(pathname);
 
   useLayoutEffect(() => {
     if (previousPathname.current !== pathname) {
@@ -130,6 +131,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     registerRouter(router);
     return () => registerRouter(null);
   }, [router]);
+
+  // Home's Space layout (open tabs, pins, order) belongs to the signed-in account: its storage key carries the account's
+  // fingerprint, so another account on this computer never sees these conversation titles. Rebinds when the session changes.
+  useEffect(() => {
+    const api = ipc();
+    if (!api?.auth?.getSession) return;
+    let cancelled = false;
+    const apply = (session: { signedIn?: boolean; accountFingerprint?: string } | null | undefined) => {
+      if (cancelled || !session) return;
+      bindSpaceAccount(session.signedIn && session.accountFingerprint ? `a${session.accountFingerprint}` : "local");
+    };
+    void api.auth.getSession().then(apply).catch(() => undefined);
+    const off = api.auth.onSessionChanged?.(apply);
+    return () => { cancelled = true; off?.(); };
+  }, []);
 
   // Slow keystrokes of this window, as timings only (never the text), into Main's diagnostics folder — renderer/lib/input-latency.ts.
   useEffect(() => startInputLatencyRecorder(), []);
@@ -337,7 +353,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <ToolApprovalSheet />
       <BackgroundWorkPill
         jobs={multimodalJobs}
-        avoidComposer={pathname.startsWith("/workspace/task")}
+        avoidComposer={pathname === "/workspace" || pathname.startsWith("/workspace/")}
         locale={locale}
         onOpen={() => router.push("/dashboard")}
       />
@@ -354,7 +370,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }}
       />}
       <GuideFab
-        avoidComposer={pathname.startsWith("/workspace/task")}
+        avoidComposer={pathname === "/workspace" || pathname.startsWith("/workspace/")}
         onReplayTour={replayCurrentPageTour}
       />
     </div>
@@ -418,33 +434,45 @@ function useComposerLift(active: boolean): number | null {
   const [lift, setLift] = useState<number | null>(null);
   useEffect(() => {
     if (!active) { setLift(null); return; }
-    let observed: Element | null = null;
+    // Workspace shows up to four panes, each with its own composer: every one of them is watched, and the button rises above the
+    // highest one that reaches under its column (the bottom-right pane's send button was covered at 20px).
+    const observed = new Set<Element>();
     let frame = 0;
     const measure = () => {
-      const composer = document.querySelector(".chat-input-shell");
-      if (composer !== observed) {
-        if (observed) observer.unobserve(observed);
-        if (composer) observer.observe(composer);
-        observed = composer;
+      const composers = Array.from(document.querySelectorAll(".chat-input-shell"));
+      for (const old of Array.from(observed)) if (!composers.includes(old)) { observer.unobserve(old); observed.delete(old); }
+      for (const composer of composers) if (!observed.has(composer)) { observer.observe(composer); observed.add(composer); }
+      const under = composers.filter((composer): composer is HTMLElement => composer instanceof HTMLElement)
+        // The button's column: 20px from the right edge, 46px wide, 8px of air.
+        .filter((composer) => composer.getBoundingClientRect().right > window.innerWidth - 74);
+      if (under.length === 0) { setLift(null); return; }
+      const tops: number[] = [];
+      for (const composer of under) {
+        tops.push(composer.getBoundingClientRect().top);
+        const pane = composer.closest("[data-space-pane]") ?? document;
+        for (const selector of ['[data-chat-folder-row="true"]', '[data-work-composer-stack="true"]']) {
+          const box = pane.querySelector(selector)?.getBoundingClientRect();
+          if (box && box.height > 0) tops.push(box.top);
+        }
       }
-      if (!(composer instanceof HTMLElement)) { setLift(null); return; }
-      const rect = composer.getBoundingClientRect();
-      // The button's column: 20px from the right edge, 46px wide, 8px of air.
-      if (rect.right <= window.innerWidth - 74) { setLift(null); return; }
-      const top = Math.min(rect.top, ...['[data-chat-folder-row="true"]', '[data-work-composer-stack="true"]']
-        .map((selector) => document.querySelector(selector)?.getBoundingClientRect())
-        .filter((box): box is DOMRect => Boolean(box && box.height > 0))
-        .map((box) => box.top));
-      setLift(Math.round(window.innerHeight - top + 10));
+      setLift(Math.round(window.innerHeight - Math.min(...tops) + 10));
     };
     const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure); };
     const observer = new ResizeObserver(schedule);
     schedule();
-    const retry = window.setInterval(schedule, 1500);
+    // The re-find runs only while the window is visible: a hidden window has nothing to measure, and showing it again measures once at once.
+    let retry = 0;
+    const syncRetry = () => {
+      if (document.hidden) { if (retry) { clearInterval(retry); retry = 0; } return; }
+      if (!retry) { schedule(); retry = window.setInterval(schedule, 1500); }
+    };
+    syncRetry();
+    document.addEventListener("visibilitychange", syncRetry);
     window.addEventListener("resize", schedule);
     return () => {
       cancelAnimationFrame(frame);
-      clearInterval(retry);
+      if (retry) clearInterval(retry);
+      document.removeEventListener("visibilitychange", syncRetry);
       observer.disconnect();
       window.removeEventListener("resize", schedule);
     };
@@ -568,7 +596,7 @@ function GuideFab({
         </div>
       )}
       {/* "결함 보고" (owner D5): the same preview-then-send path as the AGI chip; nothing leaves without Send. */}
-      {bugRequested && <AgiBugReportDialog open={bugOpen} onClose={() => setBugOpen(false)} draft={null} locale={ko ? "ko" : "en"} />}
+      {bugRequested && <DefectReportDialog open={bugOpen} onClose={() => setBugOpen(false)} draft={null} locale={ko ? "ko" : "en"} />}
       <div style={{ position: "relative", width: 46, height: 46 }}>
         <button
           ref={triggerRef}

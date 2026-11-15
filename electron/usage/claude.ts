@@ -30,10 +30,14 @@ function claudeConfigDir(): string {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
 }
 
+/** The file that names the signed-in Claude account. The account watch follows this exact path. */
+export function claudeUsageIdentityFile(): string {
+  return process.env.CLAUDE_CONFIG_DIR ? path.join(claudeConfigDir(), ".claude.json") : path.join(os.homedir(), ".claude.json");
+}
+
 function currentClaudeUsageIdentity(): { kind: "uuid" | "email"; value: string } | undefined {
   try {
-    const file = process.env.CLAUDE_CONFIG_DIR ? path.join(claudeConfigDir(), ".claude.json") : path.join(os.homedir(), ".claude.json");
-    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    const parsed = JSON.parse(readFileSync(claudeUsageIdentityFile(), "utf8"));
     const account = parsed?.oauthAccount;
     if (typeof account?.accountUuid === "string" && account.accountUuid.trim()) return { kind: "uuid", value: account.accountUuid };
     if (typeof account?.emailAddress === "string" && account.emailAddress.trim()) return { kind: "email", value: account.emailAddress };

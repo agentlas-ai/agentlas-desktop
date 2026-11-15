@@ -22,8 +22,10 @@ import {
   type TextFilePreview,
 } from "../fs/workspace";
 import { FsAccessDeniedError } from "../fs/access";
-import { userDataPath } from "../runtime-paths";
+import { agentHomeRootStatus, ensureAgentOwnerMarker, legacyAgentsRoot, resolveAgentHome } from "./home";
+import { isAgentLocalStatePath } from "../../shared/agent-local-state";
 import { SCIENCE_RESEARCH_DIRECTOR_SLUG } from "../architecture/manifest";
+import { specialFolderAgentForSlug } from "../../shared/special-folder-agents";
 import { assertAgentWorkspaceActivationReady } from "./workspace-guard";
 import { isWorkspaceAsset } from "./workspace-snapshot";
 import { capturePackageSourceOwner, assertOriginalPackageDeclaration, observeAdmittedPackageSources,
@@ -46,23 +48,38 @@ interface AgentRow {
   builtin?: number;
 }
 
-function agentsRoot(): string {
-  return userDataPath("agents");
-}
-
 /** 이 에이전트의 파일이 실제로 사는 폴더. 로컬 임포트면 원본 폴더, 아니면 userData/agents/<slug>. */
 export function resolveAgentPackageDir(agentId: string, slug: string): { dir: string; isLocal: boolean } {
   return resolveDir(agentId, slug);
 }
 
 function resolveDir(agentId: string, slug: string): { dir: string; isLocal: boolean } {
-  const route = getRoute(agentId);
-  if (route) return { dir: route.path, isLocal: true };
-  return { dir: agentFolderPath(slug), isLocal: false };
+  // 위치를 푸는 곳은 agents/home.ts 한 곳이다. 라우트는 정의 위치의 정본이라 여기서 읽어 넘긴다(home.ts 는 Electron 을 가져오지 않는다).
+  const { dir, isLocal } = resolveAgentHome({ id: agentId, slug }, getRoute(agentId));
+  return { dir, isLocal };
 }
 
+/**
+ * slug 만 아는 호출처용: 예전 설치 위치 `userData/agents/<slug>`(1.x 가 쓰던 자리 — 새 폴더는 `agentHomeRoot()` 에 태어난다). 행을 아는 곳은 resolveAgentPackageDir /
+ * agentHomeDir 를, 지금 폴더가 어디에 있는지 *읽는* 곳은 `currentAgentFolderPath` 를 쓴다. 클라우드 설치 트랜잭션의 관리 경로는 `cloudManagedFolder` 가 정한다.
+ */
 export function agentFolderPath(slug: string): string {
-  return path.join(agentsRoot(), slug);
+  return path.join(legacyAgentsRoot(), slug);
+}
+
+/**
+ * slug 만 아는 *읽는* 호출처용: 이 slug 의 폴더가 지금 있는 곳. 폴더 이동이 `userData/agents/<slug>` 를 에이전트 루트로 옮겼다면 그곳이다.
+ * 행이 없거나 위치를 못 풀면 예전 위치. 던지지 않는다.
+ */
+export function currentAgentFolderPath(slug: string): string {
+  const legacy = agentFolderPath(slug);
+  try {
+    const row = getDb().prepare("SELECT id FROM installed_agents WHERE slug = ? ORDER BY installed_at LIMIT 1").get(slug) as { id?: string } | undefined;
+    if (!row?.id) return legacy;
+    return resolveAgentHome({ id: row.id, slug }, getRoute(row.id)).dir;
+  } catch {
+    return legacy;
+  }
 }
 
 function getRow(agentId: string): AgentRow | null {
@@ -98,8 +115,33 @@ export function materializeAgentFiles(agentId: string): string | null {
   // 로컬 임포트 에이전트는 원본 폴더를 그대로 쓰므로 별도 파일을 만들지 않는다.
   const route = getRoute(agentId);
   if (route) return route.path;
-  const dir = agentFolderPath(row.slug);
+  return writeStubFiles(row);
+}
+
+/**
+ * 3파일 스텁의 폴더를 (없으면) 만들고 *실제로 만든 곳*을 돌려준다 — 스텁을 가리키는 라우트를 적는 쪽은 이 반환값을 쓴다.
+ * "폴더를 만드는 곳"과 "라우트에 적는 경로"가 따로 계산되면 라우트가 없는 폴더를 가리킨다(감사 29-1: 호출 전용 Hub 좌석이 "소스 없음"으로 태어났다).
+ * 라우트가 이미 있고 그 폴더가 실제로 있으면 그곳이다. 라우트가 없는 폴더를 가리키면 그 경로를 믿지 않고 행에서 푼 자리에 만든다.
+ */
+export function ensureAgentStubFolder(agentId: string): string | null {
+  const row = getRow(agentId);
+  if (!row) return null;
+  const route = getRoute(agentId);
+  if (route) {
+    try { if (fs.statSync(route.path).isDirectory()) return route.path; } catch { /* the route names a folder that is not there */ }
+  }
+  return writeStubFiles(row);
+}
+
+function writeStubFiles(row: AgentRow): string {
+  const resolved = resolveAgentHome({ id: row.id, slug: row.slug }, null);
+  const dir = resolved.dir;
+  // 설정된 에이전트 루트가 지금 없다(드라이브 분리·이름 변경): 읽는 쪽이 내려앉은 기본 루트에 스텁을 만들지 않는다 — 돌아오면 에이전트 폴더가 두 곳으로 갈린다.
+  // 턴은 DB 에 둔 정본 프롬프트로 그대로 돈다(`readAgentPromptSource` 가 폴더 없음을 `null` 로 본다).
+  if (resolved.source === "home" && !agentHomeRootStatus().available) return dir;
   fs.mkdirSync(dir, { recursive: true });
+  // 새 폴더를 에이전트 루트 안에 만들었으면 소유 표식을 함께 쓴다 — 표식이 없으면 다음 계산이 이 폴더를 "남의 것"으로 보고 `-id6` 이름으로 갈라진다.
+  if (resolved.source === "home") ensureAgentOwnerMarker(dir, row.id);
 
   // A built-in's prompt is owned by the manifest (installed_agents.system_prompt is re-synced on every architecture bump), so its
   // folder copy follows the row. writeIfMissing kept a July copy of the Orchestrator ("Announce the route before doing the work:
@@ -112,9 +154,26 @@ export function materializeAgentFiles(agentId: string): string | null {
   if (row.builtin && !PACKAGE_WRITTEN_BUILTIN_PROMPTS.has(row.slug)) writeBuiltinPromptFile(path.join(dir, "system-prompt.md"), row.system_prompt || "");
   else writeIfMissing(path.join(dir, "system-prompt.md"), row.system_prompt || "");
 
+  // A special agent (a built-in whose tools, skills and data stay with its plugin, shared/special-folder-agents.ts): a cover document that says so, and the
+  // folder manifest. Nothing of the plugin is copied here, and `skills/` is not created: it holds only what the owner makes or promotes.
+  const special = row.builtin ? specialFolderAgentForSlug(row.slug) : null;
+  if (special) writeIfMissing(path.join(dir, "agentlas.json"), JSON.stringify(special.folderManifest, null, 2));
   writeIfMissing(
     path.join(dir, "AGENT.md"),
-    [
+    special ? [
+      `# ${row.name}`,
+      "",
+      row.tagline || "",
+      "",
+      `**Slug**: ${row.slug}`,
+      `**Kind**: special (plugin \`${special.folderManifest.plugin}\`)`,
+      "",
+      "## How it works",
+      "",
+      `This agent has a folder and its own memory like any agent. Its tools, skills and data stay with the \`${special.folderManifest.plugin}\` plugin and are not copied here;`,
+      "`skills/` holds only skills you create or promote. Turns run through the plugin, not from `system-prompt.md`.",
+      "",
+    ].join("\n") : [
       `# ${row.name}${row.name_en && row.name_en !== row.name ? ` (${row.name_en})` : ""}`,
       "",
       row.tagline || "",
@@ -369,6 +428,8 @@ export function readAgentPromptSource(agentId: string): AgentFileTextSnapshot | 
   const { dir, isLocal } = resolveDir(agentId, row.slug);
   if (!isLocal) materializeAgentFiles(agentId);
   assertAgentWorkspaceActivationReady(agentId);
+  // 정의 폴더가 사라졌다(루트가 빠졌거나 라우트가 가리키는 폴더가 없다): 턴이 죽지 않는다 — 호출하는 쪽이 DB 의 정본 프롬프트(`system_prompt`)를 쓴다. 기억·대화는 그대로다.
+  if (!fs.existsSync(dir)) return null;
   const observation = capturePackageSourceOwner();
   const route = JSON.stringify(getRoute(agentId) ?? null);
   const prompt = readCanonicalPromptFromDirectory(dir);
@@ -490,6 +551,8 @@ export function computeAgentPackageHash(agentId: string, requestedTarget: string
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
       const absolute = path.join(current, entry.name);
       const relative = path.relative(dir, absolute).split(path.sep).join("/");
+      // 이 컴퓨터에만 있는 상태(팀 멤버의 `.agentlas-local` 등)는 지문에 들지 않는다 — 링크든 큰 파일이든 열지도 세지도 않는다.
+      if (isAgentLocalStatePath(relative)) continue;
       if (entry.isSymbolicLink()) {
         if (isGovernedAsset(relative, explicitTarget)) {
           throw new Error("Symbolic-link agent assets cannot be package fingerprinted");
@@ -630,7 +693,9 @@ export function buildAgentSkillsRuntimeContext(agentId: string): string {
   if (!isLocal) materializeAgentFiles(agentId);
   const observation = capturePackageSourceOwner(), route = JSON.stringify(getRoute(agentId) ?? null);
   const assets: AdmittedPackageAsset[] = [], identities: Array<{ path: string; stat: fs.Stats }> = [];
-  const result = agentSkillCatalogLine(dir, assets, identities);
+  const skipped: SkippedSkill[] = [];
+  const result = agentSkillCatalogLine(dir, assets, identities, skipped);
+  rememberSkippedSkills(agentId, skipped);
   observeAdmittedPackageSources(observation, { agentId, root: dir, assets,
     assertCurrent: () => { assertAgentWorkspaceActivationReady(agentId); const latest = getRow(agentId);
       if (!latest || resolveDir(agentId, latest.slug).dir !== dir || JSON.stringify(getRoute(agentId) ?? null) !== route) throw new Error("agent_package_source_changed");
@@ -644,34 +709,43 @@ export function buildAgentSkillsRuntimeContext(agentId: string): string {
  * bodies. Owner 2026-10-13: installed skills are a list, not inlined bodies (that was up to 3 MiB per run).
  * Exported so a gate can exercise it without a database row.
  */
-export function agentSkillCatalogLine(dir: string, observedAssets?: AdmittedPackageAsset[], identities?: Array<{ path: string; stat: fs.Stats }>): string {
+export function agentSkillCatalogLine(dir: string, observedAssets?: AdmittedPackageAsset[], identities?: Array<{ path: string; stat: fs.Stats }>, skipped?: SkippedSkill[]): string {
   const maxSkills = 128;
   const maxSkillBytes = 512 * 1024;
   const loaded: Array<{ root: string; slug: string }> = [];
   const revision = createHash("sha256");
 
-  const entries = listAgentSkillEntries(dir);
+  let entries = listAgentSkillEntries(dir);
   if (entries.length === 0) return "";
-  if (entries.length > maxSkills) throw new Error("Agent skill package exceeds the runtime skill-count limit");
+  // A skill that cannot be listed is left out of this agent's prompt with a machine code; the agent runs with the rest.
+  // Whatever is wrong with the package folder itself (assertOriginalPackageDeclaration on the folder, below) still stops the turn: it is not one skill's fault.
+  if (entries.length > maxSkills) {
+    for (const entry of entries.slice(maxSkills)) skipped?.push({ path: `${entry.root}/${entry.name}`, code: "skill_count_limit" });
+    entries = entries.slice(0, maxSkills);
+  }
 
   for (const entry of entries) {
-    const skillDirectory = ensureInside(dir, path.join(entry.root, entry.name));
-    const directoryStat = fs.lstatSync(skillDirectory);
-    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
-      throw new Error("Agent runtime skill directory must not be a symbolic link");
-    }
-    const skillPath = ensureInside(dir, path.join(entry.root, entry.name, "SKILL.md"));
+    const skillRelative = `${entry.root}/${entry.name}/SKILL.md`;
+    const leaveOut = (code: string): void => { skipped?.push({ path: skillRelative, code }); };
+    try {
+      const skillDirectory = ensureInside(dir, path.join(entry.root, entry.name));
+      const directoryStat = fs.lstatSync(skillDirectory);
+      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) { leaveOut("skill_directory_link"); continue; }
+    } catch { leaveOut("skill_directory_unreadable"); continue; }
+    let skillPath: string;
+    try { skillPath = ensureInside(dir, path.join(entry.root, entry.name, "SKILL.md")); } catch { leaveOut("skill_file_unreadable"); continue; }
     let fd: number;
     try {
       fd = fs.openSync(skillPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      throw error;
+      leaveOut((error as NodeJS.ErrnoException).code === "ELOOP" ? "skill_file_link" : "skill_file_unreadable");
+      continue;
     }
     try {
       const stat = fs.fstatSync(fd);
-      if (!stat.isFile()) throw new Error("Agent runtime skill must be a regular file");
-      if (stat.size > maxSkillBytes) throw new Error("Agent skill exceeds the portable skill size limit");
+      if (!stat.isFile()) { leaveOut("skill_file_not_regular"); continue; }
+      if (stat.size > maxSkillBytes) { leaveOut("skill_too_large"); continue; }
       // The body is not inlined any more; its bytes still pin the listed revision (participant freeze compares prompts).
       const bytes = fs.readFileSync(fd), after = fs.fstatSync(fd), live = fs.lstatSync(skillPath);
       if (bytes.byteLength !== stat.size || bytes.byteLength > maxSkillBytes || live.isSymbolicLink()
@@ -679,8 +753,9 @@ export function agentSkillCatalogLine(dir: string, observedAssets?: AdmittedPack
         || !sameFileIdentity(after, live) || after.size !== live.size || after.mtimeMs !== live.mtimeMs || after.ctimeMs !== live.ctimeMs || after.mode !== live.mode || after.nlink !== live.nlink)
         throw new Error("agent_package_source_changed");
       const text = bytes.toString("utf8");
-      if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Agent runtime skill is not valid UTF-8");
-      assertOriginalPackageDeclaration(dir, text);
+      if (!Buffer.from(text, "utf8").equals(bytes)) { leaveOut("skill_not_utf8"); continue; }
+      assertOriginalPackageDeclaration(dir, "");
+      if (isGeneratedMemoryDeclaration(text)) { leaveOut("skill_generated_declaration"); continue; }
       revision.update(`${entry.root}/${entry.name}\0`).update(bytes).update("\0");
       identities?.push({ path: skillPath, stat: after });
       observedAssets?.push({ path: `${entry.root}/${entry.name}/SKILL.md`, role: "skill", digest: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.byteLength, generated: isGeneratedMemoryDeclaration(text) });
@@ -700,6 +775,19 @@ export function agentSkillCatalogLine(dir: string, observedAssets?: AdmittedPack
   return `skills: ${loaded.map((skill) => `${skill.slug}=${skill.root}/${skill.slug}/SKILL.md`).join(", ")} (in ${dir}; rev ${rev})`;
 }
 
+/** A skill left out of a prompt and the machine code why. Codes: skill_count_limit, skill_directory_link, skill_directory_unreadable, skill_file_link, skill_file_unreadable, skill_file_not_regular, skill_too_large, skill_not_utf8, skill_generated_declaration. */
+export interface SkippedSkill { path: string; code: string }
+/** What each agent's last prompt build left out (this process only; at most 64 agents). Read by the agent workspace snapshot for the owner's "left out" line. */
+const skippedByAgent = new Map<string, SkippedSkill[]>();
+export function skippedSkillsFor(agentId: string): SkippedSkill[] { return skippedByAgent.get(agentId) ?? []; }
+function rememberSkippedSkills(agentId: string, skipped: SkippedSkill[]): void {
+  skippedByAgent.delete(agentId);
+  if (!skipped.length) return;
+  skippedByAgent.set(agentId, skipped.slice(0, 32));
+  if (skippedByAgent.size > 64) skippedByAgent.delete(skippedByAgent.keys().next().value as string);
+  console.warn(`[agent-skills] left out ${skipped.length}: ${skipped.slice(0, 8).map(item => `${item.path}=${item.code}`).join(" ")}`);
+}
+
 export function appendAgentSkillsToSystemPrompt(agentId: string, systemPrompt: string): string {
   const skillContext = buildAgentSkillsRuntimeContext(agentId);
   return skillContext ? `${systemPrompt}\n\n${skillContext}` : systemPrompt;
@@ -710,6 +798,24 @@ export function buildEffectiveAgentSystemPrompt(agentId: string, fallback: strin
   assertAgentWorkspaceActivationReady(agentId);
   const source = readAgentPromptSource(agentId);
   return appendAgentSkillsToSystemPrompt(agentId, source?.content ?? fallback);
+}
+
+/**
+ * 이 에이전트의 정의 폴더를 지금 읽을 수 없는가: 라우트가 가리키는 폴더가 없거나(옮기거나 지웠다), 라우트가 없고 설정된 에이전트 루트가 지금 없다(드라이브 분리·이름 변경).
+ * 턴이 시작할 때 이것이 참이면 파일을 고정(임대)하지 않고 DB 에 둔 정본 프롬프트(`system_prompt`)로 돈다 — 폴더가 마지막으로 저장될 때의 같은 글이다. 읽기만 한다. 던지지 않는다.
+ * 라우트가 없고 루트가 읽히는데 폴더만 아직 없는 새 에이전트는 거짓이다(폴더는 처음 쓰일 때 만들어진다).
+ */
+export function agentFolderUnavailable(agentId: string): boolean {
+  try {
+    const row = getDb().prepare("SELECT id, slug FROM installed_agents WHERE id = ?").get(agentId) as { id: string; slug: string } | undefined;
+    if (!row) return false;
+    const route = getRoute(agentId);
+    if (route?.path) return !fs.existsSync(route.path);
+    const resolved = resolveAgentHome({ id: row.id, slug: row.slug }, null);
+    return resolved.source === "home" && !agentHomeRootStatus().available && !fs.existsSync(resolved.dir);
+  } catch {
+    return false;
+  }
 }
 
 /**

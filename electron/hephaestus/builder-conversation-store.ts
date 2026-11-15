@@ -25,11 +25,17 @@ export interface StoredBuilderConversation {
 
 export interface BuilderConversationOwner { userId: string; workspaceId: string; scope?: "account" | "local" }
 
-function ownerKey(owner: BuilderConversationOwner): string {
+export function ownerKey(owner: BuilderConversationOwner): string {
   if (typeof owner.userId !== "string" || !owner.userId || typeof owner.workspaceId !== "string" || !owner.workspaceId) throw new Error("builder_owner_required");
   if (owner.scope !== undefined && owner.scope !== "account" && owner.scope !== "local") throw new Error("builder_owner_required");
   return createHash("sha256").update(JSON.stringify([owner.scope ?? "account", owner.userId, owner.workspaceId])).digest("hex");
 }
+
+/** The saved Build conversations of one owner (the Build list reads them): every row key lies in [lo, hi). */
+export function builderRowRange(owner: BuilderConversationOwner): [string, string] {
+  return [`builder-conversation-v1:${ownerKey(owner)}:`, `builder-conversation-v1:${ownerKey(owner)};`];
+}
+export { ownerKey as builderOwnerKey };
 
 function key(owner: BuilderConversationOwner, buildId: string): string {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(buildId)) throw new Error("builder_id_invalid");

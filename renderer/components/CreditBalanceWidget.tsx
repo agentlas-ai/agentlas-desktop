@@ -4,15 +4,19 @@
 "use client";
 import popupMenu from "./PanelPopover.module.css";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ipc } from "@/lib/ipc";
-import { useVisibleInterval } from "@/lib/useVisibleInterval";
+import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
+import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import { openPricing } from "./UpgradeCta";
 import type { HubCreditBalance } from "@/lib/types";
 
-const POLL_MS = 60_000;
+// A balance older than this is refreshed when the window comes back (this was the old poll interval).
+const STALE_MS = 60_000;
+// After a run finishes the server needs a moment to settle its charge, and runs that end together share one read.
+// Runs that keep finishing (a busy team) still read at most once per STALE_MS, as the old poll did.
+const RUN_SETTLE_DELAY_MS = 3_000;
 /** 구독 잔액이 이 값 미만이면 구독 플랜 CTA 노출. */
 const LOW_BALANCE_THRESHOLD = 50;
 
@@ -26,14 +30,17 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
+  const readAt = useRef(0);
   const refresh = useCallback(async (force = false) => {
     const api = ipc();
     if (!api?.billing) return;
+    readAt.current = Date.now();
     try {
       const next = await loadViewData(
         "shell.credit-balance",
-        () => api.billing.getCredits(),
-        { maxAgeMs: POLL_MS, force },
+        // A forced read reaches Main as `force` (past its 2 s shared read) and skips the IPC read cache (ipc-cache.ts `isForcedRead`).
+        () => (force ? api.billing.getCredits({ force: true }) : api.billing.getCredits()),
+        { maxAgeMs: STALE_MS, force },
       );
       // 조회 실패는 "잔액 0"이 아니라 "잔액 모름"이다. billing.ts는 5xx/타임아웃에
       // {authenticated:true, error} 만 돌려주므로(숫자 없음) 그대로 담으면 마지막 정상
@@ -44,34 +51,55 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
         prev && next.authenticated && typeof next.remainingCredits !== "number" ? prev : next,
       );
     } catch {
-      // 다음 폴링 재시도
+      // The next signal reads again.
+    } finally {
+      // Age counts from when the answer arrived, so a later "older than STALE_MS" read is past the IPC cache too.
+      readAt.current = Date.now();
     }
   }, []);
 
-  // 초기 1회 refresh는 유지. 주기 폴링(60s)은 useVisibleInterval이 담당 —
-  // 기존 visibilitychange가 interval을 멈추지 않던 버그(숨김 중에도 계속 폴링)를 훅이 해결한다.
-  useVisibleInterval(() => refresh(true), POLL_MS, { initial: refresh });
+  // No polling: GET /api/billing/credits runs once on mount and then on a signal. Sign-in/out and a claimed reward
+  // are the two events below; here, a run finishing (it may have spent credits) and the window coming back after
+  // the balance is older than the old poll interval (a plan bought in the browser is seen on return).
+  useEffect(() => {
+    void refresh();
+    let active: ReadonlySet<string> | null = null;
+    let settleTimer: number | null = null;
+    const offActive = ipcEvents()?.onActiveChats?.((chatIds) => {
+      const next = new Set(chatIds);
+      const settled = active !== null && [...active].some((chatId) => !next.has(chatId));
+      active = next;
+      if (!settled || settleTimer !== null) return;
+      const wait = Math.max(RUN_SETTLE_DELAY_MS, readAt.current + STALE_MS - Date.now());
+      settleTimer = window.setTimeout(() => { settleTimer = null; void refresh(true); }, wait);
+    });
+    const whenStale = () => {
+      if (document.visibilityState !== "hidden" && Date.now() - readAt.current >= STALE_MS) void refresh(true);
+    };
+    window.addEventListener("focus", whenStale);
+    document.addEventListener("visibilitychange", whenStale);
+    return () => {
+      offActive?.();
+      if (settleTimer !== null) window.clearTimeout(settleTimer);
+      window.removeEventListener("focus", whenStale);
+      document.removeEventListener("visibilitychange", whenStale);
+    };
+  }, [refresh]);
 
-  // 로그인/로그아웃 직후(AccountChip 브로드캐스트) 즉시 동기화 — 60초 폴링을 기다리며
+  // 로그인/로그아웃 직후(AccountChip 브로드캐스트) 즉시 동기화 —
   // "로그아웃했는데 크레딧이 그대로" 같은 불일치가 보이지 않게 한다.
   useEffect(() => {
     const onAuthChanged = () => {
       const api = ipc();
       if (!api?.billing) return;
-      // 로그아웃 직후 stale 잔액이 남지 않도록 먼저 지우고 다시 조회한다.
+      // 로그아웃 직후 stale 잔액이 남지 않도록 먼저 지우고 다시 조회한다. refresh(true) 는 화면 캐시만 건너뛰므로
+      // IPC 읽기 캐시(60초)도 여기서 비운다 — 앞 계정의 값이 60초 넘게 남던 결함(#3).
       setBal(null);
+      invalidateIpcCache("billing");
       void refresh(true);
     };
     window.addEventListener("agentlas:auth-changed", onAuthChanged);
     return () => window.removeEventListener("agentlas:auth-changed", onAuthChanged);
-  }, [refresh]);
-
-  // 퀘스트 보상 수령 직후(QuestBoard 브로드캐스트) 즉시 동기화 — 60초 폴링을
-  // 기다리는 동안 "+50 지급 완료"라는데 잔액이 그대로인 불신을 없앤다.
-  useEffect(() => {
-    const onCreditsRefresh = () => void refresh(true);
-    window.addEventListener("agentlas:credits-refresh", onCreditsRefresh);
-    return () => window.removeEventListener("agentlas:credits-refresh", onCreditsRefresh);
   }, [refresh]);
 
   useDismissibleLayer({
@@ -116,7 +144,8 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
         }}
       >
         {/* Owner 2026-09-25: the remaining balance as a small horizontal energy bar, the number smaller than the bar. */}
-        <span style={{ display: "flex", flexDirection: "column", gap: 4, width: "100%", minWidth: 0 }}>
+        {/* A two-line card-shaped button (label and number over the meter): its block wrapper keeps it out of the one-line label-button rule (F-D2). */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, width: "100%", minWidth: 0 }}>
           {!collapsed && (
             <span style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 6, fontSize: 10.5, lineHeight: 1 }}>
               <span style={{ color: "var(--muted-deep)" }}>{ko ? "AI 크레딧" : "AI credits"}</span>
@@ -134,7 +163,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
           >
             <span style={{ display: "block", width: `${Math.max(energy > 0 ? 3 : 0, Math.round(energy * 100))}%`, height: "100%", borderRadius: 999, background: energyColor, transition: "width 400ms ease" }} />
           </span>
-        </span>
+        </div>
       </button>
 
       {/* 잔액 부족 CTA — 웹 결제 페이지(agentlas.cloud/pricing)를 외부 브라우저로 연다. */}

@@ -62,11 +62,31 @@ const blockedAddresses = (() => {
   block.addSubnet("fe80::", 10, "ipv6");
   block.addSubnet("ff00::", 8, "ipv6");
   block.addSubnet("2001:db8::", 32, "ipv6");
+  // VD: forms that embed or tunnel to an IPv4 address (a private one included) are not public hosts either. basis: RFC 6052 NAT64 (64:ff9b::/96, 64:ff9b:1::/48),
+  // RFC 3056 6to4 (2002::/16), RFC 4380 Teredo (2001::/32), RFC 3879 site-local (fec0::/10), RFC 6666 discard (100::/64). A host reachable only through them is refused (blocked_private_address).
+  block.addSubnet("64:ff9b::", 96, "ipv6");
+  block.addSubnet("64:ff9b:1::", 48, "ipv6");
+  block.addSubnet("2002::", 16, "ipv6");
+  block.addSubnet("2001::", 32, "ipv6");
+  block.addSubnet("fec0::", 10, "ipv6");
+  block.addSubnet("100::", 64, "ipv6");
   return block;
 })();
 
 export function isBlockedAddress(address: string, family: 4 | 6): boolean {
   return blockedAddresses.check(address, family === 4 ? "ipv4" : "ipv6");
+}
+
+/**
+ * VD: a NAME that is private by its form, refused before any lookup (the resolved addresses are checked as well - this rule only saves the lookup and names the cases a resolver may answer
+ * oddly): `localhost`, a name with one label (an intranet short name), and the suffixes that RFC 6761 / RFC 8375 / common practice reserve for private networks.
+ */
+const PRIVATE_NAME_SUFFIXES = ["localhost", "local", "internal", "lan", "home", "home.arpa", "intranet", "corp", "private"] as const;
+export function isBlockedHostName(hostname: string): boolean {
+  const name = hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase().replace(/\.$/, "");
+  if (name === "" || isIP(name)) return false;     // an IP literal is judged by address, not by name
+  if (!name.includes(".")) return true;
+  return PRIVATE_NAME_SUFFIXES.some((suffix) => name === suffix || name.endsWith(`.${suffix}`));
 }
 
 export interface ResolvedAddress { address: string; family: 4 | 6 }
@@ -87,6 +107,7 @@ export async function checkPublicHttpsTarget(url: URL, resolveHost: ResolveHost 
   if (url.username || url.password) throw new PublicFetchRefusal("blocked_insecure_url", "credentials in the URL");
   const hostname = url.hostname.replace(/^\[(.*)\]$/, "$1");
   const literal = isIP(hostname);
+  if (isBlockedHostName(hostname)) throw new PublicFetchRefusal("blocked_private_address", "a private name");
   const addresses = literal ? [{ address: hostname, family: literal as 4 | 6 }] : await resolveHost(hostname);
   if (!addresses.length) throw new Error(`No address for ${hostname}.`);
   // Checked before the scheme, so a private target is named as such whatever its scheme.
@@ -187,5 +208,48 @@ export async function fetchPublicHttps(url: string, options: {
       chunks.push(value);
     }
     return { url: current.toString(), status: response.status, headers: response.headers, body: Buffer.concat(chunks) };
+  }
+}
+
+/**
+ * VD: the same hop-by-hop check and pinned connection as `fetchPublicHttps`, but the body is NOT read: the caller streams it (a 190 MiB file must not sit in memory). Redirects are followed by hand with
+ * every hop re-checked and re-pinned. The caller's `signal` ends the body; `headerTimeoutMs` bounds only the wait for the answer's headers (a stalled body is the caller's idle rule).
+ * Returns the final response; its `body` must be consumed or destroyed by the caller. Throws PublicFetchRefusal / Error (a refusal names no address of the caller's data).
+ */
+export async function openPublicHttps(url: string, options: {
+  signal: AbortSignal;
+  headerTimeoutMs: number;
+  maxRedirects?: number;
+  headers?: Record<string, string>;
+  resolveHost?: ResolveHost;
+  transport?: PinnedTransport;
+  /** VD: the only port a hop may name (443 for a file taken from outside); a hop - the first or after a redirect - on another port is refused before any connection. */
+  onlyPort?: number;
+}): Promise<{ url: string; status: number; headers: IncomingHttpHeaders; body: PinnedResponse["body"] }> {
+  const maxRedirects = options.maxRedirects ?? 3;
+  const transport = options.transport ?? defaultTransport;
+  let current: URL;
+  try { current = new URL(url); } catch { throw new PublicFetchRefusal("blocked_insecure_url", "not a URL"); }
+  for (let hop = 0; ; hop += 1) {
+    if (options.onlyPort !== undefined && Number(current.port || 443) !== options.onlyPort) throw new PublicFetchRefusal("blocked_insecure_url", "a port that is not allowed");
+    const target = await checkPublicHttpsTarget(current, options.resolveHost);
+    const controller = new AbortController();
+    const relay = (): void => controller.abort();
+    if (options.signal.aborted) controller.abort(); else options.signal.addEventListener("abort", relay, { once: true });
+    const timer = setTimeout(relay, options.headerTimeoutMs);
+    let response: PinnedResponse;
+    try {
+      response = await transport({ url: current, ...target, headers: options.headers ?? {}, signal: controller.signal });
+    } finally { clearTimeout(timer); }
+    if (REDIRECT_STATUSES.has(response.status)) {
+      options.signal.removeEventListener("abort", relay);
+      response.body.destroy();
+      const location = Array.isArray(response.headers.location) ? response.headers.location[0] : response.headers.location;
+      if (!location) throw new Error(`HTTP ${response.status} redirect without a location.`);
+      if (hop >= maxRedirects) throw new PublicFetchRefusal("too_many_redirects", `more than ${maxRedirects}`);
+      try { current = new URL(location, current); } catch { throw new PublicFetchRefusal("blocked_insecure_url", "redirect location is not a URL"); }
+      continue;
+    }
+    return { url: current.toString(), status: response.status, headers: response.headers, body: response.body };
   }
 }

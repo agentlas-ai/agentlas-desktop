@@ -28,7 +28,7 @@ import { invocationJudgmentContext } from "../runtime/judgment-context";
 import { JUDGMENT_MODEL_UNRESOLVED, judgmentModelMissing, withJudgmentModel } from "./judgment-model";
 import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
-import { runtimeFailureBlocksReplay, pinnedRuntimeCredentialOrModelUnavailable, pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
+import { effortForSelectedModel, runtimeFailureBlocksReplay, pinnedRuntimeCredentialOrModelUnavailable, pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
 import { isRuntimeCredentialUnavailable } from "../runtime/credential-access";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
 import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown } from "../runtime/runtime-cooldown";
@@ -42,6 +42,7 @@ import { decideTurnSettlement, RATE_LIMIT_MAX_RETRIES } from "../../shared/turn-
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import { RUNTIME_CAPABILITIES, runtimeRequestRefusal } from "../../shared/runtime-capabilities";
+import { currentModelCallScope, withModelCallScope, type ModelCallRole } from "../runtime/model-call-ledger";
 
 /** Keep output/authority rules fixed; task contracts and owner observations stay in system. */
 export function composeJudgmentSystemPrompt(id: string, fixed: string[], contract: string[] = [], context: string[] = []): string {
@@ -534,18 +535,21 @@ function judgmentCacheKey(kind: string, input: string): string {
 export function runtimeSelectionCacheScope(
   selection = invocationJudgmentContext()?.selection,
   selectionPolicy?: JudgmentSelectionPolicy,
+  /** A judgment's own effort (callJudgmentModelDetailed `effort`): the scope names the effort the verdict is made at, not the turn's. */
+  effort?: string,
 ): string {
-  if (selectionPolicy) return `\u0000orchestrator-pool:${selectionPolicy.poolFingerprint}`;
+  const ownEffort = effort ? `\u0000effort:${effort}` : "";
+  if (selectionPolicy) return `\u0000orchestrator-pool:${selectionPolicy.poolFingerprint}${ownEffort}`;
   if (!selection) {
     const pool = readJudgmentPool();
-    return pool.state === "unconfigured" ? "" : `\u0000orchestrator-pool:${pool.fingerprint}`;
+    return pool.state === "unconfigured" ? ownEffort : `\u0000orchestrator-pool:${pool.fingerprint}${ownEffort}`;
   }
   return `\u0000runtime:${JSON.stringify({
     kind: selection.kind,
     backend: selection.backend ?? null,
     source: selection.source ?? null,
     model: selection.model ?? null,
-    effort: selection.effort ?? null,
+    effort: effort ?? selection.effort ?? null,
     longContext: selection.longContext ?? null,
     ...(selection.acpAgentId ? { acpAgentId: selection.acpAgentId } : {}),
   })}`;
@@ -719,6 +723,8 @@ export async function callConnectedModel(opts: {
  * 하는 호출부용. text가 null이면 failure에 마지막 런타임의 진짜 사유가 실려 있다.
  */
 export async function callConnectedModelDetailed(opts: {
+  /** The model-call ledger role and phase of this call (fix-desktop-3 T3). */
+  ledger?: { role: ModelCallRole; phase: string };
   systemPrompt: string;
   input: string;
   /** Explicit user-selected images; transported as multimodal attachments, never prompt text. */
@@ -805,7 +811,15 @@ function workerFallbackFailureAllowsNext(failure: RunnerFailure, returned = fals
     : returned && failure.source === "exit" && failure.kind === "empty";
 }
 
-async function callJudgmentModelDetailed(opts: {
+/** The ledger name a judgment-model call writes under. Judgment calls without it keep the inferred `judgment` role; an authoring call (graph interview, graph patch) used to read `unscoped`. */
+type JudgmentLedgerName = { role: ModelCallRole; phase: string };
+async function callJudgmentModelDetailed(opts: Parameters<typeof callJudgmentModelDetailedBody>[0]): ReturnType<typeof callJudgmentModelDetailedBody> {
+  const named: JudgmentLedgerName | undefined = opts.ledger ?? (opts.authoring && !currentModelCallScope()?.role ? { role: "planner", phase: "authoring" } : undefined);
+  return named ? withModelCallScope(named, () => callJudgmentModelDetailedBody(opts)) : callJudgmentModelDetailedBody(opts);
+}
+async function callJudgmentModelDetailedBody(opts: {
+  /** The model-call ledger role and phase of this call (fix-desktop-3 T3). */
+  ledger?: JudgmentLedgerName;
   systemPrompt: string;
   input: string;
   /** Explicit user-selected images; transported as multimodal attachments, never prompt text. */
@@ -850,6 +864,15 @@ async function callJudgmentModelDetailed(opts: {
    * joins the candidate list; no provider outside the pin and the pool is ever tried.
    */
   pinFallback?: JudgmentPinFallback;
+  /**
+   * The effort this judgment runs at, whatever the turn or the pool member carries. A classification that blocks the
+   * turn before its model starts does not need the turn's reasoning effort (owner's machine, 30 days: turn-scoped
+   * judgments on codex at high averaged 13.4 s, at xhigh 23.8 s). Model, backend and account stay inherited. The
+   * level is resolved against the judging model's advertised levels by the shared rule (selection.ts
+   * effortForSelectedModel): a model that does not offer it gets the nearest level it has at or below, or its own
+   * default. Absent = the inherited controls, unchanged.
+   */
+  effort?: string;
 }): Promise<{ text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[] }> {
   const inherited = invocationJudgmentContext();
   const explicitSelection = opts.runtimeSelection;
@@ -1148,7 +1171,8 @@ async function callJudgmentModelDetailed(opts: {
       // when the caller does not carry a separate pin or selection-policy token.
       const selectedControls = Boolean(opts.runtimeSelection || opts.selectionPolicy || poolRoute);
       const longContext = selectedControls ? runtime.longContextEnabled : false;
-      const effort = selectedControls ? runtime.effort ?? undefined : "low";
+      const effort = opts.effort ? effortForSelectedModel(runtime, runtime.model, opts.effort) ?? undefined
+        : selectedControls ? runtime.effort ?? undefined : "low";
       runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "not_invoked", selection: {
         ...workerIdentity, kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
       }, longContext,
@@ -1865,6 +1889,8 @@ export interface SubsetSpec<V extends string> {
   requireNoTools?: true;
   /** Decoder-enforced answer shape for runners that support it (llama.cpp json_schema); others keep the output line. */
   outputSchema?: RunnerRequest["outputSchema"];
+  /** Effort for this selection instead of the turn's (callJudgmentModelDetailed `effort`); also the verdict's cache scope. */
+  effort?: string;
 }
 
 export interface SubsetVerdict<V extends string> {
@@ -1921,7 +1947,7 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
   const limit = spec.maxInputChars ?? MAX_INPUT_CHARS;
   const input = spec.maxInputChars === null || spec.input.length <= limit ? spec.input : spec.input.slice(0, limit);
 
-  const runtimeScope = runtimeSelectionCacheScope();
+  const runtimeScope = runtimeSelectionCacheScope(undefined, undefined, spec.effort);
   const signature = `${intentSignature(input)}${runtimeScope}`;
   const cacheKey = `${subsetCacheKey(spec.kind, spec.labels, input)}${runtimeScope}`;
   const cached = hasActiveVerificationSession() ? undefined : subsetCache.get(cacheKey);
@@ -1965,6 +1991,7 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
     requireNoTools: spec.requireNoTools,
     ...(spec.requireNoTools ? { accept: (text: string) => parseSubset<V>(text, spec.labels) !== null } : {}),
     ...(spec.outputSchema ? { outputSchema: spec.outputSchema } : {}),
+    ...(spec.effort ? { effort: spec.effort } : {}),
   });
   const text = detailed.text;
   if (text === null) return { ...undecided, reason: detailed.failure?.providerCode ?? undecided.reason,
@@ -1973,7 +2000,7 @@ export async function judgeSubset<V extends string>(spec: SubsetSpec<V>): Promis
   const parsed = parseSubset<V>(text, spec.labels);
   if (!parsed) return { ...undecided, decisionFailure: "invalid_output", failureKind: "exit", attempts: detailed.attempts };
   const verdict: SubsetVerdict<V> = { ...parsed, source: "llm" };
-  if (runtimeScope === runtimeSelectionCacheScope()) {
+  if (runtimeScope === runtimeSelectionCacheScope(undefined, undefined, spec.effort)) {
     subsetCache.set(cacheKey, verdict);
     durableSubsetPut(spec.kind, signature, verdict);
   }

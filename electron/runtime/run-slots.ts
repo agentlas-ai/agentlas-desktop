@@ -7,7 +7,8 @@
 // CPU/GPU를 쓰므로 이 풀이 아니라 local-inference-run-slots.ts의 별도 예산으로 게이트한다
 // (selection.ts의 withRunSlot/withLocalInferenceSlot 참고).
 import { getAgentConcurrency } from "../store/concurrency";
-import { currentRunPriority, type RunPriority } from "./run-priority";
+import { currentRunPriority, memberQueueReporter, type RunPriority } from "./run-priority";
+import { createLendBudget } from "./run-slot-lease";
 
 let inUse = 0;
 /** Slots held by owner runs (part of inUse). */
@@ -18,8 +19,16 @@ let maintenance = false;
  * starts now instead of waiting for automation, a Goal pass or a teammate to finish. Bounded: at most one extra child.
  */
 export const OWNER_RESERVED_SLOTS = 1;
+/** How many turns may have let their slot go while a person decides (run-slot-lease.ts): at most the limit, so live CLIs <= 2 x limit. */
+export const runSlotLendBudget = createLendBudget(() => concurrencyLimit());
 /** Last moment a run held or released a slot (process start counts as activity). */
 let lastSlotActivityAt = Date.now();
+/**
+ * Runs in progress that hold no slot of this pool (N8): an API run (BYOK, Agentlas serving) and a local-inference run (its own pool).
+ * They are "the app is working" for the busy signal and the quiet clock, but they never wait for or take a slot here, so an owner's
+ * API turn starts exactly as before.
+ */
+let activityRuns = 0;
 
 interface Waiter {
   resolve: (release: () => void) => void;
@@ -89,10 +98,49 @@ function abortError(): Error {
   return e;
 }
 
+const busyListeners = new Set<(busy: boolean) => void>();
+/**
+ * Tells a listener when this process goes from no run to one, and from its last run to none. Every run takes a slot,
+ * also one that never keeps a resident CLI (an API-only run), so this is the process's "is anything running" signal.
+ * Returns the function that removes the listener.
+ */
+export function onRunSlotsBusyChange(listener: (busy: boolean) => void): () => void {
+  busyListeners.add(listener);
+  return () => { busyListeners.delete(listener); };
+}
+let busyAnnounced = false;
+/** Announces a change only: a release that hands its slot straight to a queued run stays "busy" and says nothing. */
+function syncBusy(): void {
+  const busy = inUse > 0 || activityRuns > 0;
+  if (busy === busyAnnounced) return;
+  busyAnnounced = busy;
+  for (const listener of [...busyListeners]) { try { listener(busy); } catch { /* a listener must not break admission */ } }
+}
+
+/**
+ * Marks one run that holds no slot of this pool as working until the returned function is called (idempotent). Starting costs one
+ * counter and a listener call only when the process goes from idle to working; it never waits.
+ */
+export function beginRunActivity(): () => void {
+  activityRuns += 1;
+  lastSlotActivityAt = Date.now();
+  syncBusy();
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    activityRuns -= 1;
+    lastSlotActivityAt = Date.now();
+    syncBusy();
+    notifyBackgroundStart();
+  };
+}
+
 function admit(priority: RunPriority): () => void {
   inUse += 1;
   if (priority === "owner") ownerInUse += 1;
   lastSlotActivityAt = Date.now();
+  syncBusy();
   return makeRelease(priority);
 }
 
@@ -105,6 +153,9 @@ function makeRelease(priority: RunPriority): () => void {
     if (priority === "owner") ownerInUse -= 1;
     lastSlotActivityAt = Date.now();
     pump();
+    // After pump: a waiter that took the freed slot keeps the process busy, so no "idle" is announced in between.
+    syncBusy();
+    notifyBackgroundStart();
   };
 }
 
@@ -146,8 +197,11 @@ export function acquireRunSlot(
     : effectivePriority === "interactive" ? ownerQueue.length + interactiveQueue.length : queuedCount();
   if (ahead === 0 && canAdmit(effectivePriority)) return Promise.resolve(admit(effectivePriority));
   const queue = queueFor(effectivePriority);
+  // A member turn of a lead room says "waiting" / "let in" through its own scope, so its time limit does not run while it waits
+  // (the tool-need judgement's slot wait included - its status line is dropped, this is not).
+  const memberQueue = memberQueueReporter?.() ?? null;
   return new Promise<() => void>((resolve, reject) => {
-    const w: Waiter = { resolve, reject, signal };
+    const w: Waiter = { resolve: memberQueue ? (release) => { memberQueue(false); resolve(release); } : resolve, reject, signal };
     if (signal) {
       w.onAbort = () => {
         const i = queue.indexOf(w);
@@ -157,6 +211,7 @@ export function acquireRunSlot(
       signal.addEventListener("abort", w.onAbort, { once: true });
     }
     queue.push(w);
+    memberQueue?.(true);
     try {
       // 위치는 전체 대기 인원 기준 — 사용자에게 "몇 번째"인지의 근사치면 충분하다.
       onQueued?.(queuedCount());
@@ -180,6 +235,7 @@ export function tryAcquireRuntimeMaintenance(): (() => void) | null {
     released = true;
     maintenance = false;
     pump();
+    notifyBackgroundStart();
   };
 }
 
@@ -191,7 +247,7 @@ export function tryAcquireRuntimeMaintenance(): (() => void) | null {
  * meaning "the owner is away" and idle-gated maintenance starved. 0 while any run holds or awaits one.
  */
 export function runSlotsQuietForMs(now = Date.now()): number {
-  if (inUse > 0 || queuedCount() > 0) return 0;
+  if (inUse > 0 || activityRuns > 0 || queuedCount() > 0) return 0;
   return Math.max(0, now - lastSlotActivityAt);
 }
 
@@ -207,4 +263,30 @@ export function runSlotQueueBreakdown(): { interactive: number; background: numb
 /** The owner lane (NH20): owner messages waiting and owner runs holding a slot (the latter may exceed the limit by one). */
 export function runSlotOwnerLane(): { queued: number; inUse: number } {
   return { queued: ownerQueue.length, inUse: ownerInUse };
+}
+
+/** True when a background run would start at once: a free slot, nobody waiting, no CLI update in progress. */
+export function backgroundRunCouldStartNow(): boolean {
+  return !maintenance && queuedCount() === 0 && inUse < concurrencyLimit();
+}
+
+const backgroundStartListeners = new Set<() => void>();
+
+/**
+ * Calls `listener` once, at the next slot release (or end of a CLI update) after which a background run could start at
+ * once. For unattended work that must claim nothing while it would only wait in the queue: the memory curator's job lease
+ * and model deadline both run from the claim, so a wait was recorded as a model failure. A signal, not a timer: nothing
+ * polls while the slots are taken. Registering the same function again is still one registration.
+ */
+export function onceBackgroundRunCouldStart(listener: () => void): void {
+  backgroundStartListeners.add(listener);
+}
+
+function notifyBackgroundStart(): void {
+  if (backgroundStartListeners.size === 0 || !backgroundRunCouldStartNow()) return;
+  const listeners = [...backgroundStartListeners];
+  backgroundStartListeners.clear();
+  for (const listener of listeners) {
+    try { listener(); } catch { /* A listener cannot block a slot release. */ }
+  }
 }

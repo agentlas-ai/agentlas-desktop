@@ -85,7 +85,7 @@ export type GoalPlanDecisionKind =
   | "owner_edit" | "marker_apply" | "marker_context"
   /** Agent Strategy (electron/long-run/agent-strategy.ts): a KPI state transition receipt, and the outcome of a strategy shift. */
   | "kpi_state" | "strategy_shift"
-  /** The AGI unblocker handed a repeatedly failing Agentlas capability to the runtime's own tools for a while (agi/actions.ts use_native_harness). */
+  /** A repeatedly failing Agentlas capability was handed to the runtime's own tools for a while (harness/native-harness-note.ts). */
   | "native_harness";
 
 export interface GoalPlanDecisionRow {
@@ -259,7 +259,7 @@ export { tacticPayload as goalPlanTacticPayload };
 /** Main-only exact compare-and-apply. The callback is synchronous local work, never provider/network work. */
 export function withCurrentGoalPlan<T>(goalId: string, expectedIdentity: string, apply: (plan: LiveGoalPlan) => T,
   /**
-   * The plan moved since `expectedIdentity` was taken (any node write moves it: an owner panel edit, an AGI hint, another
+   * The plan moved since `expectedIdentity` was taken (any node write moves it: an owner panel edit, another
    * branch's report). When the caller can show, from the CURRENT plan, that what its work names is unchanged, it returns
    * true and the work applies to the current plan by node id instead of being dropped as stale. Runs inside the transaction.
    */

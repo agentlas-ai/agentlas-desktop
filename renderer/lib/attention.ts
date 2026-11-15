@@ -56,15 +56,25 @@ export interface AttentionItem {
   personalAgent?: true;
 }
 
+/*
+ * When the pending lists are read (rule: a signal, not a timer on unchanged state):
+ *  - a new question is a chat message, and Main announces every chat write as store:changed {chat} (its own writes and
+ *    the rows the background service inserts, electron/store/external-chat-changes.ts). That push drives the read,
+ *    hidden or not, so the dock badge still rises while the app is put away.
+ *  - an answer or a snooze committed from another surface (the phone, another window) and a browser approval resolved
+ *    elsewhere are NOT announced by Main. Only for those a visible window keeps reading on the timers below.
+ *    A hidden window runs no timer at all.
+ */
 const POLL_MS = 3_000;
-const POLL_HIDDEN_MS = 15_000;
 const SLOW_POLL_MS = 15_000;
-const SLOW_POLL_HIDDEN_MS = 60_000;
+/** While hidden, a burst of chat changes is read at most this often (the old hidden rate); the first one is read at once. */
+const HIDDEN_CHANGE_WINDOW_MS = 15_000;
 /** The dock badge count is sent when it changes, and re-sent this often so a reloaded window stays right. */
 const BADGE_HEARTBEAT_MS = 60_000;
 let badgeSent: { count: number; at: number } | null = null;
 /** Snoozed confirmations the last rebuild hid; a snooze that ran out since then must rebuild (it is time-based). */
 let snoozedAtRebuild = 0;
+let snoozeExpiryTimer: number | null = null;
 
 let confirmations: PendingConfirmation[] = [];
 let browserApprovals = new Map<string, BrowserApprovalRequestEvent>();
@@ -77,6 +87,16 @@ const chatLookups = new Set<string>();
 let orphansRevealed = false;
 
 const listeners = new Set<() => void>();
+/**
+ * The two lists this module already reads, shared with the screens that show the same lists (the approval inbox, the fleet strip,
+ * the personal agent's supervised approvals) so they do not read them again on their own timers. Each reference changes only when
+ * the list does: `null` until the first answer.
+ */
+const listWatchers = new Set<() => void>();
+let confirmationList: PendingConfirmation[] | null = null;
+let browserApprovalList: BrowserApprovalRequestEvent[] = [];
+const NO_BROWSER_APPROVALS: BrowserApprovalRequestEvent[] = [];
+function notifyListWatchers(): void { for (const watcher of [...listWatchers]) watcher(); }
 let started = false;
 let version = 0;
 type AttentionCounts = { approvals: number; results: number };
@@ -113,9 +133,22 @@ function rebuild(): void {
     else pushChat(`browser:${request.requestId}`, "approval", owner?.chatId ?? null, owner?.surface ?? null, null, request.summary);
   }
   snoozedAtRebuild = 0;
+  let soonestSnoozeEnd = Number.POSITIVE_INFINITY;
   for (const item of confirmations) {
     if (!isPendingConfirmationSnoozed(item)) pushChat(`confirm:${item.sourceMessageId}`, "approval", item.chatId, null, null, item.chatTitle ?? null);
-    else snoozedAtRebuild += 1;
+    else {
+      snoozedAtRebuild += 1;
+      const end = Date.parse(item.snoozedUntil ?? "");
+      if (Number.isFinite(end)) soonestSnoozeEnd = Math.min(soonestSnoozeEnd, end);
+    }
+  }
+  // A snooze ends at a known time: the question returns to the list (and the dock badge) then, also while the window is
+  // hidden and nothing is polled.
+  if (snoozeExpiryTimer !== null) window.clearTimeout(snoozeExpiryTimer);
+  snoozeExpiryTimer = null;
+  if (Number.isFinite(soonestSnoozeEnd)) {
+    snoozeExpiryTimer = window.setTimeout(() => { snoozeExpiryTimer = null; rebuild(); },
+      Math.min(Math.max(0, soonestSnoozeEnd - Date.now()) + 50, 2_147_000_000));
   }
   for (const chatId of finishedUnseen) pushChat(`done:${chatId}`, "result", chatId);
   for (const member of orgUnread) {
@@ -171,13 +204,21 @@ function lookupChat(chatId: string): void {
   });
 }
 
-/** Polls overlap (3 s timer, focus, attention-refresh after an answer); only the newest read may land. */
+/** Reads overlap (store change, visible 3 s timer, attention-refresh after an answer); only the newest read may land. */
 let confirmationPollStarted = 0;
 let confirmationPollApplied = 0;
+
+/** The 3 s timer reads for answers given elsewhere (the phone); with no question open nothing can be answered, so it
+ * only keeps a slow net under a missed store event. Every other trigger (store change, focus, answer) reads at once. */
+/** Longer than the 30 s list Main holds (electron/confirm/index.ts PENDING_CONFIRMATIONS_TTL_MS): an idle read that fell
+ * inside that hold re-read the same list and the net took 59 s. Worst case now 33 s + one 3 s tick. */
+const IDLE_CONFIRMATION_POLL_MS = 33_000;
+let confirmationsReadAtMs = 0;
 
 async function pollConfirmations(): Promise<void> {
   const api = ipc();
   if (!api?.confirm?.listPending) return;
+  confirmationsReadAtMs = Date.now();
   const poll = ++confirmationPollStarted;
   try {
     const list = await api.confirm.listPending();
@@ -185,7 +226,9 @@ async function pollConfirmations(): Promise<void> {
     if (poll < confirmationPollApplied) return;
     confirmationPollApplied = poll;
     const same = list.length === confirmations.length && list.every((item, index) => item.sourceMessageId === confirmations[index]?.sourceMessageId && item.snoozedUntil === confirmations[index]?.snoozedUntil);
+    const firstAnswer = confirmationList === null;
     confirmations = list;
+    if (!same || firstAnswer) { confirmationList = list; notifyListWatchers(); }
     // 독 배지·독 튕김·"승인 대기" OS 알림. 예전엔 AppShell 폴링에만 물려 One 에선 멈췄다.
     // Unchanged counts are not re-sent every 3 s; Main only acts on a change (perf review R-15).
     if (!badgeSent || badgeSent.count !== list.length || Date.now() - badgeSent.at >= BADGE_HEARTBEAT_MS) {
@@ -198,12 +241,18 @@ async function pollConfirmations(): Promise<void> {
   }
 }
 
+/** A request Main already closed (answered anywhere, or expired) never comes back from a slower list read. Bounded. */
+const closedBrowserRequests = new Set<string>();
+
 function mergeBrowser(incoming: BrowserApprovalRequestEvent[], replace: boolean): void {
   const now = Date.now();
   const next = replace ? new Map<string, BrowserApprovalRequestEvent>() : new Map(browserApprovals);
   for (const item of incoming) {
-    if (item.expiresAt <= now) next.delete(item.requestId);
-    else next.set(item.requestId, item);
+    if (item.expiresAt <= now) {
+      if (closedBrowserRequests.size >= 500) closedBrowserRequests.clear();
+      closedBrowserRequests.add(item.requestId);
+      next.delete(item.requestId);
+    } else if (!closedBrowserRequests.has(item.requestId)) next.set(item.requestId, item);
   }
   for (const [id, item] of next) if (item.expiresAt <= now) next.delete(id);
   // The 15 s poll usually returns the same requests: then nothing is rebuilt and no subscriber re-renders.
@@ -212,6 +261,7 @@ function mergeBrowser(incoming: BrowserApprovalRequestEvent[], replace: boolean)
     return previous === item || (previous !== undefined && JSON.stringify(previous) === JSON.stringify(item));
   });
   browserApprovals = next;
+  if (!same) { browserApprovalList = [...next.values()]; notifyListWatchers(); }
   // 메인이 정한 만료 시각에 점에서도 빠지게 — 다음 폴링까지 남아 있지 않게 한다.
   if (browserExpiryTimer !== null) window.clearTimeout(browserExpiryTimer);
   browserExpiryTimer = null;
@@ -250,8 +300,28 @@ function start(): void {
   subscribeToolApprovals(rebuild);
   subscribeAskUserQueue(rebuild);
   ipcEvents()?.onBrowserApproval?.((request) => mergeBrowser([request], false));
-  // A room that stopped (or started) being the personal agent's is looked up again ("내가 직접 이어가기").
+  // A chat or Goal change may add or close a question: read the list now, then at most once per window while changes
+  // keep coming (a streaming run writes many rows). Leading and trailing, so the last change is never dropped.
+  let confirmationsReadAt = Number.NEGATIVE_INFINITY;
+  let confirmationsTrailing: number | null = null;
+  const readConfirmationsOnChange = () => {
+    if (confirmationsTrailing !== null) return;
+    const windowMs = document.visibilityState === "hidden" ? HIDDEN_CHANGE_WINDOW_MS : POLL_MS;
+    const wait = confirmationsReadAt + windowMs - Date.now();
+    // A hidden window has no slow timer either: a teammate's unread post is a chat change too, so it is read here.
+    const read = () => {
+      confirmationsReadAt = Date.now();
+      void pollConfirmations();
+      if (document.visibilityState === "hidden") refreshSlow();
+    };
+    if (wait <= 0) { read(); return; }
+    confirmationsTrailing = window.setTimeout(() => { confirmationsTrailing = null; read(); }, wait);
+  };
   ipcEvents()?.onStoreChanged?.((change) => {
+    if (change.entity === "chat" || change.entity === "long-run") readConfirmationsOnChange();
+    // The org roster (members added, archived, marked read) is what the unread list is built from.
+    if (change.entity === "one-org") refreshSlow();
+    // A room that stopped (or started) being the personal agent's is looked up again ("내가 직접 이어가기").
     if (change.entity !== "chat" || !change.id || !chatInfo.has(change.id)) return;
     chatInfo.delete(change.id);
     chatLookups.delete(change.id);
@@ -270,16 +340,28 @@ function start(): void {
   ipcEvents()?.onActiveChats?.(applyActive);
   void pollConfirmations();
   refreshSlow();
-  let fast = window.setInterval(() => void pollConfirmations(), POLL_MS);
-  let slow = window.setInterval(() => refreshSlow(), SLOW_POLL_MS);
-  // 승인 대기(독 배지)는 앱을 내려놓은 사이에도 떠야 하므로 숨김 중에도 돈다 — 간격만 늘린다.
+  // Visible only: these timers exist for the changes Main does not announce (see POLL_MS). While hidden nothing
+  // is polled; a new question still reaches the dock badge through the store-change read above, and coming back
+  // to the window reads everything once.
+  let fast: number | null = null;
+  let slow: number | null = null;
+  const armVisibleTimers = () => {
+    if (fast !== null) window.clearInterval(fast);
+    if (slow !== null) window.clearInterval(slow);
+    fast = slow = null;
+    if (document.visibilityState === "hidden") return;
+    fast = window.setInterval(() => {
+      // A clock that went back makes the age negative: read then, not after the clock catches up.
+      const age = Date.now() - confirmationsReadAtMs;
+      if (confirmations.length === 0 && age >= 0 && age < IDLE_CONFIRMATION_POLL_MS) return;
+      void pollConfirmations();
+    }, POLL_MS);
+    slow = window.setInterval(() => refreshSlow(), SLOW_POLL_MS);
+  };
+  armVisibleTimers();
   document.addEventListener("visibilitychange", () => {
-    window.clearInterval(fast);
-    window.clearInterval(slow);
-    const hidden = document.visibilityState === "hidden";
-    fast = window.setInterval(() => void pollConfirmations(), hidden ? POLL_HIDDEN_MS : POLL_MS);
-    slow = window.setInterval(() => refreshSlow(), hidden ? SLOW_POLL_HIDDEN_MS : SLOW_POLL_MS);
-    if (!hidden) { void pollConfirmations(); refreshSlow(); }
+    armVisibleTimers();
+    if (document.visibilityState !== "hidden") { void pollConfirmations(); refreshSlow(); }
   });
   window.addEventListener("agentlas:attention-refresh", () => { void pollConfirmations(); refreshSlow(); });
   window.addEventListener("focus", () => refreshSlow());
@@ -290,6 +372,21 @@ function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   start();
   return () => { listeners.delete(listener); };
+}
+function subscribeLists(watcher: () => void): () => void {
+  listWatchers.add(watcher);
+  start();
+  return () => { listWatchers.delete(watcher); };
+}
+
+/** The questions waiting for the owner, as Main last listed them (null until the first answer). One read for every screen. */
+export function usePendingConfirmationList(): readonly PendingConfirmation[] | null {
+  return useSyncExternalStore(subscribeLists, () => confirmationList, () => null);
+}
+
+/** The browser approvals Main is waiting on (answered or expired ones drop out on the next read or at their expiry). */
+export function usePendingBrowserApprovals(): readonly BrowserApprovalRequestEvent[] {
+  return useSyncExternalStore(subscribeLists, () => browserApprovalList, () => NO_BROWSER_APPROVALS);
 }
 const SERVER = { version: 0, items: [] as AttentionItem[], visible: new Set<string>() as ReadonlySet<string>, orphansRevealed: false, byChat: new Map<string, AttentionCounts>(), pendingConfirmations: 0 };
 
@@ -403,6 +500,80 @@ export function useChatAttention(chatId: string | null | undefined): { approvals
     () => chatId ? snapshot.byChat.get(chatId) ?? null : null,
     () => null,
   );
+}
+
+/** What one waiting item is, read from its key (the keys are made in rebuild() above: tool: / browser: = an approval, ask: / confirm: = a question, done: = a finished run). */
+export type AttentionItemClass = "approval" | "question" | "done" | "other";
+export function attentionItemClass(key: string): AttentionItemClass {
+  if (key.startsWith("tool:") || key.startsWith("browser:")) return "approval";
+  if (key.startsWith("ask:") || key.startsWith("confirm:")) return "question";
+  if (key.startsWith("done:")) return "done";
+  return "other";
+}
+
+/**
+ * The count on the Dashboard menu row: every item waiting for an answer that is not on the screen the owner is looking at.
+ * It is the set the old product switcher counted as `approvals` (useAttention): the same items, the same on-screen and on-Build filter.
+ * No read of its own: it counts what this module already holds.
+ */
+export function usePendingApprovalCount(pathname: string): number {
+  return useSyncExternalStore(subscribe, () => {
+    const onBuild = pathname === "/build" || pathname.startsWith("/build/");
+    const here = surfaceForPath(pathname);
+    let count = 0;
+    for (const item of snapshot.items) {
+      if (item.kind !== "approval") continue;
+      if (item.chatId) { if (snapshot.visible.has(item.chatId)) continue; }
+      else if (item.href === "/build") { if (onBuild) continue; }
+      else if (item.href === "/science") { if (here === "science") continue; }
+      else if (item.href === "/one") { if (here === "one") continue; }
+      count += 1;
+    }
+    return count;
+  }, () => 0);
+}
+
+export interface ChatWaiting { approvals: number; questions: number; done: number; personalAgentHref: string | null }
+const NO_WAITING: ReadonlyMap<string, ChatWaiting> = new Map();
+/**
+ * Per chat, what waits there: how many approvals, how many questions, whether a run finished unseen. The Dashboard's Work in progress cards
+ * read this (a red dot and the kind in words). Same map while the lists are unchanged.
+ */
+export function useWaitingByChat(): ReadonlyMap<string, ChatWaiting> {
+  const state = useSyncExternalStore(subscribe, () => snapshot, () => SERVER);
+  return useMemo(() => {
+    if (state.items.length === 0) return NO_WAITING;
+    const map = new Map<string, ChatWaiting>();
+    for (const item of state.items) {
+      if (!item.chatId || state.visible.has(item.chatId)) continue;
+      const kind = attentionItemClass(item.key);
+      if (kind === "other") continue;
+      const row = map.get(item.chatId) ?? { approvals: 0, questions: 0, done: 0, personalAgentHref: null };
+      if (kind === "approval") row.approvals += 1; else if (kind === "question") row.questions += 1; else row.done += 1;
+      if (item.personalAgent && item.href) row.personalAgentHref = item.href;
+      map.set(item.chatId, row);
+    }
+    return map;
+  }, [state]);
+}
+
+const NO_CONFIRMATIONS: readonly PendingConfirmation[] = [];
+const confirmationsByChat = new Map<string, readonly PendingConfirmation[]>();
+/**
+ * The questions one chat waits on. A chat on screen is left out of the dots (they would point at where the person already
+ * is), so a pane that cannot draw the answer card itself reads them here and says so. Same array while unchanged.
+ */
+export function useChatConfirmations(chatId: string | null | undefined): readonly PendingConfirmation[] {
+  return useSyncExternalStore(subscribe, () => {
+    if (!chatId) return NO_CONFIRMATIONS;
+    const mine = confirmations.filter((item) => item.chatId === chatId && !isPendingConfirmationSnoozed(item));
+    if (mine.length === 0) { confirmationsByChat.delete(chatId); return NO_CONFIRMATIONS; }
+    const before = confirmationsByChat.get(chatId);
+    if (before && before.length === mine.length && before.every((item, index) => item.sourceMessageId === mine[index].sourceMessageId)) return before;
+    if (confirmationsByChat.size > 64) confirmationsByChat.clear();
+    confirmationsByChat.set(chatId, mine);
+    return mine;
+  }, () => NO_CONFIRMATIONS);
 }
 
 /** The shared shell only needs this count; unrelated results must not render its entire tree. */

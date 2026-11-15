@@ -2,10 +2,11 @@ import { createHash, randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 import { hasChatFileMessageBinding } from "../store/chat-file-message-bindings";
 import { VideoCancelFence } from "./video-cancel-fence";
+import { CHAT_VIDEO_MAX_BYTES } from "./chat-video-limits";
 
 /** Bounds are independent of the WebSocket/relay queue. This class never exposes a host path. */
 export const CHAT_VIDEO_CHUNK_BYTES = 1024 * 1024;
-const MAX_BYTES = 64 * 1024 * 1024;
+const MAX_BYTES = CHAT_VIDEO_MAX_BYTES;
 const MAX_TRANSFERS = 4;
 const TTL_MS = 10 * 60_000;
 const VIDEO_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm", "video/x-m4v", "video/ogg"]);

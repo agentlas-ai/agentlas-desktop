@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import type { Session } from "electron";
+import { isElectronMainProcess } from "../main-process-host";
 import type { McpInvocationEvent } from "../../shared/types";
 import { registrableDomain } from "../../shared/registrable-domain";
 import type { NativeBrowserRelayGrant } from "./native-cdp-relay";
@@ -59,6 +60,9 @@ function consentDomains(domains: readonly string[]): Promise<{ profileId: string
 async function readStore(surface: BrowserCookieSurface, domains: readonly string[]): Promise<CookieMetadata[] | null> {
   const recoveryDomains = recoveryCookieDomains(domains);
   if (surface === "native-partition") {
+    // Only the window host owns this session. Every native-partition write below starts from this read, so "unreadable"
+    // (never "empty") keeps a background-service turn from reaching the Electron-only importer.
+    if (!isElectronMainProcess()) return null;
     // The live session is authoritative, including an empty store which may not yet have a SQLite file.
     try {
       const rows = await electronSession.fromPartition(NATIVE_PARTITION).cookies.get({});
@@ -97,7 +101,7 @@ function loopbackWs(value: unknown, port: number): string | null {
 
 async function cdpPages(): Promise<CdpPageTarget[]> {
   const { browserCdpPort } = await import("../mcp-tools/browser-cdp-launcher");
-  const { fetchCdpJson } = await import("./native-session-cookie-import");
+  const { fetchCdpJson } = await import("./cdp-json");
   const port = browserCdpPort();
   const list = await fetchCdpJson(port, "/json/list");
   if (!Array.isArray(list)) return [];
@@ -263,7 +267,7 @@ export function dedicatedBrowserPages(): Promise<CdpPageTarget[]> {
  */
 export async function dedicatedBrowserWindowBounds(): Promise<Array<{ x: number; y: number; width: number; height: number }>> {
   const { browserCdpPort } = await import("../mcp-tools/browser-cdp-launcher");
-  const { fetchCdpJson } = await import("./native-session-cookie-import");
+  const { fetchCdpJson } = await import("./cdp-json");
   const port = browserCdpPort();
   const version = await fetchCdpJson(port, "/json/version") as { webSocketDebuggerUrl?: unknown } | null;
   const ws = loopbackWs(version?.webSocketDebuggerUrl, port);
@@ -416,7 +420,7 @@ async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[], domains: read
   let writeDispatched = false;
   try {
     assertLoginImportCurrent(scope);
-    const { fetchCdpJson } = await import("./native-session-cookie-import");
+    const { fetchCdpJson } = await import("./cdp-json");
     assertLoginImportCurrent(scope);
     const port = launcher.browserCdpPort();
     const version = await fetchCdpJson(port, "/json/version") as { webSocketDebuggerUrl?: unknown } | null;
@@ -548,9 +552,9 @@ async function feedStore(input: { from: BrowserCookieSurface; to: BrowserCookieS
   const scope = await consentDomains(input.domains);
   if (!scope) return { state: "not-consented", written: 0 };
   if (input.from === "cdp-profile" && input.to === "native-partition") {
-    const { syncConnectBrowserSession } = await import("./native-session-cookie-import");
     const state = automaticRecoveryDestination(await readStore(input.to, input.domains), input.domains, Date.now() / 1_000);
     if (state !== "empty") return { state: state === "protected" ? "destination-protected" : "destination-unreadable", written: 0 };
+    const { syncConnectBrowserSession } = await import("./native-session-cookie-import");
     const receipt = await syncConnectBrowserSession({ domains: scope.domains, reason: "refresh" });
     return receipt.ok && receipt.imported > 0 ? { state: "imported", written: receipt.imported } : { state: "failed", written: 0 };
   }

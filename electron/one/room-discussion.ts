@@ -16,9 +16,14 @@ import {
   RoomDiscussionEngine, SpeakerCaps, type RoomMember, type RoomRoster, type SpeakerHandle, type SpeakerRunnerPort, type SpeakerSettled,
 } from "./room-discussion-core";
 import { createRoomDiscussionStore, type RoomDb } from "./room-discussion-store";
+import { createTurnWatch, type TurnWatch } from "./room-turn-watch";
 
-/** A speaker that has not settled after this long is cancelled and reported as `turn_timeout`. */
-export const SPEAKER_TURN_TIMEOUT_MS = 6 * 60_000;
+/**
+ * A speaker whose run goes SILENT for the runner's own silence limit (invocation/outer-silence.ts, derived from the runner, not set here) is cancelled and
+ * reported as `turn_timeout`. It used to be an absolute 6 minutes from the start, which cut a healthy speaker that was still producing
+ * (desktop values S2, audit risk ga-3; no basis for the 6 minutes was found: the number is from the first release of this file).
+ * Without an event feed (`invocation.onEvent` absent: a gate's stub) the same limit counts from the start, as before.
+ */
 
 /** Services the wiring needs. Production resolves them lazily; the gates inject stubs. */
 export interface RoomDiscussionServices {
@@ -35,6 +40,8 @@ export interface RoomDiscussionServices {
     start(request: Record<string, unknown>): { runId: string };
     cancel(runId: string): unknown;
     onSettled(listener: (envelope: { runId: string; chatId: string; receipt: { status: string } }) => void): () => void;
+    /** Every event of every run (a heartbeat carries `activity.code` runtime_wait). Optional: see SPEAKER_TURN limit above. */
+    onEvent?(listener: (envelope: { runId: string; event: { activity?: { code?: string } } }) => void): () => void;
   };
   slots(): { inUse: number; queued: number; limit: number };
   emit(chatId: string): void;
@@ -64,7 +71,10 @@ function lastAssistantSince(services: RoomDiscussionServices, chatId: string, si
 export function createSpeakerRunner(services: RoomDiscussionServices, options: { timeoutMs?: number } = {}): SpeakerRunnerPort {
   const waiting = new Map<string, (settled: SpeakerSettled) => void>();
   let unsubscribe: (() => void) | null = null;
+  let unsubscribeEvents: (() => void) | null = null;
+  const watches = new Map<string, TurnWatch>();
   const ensureListener = () => {
+    if (!unsubscribeEvents && services.invocation.onEvent) unsubscribeEvents = services.invocation.onEvent((envelope) => { watches.get(envelope.runId)?.event(envelope.event?.activity?.code); });
     if (unsubscribe) return;
     unsubscribe = services.invocation.onSettled((envelope) => {
       const resolve = waiting.get(envelope.runId);
@@ -110,14 +120,19 @@ export function createSpeakerRunner(services: RoomDiscussionServices, options: {
         waiting.delete(runId);
         throw error;
       }
-      const timer = setTimeout(() => {
-        if (!waiting.has(runId)) return;
-        waiting.delete(runId);
-        try { services.invocation.cancel(runId); } catch { /* the run may already be gone */ }
-        settle({ status: "failed", text: null, errorCode: "turn_timeout" });
-      }, options.timeoutMs ?? SPEAKER_TURN_TIMEOUT_MS);
-      timer.unref?.();
-      void done.finally(() => clearTimeout(timer));
+      const limitMs = options.timeoutMs ?? (require("../invocation/outer-silence") as typeof import("../invocation/outer-silence")).outerSilenceLimitMs(); // eslint-disable-line @typescript-eslint/no-require-imports
+      const watch = createTurnWatch({
+        timeoutMs: limitMs,
+        onTimeout: () => {
+          if (!waiting.has(runId)) return;
+          waiting.delete(runId);
+          try { services.invocation.cancel(runId); } catch { /* the run may already be gone */ }
+          settle({ status: "failed", text: null, errorCode: "turn_timeout" });
+        },
+      });
+      watches.set(runId, watch);
+      watch.start();
+      void done.finally(() => { watch.stop(); watches.delete(runId); });
       const handle: SpeakerHandle = {
         runId, childChatId: child, done,
         cancel: () => {
@@ -251,6 +266,7 @@ function productionServices(): RoomDiscussionServices {
       start: (request) => invocation().start(request as never, undefined, undefined, undefined, "one-dispatch-brief"),
       cancel: (runId) => invocation().cancel(runId),
       onSettled: (listener) => invocation().onSettled(listener as never),
+      onEvent: (listener) => invocation().onEvent(listener as never),
     },
     slots() {
       const { runSlotStats } = require("../runtime/run-slots") as typeof import("../runtime/run-slots");

@@ -110,7 +110,7 @@ export function CloudSaveChoiceDialog({
         <div className="build-cloud-choice-package" title={packageName}>
           <span className="build-cloud-choice-package-dot" />
           <strong>{packageName}</strong>
-          <span>{ko ? "이 컴퓨터에 설치됨" : "Installed on this computer"}</span>
+          <span>{ko ? "이 데스크탑에 설치됨" : "Installed on this computer"}</span>
         </div>
 
         <div className="build-cloud-choice-actions">
@@ -139,7 +139,7 @@ export function CloudSaveChoiceDialog({
             <span className="build-cloud-choice-option-icon"><IconBuilding size={18} /></span>
             <span>
               <strong>{ko ? "로컬에만 저장" : "Keep local only"}</strong>
-              <small>{ko ? "네트워크 연결 없이 이 컴퓨터에만" : "Only on this computer; no network call"}</small>
+              <small>{ko ? "네트워크 연결 없이 이 데스크탑에만" : "Only on this computer; no network call"}</small>
             </span>
           </button>
         </div>

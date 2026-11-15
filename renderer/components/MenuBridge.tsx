@@ -141,7 +141,7 @@ export function MenuBridge() {
     {shortcuts.map(({ label, keys, icon }) => <div key={label} style={{display: "flex", alignItems: "center", gap: 10, minHeight: 44}}>
       <span aria-hidden="true" style={{color: "var(--muted-deep)"}}>{icon}</span>
       <span style={{flex: 1, fontSize: 13}}>{label}</span>
-      <span style={{display: "flex", gap: 4}}>{keys.map((key, index) => <kbd key={index} style={{display: "grid", placeItems: "center", minWidth: 26, height: 28, padding: "0 6px", border: "1px solid var(--line)", borderRadius: 6, background: "var(--paper)", boxShadow: "0 2px 0 var(--line)", font: "inherit", fontSize: 12}}>{key}</kbd>)}</span>
+      <span style={{display: "flex", gap: 4}}>{keys.map((key, index) => <kbd key={index} style={{display: "grid", placeItems: "center", minWidth: 26, height: 28, padding: "0 6px", border: "1px solid var(--paper-edge)", borderRadius: 6, background: "var(--paper)", boxShadow: "0 2px 0 var(--paper-edge)", font: "inherit", fontSize: 12}}>{key}</kbd>)}</span>
     </div>)}
   </PopupFrame> : null;
 }

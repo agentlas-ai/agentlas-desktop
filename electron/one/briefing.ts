@@ -24,6 +24,7 @@ import {
 } from "../../shared/one-briefing";
 import type { Automation, AutomationRunRecord, CanonicalTask, FailureEventUi, InvocationRunReceipt, Project } from "../../shared/types";
 import { tryRecordOneDomainEvent } from "./domain-events";
+import { onDesktopStoreChange } from "../store/change-bus";
 import { resolveMainOwnedReadPath } from "../fs/access";
 import { userDataDir } from "../runtime-paths";
 
@@ -706,7 +707,8 @@ function prepareDetectionContext(
     if (!current) {
       observations.set(key, { key, firstSeenAt: iso(now), lastSeenAt: iso(now) });
       changed = true;
-    } else if (now.getTime() - Date.parse(current.lastSeenAt) >= 60 * 60 * 1_000) {
+    } else if (now.getTime() - Date.parse(current.lastSeenAt) >= DAY_MS) {
+      // lastSeenAt only feeds the 120-day retention below, so a day is precise enough and the file is not rewritten every hour.
       observations.set(key, { ...current, lastSeenAt: iso(now) });
       changed = true;
     }
@@ -842,6 +844,28 @@ export function oneDesktopNotificationAllowed(now = new Date()): boolean {
 }
 
 /**
+ * Read-only look before the state lock is taken: false when this pass could neither deliver nor change the file (channel off, quiet
+ * hours, nothing eligible or already delivered, nothing to prune or record), so the lock file is not created and removed for nothing.
+ * It only ever says "nothing to do"; whenever it says true the locked path below decides, exactly as before.
+ */
+function desktopNotificationMayBeDue(deps: OneBriefingDetectorDependencies, now: Date): boolean {
+  try {
+    const state = loadState(now);
+    if (!state.preferences.channels.includes("desktop_notification") || quietHoursActive(state.preferences, now)) return false;
+    if (state.notificationReceipts.some((item) => Date.parse(item.expiresAt) <= now.getTime())) return true; // pruning writes
+    const probe = JSON.parse(JSON.stringify(state)) as BriefingStateV1;
+    const eligible = eligibleCandidates(deps, probe, now);
+    if (eligible.changed) return true;
+    const candidate = eligible.candidates.find((item) => item.severity >= 3) ?? null;
+    if (!candidate || Date.parse(candidate.expiresAt) <= now.getTime()) return false;
+    const key = `notification:${stableToken(candidate.dedupeKey)}`;
+    return !state.notificationReceipts.some((item) => item.key === key);
+  } catch {
+    return true; // cannot tell: take the normal path
+  }
+}
+
+/**
  * Atomically claims one generic Desktop notification. The candidate is
  * re-derived while holding the state lock; a persisted receipt prevents
  * duplicate delivery after restart or concurrent scheduler ticks.
@@ -850,6 +874,7 @@ export function claimOneBriefingDesktopNotification(
   deps: OneBriefingDetectorDependencies = {},
 ): OneProactiveBriefing | null {
   const now = deps.now ?? new Date();
+  if (!desktopNotificationMayBeDue(deps, now)) return null;
   let claimed: OneProactiveBriefing | null = null;
   try {
     mutateStateCas(now, (state) => {
@@ -877,6 +902,113 @@ export function claimOneBriefingDesktopNotification(
     if (code !== "EEXIST") throw error;
   }
   return claimed;
+}
+
+const configListeners = new Set<() => void>();
+/** Called after the owner's briefing settings are saved by this process. */
+export function onOneBriefingConfigChanged(listener: () => void): () => void {
+  configListeners.add(listener);
+  return () => { configListeners.delete(listener); };
+}
+
+/** While a connected folder may go missing (no signal exists for that) or a running Task is past its stall age, look this often. */
+export const ONE_BRIEFING_BACKSTOP_MS = 15 * 60_000;
+
+/**
+ * When the desktop-notification check next needs to run without any signal, as epoch ms; null = nothing is waiting, set no timer.
+ *  - channel "desktop_notification" off: null (nothing is configured);
+ *  - inside quiet hours: the end of the quiet window;
+ *  - otherwise the earliest time a Task crosses an age threshold (waiting a day, running 2 h, failed/partial 3 days), and the backstop
+ *    while a project has a connected folder (folder and deadline state have no change event) or a stalled-looking Task still has a live run.
+ * Everything else that can make a briefing due (an automation run, a project or Task change) arrives as a store change instead.
+ */
+export function nextOneBriefingCheckAt(deps: OneBriefingDetectorDependencies = {}): number | null {
+  const now = deps.now ?? new Date();
+  const state = loadState(now);
+  if (!state.preferences.channels.includes("desktop_notification")) return null;
+  const nowMs = now.getTime();
+  const quiet = state.preferences.quietHours;
+  if (quietHoursActive(state.preferences, now)) {
+    const end = new Date(now); end.setHours(quiet.endHour, 0, 0, 0);
+    if (end.getTime() <= nowMs) end.setDate(end.getDate() + 1);
+    return end.getTime();
+  }
+  let next = Infinity;
+  const projects = deps.projects ?? (() => { try { return listProjects(); } catch { return []; } })();
+  if (projects.some((project) => !!project.folderPath)) next = nowMs + ONE_BRIEFING_BACKSTOP_MS;
+  const chatSurface = deps.chatSurface ?? ((chatId: string) => { try { return chatOriginSurface(chatId); } catch { return null; } });
+  const age: Record<string, number> = {
+    "waiting-decision": WAITING_DECISION_THRESHOLD_MS, running: RUNNING_STALL_THRESHOLD_MS, failed: ABANDONED_TASK_THRESHOLD_MS, partial: ABANDONED_TASK_THRESHOLD_MS,
+  };
+  for (const task of deps.tasks ?? safeCanonicalTasks()) {
+    const threshold = age[task.status];
+    const updatedMs = Date.parse(task.updatedAt);
+    if (threshold === undefined || !task.originChatId || !Number.isFinite(updatedMs) || chatSurface(task.originChatId) !== "one") continue;
+    if (nowMs - updatedMs > TASK_CANDIDATE_TTL_MS) continue;
+    const at = updatedMs + threshold;
+    if (at > nowMs) next = Math.min(next, at);
+    else if (task.status === "running") next = Math.min(next, nowMs + ONE_BRIEFING_BACKSTOP_MS); // past its stall age: a live run may end without a Task change
+  }
+  return Number.isFinite(next) ? next : null;
+}
+
+export interface OneBriefingSchedulerPorts {
+  /** Runs the claim and shows the notification; must not throw. */
+  check(): void;
+  signedIn(): boolean;
+  /** Test seams; the real timers and clock by default. */
+  now?: () => Date;
+  setTimeout?: (fn: () => void, ms: number) => unknown;
+  clearTimeout?: (handle: unknown) => void;
+  firstCheckDelayMs?: number;
+}
+
+/**
+ * The desktop-notification scheduler: no fixed period. One timer aimed at nextOneBriefingCheckAt, nothing while that is null or nobody is
+ * signed in; re-aimed after every check and when the settings, a Task, an automation or a project change (store change bus) or the caller
+ * pokes it (sign-in or sign-out, wake from sleep). A timer that fires late after sleep still runs the check, which looks at the real
+ * time: a briefing still due is delivered once (the receipt stops repeats) and one that expired is skipped.
+ */
+export function startOneBriefingNotificationScheduler(p: OneBriefingSchedulerPorts): { poke(): void; stop(): void } {
+  const setT = p.setTimeout ?? ((fn: () => void, ms: number) => { const t = setTimeout(fn, ms); t.unref?.(); return t; });
+  const clearT = p.clearTimeout ?? ((h: unknown) => clearTimeout(h as ReturnType<typeof setTimeout>));
+  const clock = p.now ?? (() => new Date());
+  let stopped = false;
+  let timer: unknown = null;
+  let burst: unknown = null;
+  let burstSince = 0;
+  const aim = (): void => {
+    if (timer !== null) { clearT(timer); timer = null; }
+    if (stopped || !p.signedIn()) return;
+    let at: number | null = null;
+    try { at = nextOneBriefingCheckAt({ now: clock() }); } catch { at = null; }
+    if (at === null) return;
+    timer = setT(() => { timer = null; run(); }, Math.min(2_000_000_000, Math.max(1_000, at - clock().getTime())));
+  };
+  const run = (): void => {
+    if (stopped) return;
+    if (p.signedIn()) p.check();
+    aim();
+  };
+  // Several changes in a row (a Task writes many rows) become one check; a stream cannot postpone it past 30 s.
+  const soon = (): void => {
+    if (stopped) return;
+    const now = Date.now();
+    if (burst === null) burstSince = now; else clearT(burst);
+    burst = setT(() => { burst = null; run(); }, Math.max(0, Math.min(5_000, burstSince + 30_000 - now)));
+  };
+  const first = setT(() => { run(); }, p.firstCheckDelayMs ?? 8_000);
+  const stopBus = onDesktopStoreChange((change) => { if (change.entity === "task" || change.entity === "automation" || change.entity === "project") soon(); });
+  const stopConfig = onOneBriefingConfigChanged(soon);
+  return {
+    poke: soon,
+    stop: () => {
+      stopped = true;
+      for (const handle of [timer, burst, first]) if (handle !== null) clearT(handle);
+      timer = burst = null;
+      stopBus(); stopConfig();
+    },
+  };
 }
 
 export function resolveOneBriefingTaskNavigation(
@@ -923,6 +1055,7 @@ export function setOneBriefingPreferences(input: {
       updatedAt: iso(now),
     };
   });
+  for (const listener of [...configListeners]) { try { listener(); } catch { /* a listener must not fail the save */ } }
   return updated.preferences;
 }
 

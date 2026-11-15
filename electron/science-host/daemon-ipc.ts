@@ -7,7 +7,8 @@ import type { IpcMain, IpcMainInvokeEvent, WebContents } from "electron";
 import type { ProductExtensionPermission } from "../../shared/product-extension";
 import type { DaemonScienceCommand, DaemonScienceEvent } from "../daemon/science-service";
 import { ScienceDaemonClientError, type ScienceDaemonClient } from "./daemon-client";
-import { onAuthSessionInvalidated, onAuthSessionRenewed, onAuthSessionRestored, sessionForDaemonHandoff } from "../auth";
+import { onAuthSessionInvalidated, onAuthSessionOwnershipChanged, onAuthSessionRenewed, onAuthSessionRestored, sessionForDaemonHandoff } from "../auth";
+import { createLatestSessionHandoff } from "./latest-session-handoff";
 import { registerScienceMathHandlers } from "./math-ipc";
 import { registerSciencePublicationIpc, SCIENCE_PUBLICATION_IPC_CHANNELS } from "./publication-ipc";
 import { registerScienceStyleLibraryIpc, SCIENCE_STYLE_LIBRARY_IPC_CHANNELS } from "./style-library-ipc";
@@ -113,9 +114,9 @@ export function registerScienceDaemonExecutionIpc(options: {
   onConnectionState?(state: ScienceDaemonObservation): void;
 }): ScienceDaemonExecutionIpc {
   const { ipcMain, client } = options;
-  const handOverSession = () => {
-    void client.command({ op: "runtime.adoptSession", input: { session: sessionForDaemonHandoff() } }).catch(() => { /* daemon not ready: the next restore or reconnect retries */ });
-  };
+  const sessionHandoff = createLatestSessionHandoff({snapshot:sessionForDaemonHandoff,
+    send:session=>client.command({op:"runtime.adoptSession",input:{session}})});
+  const handOverSession = () => sessionHandoff.request();
   const viewers = new Map<number, Viewer>();
   let closed = false;
   let unsubscribe: (() => void) | null = null;
@@ -722,6 +723,7 @@ export function registerScienceDaemonExecutionIpc(options: {
   const stopSessionRestored = onAuthSessionRestored(() => handOverSession());
   const stopSessionInvalidated = onAuthSessionInvalidated(() => handOverSession());
   const stopSessionRenewed = onAuthSessionRenewed(() => handOverSession());
+  const stopSessionOwnershipChanged = onAuthSessionOwnershipChanged(() => handOverSession());
   return { reconnect, outputScope() {
     const scopes = [...viewers.values()].filter(live).flatMap(viewer => viewer.scope ? [viewer.scope] : []);
     if (!scopes.length || scopes.some(scope => !matches(scope, scopes[0]))) return null;
@@ -729,7 +731,7 @@ export function registerScienceDaemonExecutionIpc(options: {
   }, close() {
     if (closed) return;
     closed = true;
-    stopSessionRestored(); stopSessionInvalidated(); stopSessionRenewed();
+    stopSessionRestored(); stopSessionInvalidated(); stopSessionRenewed(); stopSessionOwnershipChanged(); sessionHandoff.close();
     release();
     for (const viewer of [...viewers.values()]) remove(viewer);
     for (const channel of SCIENCE_DAEMON_EXECUTION_IPC_CHANNELS) ipcMain.removeHandler(channel);

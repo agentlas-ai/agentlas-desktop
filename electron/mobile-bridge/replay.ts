@@ -11,6 +11,7 @@ import {
   type MobileBridgeRpcSuccess,
 } from "../../shared/mobile-bridge";
 import { mobileBridgeJsonBytes } from "./sanitize";
+import { LONG_OPS_LONGEST_WRITE_MAX_MS } from "./long-ops";
 
 const BRIDGE_DIR = "mobile-bridge";
 const REPLAY_FILE = "request-replays.json";
@@ -55,6 +56,32 @@ export interface MobileBridgeReplayStoreOptions {
   maxEntries?: number;
   now?: () => Date;
   instanceId?: string;
+  /** Tests only: whether a process number belongs to a running process (default: signal 0). */
+  processAlive?: (pid: number) => boolean;
+  /** Tests only: this process's number (default process.pid). */
+  pid?: number;
+}
+
+/**
+ * The owner mark of a ledger line is `<uuid>@<process number>` (no new column: the mark was already a free string of at most 128 characters).
+ * A line written before this carries no number and is read as before (an owner that is not this instance is gone).
+ */
+const OWNER_PID_SUFFIX = /@(\d{1,10})$/;
+export function mobileBridgeOwnerPid(ownerInstanceId: string): number | null {
+  const match = OWNER_PID_SUFFIX.exec(ownerInstanceId);
+  if (!match) return null;
+  const pid = Number(match[1]);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: the process exists and belongs to someone else - it is alive. ESRCH (or anything else): gone.
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -148,6 +175,8 @@ export class MobileBridgeRequestReplayStore {
   private readonly maxEntries: number;
   private readonly now: () => Date;
   private readonly instanceId: string;
+  private readonly pid: number;
+  private readonly processAlive: (pid: number) => boolean;
   private lastOverflowPruneAt = Number.NEGATIVE_INFINITY;
 
   constructor(
@@ -157,10 +186,22 @@ export class MobileBridgeRequestReplayStore {
     this.ttlMs = Math.max(60_000, options.ttlMs ?? DEFAULT_TTL_MS);
     this.maxEntries = Math.max(1, Math.min(10_000, options.maxEntries ?? DEFAULT_MAX_ENTRIES));
     this.now = options.now ?? (() => new Date());
-    this.instanceId = options.instanceId ?? randomUUID();
+    this.pid = options.pid ?? process.pid;
+    this.processAlive = options.processAlive ?? processIsAlive;
+    this.instanceId = options.instanceId ?? `${randomUUID()}@${this.pid}`;
     if (!this.instanceId || this.instanceId.length > 128 || /[\u0000-\u001f]/.test(this.instanceId)) {
       throw new Error("Invalid Mobile Bridge replay instance id");
     }
+  }
+
+  /**
+   * Audit 62 (bridge B11): can the ledger be read? A machine code the desktop's state and log can show: `ok`, or `ledger_invalid` (the file is not the ledger: not JSON, another version, an entry that does not validate) /
+   * `ledger_unreadable`. While it is not `ok` every phone write is `idempotency_unavailable` (fail-closed, on purpose). What ends it is the OWNER's act: quit the app, move `<user data>/mobile-bridge/request-replays.json` (and the
+   * `request-replays-overflow` folder) out of the way, start the app again: the ledger starts empty and the keys of the last 24 hours are "new" once (a command whose answer was lost may run again - the owner decides).
+   */
+  health(): { ok: true } | { ok: false; code: "ledger_invalid" | "ledger_unreadable" } {
+    try { this.readLedger(mobileBridgeReplayStorePath(this.userDataPath)); return { ok: true }; }
+    catch (error) { return { ok: false, code: error instanceof SyntaxError || /invalid/i.test(String((error as Error)?.message)) ? "ledger_invalid" : "ledger_unreadable" }; }
   }
 
   begin(deviceId: string, key: string, fingerprint: string): MobileBridgeReplayBeginResult {
@@ -177,9 +218,8 @@ export class MobileBridgeRequestReplayStore {
       if (existing.state === "completed" && existing.response) {
         return { kind: "replay", response: existing.response };
       }
-      if (existing.state === "uncertain" || existing.ownerInstanceId !== this.instanceId) {
-        return { kind: "uncertain" };
-      }
+      if (existing.state === "uncertain") return { kind: "uncertain" };
+      if (existing.ownerInstanceId !== this.instanceId && !this.liveForeignOwner(existing, now.getTime())) return { kind: "uncertain" };
       return { kind: "in-progress" };
     }
     if (ledger.entries.length >= this.maxEntries) {
@@ -222,10 +262,24 @@ export class MobileBridgeRequestReplayStore {
     if (entry.state === "completed" && entry.response) {
       return { kind: "completed", response: entry.response };
     }
-    if (entry.state === "uncertain" || entry.ownerInstanceId !== this.instanceId) {
-      return { kind: "uncertain" };
-    }
+    if (entry.state === "uncertain") return { kind: "uncertain" };
+    if (entry.ownerInstanceId !== this.instanceId && !this.liveForeignOwner(entry, now)) return { kind: "uncertain" };
     return { kind: "in-progress" };
+  }
+
+  /**
+   * L1 D5 (contracts/phone-long-ops.md C3): a pending line whose owner is ANOTHER process that is still running is "in progress", not "unknown" - the
+   * Main <-> background-service hand-off leaves the work running in the process that started it, and a new owner must neither run it again nor call it lost.
+   * Only a line that names a process number can be live (older lines never are), never this very process (another instance in it is gone, as before), and
+   * only while the line is younger than the longest bound of any write: past that the work cannot still be going, so a process number the system
+   * reused for something else cannot hold a key "in progress" for a day. Read-only.
+   */
+  private liveForeignOwner(entry: StoredReplayEntry, nowMs: number): boolean {
+    if (entry.state !== "pending") return false;
+    const pid = mobileBridgeOwnerPid(entry.ownerInstanceId);
+    if (pid === null || pid === this.pid) return false;
+    if (nowMs - Date.parse(entry.updatedAt) > LONG_OPS_LONGEST_WRITE_MAX_MS) return false;
+    try { return this.processAlive(pid); } catch { return false; }
   }
 
   capability(): { schemaVersion: 1; retentionMs: number } {
@@ -286,8 +340,9 @@ export class MobileBridgeRequestReplayStore {
     const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
     const { ledger } = this.readLedgerForKey(deviceId, keyHash);
     const entry = ledger.entries.find((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
+    const nowMs = this.checkedNow().getTime();
     return Boolean(entry && entry.fingerprint === fingerprint && entry.state !== "completed" && entry.ownerInstanceId !== this.instanceId
-      && Date.parse(entry.updatedAt) >= this.checkedNow().getTime() - this.ttlMs);
+      && Date.parse(entry.updatedAt) >= nowMs - this.ttlMs && !this.liveForeignOwner(entry, nowMs));
   }
 
   /**
@@ -305,6 +360,7 @@ export class MobileBridgeRequestReplayStore {
     if (index < 0) return false;
     const entry = ledger.entries[index];
     if (entry.fingerprint !== fingerprint || entry.ownerInstanceId === this.instanceId || entry.state === "completed") return false;
+    if (this.liveForeignOwner(entry, this.checkedNow().getTime())) return false;
     ledger.entries.splice(index, 1);
     this.writeLedger(ledger, target);
     return true;
@@ -321,6 +377,7 @@ export class MobileBridgeRequestReplayStore {
     const { ledger, target } = this.readLedgerForKey(deviceId, keyHash);
     const entry = ledger.entries.find((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
     if (!entry || entry.fingerprint !== fingerprint || entry.ownerInstanceId === this.instanceId || entry.state === "completed") return false;
+    if (this.liveForeignOwner(entry, this.checkedNow().getTime())) return false;
     entry.state = "completed";
     entry.response = response;
     entry.ownerInstanceId = this.instanceId;

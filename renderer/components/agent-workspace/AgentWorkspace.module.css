@@ -236,3 +236,34 @@
 .appearanceChoice[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .appearanceChoice img { max-width: 100%; object-fit: contain; }
 .appearanceGlyphs .appearanceChoice { width: 38px; }
+/* tabs */
+.recall { flex: 1; min-width: 0; overflow: auto; padding: 12px 14px; }
+.modelCurrent { display: flex; flex-direction: column; gap: 2px; margin: 0 0 6px; padding: 9px 11px; border: 1px solid var(--paper-edge); border-radius: 6px; background: var(--paper-2); font-size: 12px; }
+.modelCurrent span { color: var(--ink-soft); font-size: 11px; }
+.readFailed { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 8px 10px; border: 1px solid var(--paper-edge-strong); border-radius: 8px; color: var(--ink-soft); font-size: 12px; }
+.readFailed > svg { flex: none; color: var(--warn); }
+.readFailed > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.roomList { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.roomRow { width: 100%; text-align: left; display: grid; gap: 2px; padding: 8px 10px; border: 1px solid var(--paper-edge); border-radius: 6px; background: var(--paper); color: var(--ink); }
+.roomRow:hover { background: var(--paper-2); }
+.roomRow strong { font-size: 12.5px; font-weight: 600; }
+.skillList { padding: 0 6px 8px; border-bottom: 1px solid var(--paper-edge); max-height: 190px; overflow: auto; }
+
+/* Agentlas 2.0 F-D8: the roster in the shape of the confirmed picture (agents-v6-timeline) - face + name rows, quiet labels, no filter, no foot bar. Selected = fill, never a bar. */
+.roster { width: 236px; flex-basis: 236px; padding: 6px 8px 8px; }
+.rosterCollapsed { width: 48px; flex-basis: 48px; }
+.rosterHeader { padding: 14px 6px 10px; min-height: 0; border-bottom: 0; }
+.rosterHeader strong { font-size: 15px; font-weight: 700; }
+.rosterToggleBtn { display: none; }
+.rosterCollapsed .rosterToggleBtn { display: inline-grid; }
+@media (max-width: 1100px) { .rosterToggleBtn { display: inline-grid; } }
+.roster .search { margin: 0 2px 10px; height: 34px; padding: 0 10px; border-radius: 9px; background: var(--paper); border: 1px solid var(--paper-edge); }
+.roster .groupLabel { height: 28px; padding: 0 8px; font-size: 10px; font-weight: 800; letter-spacing: .08em; color: var(--muted-deep); }
+.roster .rosterRow { gap: 10px; min-height: 40px; padding: 0 8px; border-radius: 9px; font-size: 14px; font-weight: 600; color: var(--ink); }
+.roster .rosterRow.subRow { padding-left: 30px; min-height: 34px; font-weight: 500; color: var(--ink-soft); }
+.roster .selected { background: var(--paper-3); }
+.roster .memoryCount { min-width: 18px; width: auto; height: 18px; padding: 0 5px; border-radius: 9px; font-size: 10.5px; font-weight: 700; background: var(--paper-3); color: var(--ink-soft); border: 1px solid var(--paper-edge-strong); }
+.heldRow { display: flex; align-items: center; gap: 4px; }
+.heldRow .rosterRow { flex: 1; min-width: 0; }
+.importIcon { display: inline-grid; place-items: center; flex: none; width: 28px; height: 28px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-soft); }
+.importIcon:hover { background: var(--paper-3); color: var(--ink); }

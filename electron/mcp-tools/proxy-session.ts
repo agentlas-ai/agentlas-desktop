@@ -1,4 +1,7 @@
+import { grantHostCall, hostCallMarks, hostToolIsRead } from "../harness/host-call-ticket";
+import { consumeLoopApproval } from "../harness/loop-approval-note";
 import {StreamableHTTPClientTransport as ScopedHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { markKeyProvenNow } from "./key-verdict";
 import {preparedMcpScopedCredential} from './prepared-transport';
 import { assertHistoryRuntimeFence, type HistoryRuntimeFence, type HistoryRuntimeToolInput } from "../one/history-runtime-fences";
 import type http from "node:http";
@@ -12,13 +15,15 @@ import { createPreparedMcpTargetTransport, listCompleteToolInventory } from "./c
 import { bindPreparedMcpProxyAsk, preparedMcpConsentResource, preparedMcpTargetTransport, PreparedMcpScopeChangedError, type PreparedMcpBinding, type PreparedMcpProxyScope } from "./prepared-transport";
 import { mcpToolSchemaDigest } from "./tool-schema";
 import { bindMainToolConsentResource } from "../runtime/tool-consent";
-import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, type RuntimeToolPermissionAsk } from "../runtime/tool-approval";
+import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, toolApprovalRefusalText, type RuntimeToolPermissionAsk } from "../runtime/tool-approval";
+import { approvalToolAnnotations, type ApprovalToolAnnotations } from "../runtime/approval-rule";
 import { beginMainMcpEffect } from "./effect-receipts";
 import { RUNTIME_MCP_SUPPORT } from "../../shared/runtime-mcp";
 import type { RuntimeKind } from "../../shared/types";
 import { recordMcpProxyEvent, safeProxyReason } from "./proxy-event-log";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 import type { BeforeMcpToolResult } from "../runtime/runner";
+import { currentSlotLease, registerSlotLeaseSignal, type SlotLease } from "../runtime/run-slot-lease";
 import { BROWSER_SIGN_IN_NEEDED, browserSignInNeededResult, isBrowserSignInNeeded } from "../../shared/browser-sign-in-needed";
 
 export type McpProxyGate = {
@@ -42,6 +47,8 @@ export type McpProxyGate = {
   /** The surface is a first list (host-tool-servers.ts): tools/list is trimmed to it, but a call to another declared tool,
    *  found through the common search, is admitted and goes through the same arbiter as any call. */
   toolSurfaceDeferred?: true;
+  /** Main-captured (prepareMcpProxyLaunch): the run slot of the turn that built this launch (N0b). In-process only. */
+  slotLease?: SlotLease;
 };
 type Registration = {
   cwd: Readonly<{ path: string; dev: number; ino: number }>;
@@ -346,7 +353,8 @@ export function prepareMcpProxyLaunch(gate: McpProxyGate): string {
     fs.accessSync(real, fs.constants.R_OK | fs.constants.X_OK);
     cwd = Object.freeze({ path: real, dev: stat.dev, ino: stat.ino });
   } catch { throw new Error("mcp_proxy_cwd_unavailable"); }
-  const normalizedGate = Object.freeze({ ...gate, cwd: cwd.path });
+  const slotLease = gate.slotLease ?? currentSlotLease();
+  const normalizedGate = Object.freeze({ ...gate, cwd: cwd.path, ...(slotLease ? { slotLease } : {}) });
   if (gate.residentKey) {
     const existingHandle = residentLaunches.get(gate.residentKey);
     if (existingHandle) {
@@ -561,6 +569,9 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
   }
   let transport: Transport | null = null, closed = false, initialized = false, buffer = "";
+  // DD: this wire is the app's own MCP client (mcp-tools/client.ts `new Client({ name: "agentlas-desktop" })`: a harness describe / tool.call that has to see every tool of a
+  // host server). The trimmed first list is for the MODEL's wire (a prompt-size choice, not a permission: a deferred tool may be called by name either way); on a DEFERRED surface (a host tool server) the app's own wire lists all. A hidden surface stays hidden on every wire.
+  let appOwnWire = false;
   // Upstream reuse state (see IdleUpstream). `adopted` is provisional until the
   // first client frame: only an initialize with byte-identical params is
   // answered from the parked handshake; any other first frame swaps in a
@@ -770,6 +781,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
             : `MCP_PROXY_RESULT_WITHHELD (${code}): the tool ran, but its result was not released to you. Do not repeat the call blindly; its effect may already have happened.` }] } });
       } catch (deliverError) { close(deliverError, "deliver"); }
     };
+    // VD: a tool call a subscription CLI made through this proxy that came back without an error is what a local program's keys were waiting for (key-verdict.ts): the same "saved -> connected" as for this app's own calls.
+    if (pending.method === "tools/call" && !browserCallFailed(frame) && binding.server.envKeys.length > 0) { try { markKeyProvenNow(binding.server.id); } catch { /* a proof is only ever added */ } }
     if (pending.method === "tools/call" && pending.toolName && gate.beforeMcpToolResult) {
       void (async () => {
         try { await gate.beforeMcpToolResult!({ catalogId: gate.catalogId, toolName: pending.toolName!, isError: browserCallFailed(frame) }); }
@@ -786,8 +799,12 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   const denyReason: Record<string, string> = {
     read_only_denied: " This turn has read-only permission: the browser may only look (navigate, snapshot, take_screenshot, wait_for, find, console and network reads), not click, type, run page code or upload. Do the reading part and ask the owner to switch to execute permission for the rest; retrying this call will not change that.",
   };
-  const deny = (wireId: string, code: string) => finish(wireId, { jsonrpc: "2.0", result: { isError: true,
-    _meta: { agentlasProxyFailure: code }, content: [{ type: "text", text: `MCP_PROXY_${code.toUpperCase()}: Tool execution was not authorized.${denyReason[code] ?? ""}` }] } });
+  // `reason` is the approval rule's own line for a call it asks about (money, delete, sending out) that ended without a "yes":
+  // what was refused, why (the owner said no / nobody answered / nobody to ask) and what to do next. Empty for every other denial,
+  // whose text is unchanged. It is also the machine-readable cause in _meta.
+  const deny = (wireId: string, code: string, reason = "") => finish(wireId, { jsonrpc: "2.0", result: { isError: true,
+    _meta: { agentlasProxyFailure: code, ...(reason ? { agentlasApprovalRefusal: reason } : {}) },
+    content: [{ type: "text", text: `MCP_PROXY_${code.toUpperCase()}: Tool execution was not authorized.${denyReason[code] ?? ""}${reason ? `\n${reason}` : ""}` }] } });
   function query(method: string, params: Frame, signal: AbortSignal): Promise<Frame> {
     signal.throwIfAborted();
     return new Promise((resolve, reject) => {
@@ -807,7 +824,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
    * 연결당 짧게 캐시하고, 상류가 notifications/tools/list_changed 를 보내면 비운다(승인 중 스키마 변경 감지는 유지).
    */
   const INVENTORY_TTL_MS = 30_000;
-  let inventoryCache: { at: number; digests: Map<string, string> } | null = null;
+  // The same listing also carries what each tool says about itself (MCP annotations): kept beside the digest, no extra round trip.
+  let inventoryCache: { at: number; digests: Map<string, string>; annotations: Map<string, ApprovalToolAnnotations> } | null = null;
   async function schema(tool: string, signal: AbortSignal): Promise<string> {
     if (!inventoryCache || Date.now() - inventoryCache.at > INVENTORY_TTL_MS) {
       const inventory = await listCompleteToolInventory({ listTools: async (params?: { cursor?: string }) => {
@@ -817,9 +835,14 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       } } as Parameters<typeof listCompleteToolInventory>[0], signal);
       const digests = new Map<string, string>();
       const counts = new Map<string, number>();
-      for (const row of inventory.tools) { counts.set(row.name, (counts.get(row.name) ?? 0) + 1); digests.set(row.name, mcpToolSchemaDigest(row)); }
-      for (const [name, n] of counts) if (n !== 1) digests.delete(name);
-      inventoryCache = { at: Date.now(), digests };
+      const annotations = new Map<string, ApprovalToolAnnotations>();
+      for (const row of inventory.tools) {
+        counts.set(row.name, (counts.get(row.name) ?? 0) + 1); digests.set(row.name, mcpToolSchemaDigest(row));
+        const marks = approvalToolAnnotations((row as { annotations?: unknown }).annotations);
+        if (marks) annotations.set(row.name, marks);
+      }
+      for (const [name, n] of counts) if (n !== 1) { digests.delete(name); annotations.delete(name); }
+      inventoryCache = { at: Date.now(), digests, annotations };
     }
     const digest = inventoryCache.digests.get(tool);
     if (!digest) throw new Error("mcp_proxy_tool_unavailable");
@@ -832,7 +855,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       if(gate.historyRuntimeFence){assertHistoryRuntimeFence(gate.historyRuntimeFence);gate.historyRuntimeFence.assertTool(historyToolInput(frame));}
       if (gate.toolSurface && !gate.toolSurfaceDeferred && !gate.toolSurface.includes(tool)) { deny(wireId, "tool_surface_denied"); return; }
       if (!graphAllows(gate, tool)) { deny(wireId, "plan_denied"); return; }
-      const mutating = policy.mutating({ catalogId: gate.catalogId, toolName: tool, args });
+      // A connected app that lives on the server: only a tool the stored list marked as a read is one (harness/host-call-ticket.ts); every other is a change.
+      const mutating = hostToolIsRead(gate.serverKey, tool) ? false : policy.mutating({ catalogId: gate.catalogId, toolName: tool, args });
       if ((gate.simulation && mutating) || (gate.planMode && policy.planMutating({ authority: gate.planReadAuthority, toolName: tool, args }))) { deny(wireId, "plan_denied"); return; }
       // Read-only observation profile: fail closed if the policy is missing, and deny before any
       // arbiter or durable consent rule can answer (a saved "always allow" never turns a look into a click).
@@ -840,13 +864,22 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const digest = await schema(tool, signal); validate(); signal.throwIfAborted();
       const ask: RuntimeToolPermissionAsk = { runtime: gate.runtime, sessionKey: gate.sessionKey,
         tool: `mcp__${gate.serverKey}__${tool}`, kind: "other", cwd: gate.cwd, permission: gate.permission,
-        chatId: gate.chatId, unattended: gate.unattended, mutating, signal, ...(gate.planMode ? { planMode: true as const } : {}) };
+        chatId: gate.chatId, unattended: gate.unattended, mutating, signal, ...(gate.planMode ? { planMode: true as const } : {}),
+        // For the approval rule only: where the tool comes from (Main's registry identity) and what it says about itself.
+        catalogId: gate.catalogId ?? null, annotations: (hostCallMarks(gate.serverKey, tool, args)?.costsMoneyHint === true ? { ...(inventoryCache?.annotations.get(tool) ?? {}), costsMoneyHint: true as const } : inventoryCache?.annotations.get(tool)) ?? null,
+        // The gateway tool of a tool.call (reached through this proxy in plan mode and the history fence): the port asks the connector tool's own rule next.
+        ...(gate.catalogId === "agentlas-turn" && tool === "harness_call" && (args as { operation?: unknown }).operation === "tool.call" ? { portAsksItsOwnRule: true as const } : {}) };
       bindMainToolConsentResource(ask, { tool: ask.tool, target: preparedMcpConsentResource(binding, binding.server), schema: digest, arguments: args });
       bindPreparedMcpProxyAsk(ask, binding);
       const arbiter = getRuntimeToolPermissionArbiter();
-      const decision = arbiter ? await arbiter(ask) : defaultRuntimeToolPermission(ask);
+      registerSlotLeaseSignal(signal, gate.slotLease); // N0b: a card raised for this call lets the building turn's run slot go
+      // An in-process-loop runtime already asked this exact change in its own window (harness/loop-approval-note.ts): the same card is not asked a second time. No note = asked here, as before.
+      const loopAsked = mutating && RUNTIME_MCP_SUPPORT[gate.runtime as RuntimeKind]?.delivery === "in-process-loop" && consumeLoopApproval(gate.serverKey, tool, args, Date.now(), gate.slotLease);
+      const decision = loopAsked ? "allow_once" as const : arbiter ? await arbiter(ask) : defaultRuntimeToolPermission(ask);
       signal.throwIfAborted(); validate();
-      if (decision === "deny") { deny(wireId, "policy_denied"); return; }
+      if (decision === "deny") { deny(wireId, "policy_denied", toolApprovalRefusalText(ask)); return; }
+      // The approval window answered "go" for this exact call: the connected-app bridge may send it as a change (it reads this record once).
+      if (mutating) grantHostCall(gate.serverKey, tool, args);
       if (await schema(tool, signal) !== digest) { deny(wireId, "schema_changed"); return; }
       signal.throwIfAborted(); validate();
       const pending = native.get(wireId); if (!pending) return;
@@ -907,6 +940,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   async function receive(frame: Frame): Promise<void> {
     validate(frame?.method==="notifications/cancelled");
     if (!frame || typeof frame !== "object" || Array.isArray(frame) || frame.jsonrpc !== "2.0") throw new Error("mcp_proxy_frame_invalid");
+    // (read before the parked-upstream branch below: a wire that adopts a parked upstream answers its initialize there)
+    if (frame.method === "initialize" && frame.params?.clientInfo?.name === "agentlas-desktop") appOwnWire = true;
     if (adopted) {
       const parked = adopted; adopted = null;
       if (frame.method === "initialize" && (typeof frame.id === "string" || typeof frame.id === "number")
@@ -964,6 +999,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   function surfaceToolList(frame: Frame): Frame {
     const surface = gate.toolSurface;
     if (!surface || frame.error || !Array.isArray(frame.result?.tools)) return frame;
+    if (appOwnWire && gate.toolSurfaceDeferred) return frame;
     return { ...frame, result: { ...frame.result, tools: frame.result.tools.filter((tool: { name?: unknown }) => typeof tool?.name === "string" && surface.includes(tool.name)) } };
   }
   function attachUpstream(upstream: Transport): void {

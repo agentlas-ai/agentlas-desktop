@@ -1,4 +1,5 @@
 import { normalizeRuntimeSelectionInput } from "./runtime-selection";
+import { emptyHomeLayout, normalizeHomeLayout, type HomeLayout } from "./space-layout";
 import type { RuntimeSelection } from "./types";
 
 export type OneRuntimePreference = (Omit<RuntimeSelection, "role" | "inherit"> & { role?: "orchestrator"; inherit?: false }) | null;
@@ -22,6 +23,7 @@ export interface AppUiPreferences {
   firmSidebarCollapsed: boolean;
   automationFlowPanels: { left: boolean; right: boolean };
   documentCitationStyle: "APA" | "MLA" | "Chicago" | "IEEE" | "Harvard";
+  homeLayout: HomeLayout;
 }
 export type AppUiPreferenceName = keyof AppUiPreferences;
 interface PreferenceDefinition<T> {
@@ -49,6 +51,7 @@ export const appUiPreferenceDefinitions = {
   firmSidebarCollapsed: { storageKey: "agentlas.firm.sidebarCollapsed", encoding: "json", defaultValue: false, description: "Collapse the organization sidebar in firm and agent-library views." },
   automationFlowPanels: { storageKey: "agentlas.automation.flow.panels", encoding: "json", defaultValue: { left: false, right: false }, description: "Open states of automation flow conversation and inspector panels." },
   documentCitationStyle: { storageKey: "agentlas.docstudio.style.v1", encoding: "text", defaultValue: "APA", description: "Document Studio citation style (independent from native document formatting styles)." },
+  homeLayout: { storageKey: "agentlas.home.layout.v1", encoding: "json", defaultValue: emptyHomeLayout(), description: "Home's Space layout (up to 4 panes, 8 tabs each, 16 in all; each tab names a chat) plus the left list's pins and order. Screen state only: a damaged value falls back to the plain start, ids of deleted chats are dropped on restore." },
 } as const satisfies { [K in AppUiPreferenceName]: PreferenceDefinition<AppUiPreferences[K]> };
 
 export function isAppUiPreferenceName(name: unknown): name is AppUiPreferenceName {
@@ -65,6 +68,8 @@ export function normalizeAppUiPreference<K extends AppUiPreferenceName>(name: K,
       role: "orchestrator", inherit: false,
     }) as AppUiPreferences[K];
   }
+  // Space's layout is forgiving on every read and write: damaged parts are cut, never refused.
+  if (name === "homeLayout") return normalizeHomeLayout(value) as AppUiPreferences[K];
   const definition = appUiPreferenceDefinitions[name];
   if (typeof definition.defaultValue === "boolean") {
     if (typeof value !== "boolean") return refuse();

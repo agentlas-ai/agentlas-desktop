@@ -20,6 +20,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { setResourceWork } from "../diagnostics/resource-sampler";
 import { observeLocalProcessIdentity } from "../local-model-hub/platform";
 import { commandLineShellSpawn, killCliTree } from "../runtime/exec";
 import { survivingHiddenSpawn } from "../runtime/windows-hidden-detach";
@@ -70,6 +71,8 @@ export interface BackgroundTaskOutput {
   /** Bytes of output.log in total; text is its last `tailBytes`. */
   bytes: number;
   truncated: boolean;
+  /** Output the 16 MiB cap has already cut away from the start of output.log, all caps together (0 = none). `bytes` no longer counts it. */
+  droppedBytes: number;
 }
 
 const ID_RE = /^b[0-9a-z]{8}$/;
@@ -79,12 +82,30 @@ const DEFAULT_TAIL = 16_384;
 const MAX_TAIL = 262_144;
 const TERMINAL: ReadonlySet<BackgroundTaskStatus> = new Set(["completed", "failed", "stopped", "lost"]);
 const STOP_GRACE_MS = 5_000;
-/** output.log over this is cut to its last OUTPUT_KEEP_BYTES (a render's progress lines can run for days). */
+/**
+ * output.log over this is cut to its last OUTPUT_KEEP_BYTES (a render's progress lines can run for days).
+ * basis: 정한 값 — 근거 없음 (both). Reached: the first bytes of the log are gone; the file starts with a one-line note that says how many (all caps added up), and output() reports it as droppedBytes.
+ */
 const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
 const OUTPUT_KEEP_BYTES = 4 * 1024 * 1024;
+/** The note capOutput writes at the head of a capped log. A host-written fixed line (not model or user text), so reading it back is exact. */
+const OUTPUT_CAP_NOTE = /^\[agentlasd\] output passed \d+ bytes; the first (\d+) bytes were dropped\n/;
+// basis: 계산 — the note is 88 characters with a 16-digit count (a safe integer is at most 16 digits), so 160 bytes always hold it whole. Reached (a longer head): the note is not recognised and droppedBytes reads 0, never an error.
+const OUTPUT_CAP_NOTE_MAX_BYTES = 160;
+function readCapNote(fd: number): { dropped: number; noteBytes: number } {
+  try {
+    const head = Buffer.alloc(OUTPUT_CAP_NOTE_MAX_BYTES);
+    const n = fs.readSync(fd, head, 0, head.length, 0);
+    const m = OUTPUT_CAP_NOTE.exec(head.toString("utf8", 0, n));
+    return m ? { dropped: Number(m[1]), noteBytes: Buffer.byteLength(m[0]) } : { dropped: 0, noteBytes: 0 };
+  } catch { return { dropped: 0, noteBytes: 0 }; }
+}
 const FINISHED_RETENTION_MS = 7 * 86_400_000;
+/** While a task runs (or a lost one still writes), its output.log is checked against the cap this often. */
 const MAINTENANCE_INTERVAL_MS = 30_000;
 const PRUNE_INTERVAL_MS = 3_600_000;
+/** setTimeout cannot wait longer than this. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** The OS's start time for a pid: `ps -o lstart=` on macOS and Linux, Win32_Process.CreationDate on Windows. */
 async function defaultProcessStartTime(pid: number): Promise<string | null> {
@@ -115,7 +136,15 @@ export class BackgroundTaskRegistry {
   private readonly stopRequested = new Set<string>();
   private readonly listeners = new Set<(record: BackgroundTaskRecord) => void>();
   private readonly lostStops = new Set<string>();
+  /** Lost tasks whose process still ran when this service started: their output.log can still grow. */
+  private readonly lostAlive = new Set<string>();
   private lastPruneAt = 0;
+  /** Output-cap timer: exists only while a task of this service runs or a lost task still writes. */
+  private upkeepTimer: NodeJS.Timeout | null = null;
+  /** One timer aimed at the moment the oldest finished task passes the retention; none when nothing is finished. */
+  private pruneTimer: NodeJS.Timeout | null = null;
+  private pruneDueAt = Infinity;
+  private disposed = false;
 
   constructor(private readonly root: string, private readonly opts: {
     serviceInstance: string;
@@ -123,8 +152,44 @@ export class BackgroundTaskRegistry {
     shell?: string;
     processStartTime?: (pid: number) => Promise<string | null>;
   }) {
+    // No timer here: an idle registry wakes nothing. Upkeep is armed by a running task or a surviving lost task,
+    // and the prune timer by a task's end time (see armUpkeep, armPruneAt).
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-    setInterval(() => { try { this.maintain(); } catch { /* the next pass retries */ } }, MAINTENANCE_INTERVAL_MS).unref?.();
+  }
+
+  /** Output-cap pass every 30 s, only while there is a file that can still grow. Stops itself when none is left. */
+  private armUpkeep(): void {
+    if (this.disposed || this.upkeepTimer || (this.children.size === 0 && this.lostAlive.size === 0)) return;
+    this.upkeepTimer = setTimeout(() => {
+      this.upkeepTimer = null;
+      try { this.maintain(); } catch { /* the next pass retries */ }
+      this.armUpkeep();
+    }, MAINTENANCE_INTERVAL_MS);
+    this.upkeepTimer.unref?.();
+  }
+
+  /** Aims the single prune timer at `dueMs` (epoch ms of this registry's clock) unless an earlier aim exists. */
+  private armPruneAt(dueMs: number): void {
+    if (this.disposed || (this.pruneTimer && this.pruneDueAt <= dueMs)) return;
+    if (this.pruneTimer) clearTimeout(this.pruneTimer);
+    const nowMs = (this.opts.now?.() ?? new Date()).getTime();
+    this.pruneDueAt = dueMs;
+    // A clock that moved makes the timer early or late; the pass re-checks every record and re-aims.
+    this.pruneTimer = setTimeout(() => {
+      this.pruneTimer = null;
+      this.pruneDueAt = Infinity;
+      try { this.pruneFinished(); } catch { /* the next signal retries */ }
+    }, Math.min(MAX_TIMER_MS, Math.max(1_000, dueMs - nowMs)));
+    this.pruneTimer.unref?.();
+  }
+
+  /** Ends both timers (service shutdown). */
+  dispose(): void {
+    this.disposed = true;
+    if (this.upkeepTimer) clearTimeout(this.upkeepTimer);
+    if (this.pruneTimer) clearTimeout(this.pruneTimer);
+    this.upkeepTimer = this.pruneTimer = null;
+    this.pruneDueAt = Infinity;
   }
 
   private processStartTime(pid: number): Promise<string | null> {
@@ -206,13 +271,17 @@ export class BackgroundTaskRegistry {
     };
     this.write(record);
     this.children.set(id, child);
+    setResourceWork("background-tasks", true);
+    this.armUpkeep();
     const settle = (code: number | null, signal: NodeJS.Signals | null, spawnError?: Error) => {
       if (!this.children.has(id)) return;
       this.children.delete(id);
+      if (this.children.size === 0) setResourceWork("background-tasks", false);
       if (spawnError) fs.appendFileSync(outputPath, `\n[agentlasd] could not start: ${spawnError.message}\n`);
       const status: BackgroundTaskStatus = this.stopRequested.delete(id) ? "stopped" : code === 0 ? "completed" : "failed";
       const settled = { ...(this.get(id) ?? record), status, exitCode: code, signal: signal ?? null, endedAt: this.now() };
       this.write(settled);
+      this.armPruneAt(Date.parse(settled.endedAt) + FINISHED_RETENTION_MS);
       for (const listener of this.listeners) {
         try { listener(settled); } catch { /* a listener cannot change how the task ended */ }
       }
@@ -236,6 +305,7 @@ export class BackgroundTaskRegistry {
     const limit = Math.min(MAX_TAIL, Math.max(1, Math.floor(tailBytes) || DEFAULT_TAIL));
     let bytes = 0;
     let text = "";
+    let droppedBytes = 0;
     try {
       bytes = fs.statSync(record.outputPath).size;
       const fd = fs.openSync(record.outputPath, "r");
@@ -244,9 +314,10 @@ export class BackgroundTaskRegistry {
         const buffer = Buffer.alloc(length);
         fs.readSync(fd, buffer, 0, length, bytes - length);
         text = buffer.toString("utf8");
+        droppedBytes = readCapNote(fd).dropped;
       } finally { fs.closeSync(fd); }
     } catch { /* no output yet */ }
-    return { id, status: record.status, text, bytes, truncated: bytes > limit };
+    return { id, status: record.status, text, bytes, truncated: bytes > limit, droppedBytes };
   }
 
   stop(id: string): BackgroundTaskRecord {
@@ -314,8 +385,12 @@ export class BackgroundTaskRegistry {
     // A task an earlier service started keeps appending after an update restarts the service
     // (detached_still_running). Unlike stopLost, no start-time check: capping a file this service owns is harmless
     // even if the pid was reused, and maintain() stays synchronous.
-    for (const record of this.list({ status: "lost" })) {
-      if (record.pid && pidAlive(record.pid)) this.capOutput(record.outputPath);
+    for (const id of [...this.lostAlive]) {
+      const record = this.get(id);
+      if (record?.pid && pidAlive(record.pid)) { this.capOutput(record.outputPath); continue; }
+      // It ended since the last pass: it is now an ordinary finished task and may already be old enough to prune.
+      this.lostAlive.delete(id);
+      this.lastPruneAt = 0;
     }
     const now = (this.opts.now?.() ?? new Date()).getTime();
     if (now - this.lastPruneAt >= PRUNE_INTERVAL_MS) this.pruneFinished();
@@ -329,7 +404,10 @@ export class BackgroundTaskRegistry {
     try {
       const keep = Buffer.alloc(OUTPUT_KEEP_BYTES);
       const read = fs.readSync(fd, keep, 0, OUTPUT_KEEP_BYTES, size - OUTPUT_KEEP_BYTES);
-      const note = Buffer.from(`[agentlasd] output passed ${OUTPUT_CAP_BYTES} bytes; the first ${size - read} bytes were dropped\n`);
+      // An earlier cap left its own note at the head: its dropped count carries over and its own bytes are not task output, so the new note counts everything cut since the task began.
+      const earlier = readCapNote(fd);
+      const dropped = earlier.dropped + (size - earlier.noteBytes - read);
+      const note = Buffer.from(`[agentlasd] output passed ${OUTPUT_CAP_BYTES} bytes; the first ${dropped} bytes were dropped\n`);
       fs.ftruncateSync(fd, 0);
       fs.writeSync(fd, note, 0, note.length, 0);
       fs.writeSync(fd, keep, 0, read, note.length);
@@ -344,12 +422,16 @@ export class BackgroundTaskRegistry {
     const now = (this.opts.now?.() ?? new Date()).getTime();
     this.lastPruneAt = now;
     const removed: string[] = [];
+    let nextDue = Infinity;
     for (const record of this.list()) {
       if (!TERMINAL.has(record.status) || !record.endedAt || this.children.has(record.id)) continue;
-      if (now - Date.parse(record.endedAt) < FINISHED_RETENTION_MS) continue;
+      const due = Date.parse(record.endedAt) + FINISHED_RETENTION_MS;
+      if (now < due) { nextDue = Math.min(nextDue, due); continue; }
       if (record.status === "lost" && pidAlive(record.pid)) continue;
       try { fs.rmSync(this.dir(record.id), { recursive: true, force: true }); removed.push(record.id); } catch { /* next pass */ }
     }
+    // Aim at the next task to expire; a surviving lost task re-enters through maintain() when its process ends.
+    if (nextDue !== Infinity) this.armPruneAt(nextDue);
     return removed;
   }
 
@@ -367,12 +449,16 @@ export class BackgroundTaskRegistry {
       this.write(settled);
       lost.push(settled);
     }
+    // One look at every lost task whose process still runs; after this, only its own end is watched.
+    for (const record of this.list({ status: "lost" })) if (record.pid && pidAlive(record.pid)) this.lostAlive.add(record.id);
+    this.armUpkeep();
     this.pruneFinished();
     return lost;
   }
 
   /** Stop every task this instance runs (service shutdown). Their records end as "stopped". */
   stopAll(): void {
+    this.dispose();
     for (const id of [...this.children.keys()]) {
       try { this.stop(id); } catch { /* already settled */ }
     }

@@ -143,7 +143,6 @@ async function defaultFitJudge(spec: { role: string; candidate: { name: string; 
       { id: "does-the-work", text: "The candidate's stated purpose covers the actual work this role describes (not merely a shared keyword or domain).", kind: "must" },
       { id: "wrong-tool", text: "The candidate is specialized for a different file format, platform, or task than the role needs.", kind: "mustNot" },
     ],
-    timeoutMs: 20_000,
     signal: spec.signal,
   });
   spec.signal?.throwIfAborted();

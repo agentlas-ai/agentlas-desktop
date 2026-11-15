@@ -20,7 +20,7 @@ export async function refreshLocalAgentIfChanged(agentId: string): Promise<boole
   const newest = Math.floor(newestLocalAgentDefinitionMtimeMs(route.path));
   if (newest <= importedAt) return false;
   try {
-    await importLocalFolder(route.path);
+    await importLocalFolder(route.path, undefined, { keepName: true });
     return true;
   } catch (error) {
     console.warn("[local-agent] refresh before run skipped:", error instanceof Error ? error.message : String(error));

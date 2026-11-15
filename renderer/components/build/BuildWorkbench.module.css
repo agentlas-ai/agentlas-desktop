@@ -185,3 +185,19 @@
 .resourceDialog footer { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--builder-line); }
 .resourceDialog footer span { flex-basis: 100%; color: var(--rd-ink-3); font-size: 11px; }
 @media (max-width: 560px) { .resourceCatalog { grid-template-columns: 1fr; } .resourceCatalog aside { max-height: 150px; } .resourceDialog { padding: 20px 16px; } }
+/* Builds tab (F-D10): quiet rows inside one hairline box, as in build-v5-home. */
+.buildRows { list-style: none; margin: 0; padding: 0; border: 1px solid var(--builder-line); border-radius: 16px; overflow: hidden; }
+.buildRows li + li { border-top: 1px solid var(--builder-line); }
+.buildRow { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 62px; padding: 8px 18px; border: 0; background: transparent; color: var(--rd-ink); text-align: left; }
+.buildRow:hover { background: var(--rd-surface-2); }
+.buildRowText { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.buildRowText strong { font-size: 14px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.buildRowText span { color: var(--rd-ink-3); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.buildRowState { display: inline-flex; align-items: center; gap: 6px; color: var(--rd-ink-2); font-size: 12.5px; white-space: nowrap; }
+.buildRowState i { width: 7px; height: 7px; border-radius: 50%; }
+.buildRowState i[data-dot="blue"] { background: var(--info); }
+.buildRowState i[data-dot="amber"] { background: var(--warn); }
+.buildRowWhen { width: 52px; text-align: right; color: var(--rd-ink-3); font-size: 12.5px; white-space: nowrap; }
+/* running Build with its files (F-D10): conversation | files | one file */
+.editorLayout3 { grid-template-columns: minmax(300px, 44fr) minmax(190px, 18fr) minmax(0, 38fr); }
+.inspector[hidden] { display: none; }

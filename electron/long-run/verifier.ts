@@ -49,7 +49,7 @@ import {
 } from "../../shared/long-run-checkpoint";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { recordOngoingEpisodeStrategy } from "./plan";
-import { scheduleNoProgressRetry } from "./goal-no-progress-wait";
+import { closeAutomaticGoalAtNoProgress, scheduleNoProgressRetry } from "./goal-no-progress-wait";
 import {
   interruptGoalStrategyReflections,
   recordGoalStrategyReflectionOutcome,
@@ -63,7 +63,7 @@ import { readInvocationEffectBoundary } from "../invocation/effect-boundary-read
 import { isEffectStatusOnlyTool } from "../invocation/effect-boundary";
 import { captureGoalVerificationBoundary, invocationMatchesGoalRevision } from "./verification-boundary";
 import { registerOngoingGoalCycle } from "./wait-subscriptions";
-import { observeOngoingOneGoalProgress } from "./goal-progress";
+import { currentTurnEffectOutcomeTokens, observeOngoingOneGoalProgress } from "./goal-progress";
 
 const controllers = new Map<string, AbortController>();
 let accepting = true;
@@ -955,9 +955,12 @@ export function longRunVerifiersSettled(): boolean {
  * digest made no progress between them. Null = unknown (never "same"): an unknown digest resets the streak.
  *
  * In: the recovery fingerprint (unmet criteria and their typed class), the files the HOST read itself (relative path + sha256), the
- * leaf (node) verdicts, the plan's goal revision and its done tactics.
- * Out, on purpose: evidence ref ids (`chat-message:`, `event:`), message text, a judge's reason sentence and this turn's tool file
- * proofs. Each of those is new on every turn, so putting one in would make "no progress" impossible to ever detect.
+ * leaf (node) verdicts, the plan's goal revision and its done tactics, and the stored result of this turn's successful calls that may
+ * have changed something outside the app (goal-progress.ts currentTurnEffectOutcomeTokens): a Goal that advances only by posting or
+ * sending changes no file, and without this it read as idle. Only when there is one, so a turn without such a call keeps its old digest.
+ * Out, on purpose: evidence ref ids (`chat-message:`, `event:`), message text, a judge's reason sentence, this turn's tool file
+ * proofs and the NUMBER of tool calls. Each of those is new on every turn (or grows when the model only repeats a call), so putting one
+ * in would make "no progress" impossible to ever detect.
  */
 export function verificationOutcomeDigest(input: {
   recoveryFingerprint: string | null | undefined;
@@ -965,6 +968,8 @@ export function verificationOutcomeDigest(input: {
   nodeVerdicts: ReadonlyArray<{ nodeId: string; verdict: string }>;
   planRevision?: number | null;
   doneTacticIds?: readonly string[];
+  /** Stable result tokens of this turn's successful outside-effect calls (never a call count). */
+  effectOutcomeTokens?: readonly string[];
 }): string | null {
   if (!input.recoveryFingerprint) return null;
   if (input.hostFiles.some((file) => typeof file.relativePath !== "string" || !file.relativePath
@@ -979,6 +984,7 @@ export function verificationOutcomeDigest(input: {
       .sort((a, b) => byText(a[0], b[0]) || byText(a[1], b[1])),
     plan: Number.isSafeInteger(input.planRevision) ? input.planRevision : null,
     done: [...new Set(input.doneTacticIds ?? [])].sort(byText),
+    ...(input.effectOutcomeTokens?.length ? { effects: [...new Set(input.effectOutcomeTokens)].sort(byText) } : {}),
   });
   return `sha256:${createHash("sha256").update(body).digest("hex")}`;
 }
@@ -1605,6 +1611,7 @@ export async function verifyGoalCompletionClaim(input: {
       nodeVerdicts: rollupActive ? nodeVerdicts.map(({ leaf, verdict }) => ({ nodeId: leaf.nodeId, verdict: verdict.verdict })) : [],
       planRevision: plan ? plan.revision : null,
       doneTacticIds: plan ? plan.tactics.filter((tactic) => tactic.status === "done").map((tactic) => tactic.id) : [],
+      effectOutcomeTokens: currentTurnEffectOutcomeTokens(input.invocationRunId),
     });
     const noProgressRetries = settlement !== "cycle_completed" && outcomeDigest
       && recoveryEpoch.priorCheckpointInEpoch && priorCheckpoint?.outcomeDigest
@@ -1614,7 +1621,7 @@ export async function verifyGoalCompletionClaim(input: {
     let disposition = goalVerificationDisposition({ completed, verdicts: checkpointVerdicts, noProgressRetries });
     if (settlement === "cycle_completed") disposition = "cycle_completed";
     // Since 1.2.54 the verifier never parks a Goal: every unfinished verdict continues. The one exception is idle
-    // spin (owner 2026-10-12 "공회전만 막고"), which blocks so the AGI incident path takes over (agi/goal-facts.ts).
+    // spin ("공회전만 막고"), which blocks so the blocked-goal sweep takes over.
     const idleSpin = noProgressRetries >= NO_PROGRESS_RETRY_LIMIT;
     if (!completed && disposition !== "cycle_completed" && disposition !== "interrupted" && !idleSpin) disposition = "retry_required";
     if (!completed && disposition !== "cycle_completed") {
@@ -1657,7 +1664,8 @@ export async function verifyGoalCompletionClaim(input: {
         // The same outcome again: rest on a host schedule (no model call until it is due) instead of the blocked state the host
         // reads as running, which the sweep resumed within a minute. A failed schedule leaves the Goal running as before.
         if (noProgressStop) {
-          try { scheduleNoProgressRetry(current.id, noProgressRetries); }
+          // A Goal the host made from a plain sentence closes instead of resting (nothing positive failed: there is nothing left to do).
+          try { if (hardFail || !closeAutomaticGoalAtNoProgress(current.id)) scheduleNoProgressRetry(current.id, noProgressRetries); }
           catch (error) { console.warn("[long-run-verifier] no-progress rest could not be scheduled:", error); }
         }
       } else if (!input.background) disposition = "interrupted";

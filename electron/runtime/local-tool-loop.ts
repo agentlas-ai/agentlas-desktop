@@ -34,6 +34,9 @@ import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-to
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { mcpToolSurfaceDefers, mcpToolSurfaceHides, mcpToolSurfaceListsFirst } from "../mcp-tools/hephaestus-tool-surface";
 import { hostToolDeclaredEffect } from "../mcp-tools/host-tool-servers";
+import { grantHostCall, hostCallMarks, hostToolIsRead } from "../harness/host-call-ticket";
+import { noteLoopApproval } from "../harness/loop-approval-note";
+import { currentSlotLease } from "./run-slot-lease";
 import { installLazyToolMenu, invalidateToolMenu, isDirectEntryTool, isToolMenuDeferred, isToolMenuTool, menuPathHint, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
 import { TOOL_RESULT_READ, foldRetainedToolResult, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
@@ -50,6 +53,7 @@ import {
 } from "./workforce-broker";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { fetchNeverConnected, fetchWithReconnect } from "./reconnecting-fetch";
+import { apiSilenceError } from "./api-silence-fetch";
 import { tStatus } from "./status-i18n";
 import { openAiStrictSchemaOrNull } from "./strict-output-schema";
 import { abortReasonError } from "./abort-reason";
@@ -62,17 +66,19 @@ import { OUTPUT_LIMIT_CONTINUATION_MAX_ROUNDS, outputLimitContinuationTurn } fro
 import { resolveShortToolName, resolveToolNameAlias, unknownToolMessage } from "./tool-name-alias";
 import {
   LOCAL_MODEL_UNLOADED_CODE, localModelResident, refineServerFailureCode, RUNTIME_SERVER_ERROR_CODE, serverFailure,
-  serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, serverFailureResendLimit, waitForServerResend,
+  serverFailureCodeForStatus, serverFailureResendable, serverFailureResendDelayMs, serverFailureResendLimit, serverResendHintNote, waitForServerResend,
   streamErrorFrameBody, streamErrorFrameCode, type ServerFailureCode,
 } from "./provider-overload";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
   toolApprovalFaultCode,
+  toolApprovalRefusalText,
   toolApprovalSessionKey,
   type RuntimeToolPermissionAsk,
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
+import { approvalToolAnnotations, type ApprovalToolAnnotations } from "./approval-rule";
 import type { ToolPermission } from "../../shared/builtin-tools";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import type { ToolResultTrust } from "../../shared/types";
@@ -199,6 +205,8 @@ export type ResolvedTool =
       serverConfigDigest: string;
       schemaDigest: string;
       prepared: PreparedMcpBinding;
+      /** What the tool says about itself in the server's list (MCP annotations), as listed: read by the approval rule alone, never a read grant. */
+      annotations?: unknown;
       /** Canonical Main inventory ID; provider function names may be sanitized. */
       brokerToolId: string;
       /** Outside its server's first list (a deferred tool surface, host-tool-servers.ts): reached through the lazy menu. */
@@ -219,7 +227,7 @@ export type ResolvedTool =
  */
 const MAX_TOOL_LOOP_TURNS = 200;
 /** The repair nudge of the empty-answer turn and of the last turn of the bound (ledger part "repair nudge user message 'tools: done. Answer the user ...'"). */
-export const TOOLS_DONE_ANSWER_NUDGE = "tools: done. Answer the user: what was done + result, brief prose. No tools, no Memory Events, no JSON.";
+export const TOOLS_DONE_ANSWER_NUDGE = "tools: done. Answer the user: what was done + result, brief prose. No tools, no JSON.";
 /** Shared host-loop progress consumes completed outcomes, never a request alone. */
 export function createToolLoopProgress(runtimeKind: string, req: RunnerRequest, target: RunnerEvents): {
   events: RunnerEvents;
@@ -388,6 +396,7 @@ export async function loadMainToolInventory(
         serverConfigDigest: workforceBrokerDigest(server),
         schemaDigest: mcpToolSchemaDigest(tool),
         prepared,
+        ...((marks) => marks && typeof marks === "object" ? { annotations: marks } : {})((tool as { annotations?: unknown }).annotations),
         brokerToolId: `mcp__${key}__${tool.name}`,
         // Listed later, on demand: the lazy menu holds it (mainToolSurface), whatever the runtime class.
         ...(mcpToolSurfaceDefers(mcpConfigPath, key, tool.name) ? { deferred: true as const } : {}),
@@ -471,6 +480,8 @@ export interface LocalToolApprovalContext {
   onApprovalDecision?: (decision: RuntimeToolPermissionDecision) => void;
   /** A refusal that came from a fault in the approval path rather than a policy decision (machine token, see tool-approval.ts). */
   onApprovalFault?: (code: string) => void;
+  /** The approval rule's line for a refused money / delete / send call (tool-approval.ts toolApprovalRefusalText). */
+  onApprovalRefusal?: (line: string) => void;
 }
 
 /**
@@ -641,6 +652,7 @@ async function approveLocalToolCall(
   consentMaterial: unknown,
   detail?: string,
   admittedReadPermission = false,
+  origin?: { catalogId?: string | null; annotations?: ApprovalToolAnnotations; portAsksItsOwnRule?: true },
 ): Promise<RuntimeToolPermissionDecision> {
   // 내장 도구는 우리가 만든 것이라 성격을 안다 — 지어내는 게 아니라 아는 것을 싣는다.
   // MCP reads require Main's exact catalog/argument admission below; a remote
@@ -675,8 +687,15 @@ async function approveLocalToolCall(
     ...(ctx.chatId ? { chatId: ctx.chatId } : {}),
     ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
     ...(ctx.unattended ? { unattended: true as const } : {}),
+    // For the approval rule only: where an MCP tool comes from (Main's registry identity) and what it says about itself.
+    ...(origin ? { catalogId: origin.catalogId ?? null, annotations: origin.annotations ?? null, ...(origin.portAsksItsOwnRule ? { portAsksItsOwnRule: true as const } : {}) } : {}),
   };
   bindMainToolConsentResource(ask, consentMaterial);
+  // The shell command line, for the approval rule to read by what it runs (approval-rule.ts shellCommandDeletes;): only the in-process `bash` carries one.
+  if (builtin?.name === "bash") {
+    const line = (consentMaterial as { arguments?: { command?: unknown } } | null)?.arguments?.command;
+    if (typeof line === "string" && line) { ask.command = line.slice(0, 20_000); if (!ask.detail) ask.detail = line.slice(0, 500); }
+  }
   const arbiter = getRuntimeToolPermissionArbiter();
   let decision: RuntimeToolPermissionDecision;
   if (!arbiter) {
@@ -690,6 +709,9 @@ async function approveLocalToolCall(
   }
   const fault = decision === "deny" ? toolApprovalFaultCode(ask) : undefined;
   if (fault) ctx.onApprovalFault?.(fault);
+  // A call the approval rule asks about that ended without a "yes": its one line (what, why, what next) goes to the model.
+  const refusal = decision === "deny" ? toolApprovalRefusalText(ask) : "";
+  if (refusal) ctx.onApprovalRefusal?.(refusal);
   ctx.signal?.throwIfAborted();
   ctx.onApprovalDecision?.(decision);
   return decision;
@@ -982,6 +1004,12 @@ async function dispatchMainToolRawUnchecked(
   // 승인은 **호출 직전**이다. 인자를 파싱한 뒤, 서버에 닿기 전.
   let approvalDecision: RuntimeToolPermissionDecision | null = null;
   let approvalFault: string | undefined;
+  let approvalRefusal = "";
+  // For the approval rule's cards only (never the read admission below): where an MCP tool comes from and what it says about itself.
+  // A connected app on the server: the marks the host declared for the tool win over what the SDK kept of the listing (it drops a key it does not know, `costsMoneyHint` among them; F3).
+  const approvalOrigin = resolved.kind === "mcp" ? { catalogId: resolved.server.catalogId ?? null, ...((marks) => marks ? { annotations: marks } : {})(hostCallMarks(resolved.serverConfigKey, resolved.serverToolName, args) ?? approvalToolAnnotations(resolved.annotations)),
+    // The gateway tool of a tool.call: the port asks the connector tool's own rule next, so the generic gateway card is not asked as well.
+    ...(resolved.server.catalogId === "agentlas-turn" && resolved.serverToolName === "harness_call" && (args as { operation?: unknown } | null)?.operation === "tool.call" ? { portAsksItsOwnRule: true as const } : {}) } : undefined;
   const actionApproval: LocalToolApprovalContext = {
     ...approval,
     ...(actionId ? {
@@ -992,6 +1020,7 @@ async function dispatchMainToolRawUnchecked(
       },
     } : {}),
     onApprovalFault: (code) => { approval.onApprovalFault?.(code); approvalFault = code; },
+    onApprovalRefusal: (line) => { approval.onApprovalRefusal?.(line); approvalRefusal = line; },
   };
   let downloadOrigin: string | undefined;
   if (resolved.kind === "builtin" && resolved.builtinName === "browser_download" && typeof args.url === "string") {
@@ -1009,10 +1038,12 @@ async function dispatchMainToolRawUnchecked(
     catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args,
   }) && (resolved.server.catalogId !== "agentlas-browser"
     || !readOnlyBrowserToolIsMutating({ toolName: resolved.serverToolName, args }));
-  if ((collectionDecision ?? await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin, admittedMcpRead)) === "deny") {
+  // A connected app on the server: a tool the stored list marked as a read is one (harness/host-call-ticket.ts); every other is a change.
+  const hostRead = resolved.kind === "mcp" && hostToolIsRead(resolved.serverConfigKey, resolved.serverToolName);
+  if ((collectionDecision ?? await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin, admittedMcpRead || hostRead, approvalOrigin)) === "deny") {
     if (actionId) broker?.finishAction(actionId, "denied");
     // A refusal caused by a fault in the approval path says so, in machine form (the classification above still reads it as declined).
-    const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.${approvalFault ? ` [approval_fault:${approvalFault}]` : ""}`;
+    const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.${approvalFault ? ` [approval_fault:${approvalFault}]` : ""}${approvalRefusal ? `\n${approvalRefusal}` : ""}`;
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true));
     return {
       content: denied,
@@ -1020,6 +1051,10 @@ async function dispatchMainToolRawUnchecked(
       isError: true,
     };
   }
+  // The approval window answered "go" for this exact call of a connected app on the server: the bridge may send it as a change (harness/host-call-ticket.ts).
+  if (resolved.kind === "mcp" && !admittedMcpRead && !hostRead) grantHostCall(resolved.serverConfigKey, resolved.serverToolName, args);
+  // This window asked the owner for the change: the Main proxy that fronts the server does not ask the same card again (harness/loop-approval-note.ts). A call this window did not ask about gets no note.
+  if (resolved.kind === "mcp" && !admittedMcpRead && !hostRead && !collectionDecision) noteLoopApproval(resolved.serverConfigKey, resolved.serverToolName, args, Date.now(), currentSlotLease());
   approval.signal?.throwIfAborted();
   approval.assertCurrent?.();
   if (approval.scienceCollectionCapability) assertScienceCollectionTool(approval.scienceCollectionCapability, resolved);
@@ -1983,7 +2018,8 @@ async function runLocalOpenAiChatInner(
       const sent = inStream ? (streamResends += 1) : (serverResends += 1);
       events.onStatus(code === LOCAL_MODEL_UNLOADED_CODE
         ? req.locale === "ko" ? "모델 서버가 오류 뒤 모델을 내렸습니다. 잠시 뒤 같은 요청을 다시 보냅니다…" : "The model server dropped the model after an error; sending the same request again shortly…"
-        : req.locale === "ko" ? `모델 서버가 바빠 잠시 뒤 같은 요청을 다시 보냅니다(${sent}/${resendLimit})…` : `The model server is busy; sending the same request again shortly (${sent}/${resendLimit})…`);
+        : (req.locale === "ko" ? `모델 서버가 바빠 잠시 뒤 같은 요청을 다시 보냅니다(${sent}/${resendLimit})…` : `The model server is busy; sending the same request again shortly (${sent}/${resendLimit})…`)
+          + serverResendHintNote(req.locale, retryAfter, resendDelayMs));
       await waitForServerResend(resendDelayMs, req.signal);
       if (req.signal?.aborted) throw abortReasonError(req);
       return "resend";
@@ -2255,6 +2291,8 @@ async function runLocalOpenAiChatInner(
           body: deliveryBody,
       }); });
     } catch (err) {
+      // A server that connected and then sent nothing for the silence window is not "unreachable": the CLIs' closed word goes up as it is.
+      if (apiSilenceError(err)) throw err;
       // The first request of the turn never reached the server (connection refused, no such host): nothing was sent, so this
       // is a typed pre-dispatch refusal, not an unsettled turn. A later request follows dispatched tool work and stays a throw.
       if (!req.signal?.aborted && turn === 0 && !sawAnyToolCall && fetchNeverConnected(err)) {
@@ -2302,7 +2340,8 @@ async function runLocalOpenAiChatInner(
             signal: req.signal,
             body: deliveryBody,
           }));
-        } catch {
+        } catch (err) {
+          if (apiSilenceError(err)) throw err;
           if (req.signal?.aborted) throw abortReasonError(req);
           throw new Error(opts.unreachableMessage);
         }
@@ -2528,7 +2567,8 @@ async function runLocalOpenAiChatInner(
         result.synthesizedCallIds?.has(call.id) ? { responseIndex: turn, partIndex } : undefined);
       progress.assertProgress();
       messages.push(outcome.toolMessage);
-      if (!outcome.visionMessage) effectDeliveries.push({ result: outcome, projection: outcome.toolMessage });
+      // The tool message is what the effect ledger acknowledges; a capture's image travels as its own vision message, so the text half reaching the provider settles the delivery.
+      effectDeliveries.push({ result: outcome, projection: outcome.toolMessage });
       // A harness capture goes only where reading images is declared: an OpenAI-compatible BYOK provider, Ollama, LM Studio
       // and MLX may serve a text-only model, which can refuse the whole request; its path stays in the tool JSON.
       if (outcome.visionMessage && opts.acceptsImageResults !== false && (!outcome.visionFromHarness || opts.acceptsImageResults === true)) {

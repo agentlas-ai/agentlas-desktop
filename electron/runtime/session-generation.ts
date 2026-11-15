@@ -141,5 +141,15 @@ export function nativeCompactionLimit(kind: string, model: string | null | undef
   return compactionTokenLimit(kind, model);
 }
 
-/** The window a local-model runner assumes for a model nobody measured (ollama.ts, local-openai.ts): one number for those runners and for the oversized-input check. */
+/**
+ * The window assumed for a local model (ollama, lmstudio, mlx) whose server has not reported one: ONE number for the runners (ollama.ts,
+ * local-openai.ts), the oversized-input check (oversized-input.ts) and the window advertised for the allocation profile (detect.ts, which
+ * advertised its own 32,000 before this). It is only the fallback: a run reads what the server says first (Ollama /api/show + /api/ps in
+ * ollama-native.ts, LM Studio's loaded context length, a managed MLX resident's exact n_ctx); the advertisement in detect.ts is built from model
+ * names alone and cannot wait for a loaded window (a model's trained maximum is not the window the server admits: lmstudio.ts:24).
+ * basis: 정한 값 — 근거 없음. Measured bounds around it: Ollama 0.31.1 defaults to 4,096 on a small-VRAM machine and 32,768 otherwise (ollama-native.ts header);
+ * 16,000 sits between them and is the smaller of the two numbers the code carried, so the advertisement never promises more than a run assumes.
+ * Reached: an input over half of it (8,000 tokens) goes to a file reference (oversized-input.ts) and a conversation rotates at 80% (12,800 tokens), earlier than a
+ * larger real window would need; the allocation profile offers local models a 16,000-token window instead of 32,000 (a smaller work packet, never a failed one).
+ */
 export const LOCAL_RUNTIME_UNKNOWN_WINDOW = 16_000;

@@ -23,12 +23,26 @@ const AGENT_FILE_CHANGE_ROUTE = "this call cannot change an agent; edit an agent
 
 const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^oneMemory\.inspector\./, "private memory inspection and correction belong to the owner renderer", "write"],
+  // K7'' (audit D5): the model's one door to forget a line is the `remove` of the memory_ticket tool, where the line must be the asking turn's own (`lineBelongsToSubject`). `oneMemory.forgetEntry` is the owner's memory map
+  // button (the renderer calls its IPC channel directly, never this route) and takes no subject, so a model that held app-control write could have forgotten any line, a Personal one included.
+  [/^oneMemory\.forgetEntry$/, "forgetting a remembered line is the owner's own button on the memory map; to forget something the owner asked to forget, use the memory_ticket tool's remove", "destructive"],
+  // Agentlas 2.0 D5: these three make a room the old way - no lead, no isolation mark, no "reads from the moment it joined" cursor, no registered-first check.
+  // The owner's screen calls its own IPC channels directly (never this route); the model has tools that call the screen's own functions.
+  [/^oneTaskforces\.(create|update)$/, "a group room is opened or changed with one_team_new_chat and one_team_add_to_chat, which run the owner's own New chat steps (lead, isolation, registered agents only)", "write"],
+  [/^chats\.create$/, "a new conversation with an agent is one_team_new_chat; a Work session is one_supervisor_start_work (a plain create here skips the room's isolation and the registered-first check)", "write"],
+  // Agentlas 2.0 D7 (section 6): the org-chart seat operations. There is no org chart: an agent is a registered object (the owner registers it in Manage agents or Build),
+  // so a seat is not something the model adds, replaces, archives or assigns. The owner's screen calls its own IPC channels directly (never this route); the model has tools.
+  [/^oneOrg\.add$/, "an agent is registered by the owner (Manage agents or Build); a registered agent is already in one_team_list, so there is no seat to add: open a chat with it with one_team_new_chat or give it work with one_team_start_session", "write"],
+  [/^oneOrg\.replace$/, "no seat is replaced any more: to have another agent do the work, give it the work with one_team_start_session (or open a chat with it with one_team_new_chat)", "write"],
+  [/^oneOrg\.(archive|restore)$/, "archiving and restoring an agent is the owner's own action in Manage agents; to end work an agent is doing, use one_team_stop", "destructive"],
+  [/^seats\.assign$/, "the agent of a conversation is the owner's choice; to bring another agent into a room use one_team_add_to_chat, to hand an agent work use one_team_start_session", "write"],
   [/^businessWork\./, "WORK changes require the focused native employee owner", "write"],
   [/^businessNative\./, "organization sharing requires the focused native employee owner", "write"],
   [/^(companyNative|companyMail|businessCompanyWork)\./, "company identity, mail and work require the focused native company owner", "consent"],
   [/^business\.account\.(joinOrganization|logout|selectOrganization|selectPersonal|signIn)$/, "account and organization selection belong to the owner", "consent"],
   [BUSINESS_CONSOLE_OPERATIONS, "organization (company) management is the owner's own screen, not an app-control operation", "write"],
   [ENTERPRISE_SERVER_OPERATIONS, "the company server connection (enrollment code, pinned server key, this device's key) is the owner's own screen, not an app-control operation", "consent"],
+  [/^oneHome\./, "the personal agent's home keys, claims and phone trust are the owner's own screen, never an app-control operation", "consent"],
   [/^oneVault\./, "credential input belongs to the dedicated native owner surface", "consent"],
   [/^oneProvider\./, "provider effects require the original native owner request", "consent"],
   [/^onePersonalData\./, "personal sources and Page changes require their current native grant", "write"],
@@ -63,7 +77,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^(hephaestus\.coreAuthLogin|runtime\.(openCliLogin|connectStart|connectCancel|connectGet)|mobileBridge\.issuePairing)$/, "sign-in and device pairing stay with the owner", "consent"],
   [/^(agentLeases\.purchase|cloudAgents\.setPrices|appFactory\.(approveProviderPayment|resolveProviderCredentials|captureProviderBrowserSessions|launchProviderBrowserSession|openProviderBrowser))$/, "payments, prices and provider accounts stay with the owner", "consent"],
   // One's own run plumbing: it has dedicated tools for these.
-  [/^(invoke|oneSupervisor|oneHarness|oneWindow|oneContext|workStart|oneTeamPreflight|attention)\./, "One's own conversation plumbing: starting or steering a run by hand would bypass admission, grants and run ownership. Hope uses the one_supervisor_* / one_team_* tools; a run that does not carry them cannot start another run, so it finishes its own task and reports the missing capability", "write"],
+  [/^(invoke|oneSupervisor|oneHarness|oneWindow|oneContext|workStart|oneTeamPreflight|attention)\./, "One's own conversation plumbing: starting or steering a run by hand would bypass admission, grants and run ownership. The personal agent has the one_supervisor_* and one_team_* tools; a run that does not carry them cannot start another run, so it finishes its own task and reports the missing capability", "write"],
   [/^chats\.appendOneUserMessage$/, "never write a message as the owner", "write"],
   // A model saves a graph through one_graph_save, which checks that the work comes back and is not a tool or a copy.
   [/^automations\.(createFromBlueprint|updateGraph)$/, "save graphs through one_graph_save, which checks the work comes back and is not a tool", "write"],
@@ -122,13 +136,13 @@ const EXPLICIT_READ_PATHS: ReadonlySet<string> = new Set([
   "agentMail.suggestAddresses",
   // agents/workspace-ipc.ts
   "agentWorkspace.memoryCounts",
-  // alive-organisms/index.ts
-  "agi.bugReportList", "agi.defectsForChat",
+  // support/defect-report-host.ts
+  "agi.bugReportList",
   // capabilities/one-capabilities-ipc.ts
   "oneCapabilities.detail",
   // ipc.ts
   "automations.computerUsePermissions", "chats.agentRoomWork", "chats.messagesPage", "experience.cloudList", "harness.uiList",
-  "hephaestus.updateJournal", "migration.scan", "quests.claimStatus", "runLedger.chatTimeline", "site.agentAppMcpRecommendation",
+  "hephaestus.updateJournal", "migration.scan", "runLedger.chatTimeline", "site.agentAppMcpRecommendation",
   "site.agentAppRuntimeStatus", "site.agentAppThumbnail", "site.operationStatus", "site.prepareRender",
   // main.ts
   "productExtensions.scienceStatus", "productExtensions.scienceSuiteStatus", "productExtensions.scienceOutputScope", "science.artifacts.resolveConversationRoute",
@@ -149,8 +163,6 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   // agents/workspace-ipc.ts
   "agentWorkspace.acknowledgeRecovery", "agentWorkspace.compare", "agentWorkspace.prepareFileChange", "agentWorkspace.prepareFileOperation",
   "agentWorkspace.prepareFromMemory", "agentWorkspace.prepareRollback", "agentWorkspace.setAppearance", "agentWorkspace.sync",
-  // alive-organisms/index.ts
-  "alive.setEnabled",
   // archive/archive-ipc.ts
   "archive.restore", "archive.setAuto",
   // automation-strategy-ipc.ts
@@ -168,7 +180,7 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   "automations.openAccessibilitySettings", "automations.planFix", "automations.proposeChecklistFromExample", "automations.proposeGraphPatch",
   "automations.reconcileGraph", "automations.reconcileTriggerEvent", "automations.recordEvalCorrection", "automations.requestGraphPatch",
   "automations.restoreGraphVersion", "automations.runNow", "automations.swapAgent", "automations.swapProvider", "automations.toggle",
-  "automations.update", "browser.markSession", "browser.saveSite", "chats.create", "chats.defineGoal", "chats.markViewed",
+  "automations.update", "browser.markSession", "browser.saveSite", "chats.defineGoal", "chats.markViewed",
   "chats.openOneMember", "chats.rename", "chats.requestGoalRuntimeSelection", "chats.reviseGoal", "chats.setContinuousMode", "chats.setGoalMode",
   "chats.setRuntimeSelection", "chats.setSwarmMode", "chats.unarchive", "cloudAgents.saveBuiltPrivate", "cloudAgents.savePrivate",
   "cloudAgents.saveRegisteredPrivate", "computerHistory.prepareDraft", "config.setCustomBaseUrl", "config.setTerminalProfiles", "document.exportPdf",
@@ -180,15 +192,15 @@ const EXPLICIT_WRITE_PATHS: ReadonlySet<string> = new Set([
   "media.copyImage", "media.saveImage", "memoryDreaming.setEnabled", "migration.import", "multimodal.openVideoOutput", "oneActivation.resolveConcern", "oneActivation.resolveMobile",
   "oneActivation.resolveWork", "oneActivation.skip", "oneAttachments.bindToTeam", "oneAttachments.prepare", "oneAutoRecovery.judge",
   "oneAutoRecovery.verify", "oneBriefing.feedback", "oneBriefing.openTask", "oneBriefing.prepareAction", "oneBriefing.setPreferences",
-  "oneBriefing.startAction", "oneFeatureIntro.acknowledge", "oneFeatureIntro.defer", "oneMemory.setAssetEnabled", "oneOrg.add", "oneOrg.createAgent", "oneOrg.markRead", "oneOrg.rename",
-  "oneOrg.reorder", "oneOrg.replace", "oneOrg.restore", "oneOrg.setTools", "oneOrg.suggestions", "oneOrg.update", "oneProfile.addPrinciple",
+  "oneBriefing.startAction", "oneFeatureIntro.acknowledge", "oneFeatureIntro.defer", "oneMemory.setAssetEnabled", "oneOrg.createAgent", "oneOrg.markRead", "oneOrg.rename",
+  "oneOrg.reorder", "oneOrg.setTools", "oneOrg.suggestions", "oneOrg.update", "oneProfile.addPrinciple",
   "oneProfile.origin", "oneProfile.setAvatarImage", "oneProfile.setPrincipleEnabled", "oneProfile.update", "oneProfile.updatePrinciple",
-  "oneRequestIntent.resolve", "oneSuggestions.dismiss", "oneSuggestions.neverAsk", "oneSuggestions.snooze", "oneTaskforces.create",
-  "oneTaskforces.update", "oneValueClosure.setReflection", "oneWeeklyReflection.resolve", "ontology.addSource", "ontology.openInbox",
+  "oneRequestIntent.resolve", "oneSuggestions.dismiss", "oneSuggestions.neverAsk", "oneSuggestions.snooze",
+  "oneValueClosure.setReflection", "oneWeeklyReflection.resolve", "ontology.addSource", "ontology.openInbox",
   "ontology.provision", "ontology.sync", "pluginBuilder.draft", "pluginBuilder.prove", "pluginBuilder.start", "pluginBuilder.verify",
   "projects.connectGithub", "projects.create", "projects.createFromWorkspace", "projects.update", "promptHub.bookmarkAdd", "promptHub.startChat",
   "runAlerts.set", "runtime.detect", "runtime.seedFirstRunRoles", "runtime.setActive", "runtime.setRoleMembers", "runtime.updateCli",
-  "runtimeFiles.write", "sdk.settings.ackLanguageApplied", "seats.assign", "setDaemonAutostart", "site.captureRect", "site.createProject",
+  "runtimeFiles.write", "sdk.settings.ackLanguageApplied", "setDaemonAutostart", "site.captureRect", "site.createProject",
   "site.editScreen", "site.exportProjectZip", "site.exportScreen", "site.exportScreenCode", "site.generateScreen", "site.handoffToWorkspace",
   "site.launchAgentApp", "site.prebuildReviewAgentAppMcp", "site.renameScreen", "site.reviewAgentAppMcp", "surfaceAssets.materialize",
   "surfaceAssets.restore", "surfaces.updateJob", "surfaces.updateState", "system.setConcurrency", "tasks.continueFromResult", "tasks.createProject",
@@ -286,15 +298,28 @@ export function appControlPolicy(entry: Pick<AppControlCatalogEntry, "path">): A
 // Operations the model's catalog does not carry at all (owner 2026-10-21): not callable, not listed as restricted either, and a
 // call by name is answered like any unknown operation. Declared, not inferred. Every one of them is denied above, so leaving a
 // name out only removes information, never grants anything; the generated catalog still mirrors the preload bridge.
-const MODEL_CATALOG_OMITTED: ReadonlyArray<RegExp> = [BUSINESS_CONSOLE_OPERATIONS, ENTERPRISE_SERVER_OPERATIONS];
+const MODEL_CATALOG_OMITTED: ReadonlyArray<RegExp> = [BUSINESS_CONSOLE_OPERATIONS, ENTERPRISE_SERVER_OPERATIONS, /^oneHome\./];
 export function appControlOmittedFromModelCatalog(entry: Pick<AppControlCatalogEntry, "path">): boolean {
   return MODEL_CATALOG_OMITTED.some((pattern) => pattern.test(entry.path));
 }
 
-const TERMINAL_APP_OPERATIONS = new Set(["invoke.cancel", "invoke.unsteer", "automations.stopRun", "automations.terminalClose"]);
+const TERMINAL_APP_OPERATIONS = new Set([
+  "invoke.cancel", "invoke.unsteer", "automations.stopRun", "automations.terminalClose",
+]);
+// These are recognized only at dispatch for an exact stop; their existing
+// catalog classification and normal Science admission remain unchanged.
+const SCIENCE_TERMINAL_OPERATIONS = new Set([
+  "science.composer.cancel", "science.manuscripts.cancelRenderJob", "science.math.cancel",
+  "science.researchCompute.interrupt", "science.researchCompute.stopSession",
+]);
 /** The existing terminal handler still validates its exact target and current caller. */
-export function isAppControlTerminalOperation(operation: string): boolean {
-  return TERMINAL_APP_OPERATIONS.has(operation);
+export function isAppControlTerminalOperation(operation: string, args?: unknown): boolean {
+  if (TERMINAL_APP_OPERATIONS.has(operation) || SCIENCE_TERMINAL_OPERATIONS.has(operation)) return true;
+  const inner = args && typeof args === "object" && !Array.isArray(args) ? (args as {input?:unknown}).input : null;
+  if (!inner || typeof inner !== "object" || Array.isArray(inner)) return false;
+  const input=inner as {intent?:unknown;action?:unknown};
+  return (operation === "science.composer.steer" && input.intent === "stop") ||
+    (operation === "science.researchLoops.transition" && (input.action === "cancel" || input.action === "pause"));
 }
 
 export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "path">): AppControlPolicyClassification {
@@ -304,7 +329,7 @@ export function classifyAppControlPolicy(entry: Pick<AppControlCatalogEntry, "pa
   if (/^invoke\.(activeChats|goalActiveChats|attach|history|receipt|latestReceipt|admission|workerReport|steeringRecovery|latestOneSurface|replay|preflightSteers|preflightSteerReceipt)$/.test(entry.path)) return explicit("read");
   // Stopping existing work does not require another owner-written turn. The
   // handler still checks the exact target and the caller's current authority.
-  if (isAppControlTerminalOperation(entry.path)) return explicit("write");
+  if (TERMINAL_APP_OPERATIONS.has(entry.path)) return explicit("write");
   if (entry.path === "invoke.clearHistory") return explicit("destructive");
   // This only reads the evidence needed to close an old occurrence; it neither
   // closes it nor changes execution authority.

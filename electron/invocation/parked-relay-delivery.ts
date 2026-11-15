@@ -45,8 +45,10 @@ const NUDGE_TEXT_BUDGET = 12_000;
  * conversation relays for One with no other way to a turn. A "goal_*" relay belongs to the Goal's next turn and may be a host
  * direction, which a plain relay would not carry faithfully. */
 export const NUDGE_CAUSE_PREFIXES: readonly string[] = ["room_note_", "owner_wait_"];
+/** A room that was busy or whose owner was typing is asked again after this (a wait the room's own series carries, never a period). */
 const SCAN_INTERVAL_MS = 30_000;
 const SCAN_CHATS_PER_PASS = 8;
+const GOAL_OWNED_RELAY_RECHECK_MS = 10 * 60_000;
 
 // ── Goal retry pull-forward ─────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -273,6 +275,8 @@ export function scanParkedRelays(ports: ParkedRelayScanPorts = productionScanPor
       // A Goal owns the room's next turn. Only a Goal that rests on its own retry can be hurried; every other state is the Goal's
       // own business (running, queued: the turn that carries the relays is coming; owner holds: only the owner wakes it).
       const pull = pullGoalRetryForward(item.chatId, ports.goal, now);
+      // The Goal's own next turn carries these relays: look again after a while, not at the next scan (no period without a reason).
+      if (!pull.pulled) nudgeSeries.set(item.chatId, { attempts: nudgeSeries.get(item.chatId)?.attempts ?? 0, notBefore: now + GOAL_OWNED_RELAY_RECHECK_MS });
       out.push({ chatId: item.chatId, action: pull.pulled ? "pulled_forward" : "goal_owns", detail: pull.pulled ? pull.nextAt : pull.reason });
       continue;
     }
@@ -306,25 +310,30 @@ function productionScanPorts(): ParkedRelayScanPorts {
   };
 }
 
-let scanTimer: NodeJS.Timeout | null = null;
-
-/** Main starts this once; the scan is silent and bounded (see the header). Returns a stop function. */
-export function startParkedRelayRecovery(ports?: ParkedRelayScanPorts): () => void {
-  if (scanTimer) return () => stopParkedRelayRecovery();
-  scanTimer = setInterval(() => {
-    try {
-      const done = scanParkedRelays(ports);
-      const acted = done.filter((entry) => entry.action === "pulled_forward" || entry.action === "sent");
-      if (acted.length) console.info("[parked-relay] scan", JSON.stringify(acted));
-    } catch (error) { console.warn("[parked-relay] scan failed:", error instanceof Error ? error.message : error); }
-  }, SCAN_INTERVAL_MS);
-  scanTimer.unref?.();
-  return () => stopParkedRelayRecovery();
+/**
+ * When the next scan owes a look (epoch ms) or null: the oldest parked relay's age gate, or the room's own wait after a refused or busy
+ * wake, whichever is later; null when nothing is parked. The one timer of the harness (harness/due-timer.ts) aims at it; there is no
+ * period. Read-only, one indexed query over the parked relays (a few rows at most).
+ */
+export function nextParkedRelayScanAt(ports: Pick<ParkedRelayScanPorts, "chats"> = productionScanPorts(), now: number = Date.now()): number | null {
+  let work: Array<{ chatId: string; oldest: number; count: number }> = [];
+  try { work = ports.chats(Number.MAX_SAFE_INTEGER, SCAN_CHATS_PER_PASS); } catch { return null; }
+  let soonest: number | null = null;
+  for (const item of work) {
+    if (now - item.oldest > PARKED_RELAY_MAX_AGE_MS) continue; // stale rows are skipped by the scan itself; they never owe a look
+    const at = Math.max(item.oldest + PARKED_RELAY_MIN_AGE_MS, nudgeSeries.get(item.chatId)?.notBefore ?? 0);
+    if (soonest === null || at < soonest) soonest = at;
+  }
+  return soonest;
 }
 
-export function stopParkedRelayRecovery(): void {
-  if (scanTimer) clearInterval(scanTimer);
-  scanTimer = null;
+/** One pass for the harness timer's source: the same scan, logged the same way. */
+export function runParkedRelayScan(ports?: ParkedRelayScanPorts): void {
+  try {
+    const done = scanParkedRelays(ports);
+    const acted = done.filter((entry) => entry.action === "pulled_forward" || entry.action === "sent");
+    if (acted.length) console.info("[parked-relay] scan", JSON.stringify(acted));
+  } catch (error) { console.warn("[parked-relay] scan failed:", error instanceof Error ? error.message : error); }
 }
 
 /** Test seam: forget the per-room wake series. */

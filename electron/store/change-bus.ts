@@ -23,6 +23,8 @@ export type DesktopStoreEntity =
   | "runtime"
   | "one-recovery"
   | "one-recovery-dropped"
+  /** Repair 5: the personal agent's HOME changed on this computer - the local state (`legacy` / `home` / `sealed` / `away`), the epoch, the computer the pointer names, a move that ended. No id: the window re-reads `oneHome:status`. */
+  | "one-home"
   | "surface";
 
 export interface DesktopStoreChange {

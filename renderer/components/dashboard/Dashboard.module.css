@@ -1,0 +1,477 @@
+/* Dashboard (Agentlas 2.0, F-D2): the shape of mockups/dashboard-final. Tokens only (dark mode follows); no colour fills on status lines,
+   no left bars; a label button never wraps (the Button rule: composes agentlas-btn). Each card keeps its own breathing room: a card that
+   does not fit grows taller, it never loses its padding. */
+
+.shell { display: flex; flex-direction: column; gap: 22px; }
+
+.card {
+  min-width: 0;
+  background: var(--paper);
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(15, 18, 20, 0.03);
+}
+
+/* ── Work in progress ─────────────────────────────────────────────────────────────────────────── */
+.wipHead { display: flex; align-items: center; gap: 10px; min-height: 28px; }
+.h { margin: 0; font-size: 15px; font-weight: 700; line-height: 1.3; color: var(--ink); }
+.quiet {
+  composes: agentlas-btn from global;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--agentlas-btn-pad-x-sm);
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink);
+  background: transparent;
+}
+.quiet:hover, .quiet:focus-visible { background: var(--fill-1); }
+.wipGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.wipFade { animation: wipFade 220ms ease-out; }
+@keyframes wipFade { from { opacity: 0.35; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .wipFade { animation: none; } }
+.wip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 66px;
+  padding: 14px 16px;
+  text-align: left;
+  color: var(--ink);
+  cursor: pointer;
+}
+.wip:hover, .wip:focus-visible { background: var(--paper-2); }
+.wipText { min-width: 0; flex: 1; }
+.wipTitle {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wipSub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted-deep);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.wipSub > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.wipSub[data-need="true"] { color: var(--danger); font-weight: 600; }
+.wipTime { align-self: flex-start; margin-top: 2px; font-size: 11px; color: var(--muted-deep); white-space: nowrap; }
+.alertDot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--danger);
+  border: 2px solid var(--paper-2);
+}
+.faces { display: flex; flex: none; }
+.faces > span + span { margin-left: -10px; }
+.tile {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--paper-3);
+  color: var(--ink-soft);
+}
+.statusDot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--muted); }
+.statusDot[data-tone="ok"] { background: var(--ok); }
+.softLine {
+  margin: 10px 0 0;
+  padding: 14px 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+/* F-D2b D: the empty and the could-not-read state are one band as high as a card (66px), so the rows below do not jump. Both buttons are white. */
+.band {
+  display: flex; align-items: center; gap: 12px; box-sizing: border-box; height: 66px; margin-top: 10px; padding: 0 16px;
+  border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); font-size: 13.5px; color: var(--ink);
+}
+.band[data-empty="true"] { border-style: dashed; border-color: var(--paper-edge-strong); background: transparent; }
+.band > svg { flex: none; color: var(--muted-deep); }
+.bandText { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bandBtn {
+  composes: agentlas-btn from global;
+  display: inline-flex; align-items: center; flex: none; height: 32px; padding: 0 var(--agentlas-btn-pad-x);
+  border: 1px solid var(--paper-edge-strong); border-radius: 8px; background: var(--paper); font-size: 12.5px; font-weight: 650; color: var(--ink);
+}
+.bandBtn:hover:not(:disabled), .bandBtn:focus-visible { background: var(--fill-1); }
+.btn {
+  composes: agentlas-btn from global;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--agentlas-btn-pad-x-sm);
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink);
+  background: transparent;
+}
+.btn:hover:not(:disabled), .btn:focus-visible { background: var(--fill-1); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.inlineBtn { margin-left: 6px; }
+
+/* ── the two columns: exactly 5 : 5 ────────────────────────────────────────────────────────────── */
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px; /* .card .h in the pictures */
+  min-height: 52px;
+  border-bottom: 1px solid var(--paper-edge);
+}
+.cardHead .h { flex: 1; min-width: 0; }
+.iconBtn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border: 1px solid var(--paper-edge);
+  border-radius: 7px;
+  color: var(--ink-soft);
+  background: transparent;
+}
+.iconBtn:hover:not(:disabled), .iconBtn:focus-visible { background: var(--fill-1); }
+.iconBtn:disabled { opacity: 0.45; cursor: default; }
+
+/* ── Models ───────────────────────────────────────────────────────────────────────────────────── */
+.role { padding: 16px; border-bottom: 1px solid var(--paper-edge); }
+.role:last-child { border-bottom: 0; }
+.roleHead {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 11px;
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--ink);
+}
+.roleHead svg { color: var(--ink-soft); flex: none; }
+.roleHead .statusDot { margin-left: auto; }
+.mline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 124px;
+  gap: 8px;
+  align-items: center;
+}
+.mline { position: relative; }
+.mline + .mline { margin-top: 8px; }
+/* F-D2b A: the handle column exists only while the role has two or more lines (one line keeps no space for it). */
+.mline[data-handle="true"] { grid-template-columns: 16px minmax(0, 1fr) 124px; }
+.mline[data-handle="true"][data-with-switch="true"] { grid-template-columns: 16px minmax(0, 1fr) 124px auto; }
+.grip { display: grid; place-items: center; width: 16px; height: 28px; margin-left: -4px; color: var(--muted); opacity: 0.45; cursor: grab; user-select: none; }
+.mline:hover .grip, .grip:hover { opacity: 1; color: var(--ink-soft); }
+.grip:active { cursor: grabbing; }
+.mline[data-dragging="true"] { opacity: 0.92; border-radius: 10px; box-shadow: 0 6px 18px rgba(15, 18, 20, 0.14); background: var(--paper); }
+.mline[data-drop="before"]::before, .mline[data-drop="after"]::after {
+  content: ""; position: absolute; left: 24px; right: 32px; height: 2px; border-radius: 1px; background: var(--ink); pointer-events: none;
+}
+.mline[data-drop="before"]::before { top: -5px; }
+.mline[data-drop="after"]::after { bottom: -5px; }
+.orderHint { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font-size: 12.5px; line-height: 1.4; color: var(--muted-deep); }
+.orderHint svg { flex: none; }
+.mline[data-with-switch="true"] { grid-template-columns: minmax(0, 1fr) 124px auto; }
+.eff { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; align-items: center; min-width: 0; }
+.eff[data-x="true"] { grid-template-columns: minmax(0, 1fr) 24px; }
+.eff .effortSelect { height: 42px; width: 100%; font-size: 13px; font-weight: 550; padding: 0 10px; }
+.eff .xBtn { width: 24px; height: 24px; }
+.mline :global(.dashboard-runtime-model-picker) { min-width: 0; }
+.mline :global(.dashboard-runtime-model-picker-trigger) {
+  min-height: 42px;
+  height: 42px;
+  padding: 0 10px;
+  gap: 8px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 8px;
+  background: var(--paper);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.mline :global(.dashboard-runtime-model-picker-value) { align-items: baseline; gap: 8px; min-width: 0; }
+.mline :global(.dashboard-runtime-model-picker-value strong) { flex: 0 1 auto; font-size: 13px; font-weight: 550; }
+.mline :global(.dashboard-runtime-model-picker-value small) { flex: 0 1 auto; max-width: none; font-size: 12px; color: var(--muted-deep); white-space: nowrap; }
+.mline :global(.dashboard-runtime-model-picker-trigger-mark) { width: 16px; height: 16px; border-radius: 0; background: transparent; }
+.effort {
+  height: 42px;
+  min-width: 0;
+  width: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 8px;
+  background: var(--paper);
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.xBtn {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  color: var(--muted);
+  background: transparent;
+}
+.xBtn:hover:not(:disabled), .xBtn:focus-visible { color: var(--ink); background: var(--fill-1); }
+.xBtn:disabled { opacity: 0.4; cursor: default; }
+.mnote { grid-column: 1 / -1; margin: 2px 0 0; font-size: 12px; line-height: 1.4; color: var(--muted-deep); }
+.moreBtn {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 30px;
+  margin-top: 8px;
+  border: 1px dashed var(--paper-edge);
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+}
+.moreBtn:hover:not(:disabled), .moreBtn:focus-visible { color: var(--ink); background: var(--fill-1); }
+.moreBtn:disabled { opacity: 0.45; cursor: default; }
+.chooseBtn {
+  composes: agentlas-btn from global;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 42px;
+  padding: 0 var(--agentlas-btn-pad-x);
+  border: 1px dashed var(--paper-edge-strong);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--muted-deep);
+  background: transparent;
+  text-align: left;
+}
+.chooseBtn:hover:not(:disabled), .chooseBtn:focus-visible { background: var(--fill-1); color: var(--ink); }
+.chooseBtn:disabled { opacity: 0.55; cursor: default; }
+.chooseBtn::after {
+  content: "";
+  margin-left: auto;
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6l4 4 4-4'/></svg>") center / contain no-repeat;
+  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='M4 6l4 4 4-4'/></svg>") center / contain no-repeat;
+}
+.note {
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  border-top: 1px solid var(--paper-edge);
+}
+.note[data-tone="error"] { color: var(--danger); }
+.note ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.note li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.emptyBody { margin: 0; padding: 18px 16px; font-size: 13px; line-height: 1.5; color: var(--ink-soft); }
+
+/* ── Connections and usage ─────────────────────────────────────────────────────────────────────── */
+.conn { padding: 4px 16px; }
+.crow {
+  display: grid;
+  grid-template-columns: 8px 20px minmax(72px, 150px) minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 10px;
+  min-height: 46px;
+  padding: 4px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--paper-edge);
+}
+.crow:last-child { border-bottom: 0; }
+.crow img { width: 16px; height: 16px; object-fit: contain; }
+.cname { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+.cmid { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.bar { flex: 1; min-width: 24px; height: 4px; border-radius: 2px; background: var(--paper-3); overflow: hidden; }
+.bar > i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
+.bar[data-hot="true"] > i { background: var(--warn); }
+.num { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; text-align: right; font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
+.cstate { min-width: 0; font-size: 12.5px; color: var(--muted-deep); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cstate[data-tone="warn"] { color: var(--warn); display: flex; align-items: center; gap: 6px; }
+.cstate[data-tone="error"] { color: var(--danger); }
+.cact {
+  composes: agentlas-btn from global;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 12px;
+  /* desktop-impl-gaps-1 E: every row action is the same white button with a hairline (.bt.sm: 30px, 12.5px, --edge-strong) */
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 9px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--ink);
+  background: var(--paper);
+  justify-self: end;
+}
+.cact:hover:not(:disabled), .cact:focus-visible { background: var(--fill-1); }
+.cact:disabled { opacity: 0.5; cursor: default; }
+.cacts { display: flex; gap: 8px; justify-self: end; }
+.cnote {
+  grid-column: 1 / -1;
+  margin: 2px 0 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.cnote code { display: block; white-space: pre-wrap; margin-top: 2px; }
+.keyEdit { grid-column: 1 / -1; display: flex; gap: 8px; margin: 2px 0 8px; }
+.keyEdit input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 13px;
+}
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  border-top: 1px solid var(--paper-edge);
+  font-size: 13px;
+  color: var(--ink);
+}
+.toggleRow svg { color: var(--ink-soft); flex: none; }
+.toggleRow b { font-weight: 650; }
+.toggleRow .tglLabel { margin-left: auto; color: var(--muted-deep); font-size: 13px; white-space: nowrap; }
+.tgl {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--paper-edge-strong);
+  border: 0;
+  padding: 0;
+}
+.tgl::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left 120ms; }
+.tgl[aria-checked="true"] { background: var(--accent); }
+.tgl[aria-checked="true"]::after { left: 18px; }
+.tgl:disabled { opacity: 0.5; cursor: default; }
+.inlineError {
+  margin: 0;
+  padding: 10px 16px;
+  font-size: 12.5px;
+  color: var(--danger);
+  border-bottom: 1px solid var(--paper-edge);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* ── F-D2b C: the readiness card (only while the owner has something to do) ───────────────────────── */
+.todoRow { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px 20px; border-bottom: 1px solid var(--paper-edge); } /* picture C: .li min-height 60 padding 8 */
+.todoIcon { flex: none; width: 22px; display: grid; place-items: center; color: var(--ink-soft); }
+.todoRow:last-child { border-bottom: 0; }
+.todoCopy { flex: 1; min-width: 0; display: grid; gap: 2px; font-size: 13.5px; line-height: 1.45; color: var(--ink); }
+.todoCopy b { font-weight: 650; }
+.todoCopy span { color: var(--muted-deep); overflow-wrap: anywhere; }
+.darkBtn {
+  composes: agentlas-btn from global;
+  display: inline-flex; align-items: center; flex: none; height: 32px; padding: 0 var(--agentlas-btn-pad-x);
+  border-radius: 8px; font-size: 12.5px; font-weight: 650;
+}
+/* [data-dark] raises the specificity above the shell's `.rd button { color }`, which otherwise paints the label in the button's own colour. */
+.darkBtn[data-dark="true"] { border: 1px solid var(--ink); background: var(--ink); color: var(--paper); }
+.darkBtn:hover:not(:disabled), .darkBtn:focus-visible { opacity: 0.9; }
+.darkBtn:disabled { opacity: 0.5; cursor: default; }
+.bandBtn:disabled { opacity: 0.5; cursor: default; }
+.readyBody { display: flex; align-items: center; gap: 10px; margin: 0; padding: 18px 16px; font-size: 13px; color: var(--ink-soft); }
+.spin { animation: spin 1s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+
+/* ── Agent Hub (the shipped card design; four cards show, two by two) ──────────────────────────── */
+.hub :global(.dashboard-module-head) { min-height: 42px; }
+.hub :global(.hub-borrow-carousel) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  overflow: visible;
+  padding: 8px 20px 18px;
+}
+.hub :global(.hub-borrow-card) { min-width: 0; width: auto; }
+
+/* ── the approval inbox (only while something waits) ───────────────────────────────────────────── */
+.inboxHead { display: flex; align-items: center; gap: 8px; padding: 13px 16px; border-bottom: 1px solid var(--paper-edge); }
+.count {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--danger);
+}
+.inboxRow { display: flex; gap: 12px; align-items: flex-start; padding: 12px 16px; border-bottom: 1px solid var(--paper-edge); }
+.inboxRow:last-child { border-bottom: 0; }
+.inboxCopy { flex: 1; min-width: 0; font-size: 13px; line-height: 1.5; color: var(--ink); }
+.inboxCopy small { display: block; font-size: 12px; color: var(--muted-deep); overflow-wrap: anywhere; }
+.inboxCopy .detail { display: grid; gap: 2px; margin-top: 6px; font-size: 11.5px; color: var(--ink-soft); }
+.open {
+  composes: agentlas-btn from global;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 0 var(--agentlas-btn-pad-x);
+  height: 32px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--ink);
+  background: var(--paper);
+}
+.open:hover:not(:disabled), .open:focus-visible { background: var(--fill-1); }
+
+/* Narrow windows: the card row takes two across, then the two columns stack. (At the shipped widths the columns are exactly 5 : 5.) */
+@media (max-width: 1100px) {
+  .wipGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .crow { grid-template-columns: 8px 20px minmax(72px, 104px) minmax(0, 1fr) auto; }
+}
+@media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }

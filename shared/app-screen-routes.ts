@@ -13,6 +13,7 @@ import { closestNames } from "./did-you-mean";
 /** Screens that exist and are accepted by name, but are not offered to the model as places to go (and are never suggested). */
 const NOT_OFFERED: Readonly<Record<string, string>> = {
   "/": "the root document; Work home is /dashboard",
+  "/one-confirm": "the confirmation window of the personal agent's home is Main-owned",
   "/one-vault": "credential input has a window of its own",
   "/surface-preview": "internal preview page",
 };

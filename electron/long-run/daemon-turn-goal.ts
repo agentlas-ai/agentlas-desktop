@@ -45,9 +45,10 @@ import { currentGoalExecutionObligations, currentGoalObligationsSatisfied } from
  * No electron import: the background service loads this without Electron (test-daemon-loads-without-electron). */
 import { goalHeldForOwnerAnswer } from "../../shared/goal-display-state";
 import { LONG_RUN_TERMINAL_STATUSES, isLongRunStatus } from "../../shared/long-run";
-import { completeChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
+import { getChatGoalRevision } from "../store/chat-goals";
+import { closeGoal } from "../store/goal-close";
 import { desktopAppInstanceId } from "./app-runtime-coordinator";
-import { getChat, setChatGoalBinding } from "../store/chats";
+import { getChat } from "../store/chats";
 import { getDb } from "../store/db";
 import { createRuntimeRetryStore } from "../store/runtime-retry";
 import {
@@ -207,10 +208,6 @@ function terminalOf(runId: string): DaemonTurnTerminal | null {
 function taskForceLeftWork(terminal: { kind: string; errorCode: string | null; verifier: string | null }): boolean {
   return (SUCCESS_KINDS.includes(terminal.kind) && terminal.verifier === "fail")
     || (terminal.kind === "invoke_failed" && terminal.errorCode === TASK_FORCE_UNVERIFIED_CODE);
-}
-
-function releaseChat(chatId: string, goalId: string): void {
-  if (getChat(chatId)?.goalId === goalId) setChatGoalBinding(chatId, null);
 }
 
 function recordSettlement(run: LongRunRecord, sourceRunId: string, outcome: string, extra: Record<string, unknown> = {}): void {
@@ -408,9 +405,8 @@ function followDaemonTurnGoalInTransaction(goalId: string): DaemonTurnGoalResult
     step("verifying", "daemon-turn-completed");
     appendLongRunEvent({ runId: run.id, kind: "verification.model_judgment_accepted", actorKind: "host",
       payload: { reason: "daemon_turn_completed", invocationRunId: source.runId, verifier: terminal.verifier } });
-    step("completed", "daemon-turn-completed");
-    completeChatGoalContract(goalId, "completed");
-    releaseChat(chatId, goalId);
+    // The one close (store/goal-close.ts): end state, contract, chat link, open tasks and due line in this transaction.
+    closeGoal(goalId, "completed", "daemon-turn", { reason: "daemon-turn-completed" });
     recordSettlement(run, source.runId, "completed", { verifier: terminal.verifier });
     return result(goalId, "completed", source.runId);
   }
@@ -452,10 +448,7 @@ function followDaemonTurnGoalInTransaction(goalId: string): DaemonTurnGoalResult
   if (SUCCESS_KINDS.includes(terminal.kind)) {
     // Unreachable for a passed verifier (completed above) and for a failed one (taskForceLeftWork); kept so no terminal kind falls
     // through to the owner-stop branch below.
-    step("cancelling", "daemon-turn-failed:task_force_verifier_failed");
-    step("cancelled", "daemon-turn-failed:task_force_verifier_failed");
-    completeChatGoalContract(goalId, "cancelled");
-    releaseChat(chatId, goalId);
+    closeGoal(goalId, "cancelled", "daemon-turn", { reason: "daemon-turn-failed:task_force_verifier_failed" });
     recordSettlement(run, source.runId, "failed", { errorCode: terminal.errorCode, verifier: terminal.verifier });
     return result(goalId, "cancelled", "task_force_verifier_failed");
   }

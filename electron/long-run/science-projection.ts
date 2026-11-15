@@ -40,9 +40,9 @@ function assertDaemonOwner(owner: ScienceDaemonProjectionOwner): void {
 
 /** Called after the previous Science execution host has relinquished its lease.
  * Only canonical Science projections move; task, attempt and result states do not. Ended runs move too: the startup reconcile
- * re-projects every loop session, ended ones included, and that projection requires the current owner. Only a run that can still act
- * gets the run.host_owner_changed event. Nothing reads it, and an ended run gained one per service boot (a real installation 230 on
- * 2 runs cancelled in September). */
+ * re-projects every loop session, ended ones included, and that projection requires the current owner. The run.host_owner_changed
+ * event is written only when a run that can still act moves from the Desktop host to the service; nothing reads it, and every run
+ * gained one per service boot before (a real installation 580 on 5 runs, 230 of them on 2 runs cancelled in September). */
 export function adoptScienceLongRunOwnership(input: {
   appInstanceId: string;
   assertOwner(): void;
@@ -67,7 +67,9 @@ export function adoptScienceLongRunOwnership(input: {
         WHERE id = ? AND host_owner_kind = ? AND app_instance_id IS ?`)
         .run(owner.appInstanceId, row.id, row.host_owner_kind, row.app_instance_id);
       if (changed.changes !== 1) throw new Error("science_projection_owner_changed");
-      if (!LONG_RUN_TERMINAL_STATUSES.has(row.status)) appendLongRunEvent({ runId: row.id, kind: "run.host_owner_changed", actorKind: "host", actorId: owner.appInstanceId,
+      // The record says that the kind of host changed (desktop to service). A new service boot of the same kind only moves the epoch,
+      // which the row itself already holds: paused runs gained one unread event per boot (580 a real installation by).
+      if (!LONG_RUN_TERMINAL_STATUSES.has(row.status) && row.host_owner_kind !== "daemon") appendLongRunEvent({ runId: row.id, kind: "run.host_owner_changed", actorKind: "host", actorId: owner.appInstanceId,
         payload: { previousHostOwnerKind: row.host_owner_kind, previousOwnerEpoch: row.app_instance_id,
           hostOwnerKind: "daemon", ownerEpoch: owner.appInstanceId } });
       adopted.push(row.id);

@@ -86,7 +86,7 @@ async function initialize(): Promise<void> {
       const nextExecution = await createDefaultHistoryNativeExecution({ service: () => history, assertCurrentBudget: assertBudget, resolveToolResources: input => policy?.historyToolResources?.(input) ?? null });
       assertOwner();
       if (epoch !== originalEpoch || personalDataHash(currentOnePersonalIntegrationActor()) !== actorDigest) { nextExecution.close(); throw personalDataError('personal_integration_session_changed'); }
-      history = nextHistory; execution = nextExecution; wake = nextWake; owner = nextOwner;
+      history = nextHistory; execution = nextExecution; wake = nextWake; owner = nextOwner; notifyWakeChange();
     } catch (error) { nextOwner.close(); nextHistory?.close(); nextWake.close(); throw error; }
   })();
   try { await initializing; } finally { initializing = null; }
@@ -125,8 +125,13 @@ export function assertOneHistoryRunCurrent(input: { runId: string; chatId: strin
   if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_history_native_bindings'").get() && db.prepare('SELECT 1 FROM one_history_native_bindings b JOIN one_supervisor_requests r ON r.command_id=b.command_id WHERE r.run_id=?').get(input.runId)) throw personalDataError('history_native_execution_adapter_required');
 }
 export function wakeOnePersonalIntegrationsFromExistingCheckin(): void { wake?.wakeFromExistingCheckin(); }
+/** Whether anything listens to the check-in beat, and a way to hear when that changes (the check-in timer is aimed with both; supervisor.ts). */
+export function onePersonalOwnerWakeActive(): boolean { return wake?.hasListeners() === true; }
+const wakeChangeListeners = new Set<() => void>();
+export function onOnePersonalOwnerWakeChange(listener: () => void): () => void { wakeChangeListeners.add(listener); return () => { wakeChangeListeners.delete(listener); }; }
+function notifyWakeChange(): void { for (const listener of [...wakeChangeListeners]) { try { listener(); } catch { /* a listener never decides */ } } }
 export function invalidateOnePersonalIntegrations(): void { owner?.invalidateCurrent(); closeOnePersonalIntegrations(); }
-export function closeOnePersonalIntegrations(): void { epoch++; owner?.close(); execution?.close(); wake?.close(); owner = null; history = null; execution = null; wake = null; }
+export function closeOnePersonalIntegrations(): void { epoch++; owner?.close(); execution?.close(); wake?.close(); owner = null; history = null; execution = null; wake = null; notifyWakeChange(); }
 
 /** Existing native invocation lease is already claimed by InvocationService. No renderer scope. */
 export async function withOneHistoryNativeInvocation<T>(input:{runId:string;chatId:string},execute:()=>Promise<T>):Promise<T>{const token=await bindOneHistoryNativeRun(input);if(!token)return execute();runtimeFences??=createHistoryRuntimeFences({bindRun:bindOneHistoryNativeRun,execution:currentOneHistoryExecution,canonicalToolReference:i=>policy?.historyToolReference?.(i)??null});return runtimeFences.withInvocation(input,()=>execute());}

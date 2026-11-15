@@ -14,7 +14,7 @@ import { app, session } from "electron";
 import type { ChildProcess } from "node:child_process";
 import { detachedSpawnOpts, killCliTree, trackRunChild, withCliPath } from "../runtime/exec";
 import { withPythonCacheBoundary } from "../runtime/python-cache";
-import { resolveHephaestusPython } from "./engine";
+import { isPyLauncher, resolveHephaestusPython } from "./engine";
 import { currentUiLocale } from "../ui-locale";
 import { userDataDir } from "../runtime-paths";
 
@@ -440,7 +440,7 @@ async function startStudioInner(): Promise<StudioStartResult> {
     HEPHAESTUS_PYTHON: py.python,
     STUDIO_REQUEST_TOKEN: requestToken,
   }));
-  const args = py.python === "py" ? ["-3", path.join("scripts", "open-studio-gui.py"), "--no-open", "--port", String(port)] : [path.join("scripts", "open-studio-gui.py"), "--no-open", "--port", String(port)];
+  const args = isPyLauncher(py.python) ? ["-3", path.join("scripts", "open-studio-gui.py"), "--no-open", "--port", String(port)] : [path.join("scripts", "open-studio-gui.py"), "--no-open", "--port", String(port)];
   // 혹시 살아있는 이전 proc 가 남아있으면(경합으로 인한 잔존) 먼저 정리해 고아를 만들지 않는다.
   if (proc) stopStudio();
   let child: ChildProcess;

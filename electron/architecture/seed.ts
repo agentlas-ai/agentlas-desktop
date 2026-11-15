@@ -12,6 +12,7 @@ import { getMeta, setMeta } from "../store/meta";
 import { materializeAgentFiles } from "../agents/files";
 import { publicAgentVisibility } from "../agents/policy";
 import { compareSemVer, parseSemVer } from "../../shared/semver";
+import { specialFolderAgentForSlug } from "../../shared/special-folder-agents";
 import {
   ARCHITECTURE_VERSION,
   BUILTIN_AGENTS,
@@ -40,7 +41,18 @@ export function shouldApplyBuiltinArchitectureSeed(
   return have < expected;
 }
 
+/**
+ * A special-folder agent (shared/special-folder-agents.ts) whose slug an owner's own agent already holds is not seeded: the owner's row stays theirs (it is not
+ * promoted to a built-in, renamed or re-prompted) and its folder is never written. The slug is the only collision the table can have (the id is ours alone).
+ */
+function specialSlugHeldByOtherAgent(def: BuiltinAgentDef): boolean {
+  if (!specialFolderAgentForSlug(def.slug)) return false;
+  const row = getDb().prepare("SELECT id FROM installed_agents WHERE slug = ?").get(def.slug) as { id: string } | undefined;
+  return Boolean(row && row.id !== builtinAgentId(def.slug));
+}
+
 function upsertBuiltin(def: BuiltinAgentDef, now: string): void {
+  if (specialSlugHeldByOtherAgent(def)) return;
   const db = getDb();
   const id = builtinAgentId(def.slug);
   const visibility = publicAgentVisibility({ ...def, builtin: true });
@@ -110,11 +122,13 @@ export function seedBuiltinAgents(): boolean {
     const have = db
       .prepare("SELECT COUNT(*) AS n FROM installed_agents WHERE builtin = 1")
       .get() as { n: number };
+    // A definition that is not seeded because the owner holds its slug is not "missing": counting it would re-run the seed on every start.
+    const seedable = BUILTIN_AGENTS.filter((def) => !specialSlugHeldByOtherAgent(def)).length;
     if (!shouldApplyBuiltinArchitectureSeed(
       installedVersion,
       ARCHITECTURE_VERSION,
       have.n,
-      BUILTIN_AGENTS.length,
+      seedable,
     )) return false;
     for (const def of BUILTIN_AGENTS) upsertBuiltin(def, now);
     setMeta(META_KEY, ARCHITECTURE_VERSION);

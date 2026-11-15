@@ -36,3 +36,15 @@
 .strip b{font-size:13px}
 @container(max-width:620px){.strip{grid-template-columns:repeat(3,minmax(0,1fr))}.strip button:nth-child(3n){border-right:0}}
 @container(max-width:360px){.strip{grid-template-columns:repeat(2,minmax(0,1fr))}.strip button:nth-child(3n){border-right:1px solid var(--paper-edge)}.strip button:nth-child(2n){border-right:0}}
+
+/* F-D17: the map is 340px tall and the index list sits to its right; in a narrow card the list goes under the map again. */
+.body{display:grid;grid-template-columns:minmax(0,1fr);align-items:stretch}
+.body[data-strip]{grid-template-columns:minmax(0,1fr) 300px}
+.mapCol{min-width:0}
+.map{min-height:0;height:340px}.map svg{height:340px;min-height:0;width:100%}
+.body[data-strip]>.strip{display:flex;flex-direction:column;justify-content:center;overflow:visible;border-top:0;border-left:1px solid var(--paper-edge);padding:4px 0;row-gap:0}
+.body[data-strip]>.strip button{width:100%;border:0;border-bottom:1px solid var(--paper-edge);padding:10px 20px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"n n" "v c";row-gap:2px;align-items:baseline;text-align:left}
+.body[data-strip]>.strip button:last-child{border-bottom:0}
+.body[data-strip]>.strip button>span{grid-area:n}.body[data-strip]>.strip button>b{grid-area:v}.body[data-strip]>.strip button>em{grid-area:c;text-align:right}
+@container(max-width:760px){.body[data-strip]{grid-template-columns:minmax(0,1fr)}.body[data-strip]>.strip{display:grid;border-left:0;border-top:1px solid var(--paper-edge);padding:16px 12px}.body[data-strip]>.strip button{border-bottom:0;border-right:1px solid var(--paper-edge);padding:0 12px;display:flex;flex-direction:column;gap:6px;align-items:stretch}.body[data-strip]>.strip button:nth-child(3n){border-right:0}.body[data-strip]>.strip button>em{text-align:left}}
+.retry{composes:agentlas-btn from global;padding:0 var(--agentlas-btn-pad-x-sm)}

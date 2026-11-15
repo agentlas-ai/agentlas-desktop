@@ -3,3 +3,5 @@
 .emptyAction{margin-left:8px;font:inherit;font-size:12px;color:var(--ink);border:1px solid var(--paper-edge);border-radius:8px;background:none;padding:4px 10px;min-height:28px;cursor:pointer}
 
 .asOf{display:block;margin-top:6px;font-size:11px;color:var(--ink-soft)}
+
+.headEnd{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;min-width:0}.headEnd>:global(*){min-width:0}

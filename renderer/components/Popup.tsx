@@ -34,7 +34,7 @@ export function PopupAction({ icon, primary, danger, children, ...props }: Butto
 }) {
   return <button {...props} type={props.type ?? "button"} className={[styles.action, props.className].filter(Boolean).join(" ")}
     data-primary={primary || undefined} data-danger={danger || undefined}>
-    {icon && <span aria-hidden="true">{icon}</span>}{children}
+    {icon && <span aria-hidden="true">{icon}</span>}<span className={styles.label}>{children}</span>
   </button>;
 }
 

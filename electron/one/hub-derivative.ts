@@ -1,5 +1,5 @@
 import { app } from "electron";
-import { decodePackagedContent } from "../cloud-agents/package";
+import { decodePackagedContent, hashPackage } from "../cloud-agents/package";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -26,6 +26,7 @@ import { getAgentById } from "../mcp/registry";
 import { getDb } from "../store/db";
 import { userDataDir } from "../runtime-paths";
 import { sameFileIdentity } from "../../shared/file-identity";
+import { isAgentLocalStatePath } from "../../shared/agent-local-state";
 
 export const ONE_HUB_DERIVATIVE_META_KEY = "agentlas.one.hub-derivative-drafts.v1";
 
@@ -379,6 +380,48 @@ function exactOwnerPrivateRelease(rootPath: string, expectedSlug: string, expect
   };
 }
 
+/**
+ * The local re-scan leaves out this computer's own state (`.agentlas-local`, `.agentlas/ledgers`), but a release uploaded by an older Desktop
+ * can have shipped ledgers inside its registered hash. Compare like with like, in this order:
+ *  1. the scan equals the registered hash (every release without state — unchanged behaviour);
+ *  2. the restore marker recorded the hash of what it wrote after leaving state out (`localPackageHash`);
+ *  3. an older restore that still holds those state files on disk: the scan plus those files equals the registered hash.
+ * Any real change to a definition file still changes the scan and fails all three.
+ */
+function scanMatchesRegisteredPackage(root: string, scan: CloudAgentLocalReviewScan, registeredHash: string): boolean {
+  if (scan.packageHash === registeredHash) return true;
+  const marker = readCloudAgentRestoreMarker(root);
+  if (marker?.packageHash !== registeredHash) return false;
+  if (marker.localPackageHash) return scan.packageHash === marker.localPackageHash;
+  const state: PackagedFile[] = [];
+  let bytes = 0;
+  const walk = (directory: string, relativeDirectory: string): boolean => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const relative = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      const absolute = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (!isAgentLocalStatePath(relative)) {
+        if (entry.isDirectory() && !entry.name.startsWith(".git") && relative.split("/").length < 8) { if (!walk(absolute, relative)) return false; }
+        continue;
+      }
+      if (entry.isDirectory()) { if (!walk(absolute, relative)) return false; continue; }
+      if (!entry.isFile()) continue;
+      const stat = fs.statSync(absolute);
+      bytes += stat.size;
+      if (state.length >= 400 || bytes > 3 * 1024 * 1024) return false;
+      state.push({
+        path: relative, bytes: stat.size, sha256: createHash("sha256").update(fs.readFileSync(absolute)).digest("hex"), contentBase64: "",
+        executable: process.platform === "win32" ? (marker.executablePaths ?? []).includes(relative) : (stat.mode & 0o111) !== 0,
+      });
+    }
+    return true;
+  };
+  try {
+    if (!walk(root, "") || state.length === 0) return false;
+    return hashPackage([...scan.included, ...state]) === registeredHash;
+  } catch { return false; }
+}
+
 function prepareOneHubDerivativeDraftUnsafe(
   input: PrepareOneHubDerivativeDraftInput,
 ): PreparedOneHubDerivativeDraft {
@@ -413,7 +456,7 @@ function prepareOneHubDerivativeDraftUnsafe(
   const sourceAfter = getAgentById(input.privateSourceId);
   const ownerReleaseAfter = exactOwnerPrivateRelease(source.localPath, source.slug, source.packageHash);
   if (
-    scan.packageHash !== source.packageHash
+    !scanMatchesRegisteredPackage(source.localPath, scan, source.packageHash)
     || !sourceAfter || sourceAfter.localPath !== source.localPath
     || sourceAfter.assetSource !== "agent-cloud" || sourceAfter.packageHash !== source.packageHash
     || JSON.stringify(ownerReleaseAfter) !== JSON.stringify(ownerRelease)

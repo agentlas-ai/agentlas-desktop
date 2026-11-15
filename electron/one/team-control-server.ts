@@ -11,9 +11,10 @@ import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import { oneGraphDispatch } from "./graph-dispatch";
 import { registerOneToolchainNativeCapability, forgetOneToolchainNativeCapability,
   forgetAllOneToolchainNativeCapabilities, withOneToolchainNativeInvocation } from "./toolchain-native-runtime";
-import { AGENTLAS_ONE_TEAM_TOOL_NAMES } from "./team-mcp-server";
+import { AGENTLAS_ONE_TEAM_TOOL_NAMES, PERSONAL_ROOM_TOOL_NAMES } from "./team-mcp-server";
 import type { GraphTeamGrant } from "./graph-team-grant";
 import { ONE_SUPERVISOR_TOOL_NAMES } from "../../shared/one-supervisor-tools";
+import { personalOnePhoneToolName } from "../../shared/one-phone-tools";
 import { ONE_PERSONAL_TOOL_NAMES } from '../../shared/one-personal-tools';
 import { ONE_HISTORY_TOOL_NAMES } from '../../shared/one-history-tools';
 import { createHistoryTeamDispatch } from './history-team-glue';
@@ -26,8 +27,6 @@ import { WORK_SESSION_TOOL_NAMES } from "../../shared/work-session-tools";
 import type { RuntimeStatus, RuntimeSelection } from "../../shared/types";
 import {
   oneTeamCreateMember,
-  oneTeamComposeGroup,
-  oneTeamInvite,
   oneTeamList,
   oneTeamSessionStatus,
   oneTeamStartSession,
@@ -35,6 +34,7 @@ import {
   oneTeamStop,
   type OneTeamCaller,
 } from "./team-dispatch";
+import { oneTeamAddToChat, oneTeamAttachProject, oneTeamNewChat } from "./team-rooms";
 
 // Main-side handler for the inline one-team MCP child. Loopback only, one
 // random server token, one capability per run config (bound to the caller chat
@@ -53,9 +53,13 @@ const hostRootContext = AsyncLocalStorage.snapshot();
 export interface OneTeamCapabilityBinding extends OneTeamCaller {
   /** Exact Main invocation; optional for legacy capabilities, never supplied by the MCP child. */
   supervisorReplyRunId?: string;
+  /** Exact same invocation as the live turn capability; Main-owned, never supplied by the child. */
+  turnRunId?: string;
   /** A Work task: only `tools` (Toolchain search/run/result) may be called through this capability.
    * "graph-step": a room-saved graph's agent/action step acting for that room (graph-team-grant.ts), `tools` only. */
   scope?: "toolchain-consumer" | "room-member" | "graph-step" | "work-session";
+  /** The run has nobody to answer an approval card (an automation, a headless run): a first message between conversations is then refused, not asked. */
+  unattended?: boolean;
   /** Main-issued exact Work run and live allocation inventory, never tool arguments. */
   workSession?: { runId: string; runtimes?: RuntimeStatus[]; runtimeSelection?: RuntimeSelection; workspace?: string };
   tools?: readonly string[];
@@ -118,18 +122,53 @@ function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown
 
 /** Internal capability dispatch shared by the same-process host and the
  * authenticated original native source callback. Not an IPC/HTTP endpoint. */
-export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityBinding,'chatId'|'supervisorReplyRunId'|'permission'>,name:string,input:Record<string,unknown>):Promise<unknown> {
+async function checkedScienceAppOperation(operation: unknown, runId: string | undefined, service: {scienceAllowedForReply(id:string): boolean | Promise<boolean>}, args?:unknown): Promise<unknown> {
+  if (typeof operation === "string" && (require("../app-control/policy") as typeof import("../app-control/policy")).isAppControlTerminalOperation(operation,args)) return operation;
+  if (typeof operation === "string" && operation.startsWith("science.") && !(require("./science-reply-origin") as typeof import("./science-reply-origin")).scienceAppCallAllowed(operation, await service.scienceAllowedForReply(runId ?? ""),args)) throw supervisorError('science_mobile_disabled');
+  return operation;
+}
+
+export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityBinding,'chatId'|'supervisorReplyRunId'|'turnRunId'|'permission'>,name:string,input:Record<string,unknown>):Promise<unknown> {
+  const result = await dispatchOneSupervisorToolUnrecorded(binding, name, input);
+  // What a tool returned from another conversation (a room's talk, a task's result) is not the personal agent's memory: the host records
+  // that text for the turn and the turn's memory step drops the candidates that restate it. A call that returns no room content - a status
+  // list, the approvals, a receipt for a message sent INTO a room - blocks nothing (item 5; before this the whole turn's memory was lost).
+  try {
+    const exclusion = require("./turn-memory-exclusion") as typeof import("./turn-memory-exclusion"); // eslint-disable-line @typescript-eslint/no-require-imports
+    if (exclusion.roomContentToolCall(name, input)) exclusion.recordTurnRoomContent(binding.chatId, binding.turnRunId ?? binding.supervisorReplyRunId, JSON.stringify(result) ?? "");
+  } catch { /* the turn is not held up by its bookkeeping */ }
+  return result;
+}
+async function dispatchOneSupervisorToolUnrecorded(binding: Pick<OneTeamCapabilityBinding,'chatId'|'supervisorReplyRunId'|'turnRunId'|'permission'>,name:string,input:Record<string,unknown>):Promise<unknown> {
     const {isPersonalSupervisorConversation,oneSupervisor} = require("./supervisor") as typeof import("./supervisor");
     if (!binding.chatId || !isPersonalSupervisorConversation(binding.chatId)) throw new Error("supervisor_personal_conversation_required");
     const service = (await import("./supervisor")).supervisorRunsInDaemon() ? oneSupervisor() : (await import("./supervisor-native-runtime")).oneSupervisorEndpoint();
     await service.assertConversation(binding.chatId);
-    const observation = name === "one_supervisor_status" || name === "one_app_operations" || name === "one_approvals_list"
+    const phoneTool = personalOnePhoneToolName(name);
+    if (phoneTool) {
+      return (await import('./personal-one-phone-dispatch')).personalOnePhoneDispatch(binding, phoneTool, input);
+    }
+    const terminalAppCall=name === "one_app_call" && typeof input.operation === "string" &&
+      (require("../app-control/policy") as typeof import("../app-control/policy")).isAppControlTerminalOperation(input.operation,
+        (require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input));
+    const observation = terminalAppCall || name === "one_supervisor_status" || name === "one_app_operations" || name === "one_approvals_list"
       || (name === "one_supervisor_checkin" && (input.action === "list" || input.action === "cancel"))
       || (name === "one_supervisor_control" && input.action === "cancel");
     if (!observation) {
       if(!binding.supervisorReplyRunId)throw supervisorError('supervisor_handoff_origin_invalid');
       await service.assertAutomaticWriteAllowed(binding.supervisorReplyRunId);
     }
+    if (name === "one_app_call") await checkedScienceAppOperation(input.operation,binding.supervisorReplyRunId,service,
+      (require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input));
+    // Who may reach what, the owner's turn for a destructive or consent action, and the card for a delete or a send (D1 and D2).
+    if (name === "one_app_call") await (await import("../harness/one-app-call-guard")).guardOneAppCall(binding as Parameters<typeof import("../harness/one-app-call-guard").guardOneAppCall>[0],
+      input.operation, (require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input));
+
+    if (terminalAppCall) return (require("../app-control/service") as typeof import("../app-control/service"))
+      .appControlCall({ownerTurn:false,permission:binding.permission ?? "read"},
+        {operation:input.operation,args:(require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input)}, undefined,
+        binding.turnRunId && binding.turnRunId === binding.supervisorReplyRunId
+          ? { chatId: binding.chatId, runId: binding.turnRunId, permission: binding.permission ?? "read" } : null);
     switch (name) {
       case "one_supervisor_status": {
         const snapshot = await service.snapshot();
@@ -156,12 +195,50 @@ export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityB
         // The model's create is a proposal the owner turns on from a card (supervisor-service checkin); the id is the host's, never the model's.
         ...(input.action === "create" && binding.supervisorReplyRunId ? {modelReplyRunId:binding.supervisorReplyRunId} : {})});
       // The app-control catalog (every bridge operation) loads only when One first uses it.
-      case "one_app_operations": return (require("../app-control/service") as typeof import("../app-control/service")).appControlOperations(input);
+      case "one_app_operations": {
+        const result = await (require("../app-control/service") as typeof import("../app-control/service")).appControlOperations(input);
+        if (!binding.turnRunId || binding.turnRunId !== binding.supervisorReplyRunId) return result;
+        const turn = await import("../turn-tools/control-server");
+        const harness = await import("../harness/capability-ports");
+        const scope = { chatId: binding.chatId, runId: binding.turnRunId, permission: binding.permission ?? "read" };
+        const exact = typeof input.operation === "string" ? input.operation.trim() : "";
+        if (exact) {
+          if (!harness.HARNESS_EFFECT_FREE_READ_OPERATIONS.has(exact)) return result;
+          const detail = await turn.bridgeLiveTurnRead(scope, "harness_describe", { id: exact });
+          const data = detail && typeof detail === "object" && (detail as { status?: unknown }).status === "ok"
+            ? (detail as { data?: Record<string, unknown> }).data : undefined;
+          return data ? { ...result, harness_operations: [{ operation: exact, effect: "read", status: "discoverable", executed: false,
+            availability: "unknown", call_tool: "one_app_call", input_schema: data.inputSchema ?? {}, required: data.required ?? [] }] } : result;
+        }
+        const query = typeof input.query === "string" ? input.query.trim() : "";
+        const area = typeof input.area === "string" ? input.area.trim() : "";
+        if (!query && !area) return result;
+        const found = await turn.bridgeLiveTurnRead(scope, "harness_search", { query: query || area, kind: "tool", limit: 60 });
+        const items = found && typeof found === "object" && Array.isArray((found as { items?: unknown }).items) ? (found as { items: Array<{ id?: unknown; description?: unknown }> }).items : [];
+        const reads = items.filter((item) => typeof item.id === "string" && harness.HARNESS_EFFECT_FREE_READ_OPERATIONS.has(item.id)
+          && (!area || item.id.startsWith(`${area}.`)));
+        const offset = typeof input.offset === "number" && Number.isInteger(input.offset) ? Math.min(Math.max(input.offset, 0), 10_000) : 0;
+        const limit = typeof input.limit === "number" && Number.isInteger(input.limit) ? Math.min(Math.max(input.limit, 1), 80) : 40;
+        if (!reads.length) return result;
+        const described = await Promise.all(reads.slice(offset, offset + limit).map(async (item) => {
+          const detail = await turn.bridgeLiveTurnRead(scope, "harness_describe", { id: item.id });
+          const data = detail && typeof detail === "object" && (detail as { status?: unknown }).status === "ok"
+            ? (detail as { data?: Record<string, unknown> }).data : undefined;
+          return data ? { operation: item.id, effect: "read", status: "discoverable", executed: false,
+            availability: "unknown", call_tool: "one_app_call", description: item.description,
+            input_schema: data.inputSchema ?? {}, required: data.required ?? [] } : null;
+        }));
+        return { ...result, harness_total: reads.length, harness_offset: offset,
+          harness_next_offset: offset + limit < reads.length ? offset + limit : null,
+          harness_operations: described.filter((item) => item !== null) };
+      }
       // The operation's input as app.call reads it: `args` or its own fields next to `operation` (call-aliases.ts appCallInputOf).
       case "one_app_call": return (require("../app-control/service") as typeof import("../app-control/service"))
         .appControlCall({ownerTurn:await service.ownerTurn(binding.supervisorReplyRunId),permission:binding.permission ?? "read"},
-          {operation:input.operation,args:(require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input)});
-      case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
+          {operation:input.operation,args:(require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input)}, undefined,
+          binding.turnRunId && binding.turnRunId === binding.supervisorReplyRunId
+            ? { chatId: binding.chatId, runId: binding.turnRunId, permission: binding.permission ?? "read" } : null);
+      case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})}, {originReplyRunId:binding.supervisorReplyRunId});
       // Approvals in the rooms this personal agent oversees (owner 2026-10-27). Main checks room scope, the floor and the
       // owner-message basis; one_app_call to approval operations stays refused (app-control/policy.ts).
       case "one_approvals_list": {
@@ -227,15 +304,34 @@ export async function oneTeamStopOnOwnerTurn(
  * and the message already lists what is possible. It comes back as a normal result (no `ok:false`, so the step is not drawn failed) that
  * says so, and the model chooses again in the same turn (production..: the model corrected itself every time).
  */
-const TEAM_REFUSALS_AS_ANSWER: readonly string[] = ["one-team-member-not-found", "one-team-member-ambiguous", "one-team-invite-refused", "one-team-group-compose-refused"];
+const TEAM_REFUSALS_AS_ANSWER: readonly string[] = ["one-team-member-not-found", "one-team-member-ambiguous", "one-team-chat-refused", "one-team-project-not-found", "one-team-member-unusable"];
 export function oneTeamRefusalAsAnswer(error: unknown): Record<string, unknown> | null {
   const message = error instanceof Error ? error.message : "";
   const code = TEAM_REFUSALS_AS_ANSWER.find((prefix) => message.startsWith(`${prefix}:`));
+  if (code === "one-team-member-unusable") {
+    // Agentlas 2.0 D6: the teammate is not registered here / has no folder / is archived - the closed code and the structured words, so a button needs no sentence reading.
+    const detail = error as { code?: unknown; register?: unknown };
+    return { done: false, refusal: code, ...(typeof detail.code === "string" ? { code: detail.code } : {}), ...(detail.register ? { register: detail.register } : {}), message: message.slice(code.length + 1).trim(),
+      note: "nothing was started or changed; this teammate cannot be used until the owner registers it (or restores it); tell the owner in your reply, and offer another teammate" };
+  }
+  if (code === "one-team-chat-refused" || code === "one-team-project-not-found") {
+    // Agentlas 2.0 D5: a room, add or project step the host refused - nothing was opened, added or joined; the sentence says why.
+    return { done: false, refusal: code, message: message.slice(code.length + 1).trim(),
+      note: "nothing was created or changed; tell the owner why, or fix the named input and call again in this turn" };
+  }
   return code ? { done: false, refusal: code, message: message.slice(code.length + 1).trim(),
-    note: "nothing was started or changed; choose from the teammates named in the message (or create one), then call again in this turn" } : null;
+    note: "nothing was started or changed; choose from the agents named in the message (or create one), then call again in this turn" } : null;
 }
 function teamAnswer<T>(run: () => T): T | Record<string, unknown> {
   try { return run(); } catch (error) { const answer = oneTeamRefusalAsAnswer(error); if (answer) return answer; throw error; }
+}
+
+/**
+ * Agentlas 2.0 D5: the room, add-to-room and project tools are the personal agent's own conversation's, never a room's One, a graph step's or a teammate's. The child lists them only
+ * there (the capability's tool list), the boundary is here.
+ */
+function assertPersonalRoomCaller(binding: OneTeamCapabilityBinding): void {
+  if (binding.scope === "graph-step" || !personalSupervisorConversation(binding.chatId)) throw new Error("one-team-room-tools-personal-only");
 }
 
 export function oneTeamResultFailureCode(result: unknown): string | null {
@@ -292,6 +388,16 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
   if (!tokenMatches(request.token, serverToken)) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
+  // A message to another conversation of the same project (harness/deliver.ts): its own door, before any scope's list, and only for a capability
+  // that was granted the tool. The sender is the capability's conversation and run - never a field of the call.
+  if (request.operation === "message") {
+    const senderRunId = binding.turnRunId ?? binding.workSession?.runId;
+    if (!binding.chatId || !senderRunId || !binding.tools?.includes("message_send")) throw new Error("one-team-message-scope");
+    const text = typeof request.text === "string" ? request.text : "";
+    const to = typeof request.to === "string" ? request.to : "";
+    return (await import("../harness/deliver-runtime")).sendPeerMessageTo({ fromChatId: binding.chatId, fromRunId: senderRunId, to, text,
+      ...(typeof request.replyTo === "string" && request.replyTo ? { replyTo: request.replyTo } : {}), attended: binding.unattended !== true, permission: binding.permission });
+  }
   if (binding.scope === "work-session") {
     if (request.operation === "work") {
       if (!binding.chatId || !binding.workSession
@@ -380,7 +486,10 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
     const input = request.input && typeof request.input === "object" && !Array.isArray(request.input) ? request.input as Record<string, unknown> : {};
     if(binding.supervisorReplyRunId && !(await import("./supervisor")).supervisorRunsInDaemon()) {
       const relay=(await import("./supervisor-native-relay")).supervisorNativeRelay(binding.chatId ?? '',binding.supervisorReplyRunId);
-      if(relay)return relay(String(request.name ?? ''),input);
+      if (relay) {
+        const name = String(request.name ?? '');
+        return (await import('./native-read-bridge')).personalNativeReadRelay(binding, relay, name, input);
+      }
     }
     return dispatchOneSupervisorTool(binding,String(request.name ?? ''),input);
   }
@@ -395,14 +504,16 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
       return name.startsWith("toolchain_") && (name === "toolchain_inspect" ? input.include_reports === true : name !== "toolchain_search")
         ? withOneToolchainNativeInvocation(binding, execute) : execute();
     }
-    case "list": return oneTeamList(binding);
+    case "list": return oneTeamList(binding, { query: request.query, limit: request.limit });
     case "start": return teamAnswer(() => oneTeamStartSession(binding, { member: request.member, brief: request.brief, newSession: request.newSession }));
     case "steer": return teamAnswer(() => oneTeamSteer(binding, { sessionId: request.sessionId, message: request.message }));
     case "stop": return oneTeamStopOnOwnerTurn(binding, { sessionId: request.sessionId });
     case "status": return oneTeamSessionStatus(binding, { sessionId: request.sessionId, waitSeconds: request.waitSeconds });
-    case "create": return oneTeamCreateMember(binding, { name: request.name, role: request.role, personality: request.personality, invite: request.invite });
-    case "invite": return teamAnswer(() => oneTeamInvite(binding, { member: request.member }));
-    case "compose_group": return teamAnswer(() => oneTeamComposeGroup(binding, { members: request.members }));
+    case "create": return oneTeamCreateMember(binding, { name: request.name, role: request.role, personality: request.personality });
+    // Agentlas 2.0 D5: the personal agent's own conversation only (assertCaller inside), the owner's screen functions behind them (team-rooms.ts).
+    case "new_chat": assertPersonalRoomCaller(binding); return teamAnswer(() => oneTeamNewChat(binding, { members: request.members, project_id: request.project_id, title: request.title }));
+    case "add_to_chat": assertPersonalRoomCaller(binding); return teamAnswer(() => oneTeamAddToChat(binding, { chat_id: request.chat_id, members: request.members }));
+    case "attach_project": assertPersonalRoomCaller(binding); return teamAnswer(() => oneTeamAttachProject(binding, { chat_id: request.chat_id, project_id: request.project_id }));
     default: throw new Error("one-team-unknown-operation");
   }
 }
@@ -503,7 +614,7 @@ export function startOneTeamControlServer(): Promise<number> {
 
 /** Mint a per-config capability file (0600) that the MCP child reads. */
 export async function createOneTeamCapability(
-  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools" | "supervisorReplyRunId" | "graphTeamGrant" | "workSession">,
+  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools" | "supervisorReplyRunId" | "turnRunId" | "graphTeamGrant" | "workSession" | "unattended">,
   configKey: string,
 ): Promise<{ path: string; binding: OneTeamCapabilityBinding }> {
   if (input.scope === "graph-step" && (!input.tools?.length
@@ -516,7 +627,8 @@ export async function createOneTeamCapability(
   // supervisor_personal_conversation_required (production 2026-10-05, Thread Marketing and Youtube launch), so a
   // conversation that is not the personal one is not offered them.
   let tools = input.tools ?? (personalSupervisorConversation(input.chatId) ? undefined
-    : AGENTLAS_ONE_TEAM_TOOL_NAMES.filter((name) => !(ONE_SUPERVISOR_TOOL_NAMES as readonly string[]).includes(name)&&!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)));
+    : AGENTLAS_ONE_TEAM_TOOL_NAMES.filter((name) => !(ONE_SUPERVISOR_TOOL_NAMES as readonly string[]).includes(name)&&!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)
+      && !(PERSONAL_ROOM_TOOL_NAMES as readonly string[]).includes(name)));
   if (input.scope !== "work-session") tools = (tools ?? AGENTLAS_ONE_TEAM_TOOL_NAMES)
     .filter(name => !(WORK_SESSION_TOOL_NAMES as readonly string[]).includes(name));
   else if (!input.chatId || !input.workSession?.runId
@@ -616,7 +728,7 @@ export async function handleOneTeamControlRequest(request:Record<string,unknown>
   if(!binding)throw new Error("one-team-capability-invalid");
   if(!binding.historySource)return retryWhenStoreBusy(()=>handleOneTeamControlRequestUnchecked(request));
   const original=binding.historySource;if(!binding.chatId)throw personalDataError("history_native_original_command_required");
-  const operations:Record<string,string>={list:"one_team_list",start:"one_team_start_session",steer:"one_team_steer",stop:"one_team_stop",status:"one_team_session_status",create:"one_team_create_member",invite:"one_team_invite",compose_group:"one_team_compose_group"};
+  const operations:Record<string,string>={list:"one_team_list",start:"one_team_start_session",steer:"one_team_steer",stop:"one_team_stop",status:"one_team_session_status",create:"one_team_create_member",new_chat:"one_team_new_chat",add_to_chat:"one_team_add_to_chat",attach_project:"one_team_attach_project"};
   const operation=String(request.operation??""),name=["graph","history","personal","supervisor"].includes(operation)?String(request.name??""):operations[operation];
   if(!name||!(AGENTLAS_ONE_TEAM_TOOL_NAMES as readonly string[]).includes(name)||binding.tools&&!binding.tools.includes(name))throw personalDataError("history_native_tool_not_granted");
   const input=["graph","history","personal","supervisor"].includes(operation)?request.input??{}:Object.fromEntries(Object.entries(request).filter(([key])=>!["token","capabilityId","operation"].includes(key)));

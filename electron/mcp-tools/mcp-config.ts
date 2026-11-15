@@ -22,6 +22,7 @@ import type { BeforeMcpToolResult } from "../runtime/runner";
 // 이제 에이전트가 실제로 브라우저를 띄워 회원가입/로그인/키 발급을 대신 해줄 수 있다.
 import { registerPreparedMcpConfig, preparedMcpBindings, mcpServerConfigurationDigest } from "./prepared-transport";
 import { ownedStdioEnvironment } from "./owned-stdio-transport";
+import { windowsCmdQuoteWrapperSource } from "../runtime/windows-cmd-quote";
 import { withUvxPath } from "./uv-runtime";
 import path from "node:path";
 import os from "node:os";
@@ -438,9 +439,14 @@ function resolveVaultRemoteUrl(s: InstalledMcpServer, rawUrl: string): string | 
   }
 }
 
-const MCP_CHILD_ENV_WRAPPER = `"use strict";
+export const MCP_CHILD_ENV_WRAPPER = `"use strict";
 const path = require("node:path");
 const crossSpawn = require(process.argv[2]);
+const { spawn: nodeSpawn } = require("node:child_process");
+
+// Windows .cmd/.bat start through cmd.exe with the product's own quoting (runtime/windows-cmd-quote.ts), generated into
+// this script from that one source. cross-spawn's escape drops every argument after a value ending in two backslashes.
+${windowsCmdQuoteWrapperSource()}
 
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MCP_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
@@ -560,7 +566,49 @@ if (process.env.AGENTLAS_HOST_RUNTIME === "desktop" && typeof process.env.HEPHAE
 
 // windowsHide: this wrapper runs under the GUI Agentlas executable, which has no console, so a console MCP
 // server (python agentlas_cloud mcp serve, node) would otherwise open a blank terminal window on Windows.
-const child = crossSpawn(command, args, { stdio: "inherit", env, windowsHide: true });
+// Windows looks in the working folder (the project the CLI runs in) BEFORE PATH for a bare command name: resolve it from
+// the absolute PATH entries first and never leave it bare (a name PATH does not have becomes a path that cannot exist).
+// Same rules as runtime/safe-executable.ts resolveBareCommand. An explicit path is unchanged.
+function resolveFromPath(name, environment) {
+  if (process.platform !== "win32" || !name || /[\\\\/]/.test(name) || /^[A-Za-z]:/.test(name)) return name;
+  const key = (wanted) => Object.keys(environment).filter((entry) => entry.toUpperCase() === wanted).sort()[0];
+  const startable = [".com", ".exe", ".bat", ".cmd"];
+  const configured = String(environment[key("PATHEXT")] || "").split(";").map((ext) => ext.trim().toLowerCase()).filter((ext) => startable.includes(ext));
+  const order = configured.length ? configured : startable;
+  const names = startable.some((ext) => name.toLowerCase().endsWith(ext)) ? [name] : order.map((ext) => name + ext);
+  for (const raw of String(environment[key("PATH")] || "").split(";")) {
+    const dir = raw.replace(/^"(.*)"$/, "$1");
+    if (!/^(?:[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\/])/.test(dir)) continue;
+    for (const candidate of names) {
+      const file = path.win32.join(dir, candidate);
+      try { if (require("node:fs").statSync(file).isFile()) return file; } catch {}
+    }
+  }
+  return path.win32.join(process.env.SystemRoot || "C:\\\\Windows", "agentlas-command-not-found", name);
+}
+const launchCommand = resolveFromPath(command, env);
+// cmd.exe (which runs a .cmd/.bat) also searches the working folder unless this variable exists.
+if (process.platform === "win32" && /\\.(?:cmd|bat)$/i.test(launchCommand)
+  && !Object.keys(env).some((entry) => entry.toUpperCase() === "NODEFAULTCURRENTDIRECTORYINEXEPATH")) env.NoDefaultCurrentDirectoryInExePath = "1";
+let batchPlan = null;
+if (process.platform === "win32" && /\\.(?:cmd|bat)$/i.test(launchCommand) && require("node:fs").existsSync(launchCommand)) {
+  // Same decision as runtime/exec.ts planWindowsCliSpawn: a batch that forwards %* makes cmd.exe read the arguments twice.
+  let batchText = null;
+  try {
+    const stat = require("node:fs").statSync(launchCommand);
+    if (stat.isFile() && stat.size <= 16384) batchText = require("node:fs").readFileSync(launchCommand, "latin1");
+  } catch {}
+  if (args.some((arg) => /[\\r\\n]/.test(arg))) {
+    process.stderr.write("windows_cmd_argument_newline: a .cmd/.bat runs through cmd.exe, which ends a command at a line break.\\n");
+    process.exit(1);
+  }
+  const reparses = batchText === null || /%\\*|%~?[0-9]/.test(batchText);
+  const shim = /node_modules[\\\\/]\\.bin[\\\\/][^\\\\/]+\\.cmd$/i.test(launchCommand);
+  batchPlan = windowsCmdSpawnArgs(path.normalize(launchCommand), args, reparses || shim);
+}
+const child = batchPlan
+  ? nodeSpawn(process.env.comspec || "cmd.exe", batchPlan, { stdio: "inherit", env, windowsHide: true, windowsVerbatimArguments: true })
+  : crossSpawn(launchCommand, args, { stdio: "inherit", env, windowsHide: true });
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
     if (!child.killed) child.kill(signal);
@@ -951,6 +999,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     released = true;
     releaseToolSurfaceDenial?.();
     releaseHostToolCatalog?.();
+    // What a host server's mint made for this turn (a capability, a record) ends with the turn's config, whether or not a tool ran.
+    for (const host of hostServers) { try { host.release?.(); } catch { /* the mint's own ending is best effort */ } }
     const ownsFile = releasePrepared?.() === true;
     for (const handle of proxyHandles) revokeMcpProxyLaunch(handle);
     for (const handle of residentProxyHandles) {
@@ -1038,6 +1088,19 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     ? (await import("../toolchains/consumer")).toolchainConsumerAllowedFor(callerChatId)
     : false;
 
+  // A message to another conversation of this project (Agentlas 2.0 N6): offered only where One Team is attached for another reason, only to a
+  // conversation of a project that has another conversation to write to, never in a dry run or plan. Nothing else about any turn changes.
+  const peerMessageTools: readonly string[] = callerChatId && !graphTeamGrant && opts?.toolGate?.simulation !== true && opts?.toolGate?.planMode !== true
+    && opts?.toolGate?.oneTeamReport !== true && serializedServers.some((s) => s.catalogId === "one-team")
+    ? (await import("../harness/deliver-runtime")).peerMessageToolNames(callerChatId) : [];
+
+  // N7 carry-over (a): a plain conversation of a project (a Work session, a teammate's session) that no other One Team seat reaches still
+  // gets the one tool, as the owner said "anyone may write to anyone in the project". It is the same capability a Toolchain consumer
+  // holds with a list of one name, so nothing else of One Team is reachable; a conversation without another conversation in its project,
+  // outside any project, a screen pack's, the personal agent's or a Hub-called agent's keeps its tool list byte for byte (peerMessageToolNames).
+  const peerOnly = peerMessageTools.length > 0 && !toolchainConsumer && !roomMember && !workSessionMain && !oneTeamDispatchAllowedFor(callerChatId)
+    && (await import("../store/chats")).getChat(callerChatId!)?.kind === "user";
+
   try {
   for (const s of serializedServers) {
     let preparedRuntimeRoot: string | null = null;
@@ -1076,7 +1139,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
     if (s.catalogId === "one-team" && (!callerChatId || opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true
       || opts?.toolGate?.oneTeamReport === true
-      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer && !roomMember && !graphTeamGrant && !workSessionMain) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
+      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer && !roomMember && !graphTeamGrant && !workSessionMain && !peerOnly) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
       // One's own conversation only (depth 1): a teammate chat, a session One
       // opened and dry runs never see the team dispatch tools. A Work task sees
       // the Toolchain consumer subset only (toolchainConsumer above).
@@ -1271,6 +1334,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
               ? [...new Set([...turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true), ...TURN_TOOLS_WAIT])]
               : turnToolsFor(opts.turnGoalTools === true, opts.turnAskTool === true, Boolean(opts.turnGoalWaitOnly)),
               ...(opts.turnGoalWaitOnly ? { goalWaitResolver: opts.turnGoalWaitOnly.resolveGoalWait } : {}), dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
+              ...(opts?.toolGate?.unattended === true ? { unattended: true as const } : {}),
               permission: opts?.toolGate?.permission ?? "read",
               admissionCurrent: opts?.admissionCurrent,
               ...(opts?.hostVideoCustody ? { hostVideoCustody: opts.hostVideoCustody } : {}),
@@ -1292,21 +1356,25 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           const capabilityConfigKey = opts?.configKey ?? key;
           const capability = await createOneTeamCapability(workSessionMain
             ? { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read", scope: "work-session" as const,
-                tools: [...WORK_SESSION_TOOL_NAMES, ...(toolchainConsumer ? (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS : [])], workSession: opts?.workSession }
+                tools: [...WORK_SESSION_TOOL_NAMES, ...(toolchainConsumer ? (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS : []), ...peerMessageTools], workSession: opts?.workSession,
+                ...(opts?.toolGate?.unattended === true ? { unattended: true } : {}) }
             : graphTeamGrant
             // Acts for the room that saved the graph; the grant's permission and tools, never the run's wider ones.
             ? { chatId: graphTeamGrant.ownerChatId, permission: graphTeamGrant.permission, scope: "graph-step" as const,
                 tools: [...graphTeamGrant.tools, ...graphTeamGrant.effectTools], graphTeamGrant }
             : { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read",
               ...(opts?.supervisorReplyRunId ? { supervisorReplyRunId: opts.supervisorReplyRunId } : {}),
+              ...(opts?.turnRunId ? { turnRunId: opts.turnRunId } : {}),
+              ...(opts?.toolGate?.unattended === true ? { unattended: true } : {}),
               ...(toolchainConsumer && !roomMember ? { scope: "toolchain-consumer" as const,
-                tools: (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS } : {}),
+                tools: [...(await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS, ...peerMessageTools] } : {}),
+              ...(peerOnly ? { scope: "toolchain-consumer" as const, tools: [...peerMessageTools] } : {}),
               // A teammate on a dispatch a graph step owns also checks and records each item it publishes (graph-effect-items);
               // a teammate also uses callable Toolchains when there are any.
               ...(roomMember ? { scope: "room-member" as const, tools: [
                 ...((await import("../one/graph-effect-items")).graphEffectScopeForTeammate(callerChatId)
                   ? [...ROOM_MEMBER_TOOL_NAMES, ...GRAPH_EFFECT_ITEM_TOOL_NAMES] : ROOM_MEMBER_TOOL_NAMES),
-                ...(toolchainConsumer ? (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS : [])] } : {}) },
+                ...(toolchainConsumer ? (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS : []), ...peerMessageTools] } : {}) },
             capabilityConfigKey,
           );
           oneTeamCapabilityCleanup.push(() => removeOneTeamCapability(capabilityConfigKey, capability.binding.capabilityId));
@@ -1492,6 +1560,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         if (hostServer) {
           // A slow first launch must not read as "no tools" (the Science child loads a large signed catalogue).
           pushCodexConfig(codexConfigArgs, key, "startup_timeout_sec", "120");
+          // A server that declares how long one of its tools may take (a connected app on the server: its 60 s plus 5) is not cut by Codex's own 60 s.
+          if (typeof hostServer.toolTimeoutSec === "number" && hostServer.toolTimeoutSec > 0) pushCodexConfig(codexConfigArgs, key, "tool_timeout_sec", String(Math.floor(hostServer.toolTimeoutSec)));
         }
         if (browserReadOnly && codexLaunch) {
           // Codex's own gate stays "never" for everything else. Only the read-only

@@ -11,8 +11,8 @@
  *  - bindBrowserLadderRun: the run (client.ts) lends its chat/run ids, locale and notice sink.
  *  - browserLadderOwnerAction: the owner card's single button.
  *
- * Every transition is a run_events row (kind browser_fallback_ladder) so a soak can count rungs, and the AGI
- * goal manager reads the stop reason (electron/agi/goal-facts.ts).
+ * Every transition is a run_events row (kind browser_fallback_ladder) so a soak can count rungs, and the blocked-goal
+ * sweep reads the stop reason (browser/ladder-signal.ts).
  */
 import { randomUUID } from "node:crypto";
 import type { McpInvocationEvent } from "../../shared/types";
@@ -848,8 +848,8 @@ export async function browserLadderOwnerAction(input: {
     return { ok: Boolean(opened && (opened as { ok?: boolean }).ok !== false), code: "login-window-opened" };
   }
   for (const key of stopped.keys()) if (key.startsWith("dedicated:")) stopped.delete(key);
-  const { agiRestartAgentlasBrowser } = await import("../agi/browser-seams");
-  const ready = await agiRestartAgentlasBrowser().catch(() => false);
+  const { restartAgentlasBrowser } = await import("./agentlas-browser-restart");
+  const ready = await restartAgentlasBrowser().catch(() => false);
   // A restart proves a ready browser, not a resumed Goal (as the native path above says): the code reports only that.
   // It used to report resumed Goals after a resume call that has done nothing since 3a60b734 removed its handler.
   return { ok: ready, code: ready ? "browser-ready" : "browser-not-ready" };

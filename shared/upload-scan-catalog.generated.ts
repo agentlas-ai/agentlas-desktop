@@ -39,6 +39,7 @@ export const SECRET_SCAN_TEXT_EXTENSIONS = [
 ] as const;
 
 export const UPLOAD_SKIP_DIRECTORIES = [
+  ".agentlas-local",
   ".git",
   ".next",
   ".studio-runtime",
@@ -49,6 +50,18 @@ export const UPLOAD_SKIP_DIRECTORIES = [
   "node_modules",
   "out",
   "release",
+] as const;
+
+/** Agent state that stays on the computer it was made on: path segments at any
+ *  depth. A subset of UPLOAD_SKIP_DIRECTORIES. The server drops matching files
+ *  from an upload instead of refusing the upload. */
+export const AGENT_LOCAL_STATE_DIRECTORIES = [
+  ".agentlas-local",
+] as const;
+
+/** Same, as consecutive path segments at any depth (e.g. .agentlas/ledgers). */
+export const AGENT_LOCAL_STATE_PATHS = [
+  ".agentlas/ledgers",
 ] as const;
 
 /** Every filename that can define one agent. */

@@ -158,19 +158,6 @@ export function OneFrontSetting({ controller, locale, withNotice = false }: { co
   </div>;
 }
 
-/**
- * The composer's model chip while the front is on: the owner does not pick a model for the personal agent then, so the chip
- * is a fixed label (no model name) that opens the setting where it is turned off.
- */
-export function OneFrontChip({ locale, onOpenSetting }: { locale: Locale; onOpenSetting: () => void }) {
-  const label = locale === "ko" ? "빠른 답변 · Agentlas" : "Fast replies · Agentlas";
-  return <button type="button" className={styles.chip} data-one-front-chip="true" onClick={onOpenSetting}
-    aria-label={locale === "ko" ? `${label}. 설정 열기` : `${label}. Open setting`}
-    title={locale === "ko" ? "개인 에이전트의 빠른 답변은 Agentlas에서 처리됩니다. 눌러서 설정을 바꿀 수 있어요." : "Fast replies are handled on Agentlas. Press to change the setting."}>
-    <IconBolt size={14} /><span>{label}</span>
-  </button>;
-}
-
 /** One quiet line when the newest turn went to the owner's own CLI instead; it goes away when the light model answers again. */
 export function OneFrontNote({ view, locale, onOpenSetting }: { view: OneFrontView | null; locale: Locale; onOpenSetting: () => void }) {
   if (!view?.effective || !view.fallback) return null;

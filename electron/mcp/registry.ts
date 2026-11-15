@@ -1,4 +1,7 @@
 // 설치된 에이전트 레지스트리 — SQLite-backed. 다국어 + envRequirements 지원.
+import { ensureRegistrationCharacter, writeEngineRegistrationFiles } from "../agents/registration-character";
+import { usabilityEnforced } from "../agents/usability";
+import { hasRegistrationCharacter } from "../../shared/agent-usability";
 import fs from "node:fs";
 import { parseHubReleasePin, type HubReleasePin } from "../../shared/hub-release-pin";
 import { requirePublicInstallDescriptor } from "../marketplace/public-install";
@@ -6,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getSource as getMarketSource, getCargoSource } from "../marketplace";
-import { agentFolderPath, materializeAgentFiles } from "../agents/files";
+import { agentFolderPath, ensureAgentStubFolder, materializeAgentFiles } from "../agents/files";
 import { getRoute, removeRoute, setRoute, type AgentRoute, type RuntimeLabel } from "../agents/routes";
 import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
 import { resolveInstalledDescription } from "../agents/package-description";
@@ -15,6 +18,7 @@ import { recoverRestoredTeamFirms } from "../cloud-agents/team-firm";
 import { deriveListingEntityKind, entityKindAfterRefresh } from "../agents/entity-kind";
 import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
 import {
+  cloudManagedFolder,
   commitCloudRegistryPackage,
   recoverCloudRegistryTransactions,
   recoverCloudRegistryTransactionsForRead,
@@ -243,7 +247,8 @@ export async function installPublicHubRelease(input: {
     || binding.agentDefinitionId !== release.agentDefinitionId || binding.agentReleaseId !== release.agentReleaseId) {
     throw new Error("hub_install_receipt_unavailable");
   }
-  return installed;
+  // Agentlas 2.0 D6: the phone's install is a registration; a screen-less one carries the default character (switch off: unchanged).
+  return withRegistrationCharacter(installed);
 }
 
 export async function installAgent(slug: string): Promise<InstalledAgent> {
@@ -276,6 +281,9 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
       callableCard = Boolean(row && (row.callable === true || row.kind === "cloud-callable"));
       if (row?.packageHash && !listing.packageHash) listing = { ...listing, packageHash: row.packageHash };
     }
+    // Agentlas 2.0 D6: a call-only card is registered like every other agent - the seat below is its card copy and folder, and `withRegistrationCharacter`
+    // gives it the character that marks it registered (agents/usability.ts reads that mark for a call-only row; with the switch off nothing is added). It is used only after that,
+    // and it answers by calling the Hub, so the owner's own source of that agent stays the Hub's (a guest in a team run, shared/call-only-agent.ts).
     if (callableCard) {
       if (listing.trustGrade !== "A" && listing.trustGrade !== "B") {
         throw new Error(
@@ -283,9 +291,12 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
         );
       }
       const seated = persistListing(slug, { ...listing, systemPrompt: "" }, "hub");
+      // The seat's route names the folder the stub was really created in. Both come from one call: the stub is made in the agent
+      // root now, and a route computed separately (the old userData/agents/<slug>) named a folder that does not exist, so every newly
+      // seated call-only agent was born "source missing" and could not be used in One Team or a group room (-1).
       setRoute({
         agentId: seated.id,
-        path: agentFolderPath(slug),
+        path: ensureAgentStubFolder(seated.id) ?? agentFolderPath(slug),
         runtime: "generic",
         labels: ["generic"],
         kind: seated.kind === "team" ? "team" : "agent",
@@ -294,7 +305,7 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
         ...(listing.packageHash ? { packageHash: listing.packageHash } : {}),
       });
       emitDesktopStoreChange({ entity: "agent", id: seated.id });
-      return getAgentById(seated.id)!;
+      return withRegistrationCharacter(getAgentById(seated.id)!);
     }
     throw new Error("This Hub package is missing the instructions required for a safe local install.");
   }
@@ -305,7 +316,14 @@ export async function installAgent(slug: string): Promise<InstalledAgent> {
     );
   }
 
-  return persistListing(slug, listing, "hub");
+  return withRegistrationCharacter(persistListing(slug, listing, "hub"));
+}
+
+/** Agentlas 2.0 D6: a registration that ends here carries a character (the default one when no screen asked; switch off: unchanged). */
+function withRegistrationCharacter(agent: InstalledAgent): InstalledAgent {
+  ensureRegistrationCharacter(agent.id);
+  writeEngineRegistrationFiles(agent.id); // the engine recognises the folder by these (agents/registration-character.ts); switch off: nothing
+  return getAgentById(agent.id) ?? agent;
 }
 
 /**
@@ -320,7 +338,7 @@ export async function installMyAgent(id: string): Promise<InstalledAgent> {
   if (isPrivateWebOnlyAgent(listing)) {
     throw new Error("This web-only agent is not available in Agentlas Desktop.");
   }
-  return persistListing(listing.slug, listing, "agent-cloud");
+  return withRegistrationCharacter(persistListing(listing.slug, listing, "agent-cloud"));
 }
 
 /**
@@ -379,7 +397,8 @@ function persistListing(
       mcp_servers_json: JSON.stringify(listing.mcpServers ?? []),
       env_requirements_json: envReqsJson,
       trust_grade: listing.trustGrade,
-      tone: listing.tone,
+      // A registered agent keeps the character it was given when its listing is refreshed (2.0 switch on; the listing's own tone would erase the registration mark).
+      tone: usabilityEnforced() && hasRegistrationCharacter(existing.tone) ? existing.tone : listing.tone,
       builtin: existing.builtin ?? 0,
       role: existing.role ?? null,
       visibility,
@@ -472,7 +491,9 @@ function persistListing(
     const labels = detectCloudRuntimeLabels(pkg.files.map((file) => file.path));
     const expectedRoute: AgentRoute = {
       agentId: id,
-      path: agentFolderPath(slug),
+      // The transaction's own answer to "where does this package live": the folder the agent already has (also after the move into
+      // the agent root), or a new one in the agent root. Route, journal and files therefore always name one folder.
+      path: cloudManagedFolder({ id, slug }),
       runtime: labels[0],
       labels,
       kind: pkg.agentKind === "team" ? "team" : "agent",
@@ -554,10 +575,18 @@ export function uninstallAgent(id: string): void {
   // 행을 닫아 좌석을 빈 자리로 남긴다 — 좌석·세션·점유 이력은 전부 보존되고,
   // chats.agent_id 는 v102 FK(ON DELETE SET NULL)가 대화를 지키게 한다.
   try { closeAgentOccupancies(id); } catch { /* 좌석 원장이 없는 구세대 DB — 삭제 자체는 진행 */ }
+  try { (require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).stopLeadRoomsOfAgent(id); } catch { /* no group room runs for it */ } // eslint-disable-line @typescript-eslint/no-require-imports
   const deleted = db.prepare("DELETE FROM installed_agents WHERE id = ?").run(id).changes > 0;
   // 로컬 임포트 라우팅도 정리 (원본 폴더는 건드리지 않음).
   if (deleted) {
     removeRoute(id);
+    // The owner's removal also removes the agent's seat in the One org: the row stayed as a locked "replace needed" seat and kept counting
+    // in "N members incl. One" (desktop trial slots.used 6 -> 7 after create + delete). The seat's completion summary goes with it.
+    try {
+      const seats = db.prepare("DELETE FROM one_org_members WHERE installed_agent_id = ?").run(id).changes;
+      db.prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?").run(id);
+      if (seats > 0) emitDesktopStoreChange({ entity: "one-org" });
+    } catch { /* a store without the One org tables has no seat to remove */ }
     // A removed agent must not keep staffing projects. This is the consequence
     // of removal itself, so every surface that can remove an agent gets it.
     detachProjectPoolReferences({

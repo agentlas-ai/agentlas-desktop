@@ -10,8 +10,10 @@ export interface RememberedRuntimeSelection {
 export function runtimeSelectionMemoryKey(
   kind: RuntimeKind,
   backend: RuntimeBackend | null | undefined,
+  acpAgentId?: string | null,
 ): string {
-  return `runtime_selection:${kind}:${canonicalRuntimeBackend(kind, backend) || "none"}`;
+  const base = `runtime_selection:${kind}:${canonicalRuntimeBackend(kind, backend) || "none"}`;
+  return kind === "acp" && acpAgentId ? `${base}:profile:${encodeURIComponent(acpAgentId)}` : base;
 }
 
 /** Per-runtime choice that survives A→B→A switches and CLI path updates. */
@@ -20,11 +22,13 @@ export function rememberRuntimeSelection(
   backend: RuntimeBackend | null | undefined,
   model: string | null | undefined,
   longContext: boolean,
+  acpAgentId?: string | null,
 ): void {
+  if (kind === "acp" && !acpAgentId) return;
   getDb()
     .prepare("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)")
     .run(
-      runtimeSelectionMemoryKey(kind, backend),
+      runtimeSelectionMemoryKey(kind, backend, acpAgentId),
       JSON.stringify({ model: model?.trim() || null, longContext: !!longContext }),
     );
 }
@@ -32,11 +36,13 @@ export function rememberRuntimeSelection(
 export function recallRuntimeSelection(
   kind: RuntimeKind,
   backend: RuntimeBackend | null | undefined,
+  acpAgentId?: string | null,
 ): RememberedRuntimeSelection | null {
+  if (kind === "acp" && !acpAgentId) return null;
   try {
     const row = getDb()
       .prepare("SELECT value FROM meta WHERE key = ?")
-      .get(runtimeSelectionMemoryKey(kind, backend)) as { value: string } | undefined;
+      .get(runtimeSelectionMemoryKey(kind, backend, acpAgentId)) as { value: string } | undefined;
     if (!row) return null;
     const parsed = JSON.parse(row.value) as { model?: unknown; longContext?: unknown };
     return {

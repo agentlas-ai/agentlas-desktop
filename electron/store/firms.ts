@@ -129,7 +129,8 @@ export function uninstallFirm(id: string): void {
   const db = getDb();
   // UI contract: removing a firm removes only the organization relationship.
   // Its installed agents and every conversation remain user-owned. The
-  // chats.firm_id FK detaches former firm chats with ON DELETE SET NULL.
+  // chats.firm_id has no FK since the v102 seat migration rebuilt chats without it, so the same transaction clears the
+  // reference itself (only the pointer; a conversation is never deleted).
   db.transaction(() => {
     const before = db
       .prepare(
@@ -139,6 +140,7 @@ export function uninstallFirm(id: string): void {
            (SELECT COUNT(*) FROM chat_messages) AS messages`,
       )
       .get() as { agents: number; chats: number; messages: number };
+    db.prepare("UPDATE chats SET firm_id = NULL WHERE firm_id = ?").run(id);
     db.prepare("DELETE FROM firms WHERE id = ?").run(id);
     const after = db
       .prepare(

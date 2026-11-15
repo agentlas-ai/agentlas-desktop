@@ -635,6 +635,237 @@ export function isolatedChildKey(chatId: string): string { return `${ISOLATED_CH
 export function isolatedChild(db: Pick<Database.Database, "prepare">, chatId: string): boolean {
   return db.prepare("SELECT 1 AS present FROM meta WHERE key=?").get(isolatedChildKey(chatId)) !== undefined;
 }
+/**
+ * A new Agent Chat is a room of its own: the same mark makes its journal and native session `chat:<id>`, so the same
+ * agent's other rooms (another project, the one-to-one with the same agent, a group) neither share nor adopt it. Written in the room's
+ * creation transaction, read by resolveSessionScope and journalDomainsOfConversation, deleted with the chat (store/chats.ts removeChat).
+ * Rooms made before this mark keep the seat scope they always had; nothing is migrated.
+ */
+export function markIsolatedChat(db: Pick<Database.Database, "prepare">, chatId: string): void {
+  db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)").run(isolatedChildKey(chatId), "1");
+}
+/**
+ * A group room made under the lead model: its owner messages go to the lead (the first member), an `@name`
+ * to that member, never to the personal agent. Rooms made before it carry no mark and keep today's behaviour (the personal agent
+ * runs them). One meta row, written in the room's creation transaction, deleted with the room (purgeOrphanChatMarks) or when the
+ * group becomes a one-to-one room again.
+ */
+export const LEAD_ROOM_KEY_PREFIX = "room-lead:";
+export function markLeadRoom(db: Pick<Database.Database, "prepare">, chatId: string): void {
+  db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)").run(LEAD_ROOM_KEY_PREFIX + chatId, "1");
+}
+export function clearLeadRoom(db: Pick<Database.Database, "prepare">, chatId: string): void {
+  db.prepare("DELETE FROM meta WHERE key = ?").run(LEAD_ROOM_KEY_PREFIX + chatId);
+}
+export function isLeadRoom(db: Pick<Database.Database, "prepare">, chatId: string): boolean {
+  try { return db.prepare("SELECT 1 AS present FROM meta WHERE key=?").get(LEAD_ROOM_KEY_PREFIX + chatId) !== undefined; }
+  catch { return false; }
+}
+
+/** Is this chat a member's own session of a lead room (a division child of a marked room)? Its turns are the room's, not a chat of their own. */
+export function isLeadRoomMemberChat(db: Pick<Database.Database, "prepare">, chatId: string): boolean {
+  try {
+    return db.prepare(
+      "SELECT 1 AS present FROM chats c JOIN meta m ON m.key = ? || c.parent_chat_id WHERE c.id = ? AND c.kind = 'division'",
+    ).get(LEAD_ROOM_KEY_PREFIX, chatId) !== undefined;
+  } catch { return false; }
+}
+
+/**
+ * "A request of this room is being answered": one meta row per lead room, written when the router takes an owner message and deleted
+ * when the request's last turn has ended (answered, stopped or limit line). It is what lets the next app start tell a request that
+ * the app's closing cut off (the row is still there) from one that was answered - including after members had already written. The
+ * value is the owner's line id and the start time. One row per room at most, deleted with the room (purgeOrphanChatMarks), never grows.
+ */
+export const LEAD_OPEN_KEY_PREFIX = "room-lead-open:";
+export function markLeadRequestOpen(db: Pick<Database.Database, "prepare">, chatId: string, ownerMessageId: string, now = Date.now(), holder: { pid: number; startedAt: number } = processHolder(),
+  /** A message another conversation sent INTO this room (not the owner's line): `peer`, and the chain it belongs to (harness/peer-chain.ts). Two more keys of the same row. */
+  extra: { peer?: true; chain?: string; /** The permission the request was taken with: a request continued after a restart runs with it again, never wider. */ perm?: "read" | "write" | "full" } = {}): void {
+  const key = LEAD_OPEN_KEY_PREFIX + chatId;
+  const write = (): void => {
+    // A new request replaces the row, and with it a Stop written into the old one. A chain another process still holds for the old
+    // request has not read that Stop yet (it reads before its next turn), so the Stop is carried into the new row as the id of the
+    // request it ended: the new request starts clean, the stopped one stays stopped (#4: a new message received by the
+    // window right after a Stop made the service's chain run its remaining turns). One row per room, a few ids at most.
+    let stopped: string[] = [];
+    try {
+      const prior = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+      const parsed = prior ? JSON.parse(prior.value) as { ownerMessageId?: unknown; stop?: unknown; stopped?: unknown } | null : null;
+      if (parsed && typeof parsed === "object") {
+        const carried = Array.isArray(parsed.stopped) ? parsed.stopped.filter((id): id is string => typeof id === "string") : [];
+        if (parsed.stop === true && typeof parsed.ownerMessageId === "string") carried.push(parsed.ownerMessageId);
+        stopped = [...new Set(carried)].filter((id) => id !== ownerMessageId).slice(-LEAD_STOPPED_CARRY);
+      }
+    } catch { /* a row that cannot be read carries nothing */ }
+    db.prepare("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)").run(key,
+      JSON.stringify({ ownerMessageId, at: now, pid: holder.pid, pstart: holder.startedAt, ...(stopped.length ? { stopped } : {}),
+        ...(extra.peer ? { peer: true } : {}), ...(typeof extra.chain === "string" && extra.chain ? { chain: extra.chain } : {}),
+        ...(extra.perm === "read" || extra.perm === "write" || extra.perm === "full" ? { perm: extra.perm } : {}) }));
+  };
+  const withTransaction = (db as { transaction?: (fn: () => void) => { immediate?: () => void } }).transaction;
+  // The read and the write are one step: two processes taking a message at the same moment must not drop each other's carried Stop.
+  if (typeof withTransaction === "function") { const run = withTransaction.call(db, write); if (typeof run.immediate === "function") { run.immediate(); return; } }
+  write();
+}
+const LEAD_STOPPED_CARRY = 8;
+/**
+ * The process that holds an open request, written into its row (no new column or table): its id and its start time in whole seconds.
+ * A starting app reads it to tell a request that ANOTHER live process (the background service between two turns of a chain) is still
+ * answering from one the app's closing cut off. The start time keeps a recycled process id from passing for the holder.
+ */
+export function processHolder(): { pid: number; startedAt: number } {
+  return { pid: process.pid, startedAt: ownStartSeconds ??= readOwnStartSeconds() };
+}
+/**
+ * This process's start time by the SAME clock the reader uses (`ps -o etime`), read once per process. `process.uptime()` leaves
+ * out the time a Linux machine slept while `etime` counts it, so after a sleep the two differed by more than the 5 s window and a
+ * live holder read as gone. Windows has no `ps` and a failed read falls back to the uptime arithmetic.
+ */
+let ownStartSeconds: number | undefined;
+function readOwnStartSeconds(): number {
+  if (process.platform !== "win32") {
+    try {
+      const { spawnSync } = require("node:child_process") as typeof import("node:child_process"); // eslint-disable-line @typescript-eslint/no-require-imports
+      const ran = spawnSync("ps", ["-o", "etime=", "-p", String(process.pid)], { encoding: "utf8", timeout: 2000 });
+      const elapsed = ran.status === 0 ? elapsedSeconds(String(ran.stdout)) : null;
+      if (elapsed !== null) return Math.round(Date.now() / 1000 - elapsed);
+    } catch { /* fall back below */ }
+  }
+  return Math.round(Date.now() / 1000 - process.uptime());
+}
+/** `ps -o etime` ("[[dd-]hh:]mm:ss") in seconds, or null when the text is not that shape. */
+function elapsedSeconds(text: string): number | null {
+  const match = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(text.trim());
+  if (!match) return null;
+  return Number(match[1] ?? 0) * 86400 + Number(match[2] ?? 0) * 3600 + Number(match[3]) * 60 + Number(match[4]);
+}
+/**
+ * Is the process that wrote an open-request row still the one running (another process than this one)? A process id alone can be
+ * recycled, so on macOS/Linux the process's age must also match the start time in the row (a few seconds apart is the same process).
+ * Windows has no `ps`: the id alone decides (a recycled id there only delays the "app closed" line, it never writes a false one).
+ */
+export function leadRequestHolderAlive(holder: { pid: number; pstart: number | null }): boolean {
+  if (holder.pid === process.pid) return false;
+  try { process.kill(holder.pid, 0); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EPERM") return false; }
+  if (holder.pstart !== null && process.platform !== "win32") {
+    try {
+      // Loaded here, not at the top: some private gates compile this file alone with a closed list of dependencies.
+      const { spawnSync } = require("node:child_process") as typeof import("node:child_process"); // eslint-disable-line @typescript-eslint/no-require-imports
+      const ran = spawnSync("ps", ["-o", "etime=", "-p", String(holder.pid)], { encoding: "utf8", timeout: 2000 });
+      const elapsed = ran.status === 0 ? elapsedSeconds(String(ran.stdout)) : null;
+      if (elapsed !== null && Math.abs(Math.round(Date.now() / 1000 - elapsed) - holder.pstart) > 5) return false;
+    } catch { /* an unreadable age leaves the id as the only evidence */ }
+  }
+  return true;
+}
+/**
+ * Deletes the room's open-request row. With `ownerMessageIds` (the requests the calling chain answers) it deletes only a row that is one
+ * of theirs: a row another process wrote for a newer request belongs to that request and its chain (#4: the old chain's end
+ * wiped the new request's row, so an app closing mid-answer was never reported). Without ids it is unconditional (the app start).
+ * Compare-and-delete: a row replaced between the read and the delete stays.
+ */
+export function clearLeadRequestOpen(db: Pick<Database.Database, "prepare">, chatId: string, ownerMessageIds?: readonly string[]): void {
+  const key = LEAD_OPEN_KEY_PREFIX + chatId;
+  if (!ownerMessageIds) { db.prepare("DELETE FROM meta WHERE key = ?").run(key); return; }
+  const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+  if (!row) return;
+  let current: unknown = null;
+  try { current = (JSON.parse(row.value) as { ownerMessageId?: unknown } | null)?.ownerMessageId; } catch { current = null; }
+  // A row that names no request (damaged, or from a build before the id was written) is nobody's to keep.
+  if (typeof current === "string" && !ownerMessageIds.includes(current)) return;
+  db.prepare("DELETE FROM meta WHERE key = ? AND value = ?").run(key, row.value);
+}
+/**
+ * The owner's Stop of a request that ANOTHER process holds, written into the request's own row as `stop: true` (no new row, column or
+ * table - the row is deleted when the request ends, and a new request writes a fresh row without the mark, so the mark is per request).
+ * Between two turns of a chain no run is registered, so a Stop has nothing to cancel there: the chain reads this mark right before it
+ * starts a turn (leadRequestStopMarked) and ends instead. A Stop is a terminal act: it does not depend on a holder being alive or a
+ * lease existing - a row of a dead holder only carries a mark nobody reads, and the next app start deletes the row. Compare-and-set, so a
+ * request that ended (or a new one that began) between the read and the write is never marked by mistake. True when a row was marked.
+ */
+export function requestLeadRequestStop(db: Pick<Database.Database, "prepare">, chatId: string): boolean {
+  try {
+    const key = LEAD_OPEN_KEY_PREFIX + chatId;
+    const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+    if (!row) return false;
+    let parsed: Record<string, unknown> = {};
+    try { const value = JSON.parse(row.value) as unknown; if (value && typeof value === "object" && !Array.isArray(value)) parsed = value as Record<string, unknown>; } catch { /* a damaged row is marked as a bare row */ }
+    if (parsed.stop === true) return true;
+    return Number(db.prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?").run(JSON.stringify({ ...parsed, stop: true }), key, row.value).changes) === 1;
+  } catch { return false; }
+}
+/**
+ * Has the owner stopped this room's open request (see requestLeadRequestStop)? One read, made right before a turn starts. With
+ * `ownerMessageIds` (the requests the calling chain answers) it is true only when the Stop is one of THEIRS: written into their row, or
+ * carried into a newer request's row (markLeadRequestOpen). A Stop of another request is not this chain's. Without ids: any Stop.
+ */
+export function leadRequestStopMarked(db: Pick<Database.Database, "prepare">, chatId: string, ownerMessageIds?: readonly string[]): boolean {
+  try {
+    const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(LEAD_OPEN_KEY_PREFIX + chatId) as { value: string } | undefined;
+    if (!row) return false;
+    type OpenRow = { stop?: unknown; ownerMessageId?: unknown; stopped?: unknown };
+    let parsed: OpenRow;
+    try { parsed = (JSON.parse(row.value) as OpenRow | null) ?? {}; } catch { return false; }
+    if (!ownerMessageIds) return parsed.stop === true;
+    if (parsed.stop === true && (typeof parsed.ownerMessageId !== "string" || ownerMessageIds.includes(parsed.ownerMessageId))) return true;
+    return Array.isArray(parsed.stopped) && parsed.stopped.some((id: unknown) => typeof id === "string" && ownerMessageIds.includes(id));
+  } catch { return false; }
+}
+/**
+ * "This request was continued once after a restart" (Agentlas 2.0 N5): written into the request's own row (no new row, column or table)
+ * by the process that now answers it, together with that process as the new holder. A request whose row carries it and is cut off again
+ * is ended the way every cut-off request was before (one plain line), so a restart never starts a loop. Compare-and-set against the exact
+ * request: a row replaced by a newer request is never marked. True when this call made the mark (false: already marked, gone, or another request).
+ */
+export function markLeadRequestResumed(db: Pick<Database.Database, "prepare">, chatId: string, ownerMessageId: string, holder: { pid: number; startedAt: number } = processHolder()): boolean {
+  try {
+    const key = LEAD_OPEN_KEY_PREFIX + chatId;
+    const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
+    if (!row) return false;
+    let parsed: Record<string, unknown>;
+    try { const value = JSON.parse(row.value) as unknown; if (!value || typeof value !== "object" || Array.isArray(value)) return false; parsed = value as Record<string, unknown>; } catch { return false; }
+    if (parsed.ownerMessageId !== ownerMessageId || parsed.resumed === true || parsed.stop === true) return false;
+    return Number(db.prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
+      .run(JSON.stringify({ ...parsed, resumed: true, pid: holder.pid, pstart: holder.startedAt }), key, row.value).changes) === 1;
+  } catch { return false; }
+}
+export function openLeadRequests(db: Pick<Database.Database, "prepare">): Array<{ chatId: string; ownerMessageId: string | null; at: number | null; pid: number | null; pstart: number | null; stop: boolean; resumed: boolean; peer: boolean; chain: string | null }> {
+  try {
+    const rows = db.prepare("SELECT substr(key, ?) AS id, value FROM meta WHERE key LIKE ?").all(LEAD_OPEN_KEY_PREFIX.length + 1, `${LEAD_OPEN_KEY_PREFIX}%`) as Array<{ id: string; value: string }>;
+    return rows.map((row) => {
+      let parsed: { ownerMessageId?: unknown; at?: unknown; pid?: unknown; pstart?: unknown; stop?: unknown; resumed?: unknown; peer?: unknown; chain?: unknown } = {};
+      try { parsed = JSON.parse(row.value) as typeof parsed; } catch { /* a damaged row still names the room */ }
+      return {
+        chatId: row.id, ownerMessageId: typeof parsed.ownerMessageId === "string" ? parsed.ownerMessageId : null, at: typeof parsed.at === "number" ? parsed.at : null,
+        // A row from before the holder was written has neither: it is judged by the older rules.
+        pid: Number.isSafeInteger(parsed.pid) && (parsed.pid as number) > 1 ? parsed.pid as number : null, pstart: typeof parsed.pstart === "number" ? parsed.pstart : null,
+        stop: parsed.stop === true, resumed: parsed.resumed === true, peer: parsed.peer === true, chain: typeof parsed.chain === "string" && parsed.chain ? parsed.chain : null,
+      };
+    });
+  } catch { return []; }
+}
+
+/**
+ * Marks whose chat is gone. A chat can be deleted by more than removeChat (a parent's children, an automation's ledger chats, a failed
+ * agent registration's rollback), and then its isolation mark has no reader. One statement, no timer: it runs where a chat is
+ * deleted and where a new room is made, so a store that already holds orphans drains by itself. Returns the number removed.
+ */
+export function purgeOrphanChatMarks(db: Pick<Database.Database, "prepare">): number {
+  let removed = 0;
+  // `session-title:` is the once-per-session mark of the automatic title (chat/session-title.ts; its only reader).
+  for (const prefix of [ISOLATED_CHILD_KEY_PREFIX, TF_SCOPE_PREFIX, TF_SCOPE_REQUIRED_PREFIX, LEAD_ROOM_KEY_PREFIX, LEAD_OPEN_KEY_PREFIX, "session-title:"]) {
+    try {
+      removed += Number(db.prepare("DELETE FROM meta WHERE key LIKE ? AND substr(key, ?) NOT IN (SELECT id FROM chats)").run(`${prefix}%`, prefix.length + 1).changes);
+    } catch {
+      // a store without the meta or chats table has no marks to purge
+    }
+  }
+  return removed;
+}
+/** A group room that became a one-to-one room again: its group scope binding goes (the isolation mark, written next to it, takes over). */
+export function clearOneTaskforceSessionScope(db: Pick<Database.Database, "prepare">, rootChatId: string): void {
+  db.prepare("DELETE FROM meta WHERE key IN (?, ?)").run(TF_SCOPE_PREFIX + rootChatId, TF_SCOPE_REQUIRED_PREFIX + rootChatId);
+}
 
 export function isRosterMember(db: Pick<Database.Database, "prepare">, agentId: string): boolean {
   return !!db.prepare("SELECT 1 FROM one_org_members WHERE installed_agent_id=? AND archived_at IS NULL LIMIT 1").get(agentId);
@@ -795,6 +1026,8 @@ export function resolveSessionScope(db: Database.Database, input: SessionScopeIn
     const tf=resolveTaskforce(db,input,mode,row,deriveSessionChannel(db,input.chatId,false));if(tf)return tf;
     seatId = seatOf({ agentId: row.agent_id, kind: row.kind, origin: row.origin_surface, seatId: row.seat_id, seatKind: row.seat_kind }, input);
     member = rosterShape({ agentId: row.agent_id, kind: row.kind, origin: row.origin_surface }, { ...input, parentChatId: row.parent_chat_id });
+    // A room marked isolated at birth (new Agent Chat) answers the old per-conversation formula, never the seat's shared scope.
+    if (seatId && isolatedChild(db, input.chatId)) return old(mode, null);
     if (seatId) return resolveSeat(db, input, mode, seatId, deriveSessionChannel(db, input.chatId, false));
     if (member) {
       const scoped = resolveRosterChild(db, input, mode, row, deriveSessionChannel(db, input.chatId, false));
@@ -861,7 +1094,7 @@ export function journalDomainsOfConversation(db: Pick<Database.Database, "prepar
   const own = legacyVisibilityDomain({ chatId: input.chatId, kind: input.kind, parentChatId: input.parentChatId }, false);
   let retiredSharedDomain:string|null=null;
   let assigned: string[] = [];
-  try { if(isolatedChild(db,input.chatId) && registeredTaskforceScope(db,input.kind==="division"&&input.parentChatId?input.parentChatId:input.chatId))return [own];
+  try { if(isolatedChild(db,input.chatId) && ((input.kind!=="division"&&!input.parentChatId) || registeredTaskforceScope(db,input.kind==="division"&&input.parentChatId?input.parentChatId:input.chatId)))return [own];
     const tf=taskforceScopeForChat(db,input);if(tf){const domain=taskforceDomain(tf),raw=(db.prepare("SELECT value FROM meta WHERE key=?").get(sessionScopeActorMetaKey(input.ownerScope,domain,`agent:${input.agentId}`)) as {value:string}|undefined)?.value;
       return raw===undefined?[own]:parseAssignment(raw)?.domain===domain?[own,domain].filter((v,i,a)=>a.indexOf(v)===i):[own];}
   }catch{return [own];}

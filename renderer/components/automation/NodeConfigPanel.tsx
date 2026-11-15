@@ -545,7 +545,9 @@ export function NodeConfigPanel({
               <option value="eq">= (eq)</option>
               <option value="ne">≠ (ne)</option>
               <option value="gt">&gt; (gt)</option>
+              <option value="gte">≥ (gte)</option>
               <option value="lt">&lt; (lt)</option>
+              <option value="lte">≤ (lte)</option>
               <option value="contains">contains</option>
             </Select>
           </Field>

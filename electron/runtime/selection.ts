@@ -1,6 +1,6 @@
 import { isRuntimeCredentialUnavailable, RUNTIME_CREDENTIAL_UNAVAILABLE_CODE, runtimeModelUnavailableByInventory } from "./credential-access";
 import { invocationBreaker, invocationBreakerKey } from "./invocation-breaker";
-import { runtimeCooldown } from "./runtime-cooldown";
+import { runtimeCooldown, runtimeCooldownForSelection } from "./runtime-cooldown";
 import { runtimeReadsWithTools } from "../../shared/runtime-capabilities";
 import { withDurableRuntimeRetry } from "./durable-retry";
 import { withModelImageBudget } from "./model-image-budget";
@@ -10,7 +10,7 @@ import type {
   RuntimeSelection,
   RuntimeStatus,
 } from "../../shared/types";
-import { findAgentRuntimeOverride, type RuntimeOverrideTarget } from "../store/agent-runtime-overrides";
+import { agentFollowedRole, agentOwnOrderOverrides, findAgentRuntimeOverride, type RuntimeOverrideTarget } from "../store/agent-runtime-overrides";
 import {
   runAnthropicByok,
   runCustomByok,
@@ -35,13 +35,14 @@ import { runLMStudio, lmStudioHost } from "./lmstudio";
 import { runMLX } from "./mlx";
 import { ollamaHost, runOllama } from "./ollama";
 import { runManagedLocalModel } from "../local-model-hub/runtime-adapter";
-import { acquireRunSlot } from "./run-slots";
+import { acquireRunSlot, beginRunActivity, runSlotLendBudget } from "./run-slots";
+import { createSlotLease, runWithSlotLease } from "./run-slot-lease";
 import { withHostNativeWriter } from "./native-writer-host";
 import { agentActivityKey, registerAgentResidency, touchAgentResidency } from "./agent-residency";
 import { ACP_AGENTS, acpDisabledFor, acpOrLegacyRunner, acpSessionKind, createAcpRunner, type AcpAgentSpec } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
-import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
-import { markRefusedBeforeDispatch, tagPickedRunnerKind, withNativeBrowserGuidance, type Runner, type RunnerFailure, type RunnerResult } from "./runner";
+import { acquireLocalInferenceSlot, localInferenceLendBudget } from "./local-inference-run-slots";
+import { markRefusedBeforeDispatch, tagPickedRunnerKind, withNativeBrowserGuidance, type Runner, type RunnerEvents, type RunnerFailure, type RunnerRequest, type RunnerResult } from "./runner";
 import { getSubscriptionCreditUse, peekProviderQuotaExhausted } from "../usage";
 import { peekAgentlasCreditsAvailable } from "../billing";
 import { listModelRoleMembers } from "../store/model-roles";
@@ -53,7 +54,7 @@ import { responsesContextPolicy } from "./responses-context-policy";
 import { withDaemonAgentContext } from "./agent-context-admission";
 import { withOversizedInputSpill } from "./oversized-input";
 import { currentModelCallScope, withModelCallLedger } from "./model-call-ledger";
-import { currentRunPriority, slotPriorityForCall } from "./run-priority";
+import { currentRunPriority, harnessOpenedTurn, slotPriorityForCall } from "./run-priority";
 import { withRemoteCurationRuntime } from "./remote-curation-binding";
 import { withMemorySourceRunner } from "../memory/source-custody";
 
@@ -79,23 +80,45 @@ function refusedBeforeRunner(failure: RunnerFailure): RunnerResult {
   return { text: "", ownerControlTerminal: "uncertain", turnDelivery: "not-dispatched", failure };
 }
 
-/** Per-turn, before the provider or its reusable session is used. Unknown probes are not authentication. */
-function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
+/**
+ * The typed failure a run is ended with when the auth probe beside it measured "signed out" (trial, repair 8 R1). Same shape as a provider's own auth
+ * failure (kind "auth", source "marker"), so every caller that already writes the shared "signed out" fact and the login cooldown from a failed run
+ * (judgment.ts recordAttempt, mcp/client.ts) does it with its own full runtime identity, and the next background call is skipped before dispatch by that cooldown.
+ */
+export const SIGNED_OUT_PROBE_CODE = "runtime_signed_out_probe";
+function signedOutProbeFailure(kind: string, locale: RunnerRequest["locale"]): RunnerFailure {
+  return { kind: "auth", runtime: kind, source: "marker", providerCode: SIGNED_OUT_PROBE_CODE,
+    message: locale === "ko" ? "이 실행기는 로그인되어 있지 않아 호출을 멈췄습니다. 로그인한 뒤 다시 시도하세요."
+      : "This runtime is signed out, so the call was stopped. Sign in and try again." };
+}
+
+/**
+ * Per-turn, before the provider or its reusable session is used. Unknown probes are not authentication.
+ *
+ * The probe is measured beside the run. Its answer used to be only logged, so a signed-out CLI whose run never ends (the trial: `codex login status`
+ * said "Not logged in" 70 ms after the call started and the call ran its whole 300 s) kept waiting. A probe that measured "signed-out" now ends the run it
+ * was started for, as an auth failure, when that run has produced nothing yet (no answer text and no tool: a run that is answering is signed in, whatever a
+ * status command says; the provider stays authoritative then). Any other probe state (unknown, signed-in, timeout, not-installed) changes nothing.
+ */
+export function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
   if (!CONNECTABLE_RUNTIMES.includes(runtimeKind as ConnectableRuntime)) return runner;
   const kind = runtimeKind as ConnectableRuntime;
   return async (req, events) => {
     if (req.signal?.aborted) throw abortReasonError(req);
     const probeKey = `${kind}\0${req.runtimeSource ?? ""}`;
     const now = Date.now();
+    let signedOutProbe: Promise<boolean> | null = null;
     if ((runtimeAuthProbeStartedAt.get(probeKey) ?? -Infinity) + RUNTIME_AUTH_PROBE_INTERVAL_MS <= now) {
       runtimeAuthProbeStartedAt.set(probeKey, now);
       // Only measured codes and command evidence: no credential values, stdout, account, source path or env.
-      void probeRuntimeAuthForRun(kind, { runtimeSource: req.runtimeSource, env: req.env, cwd: req.cwd }).then((probe) => {
+      signedOutProbe = probeRuntimeAuthForRun(kind, { runtimeSource: req.runtimeSource, env: req.env, cwd: req.cwd }).then((probe) => {
         console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
           state: probe.state, reason: probe.reason ?? probe.state, checkedAt: probe.checkedAt, latencyMs: probe.latencyMs, evidence: probe.evidence }));
+        return probe.state === "signed-out";
       }, () => {
         console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
           state: "unknown", reason: "probe-failed" }));
+        return false;
       });
     }
     // The provider remains authoritative for auth failure and runtime fallback; absent status commands (Kimi) and
@@ -112,7 +135,30 @@ function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
         message: req.locale === "ko" ? "구독 한도가 소진됐고 크레딧 자동 사용이 꺼져 있어 시작하지 않았습니다."
           : "This run was not started: the subscription limit is reached and automatic credit use is off." });
     }
-    return runner(req, events);
+    if (!signedOutProbe) return runner(req, events);
+    // The probe started for this run may end it. The run gets its own signal that follows the caller's (same reason), so the caller's Stop still reads as its own.
+    const stop = new AbortController();
+    const relay = (): void => stop.abort(req.signal?.reason);
+    req.signal?.addEventListener("abort", relay, { once: true });
+    const state: { answering: boolean; finished: boolean; cut: RunnerFailure | null } = { answering: false, finished: false, cut: null };
+    const watched: RunnerEvents = { ...events,
+      onPartial: (chunk) => { state.answering = true; events.onPartial(chunk); },
+      ...(events.onTool ? { onTool: (...args: Parameters<NonNullable<RunnerEvents["onTool"]>>) => { state.answering = true; events.onTool?.(...args); } } : {}) };
+    void signedOutProbe.then((signedOut) => {
+      if (!signedOut || state.answering || state.finished || req.signal?.aborted) return;
+      state.cut = signedOutProbeFailure(kind, req.locale);
+      stop.abort(new Error(state.cut.message));
+    });
+    try {
+      const result = await runner({ ...req, signal: stop.signal }, watched);
+      return state.cut && !result.text ? { text: "", ownerControlTerminal: "uncertain", failure: state.cut } : result;
+    } catch (error) {
+      if (state.cut && !req.signal?.aborted) return { text: "", ownerControlTerminal: "uncertain", failure: state.cut };
+      throw error;
+    } finally {
+      state.finished = true;
+      req.signal?.removeEventListener("abort", relay);
+    }
   };
 }
 
@@ -134,13 +180,20 @@ function withRunSlot(runner: Runner, runtimeKind: string): Runner {
     // 우선순위: 요청 명시값 → 호출 문맥(withRunPriority) → interactive.
     // 자동화 스케줄러·데몬 graph.run 이 background 문맥을 깔고, 채팅 턴은 기본값이다.
     // 오너 턴 안에서 맡긴 일(firm/swarm/task-force 워커·플래너·종합, 큐레이터)은 오너 레인을 쓰지 않는다(NH20).
-    const release = await acquireRunSlot(req.signal, () => {
+    const slotPriority = req.runPriority ?? slotPriorityForCall(currentRunPriority(), currentModelCallScope()?.role);
+    const onSlotQueued = () => {
       events.onStatus(
         req.locale === "ko"
           ? "다른 에이전트 실행이 끝나기를 기다리는 중... (동시 실행 한도)"
           : "Waiting for a free run slot... (concurrency limit)",
+        { code: "queue_wait" }, // machine-readable: a lead room's time limit does not run while a member waits for a slot
       );
-    }, req.runPriority ?? slotPriorityForCall(currentRunPriority(), currentModelCallScope()?.role));
+    };
+    const release = await acquireRunSlot(req.signal, onSlotQueued, slotPriority);
+    // N0b: while a person decides on a card or question this turn raised, the slot is let go and taken again in the same lane.
+    // A person's answer is the owner's hand: the slot is taken again in the owner lane (queued behind owner turns only, never behind
+    // an automation pass that was started meanwhile), and a pool whose lent slots reached its limit lends no more (run-slot-lease.ts).
+    const slotLease = createSlotLease(release, () => acquireRunSlot(req.signal, onSlotQueued, "owner"), runSlotLendBudget);
     /*
      * ★상주 등록 — 여기가 **공용 실행 경로**다.
      *
@@ -172,12 +225,43 @@ function withRunSlot(runner: Runner, runtimeKind: string): Runner {
       // 등록소 실패가 실행을 막지 않는다 — 관측은 실행보다 뒤에 선다.
     }
     try {
-      return await checkedRunner(req, events);
+      return await runWithSlotLease(slotLease, req.signal, () => checkedRunner(req, events));
     } finally {
       try { touchAgentResidency(residencyKey, { inUse: false }); } catch { /* 관측 실패 무시 */ }
-      release();
+      slotLease.close();
     }
     });
+  };
+}
+
+/**
+ * API runs (BYOK, Agentlas serving) hold no CLI child, so they were never counted: the run-slot "busy" signal and the quiet clock
+ * said "idle" while an API turn was streaming, and a host-opened turn (a goal continuation, a teammate's message) on an API runner
+ * started without any bound, after a restart all of them at once (N8). This wrapper marks the run as working, and sends a turn
+ * the product opened through a run slot like a CLI turn; the owner's own message takes no slot and starts exactly as before.
+ */
+export function withApiRunActivity(runner: Runner): Runner {
+  return async (req, events) => {
+    const endActivity = beginRunActivity();
+    let slotLease: ReturnType<typeof createSlotLease> | null = null;
+    try {
+      if (!harnessOpenedTurn()) return await runner(req, events);
+      const slotPriority = req.runPriority ?? slotPriorityForCall(currentRunPriority(), currentModelCallScope()?.role);
+      const onSlotQueued = () => {
+        events.onStatus(
+          req.locale === "ko"
+            ? "다른 에이전트 실행이 끝나기를 기다리는 중... (동시 실행 한도)"
+            : "Waiting for a free run slot... (concurrency limit)",
+          { code: "queue_wait" },
+        );
+      };
+      const release = await acquireRunSlot(req.signal, onSlotQueued, slotPriority);
+      slotLease = createSlotLease(release, () => acquireRunSlot(req.signal, onSlotQueued, "owner"), runSlotLendBudget);
+      return await runWithSlotLease(slotLease, req.signal, () => runner(req, events));
+    } finally {
+      slotLease?.close();
+      endActivity();
+    }
   };
 }
 
@@ -189,17 +273,27 @@ function withRunSlot(runner: Runner, runtimeKind: string): Runner {
  */
 function withLocalInferenceSlot(runner: Runner): Runner {
   return async (req, events) => {
-    const release = await acquireLocalInferenceSlot(req.signal, () => {
+    // N8: a local-inference run has its own pool but is work like any other: the busy signal and the quiet clock count it.
+    const endActivity = beginRunActivity();
+    try {
+    const slotPriority = req.runPriority ?? slotPriorityForCall(currentRunPriority(), currentModelCallScope()?.role);
+    const onSlotQueued = () => {
       events.onStatus(
         req.locale === "ko"
           ? "다른 로컬 추론이 끝나기를 기다리는 중... (동시 실행 한도)"
           : "Waiting for a free local inference slot... (concurrency limit)",
+        { code: "queue_wait" },
       );
-    }, req.runPriority ?? slotPriorityForCall(currentRunPriority(), currentModelCallScope()?.role));
+    };
+    const release = await acquireLocalInferenceSlot(req.signal, onSlotQueued, slotPriority);
+    const slotLease = createSlotLease(release, () => acquireLocalInferenceSlot(req.signal, onSlotQueued, "owner"), localInferenceLendBudget);
     try {
-      return await runner(req, events);
+      return await runWithSlotLease(slotLease, req.signal, () => runner(req, events));
     } finally {
-      release();
+      slotLease.close();
+    }
+    } finally {
+      endActivity();
     }
   };
 }
@@ -220,6 +314,18 @@ const runOllamaSlotted = withLocalInferenceSlot((req, events) => runOllama(req, 
 const runLMStudioSlotted = withLocalInferenceSlot(runLMStudio);
 const runMLXSlotted = withLocalInferenceSlot(runMLX);
 const runManagedLocalModelSlotted = withLocalInferenceSlot(runManagedLocalModel);
+const runAnthropicByokActive = withApiRunActivity((req, events) => runAnthropicByok(req, events));
+const runOpenAIByokActive = withApiRunActivity((req, events) => runOpenAIByok(req, events));
+const runGoogleByokActive = withApiRunActivity((req, events) => runGoogleByok(req, events));
+const runUpstageByokActive = withApiRunActivity((req, events) => runUpstageByok(req, events));
+const runCustomByokActive = withApiRunActivity((req, events) => runCustomByok(req, events));
+const runGlmByokActive = withApiRunActivity((req, events) => runGlmByok(req, events));
+const runKimiByokActive = withApiRunActivity((req, events) => runKimiByok(req, events));
+const runDeepseekByokActive = withApiRunActivity((req, events) => runDeepseekByok(req, events));
+const runMinimaxByokActive = withApiRunActivity((req, events) => runMinimaxByok(req, events));
+const runXaiByokActive = withApiRunActivity((req, events) => runXaiByok(req, events));
+const runOpenRouterByokActive = withApiRunActivity((req, events) => runOpenRouterByok(req, events));
+const runAgentlasServingActive = withApiRunActivity((req, events) => runAgentlasServing(req, events));
 
 function bindRuntimeSource(runner: Runner, source: string | undefined): Runner {
   return (req, events) => runner({ ...req, ...(source ? { runtimeSource: source } : {}) }, events);
@@ -424,32 +530,32 @@ function pickRunnerWithoutHostGuidance(active: RuntimeStatus, acpSpec: AcpAgentS
     return { runner: runManagedLocalModelSlotted, label: `Agentlas Local${active.model ? ` · ${active.model}` : ""}` };
   if (active.kind === "agentlas") {
     // 서버가 실행을 들고 있으므로 로컬 실행 슬롯을 잡지 않는다 — 이 기계의 CPU 를 쓰지 않는
-    // 원격 호출이라, BYOK 와 같은 취급이 맞다.
-    return { runner: runAgentlasServing, label: agentlasServingRunnerLabel(active.model) };
+    // 원격 호출이라, BYOK 와 같은 취급이 맞다. (.)
+    return { runner: runAgentlasServingActive, label: agentlasServingRunnerLabel(active.model) };
   }
   if (active.kind === "byok") {
     if (active.backend === "anthropic")
-      return { runner: runAnthropicByok, label: RUNNER_LABEL["byok:anthropic"] };
+      return { runner: runAnthropicByokActive, label: RUNNER_LABEL["byok:anthropic"] };
     if (active.backend === "openai")
-      return { runner: runOpenAIByok, label: RUNNER_LABEL["byok:openai"] };
+      return { runner: runOpenAIByokActive, label: RUNNER_LABEL["byok:openai"] };
     if (active.backend === "google")
-      return { runner: runGoogleByok, label: RUNNER_LABEL["byok:google"] };
+      return { runner: runGoogleByokActive, label: RUNNER_LABEL["byok:google"] };
     if (active.backend === "upstage")
-      return { runner: runUpstageByok, label: RUNNER_LABEL["byok:upstage"] };
+      return { runner: runUpstageByokActive, label: RUNNER_LABEL["byok:upstage"] };
     if (active.backend === "custom")
-      return { runner: runCustomByok, label: RUNNER_LABEL["byok:custom"] };
+      return { runner: runCustomByokActive, label: RUNNER_LABEL["byok:custom"] };
     if (active.backend === "glm")
-      return { runner: runGlmByok, label: RUNNER_LABEL["byok:glm"] };
+      return { runner: runGlmByokActive, label: RUNNER_LABEL["byok:glm"] };
     if (active.backend === "kimi")
-      return { runner: runKimiByok, label: RUNNER_LABEL["byok:kimi"] };
+      return { runner: runKimiByokActive, label: RUNNER_LABEL["byok:kimi"] };
     if (active.backend === "deepseek")
-      return { runner: runDeepseekByok, label: RUNNER_LABEL["byok:deepseek"] };
+      return { runner: runDeepseekByokActive, label: RUNNER_LABEL["byok:deepseek"] };
     if (active.backend === "minimax")
-      return { runner: runMinimaxByok, label: RUNNER_LABEL["byok:minimax"] };
+      return { runner: runMinimaxByokActive, label: RUNNER_LABEL["byok:minimax"] };
     if (active.backend === "xai")
-      return { runner: runXaiByok, label: RUNNER_LABEL["byok:xai"] };
+      return { runner: runXaiByokActive, label: RUNNER_LABEL["byok:xai"] };
     if (active.backend === "openrouter")
-      return { runner: runOpenRouterByok, label: RUNNER_LABEL["byok:openrouter"] };
+      return { runner: runOpenRouterByokActive, label: RUNNER_LABEL["byok:openrouter"] };
   }
   return null;
 }
@@ -492,12 +598,14 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
 function applyRoleSelection(runtime: RuntimeStatus, role: RuntimeRole): RuntimeStatus {
   const selection = runtime.roleSelections?.[role];
   if (!selection) return { ...runtime, active: true };
-  const model = selection.model ?? runtime.model;
+  const model = selection.model;
   return {
     ...runtime,
     active: true,
     model,
-    effort: effortForSelectedModel(runtime, model, selection.effort ?? runtime.effort),
+    effort: selection.effort == null
+      ? selection.effort
+      : effortForSelectedModel(runtime, model, selection.effort),
     longContextEnabled: selection.longContext ?? runtime.longContextEnabled,
   };
 }
@@ -598,12 +706,14 @@ function applyStoredRoleSelection(
   runtime: RuntimeStatus,
   selection: RuntimeSelection,
 ): RuntimeStatus {
-  const model = selection.model ?? runtime.model;
+  const model = selection.model;
   return {
     ...runtime,
     active: true,
     model,
-    effort: effortForSelectedModel(runtime, model, selection.effort ?? runtime.effort),
+    effort: selection.effort == null
+      ? selection.effort
+      : effortForSelectedModel(runtime, model, selection.effort),
     longContextEnabled: selection.longContext ?? runtime.longContextEnabled,
   };
 }
@@ -908,12 +1018,70 @@ export function applyRuntimeOverride(
   };
 }
 
+/**
+ * An agent's own model order (store/agent-runtime-overrides.ts): the first of its lines whose runtime is connected, has the model and
+ * is not out of quota. Null when none can run (the caller then takes the existing unavailable-assignment path, which ends at the global
+ * pool), or when the override is not an agent's own order.
+ */
+function firstUsableOwnLine(runtimes: RuntimeStatus[], first: AgentRuntimeOverride): AgentRuntimeOverride | null {
+  if (first.scope !== "agent") return null;
+  for (const line of agentOwnOrderOverrides(first.targetId)) {
+    const matched = runtimes.find((runtime) => runtimeMatchesOverride(runtime, line));
+    // A line whose runtime is resting after a rate limit, quota or sign-in failure is skipped like one that is not connected: the next line of the owner's own order takes the turn
+    // instead of every turn starting on the resting line and failing until the limit ends (desktop 3, Workspace B-2). When no line is usable the first stays, as before.
+    if (matched && !runtimeSelectionUnavailableReason(matched, line.selection) && !(line.selection.source ? runtimeCooldownForSelection(line.selection) : null) && !runtimeCooldown(matched)) return line;
+  }
+  return null;
+}
+
+/**
+ * The rest of an agent's own order as candidates once a turn on one of its lines failed (desktop 3, Workspace B-2, the turn-time half): before the turn starts `firstUsableOwnLine` skips a line that is
+ * resting, but a turn that started on line 1 and failed went on to the global Orchestrator pool only, so line 2 of the agent's own order was never tried (and a pool that is empty, or the same provider, ended the
+ * turn with nothing left to try). The caller puts these BEFORE the pool's candidates. Same rules as the pool: nothing at all where a replay guard stands (`roleFallbackBlocked`), no resting runtime, no runtime that
+ * shares the failed provider's domain, no unconnected or unrunnable line. `override` is the one the turn started on; anything but an agent's own order gives nothing. Reads only.
+ */
+export function ownOrderFallbackRuntimes(
+  runtimes: RuntimeStatus[],
+  override: AgentRuntimeOverride | null | undefined,
+  options: {
+    failedRuntime: RuntimeStatus;
+    failure: Pick<RunnerFailure, "kind" | "providerCode"> & Partial<Pick<RunnerFailure, "source">>;
+    unsettledNoEffectProven?: boolean;
+  },
+): RuntimeStatus[] {
+  if (!override || override.scope !== "agent") return [];
+  if (roleFallbackBlocked(options)) return [];
+  const out: RuntimeStatus[] = [];
+  for (const line of agentOwnOrderOverrides(override.targetId)) {
+    const matched = runtimes.find((runtime) => runtimeMatchesOverride(runtime, line));
+    if (!matched) continue;
+    const candidate = applyRuntimeOverride(matched, line);
+    if (isRuntimeCredentialUnavailable(candidate) || runtimeCooldown(candidate)) continue;
+    if (line.selection.source && runtimeCooldownForSelection(line.selection)) continue;
+    if (runtimeFailureSharesProviderDomain(candidate, options.failedRuntime, options.failure)) continue;
+    if (runtimeSelectionUnavailableReason(matched, line.selection) || !pickRunner(candidate)) continue;
+    if (!out.some((item) => sameRuntimeModel(item, candidate))) out.push(candidate);
+  }
+  return out;
+}
+
 export function selectRuntimeForTargets(
   runtimes: RuntimeStatus[],
   targets: RuntimeOverrideTarget[],
   role: RuntimeRole = "orchestrator",
+  /** The role an agent with nothing stored follows in this turn (Worker in an ordinary agent's one-to-one chat); absent = `role`. */
+  unsetRole?: RuntimeRole,
 ): RuntimeChoice | null {
-  const override = findAgentRuntimeOverride(targets);
+  const found = findAgentRuntimeOverride(targets);
+  // An agent the owner told to follow the Worker or the Orchestrator order reads that global order at this turn (nothing is copied);
+  // an agent with nothing stored follows `unsetRole` when the turn names one, else the role its turn kind always used. A team pin (found)
+  // and the owner's own pick are decided before this, so the default never beats them.
+  const followed = found ? null : agentFollowedRole(targets.find((target) => target.scope === "agent" && target.targetId)?.targetId);
+  if (followed) role = followed;
+  else if (!found && unsetRole) role = unsetRole;
+  // A Worker order nobody can run now (every line gone or out of quota) is the Orchestrator's, never a dead turn.
+  if (!found && role === "worker" && (followed || unsetRole) && rolePriorityRuntimes(runtimes, "worker").length === 0) role = "orchestrator";
+  const override = found && found.scope === "agent" ? (firstUsableOwnLine(runtimes, found) ?? found) : found;
   if (override) {
     const matched = runtimes.find((runtime) => runtimeMatchesOverride(runtime, override));
     const unavailableReason = runtimeSelectionUnavailableReason(matched, override.selection);
@@ -1013,6 +1181,8 @@ export function selectInvocationRuntime(
     /** true = Main-owned unattended automation pin, false = chat-surface pin. */
     pinIsAuthoritative: boolean;
     agentAppMode?: boolean;
+    /** The role an agent with nothing stored follows (runtime/agent-default-role.ts); absent = the Orchestrator, as before. */
+    unsetRole?: RuntimeRole;
   },
 ): InvocationRuntimeResolution {
   const assigned =
@@ -1026,7 +1196,7 @@ export function selectInvocationRuntime(
   }
   const choice = options.agentAppMode
     ? selectAgentAppRuntimeForTargets(runtimes, targets)
-    : selectRuntimeForTargets(runtimes, targets);
+    : selectRuntimeForTargets(runtimes, targets, "orchestrator", options.unsetRole);
   return { choice, pinHonored: false, pinYieldedToOverride: assigned };
 }
 

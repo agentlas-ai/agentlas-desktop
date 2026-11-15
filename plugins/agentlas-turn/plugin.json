@@ -10,7 +10,7 @@
     "displayNameKo": "턴 도구",
     "tagline": "Typed tools the host validates instead of text blocks",
     "taglineKo": "텍스트 블록 대신 호스트가 검증하는 타입 도구",
-    "description": "Agentlas built-in server whose typed tools (memory_note) replace control blocks a model used to append to its reply. The host validates each call and feeds the same pipeline.",
+    "description": "Agentlas built-in server whose typed tools (memory_ticket) replace control blocks a model used to append to its reply. The host validates each call and feeds the same pipeline.",
     "descriptionKo": "모델이 답 끝에 붙이던 제어 블록(기억 노트 등)을 호스트가 검증하는 타입 도구로 바꾼 Agentlas 내장 서버입니다.",
     "category": "data",
     "brandColor": "#0F766E",
@@ -30,7 +30,7 @@
           "name": "턴 도구",
           "nameEn": "Turn Tools",
           "description": "기억 노트 등 호스트가 검증하는 타입 도구.",
-          "descriptionEn": "Typed, host-validated tools such as memory_note.",
+          "descriptionEn": "Typed, host-validated tools such as memory_ticket.",
           "category": "data",
           "brandColor": "#0F766E",
           "mark": "TT"

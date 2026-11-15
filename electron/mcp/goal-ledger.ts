@@ -23,6 +23,7 @@ import {
   tryCompleteVerifiedLongRun,
 } from "../store/long-runs";
 import { getChatGoalRevision } from "../store/chat-goals";
+import { closeGoal } from "../store/goal-close";
 import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
 import type { GoalPlanView } from "../../shared/goal-shape";
 import { goalPlanView } from "../long-run/goal-shaping";
@@ -244,18 +245,12 @@ export async function recordGoalLedgerCycle(input: {
 }
 
 function cancelRun(goalId: string, reason: string): boolean {
-  let run = getLongRunByGoalId(goalId);
+  const run = getLongRunByGoalId(goalId);
   if (!run) return false;
   if (run.status === "cancelled") return true;
   if (run.status === "completed" || run.status === "failed") return false;
-  if (run.status === "draft" || run.status === "paused" || run.status === "blocked") {
-    transitionLongRun({ runId: run.id, to: "cancelled", reason, actorKind: "user" });
-    return true;
-  }
-  if (run.status !== "cancelling") {
-    run = transitionLongRun({ runId: run.id, to: "cancelling", reason, actorKind: "user" });
-  }
-  transitionLongRun({ runId: run.id, to: "cancelled", reason, actorKind: "host" });
+  if (run.surface === "science") return false; // a Science run is a projection of Science's own state: this tool never closed it (it was refused)
+  closeGoal(goalId, "cancelled", "owner-tool", { reason });
   return true;
 }
 

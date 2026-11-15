@@ -238,6 +238,21 @@ async function resolveSetupStep(input: {
   throw new Error(mcpConnectionFailureMessage(observed, ko));
 }
 
+/**
+ * VD: the moment a key is saved, the connection that uses it is called once for real (`mcpTools.test` = initialize + tools/list through the one MCP client) and what that call proved is read from the closed word
+ * `keyVerdict` (electron/mcp-tools/key-verdict.ts) - never from the words of an error. A refused key (401/403) is not "connected"; a service that did not answer is not blamed on the key (the next status read
+ * asks again - no timer here); a local program has nothing to refuse a key with until its first tool call (`saved`).
+ */
+export async function checkSavedKeys(api: NonNullable<ReturnType<typeof ipc>>, serverIds: readonly string[] | undefined): Promise<{ rejected: boolean }> {
+  let rejected = false;
+  for (const id of serverIds ?? []) {
+    let status: McpServerStatus | null = null;
+    try { status = await api.mcpTools.test(id); } catch { /* an unread probe is "not checked", never "connected" */ }
+    if (status?.keyVerdict === "rejected") rejected = true;
+  }
+  return { rejected };
+}
+
 export async function installPlugins(input: {
   chosen: MarketplaceListing[];
   ko: boolean;
@@ -633,6 +648,11 @@ export function KeyStep({
           await api.env.set(target, value);
         }
       }
+      if (isCurrent() && deferred.length < current.envKeys.length) {
+        const check = await checkSavedKeys(api, current.serverIds);
+        if (!isCurrent()) return;
+        if (check.rejected) { setError(ko ? "서비스가 이 키를 받아 주지 않았어요. 키를 다시 확인해 주세요." : "The service did not accept this key. Check it and try again."); return; }
+      }
       if (isCurrent()) { onSavePhase?.(null); advance(deferred); }
     } catch (saveError) {
       if (isCurrent()) setError(saveError instanceof Error ? saveError.message : "save failed");
@@ -681,7 +701,7 @@ export function KeyStep({
 
       <p className={styles.keyNote}>
         {ko
-          ? <>값은 이 컴퓨터의 <CredentialStoreWord ko />에만 저장되고 화면이나 기록에 남지 않습니다.</>
+          ? <>값은 이 데스크탑의 <CredentialStoreWord ko />에만 저장되고 화면이나 기록에 남지 않아요.</>
           : <>Values are stored only in this computer&apos;s <CredentialStoreWord ko={false} /> — never shown or logged.</>}
       </p>
 

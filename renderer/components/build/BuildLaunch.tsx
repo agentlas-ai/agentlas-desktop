@@ -12,6 +12,8 @@ import { onHubBookmarkChange } from "@/lib/hub-bookmark-events";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import type { AgentUsageSummaryRow, HubAgentBookmark, InstalledAgent, MarketplaceListing, McpToolCatalogEntry, SkillCatalogEntry } from "@/lib/types";
+import type { BuildListItem } from "@shared/build-workbench";
+import { BuildsList, useBuildList } from "./BuildsList";
 import styles from "./BuildWorkbench.module.css";
 
 interface Props {
@@ -20,6 +22,8 @@ interface Props {
   onNew: () => void; onBlank: () => void; onCompose: (text: string) => void;
   /** media-carousel pictures, videos and files dropped or pasted on the intro composer join the build's attachments. */
   onAttachFiles?: (files: File[]) => void; attachmentCount?: number;
+  /** F-D10: a row of the Builds tab was pressed (the page opens that saved build). */
+  onOpenBuild?: (item: BuildListItem) => void;
 }
 type GallerySource = "local" | "cloud" | "hub";
 type LoadState = "loading" | "ready" | "error" | "signed-out";
@@ -84,7 +88,7 @@ function rankedExamples(items: GalleryItem[]): GalleryItem[] {
 }
 
 /** Only real local, owned Cloud, and Hub entries are offered here. Browsing never installs or executes one. */
-export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume, onHome, onNew, onBlank, onCompose, onAttachFiles, attachmentCount = 0 }: Props) {
+export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume, onHome, onNew, onBlank, onCompose, onAttachFiles, attachmentCount = 0, onOpenBuild }: Props) {
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [usage, setUsage] = useState<AgentUsageSummaryRow[]>([]);
   const [usageStatus, setUsageStatus] = useState<LoadState>("loading");
@@ -94,7 +98,12 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
   const [hub, setHub] = useState<MarketplaceListing[]>([]);
   const [hubStatus, setHubStatus] = useState<LoadState>("loading");
   const [bookmarks, setBookmarks] = useState<HubAgentBookmark[]>([]);
-  const [agentTab, setAgentTab] = useState<"recent" | "mine">("recent");
+  const [agentTab, setAgentTab] = useState<"builds" | "recent" | "mine">("recent");
+  // The Builds tab leads the list when there are saved builds (picture build-v5-home); a person's own tab choice is never overridden.
+  const builds = useBuildList();
+  const tabChosen = useRef(false);
+  useEffect(() => { if (!tabChosen.current && builds.status === "ready" && builds.items.length > 0) setAgentTab("builds"); }, [builds.status, builds.items.length]);
+  const pickTab = (tab: "builds" | "recent" | "mine") => { tabChosen.current = true; setAgentTab(tab); };
   const [heroSlide, setHeroSlide] = useState(0);
   const [query, setQuery] = useState("");
   const [galleryOpen, setGalleryOpen] = useState(false);
@@ -168,7 +177,7 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
   const featured = rankedExamples(gallery);
   const pages = Math.max(1, Math.ceil(featured.length / 4));
   const visibleSlide = Math.min(heroSlide, pages - 1);
-  const sourceLabel = (source: GallerySource) => source === "local" ? (ko ? "내 컴퓨터" : "On this computer") : source === "cloud" ? (ko ? "내 Cloud" : "My Cloud") : "Hub";
+  const sourceLabel = (source: GallerySource) => source === "local" ? (ko ? "내 데스크탑" : "On this computer") : source === "cloud" ? (ko ? "내 Cloud" : "My Cloud") : "Hub";
   const displayName = (item: GalleryItem) => ko ? item.name : item.nameEn || item.name;
   const displayDescription = (item: GalleryItem) => (ko ? item.description : item.descriptionEn || item.description) || (ko ? "에이전트 상세 정보를 확인하세요." : "Open this agent to see its details.");
   const normalizedQuery = galleryQuery.trim().toLocaleLowerCase();
@@ -197,16 +206,16 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
         </div>
       </header>
       <section className={styles.hero} aria-labelledby="build-hero-title">
-        <div><h2 id="build-hero-title">{ko ? <>내 에이전트와<br />Hub에서 시작하기</> : <>Start with your agents<br />and the Hub</>}</h2><p>{ko ? "내 컴퓨터와 Cloud, Hub에서 실제 에이전트를 살펴보세요." : "Explore real agents on this computer, in your Cloud, and in the Hub."}</p><button className={styles.primary} onClick={() => navigate("/marketplace")}>{ko ? "에이전트 둘러보기" : "Explore agents"}</button></div>
+        <div><h2 id="build-hero-title">{ko ? <>내 에이전트와<br />Hub에서 시작하기</> : <>Start with your agents<br />and the Hub</>}</h2><p>{ko ? "내 데스크탑과 Cloud, Hub에서 실제 에이전트를 살펴보세요." : "Explore real agents on this computer, in your Cloud, and in the Hub."}</p><button className={styles.primary} onClick={() => navigate("/marketplace")}>{ko ? "에이전트 둘러보기" : "Explore agents"}</button></div>
         {featured.length ? <div className={styles.heroCards}>{featured.slice(visibleSlide * 4, visibleSlide * 4 + 4).map(item => <button key={item.key} onClick={() => openGallery(item.key)}><AgentAvatar name={displayName(item)} agentId={item.agentId} size={35} /><strong>{displayName(item)}</strong><span>{sourceLabel(item.source)} · {displayDescription(item)}</span></button>)}</div> : <p className={styles.heroEmpty}>{catalogLoading ? (ko ? "에이전트를 불러오는 중…" : "Loading agents…") : (ko ? "에이전트 목록을 확인해 주세요." : "Check your agent catalog.")}</p>}
         {pages > 1 && <div className={styles.heroPages} aria-label={ko ? "추천 에이전트 페이지" : "Featured agent pages"}>{Array.from({ length: pages }, (_, index) => <button key={index} aria-label={ko ? `추천 ${index + 1} 보기` : `Show featured page ${index + 1}`} aria-pressed={visibleSlide === index} onClick={() => setHeroSlide(index)} />)}</div>}
       </section>
-      <div className={styles.libraryHeading}><div className={styles.agentTabs} role="group" aria-label={ko ? "에이전트 목록" : "Agent lists"}><button aria-pressed={agentTab === "recent"} aria-controls="build-agent-list" onClick={() => setAgentTab("recent")}>{ko ? "최근 사용 에이전트" : "Recently used"}</button><button aria-pressed={agentTab === "mine"} aria-controls="build-agent-list" onClick={() => setAgentTab("mine")}>{ko ? "내 에이전트" : "Your agents"}</button><Link href="/marketplace">{ko ? "에이전트 허브" : "Agent Hub"}</Link></div><button className={styles.quietButton} onClick={() => navigate("/library/agents")}>{ko ? "라이브러리 열기" : "Open library"}</button></div>
+      <div className={styles.libraryHeading}><div className={styles.agentTabs} role="group" aria-label={ko ? "에이전트 목록" : "Agent lists"}>{builds.status !== "unavailable" && <button aria-pressed={agentTab === "builds"} aria-controls="build-agent-list" onClick={() => pickTab("builds")}>{ko ? "빌드" : "Builds"}</button>}<button aria-pressed={agentTab === "recent"} aria-controls="build-agent-list" onClick={() => pickTab("recent")}>{ko ? "최근 사용 에이전트" : "Recently used"}</button><button aria-pressed={agentTab === "mine"} aria-controls="build-agent-list" onClick={() => pickTab("mine")}>{ko ? "내 에이전트" : "Your agents"}</button><Link href="/marketplace">{ko ? "에이전트 허브" : "Agent Hub"}</Link></div><button className={styles.quietButton} onClick={() => navigate("/library/agents")}>{ko ? "라이브러리 열기" : "Open library"}</button></div>
       {hasBuild && <button className={styles.resume} onClick={onResume}><IconWand size={19} /><span><strong>{ko ? "만들던 에이전트 이어서 보기" : "Return to your build"}</strong><span>{request || (ko ? "진행 상태와 결과 확인" : "View progress and results")}</span></span></button>}
-      <div id="build-agent-list">{localStatus === "loading" || (agentTab === "recent" && usageStatus === "loading") ? <p role="status">{ko ? "에이전트를 불러오는 중…" : "Loading agents…"}</p> : localStatus === "error" || (agentTab === "recent" && usageStatus === "error") ? <p role="status" className={styles.empty}>{ko ? "에이전트 목록을 읽지 못했습니다. 라이브러리에서 다시 확인하세요." : "Could not read your agents. Open the library to check again."}</p> : displayedAgents.length ? <div className={styles.agentGrid}>{displayedAgents.map(agent => {
+      <div id="build-agent-list">{agentTab === "builds" && builds.status !== "unavailable" ? <BuildsList ko={ko} items={builds.items} status={builds.status} onOpen={(item) => onOpenBuild?.(item)} /> : localStatus === "loading" || (agentTab === "recent" && usageStatus === "loading") ? <p role="status">{ko ? "에이전트를 불러오는 중…" : "Loading agents…"}</p> : localStatus === "error" || (agentTab === "recent" && usageStatus === "error") ? <p role="status" className={styles.empty}>{ko ? "에이전트 목록을 불러오지 못했어요." : "Could not load your agents."}</p> : displayedAgents.length ? <div className={styles.agentGrid}>{displayedAgents.map(agent => {
         const name = agent.localDisplayName || (ko ? agent.name : agent.nameEn || agent.name);
         return <button className={styles.agentCard} key={agent.id} onClick={() => navigate(`/library/agents?agentId=${encodeURIComponent(agent.id)}`)}><AgentAvatar name={name} agentId={agent.id} size={38} /><span><strong>{name}</strong><span>{usableDescription(ko ? agent.tagline : agent.taglineEn || agent.tagline)}</span></span></button>;
-      })}</div> : <div className={styles.empty}><strong>{query ? (ko ? "검색 결과가 없습니다" : "No matching agents") : agentTab === "recent" ? (ko ? "최근 사용한 에이전트가 없습니다" : "No recently used agents") : (ko ? "내 에이전트가 없습니다" : "No agents on this computer")}</strong><p>{ko ? "새로 만들거나 내 Cloud와 Hub를 둘러보세요." : "Create one or browse your Cloud and the Hub."}</p><button className={styles.primary} onClick={onNew}><IconPlus size={15} />{ko ? "에이전트 만들기" : "Create agent"}</button></div>}</div>
+      })}</div> : <div className={styles.empty}><strong>{query ? (ko ? "검색 결과가 없습니다" : "No matching agents") : agentTab === "recent" ? (ko ? "최근 사용한 에이전트가 없습니다" : "No recently used agents") : (ko ? "내 에이전트가 없습니다" : "No agents on this computer")}</strong><button className={styles.primary} onClick={onNew}><IconPlus size={15} />{ko ? "에이전트 만들기" : "Create agent"}</button></div>}</div>
     </section> : <section className={styles.intro} aria-labelledby="build-intro-title">
       <header className={styles.introHeader}><button className={styles.quietButton} onClick={onHome}><IconArrowLeft size={16} />{ko ? "뒤로" : "Back"}</button><button className={styles.quietButton} onClick={onBlank}>{ko ? "빈 상태로 시작" : "Start from scratch"}</button></header>
       <div className={styles.introBody}><img className={styles.introAvatar} src="/brand/one-characters/blue-wave.png" alt="" /><h1 id="build-intro-title">{ko ? "에이전트가 어떤 일을 해야 하나요?" : "What should your agent do?"}</h1>
@@ -227,10 +236,10 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
       <div className={styles.templateLayout}><aside><label className={styles.search}><IconSearch size={14} /><input aria-label={ko ? "에이전트 목록 검색" : "Search agent catalog"} placeholder={ko ? "에이전트 검색" : "Search agents"} value={galleryQuery} onChange={event => setGalleryQuery(event.target.value)} /></label>
         <div className={styles.gallerySources} role="group" aria-label={ko ? "에이전트 출처" : "Agent source"}>{(["all", "local", "cloud", "hub"] as const).map(source => <button key={source} aria-pressed={gallerySource === source} onClick={() => setGallerySource(source)}>{source === "all" ? (ko ? "전체" : "All") : sourceLabel(source)}</button>)}</div>
         <div className={styles.templateList}>{options.map(item => <button key={item.key} data-gallery-item aria-pressed={active?.key === item.key} onClick={() => setSelected(item.key)}><AgentAvatar name={displayName(item)} agentId={item.agentId} size={23} /><span>{displayName(item)}<small>{sourceLabel(item.source)}</small></span></button>)}{!options.length && <p>{catalogLoading ? (ko ? "불러오는 중…" : "Loading…") : (ko ? "표시할 에이전트가 없습니다." : "No agents to show.")}</p>}</div></aside>
-        <section>{active ? <><AgentAvatar name={displayName(active)} agentId={active.agentId} size={52} /><h2 id="build-gallery-title">{displayName(active)}</h2><p>{displayDescription(active)}</p><h3>{ko ? "출처" : "Source"}</h3><p>{sourceLabel(active.source)}{active.saved ? (ko ? " · 저장한 에이전트" : " · Saved agent") : ""}{active.verified > 0 ? (ko ? ` · 검증된 호출 ${active.verified}회` : ` · ${active.verified} verified calls`) : ""}</p><p>{active.source === "local" ? (ko ? "이 컴퓨터에 등록된 에이전트입니다." : "This agent is registered on this computer.") : active.source === "cloud" ? (ko ? "내 Cloud에서 상세 내용을 보고 필요한 경우 내려받을 수 있습니다." : "View it in your Cloud and download it if needed.") : (ko ? "Hub에서 상세 내용을 확인할 수 있습니다." : "View details in the Hub.")}</p></> : <><h2 id="build-gallery-title">{ko ? "내 에이전트와 Hub" : "My agents and Hub"}</h2><p>{catalogLoading ? (ko ? "실제 에이전트 목록을 불러오고 있습니다." : "Loading your real agent catalog.") : (ko ? "검색을 바꾸거나 목록을 다시 확인해 주세요." : "Try another search or refresh the catalog.")}</p></>}
-          {(cloudStatus === "error" || cloudStatus === "signed-out") && <p role="status">{cloudStatus === "signed-out" ? (ko ? "내 Cloud를 보려면 Agentlas에 로그인하세요." : "Sign in to see My Cloud.") : (ko ? "내 Cloud 목록을 읽지 못했습니다." : "Could not load My Cloud.")}</p>}
-          {cloudStatus === "ready" && cloud.length === 0 && <p role="status">{ko ? "내 Cloud가 비어 있거나 연결을 확인할 수 없습니다." : "My Cloud may be empty or unavailable."}</p>}
-          {hubStatus === "error" && <p role="status">{ko ? "Hub 목록을 읽지 못했습니다." : "Could not load the Hub."}</p>}
+        <section>{active ? <><AgentAvatar name={displayName(active)} agentId={active.agentId} size={52} /><h2 id="build-gallery-title">{displayName(active)}</h2><p>{displayDescription(active)}</p><h3>{ko ? "출처" : "Source"}</h3><p>{sourceLabel(active.source)}{active.saved ? (ko ? " · 저장한 에이전트" : " · Saved agent") : ""}{active.verified > 0 ? (ko ? ` · 검증된 호출 ${active.verified}회` : ` · ${active.verified} verified calls`) : ""}</p><p>{active.source === "local" ? (ko ? "이 데스크탑에 등록된 에이전트입니다." : "This agent is registered on this computer.") : active.source === "cloud" ? (ko ? "내 Cloud에서 상세 내용을 보고 필요한 경우 내려받을 수 있습니다." : "View it in your Cloud and download it if needed.") : (ko ? "Hub에서 상세 내용을 확인할 수 있습니다." : "View details in the Hub.")}</p></> : <><h2 id="build-gallery-title">{ko ? "내 에이전트와 Hub" : "My agents and Hub"}</h2><p>{catalogLoading ? (ko ? "실제 에이전트 목록을 불러오고 있습니다." : "Loading your real agent catalog.") : (ko ? "검색을 바꾸거나 목록을 다시 확인해 주세요." : "Try another search or refresh the catalog.")}</p></>}
+          {(cloudStatus === "error" || cloudStatus === "signed-out") && <p role="status">{cloudStatus === "signed-out" ? (ko ? "내 Cloud를 보려면 Agentlas에 로그인하세요." : "Sign in to see My Cloud.") : (ko ? "내 Cloud 목록을 불러오지 못했어요." : "Could not load My Cloud.")}</p>}
+          {cloudStatus === "ready" && cloud.length === 0 && <p role="status">{ko ? "내 Cloud가 비어 있거나 연결할 수 없어요." : "My Cloud may be empty or unavailable."}</p>}
+          {hubStatus === "error" && <p role="status">{ko ? "Hub 목록을 불러오지 못했어요." : "Could not load the Hub."}</p>}
           <button className={styles.quietButton} onClick={() => setRefreshNumber(value => value + 1)}>{ko ? "다시 불러오기" : "Refresh"}</button>
           {active && <button className={styles.primary} onClick={() => openItem(active)}>{ko ? "상세 보기" : "View details"}</button>}
         </section>
@@ -320,7 +329,7 @@ export function BuildResources({ ko, canAttach, canConfigure = canAttach, onAtta
       <button type="button" onClick={event => { trigger.current = event.currentTarget; setCatalog("skills"); }}>{ko ? "스킬 찾아보기" : "Browse skills"}</button>
       {library && <Link href={`${library}&tab=memory`}>{ko ? "메모리" : "Memory"}</Link>}
     </div>
-    <p>{ko ? "이 컴퓨터의 연결과 엔진 스킬을 확인합니다. 이번 빌드에서 사용할 MCP는 제작 중 검토하고 승인합니다." : "Browse this computer’s connections and engine skills. Review and approve MCP access for this build during creation."}</p>
+    <p>{ko ? "이 데스크탑의 연결과 엔진 스킬을 확인할 수 있어요." : "Browse this computer’s connections and engine skills."}</p>
     {library ? <div className={styles.resourceAfterBuild}>
       <Link href={library}>{ko ? "이름·파일 설정" : "Name and file settings"}</Link>
       <Link href="/automation/new">{ko ? "자동화 만들기" : "Create automation"}</Link>
@@ -328,13 +337,13 @@ export function BuildResources({ ko, canAttach, canConfigure = canAttach, onAtta
     </div> : <p>{ko ? "생성·등록 후 이 에이전트의 이름, 파일, 메모리와 자동화를 관리할 수 있습니다." : "After creation and registration, manage this agent’s name, files, memory and automations."}</p>}
     <dialog ref={dialog} className={styles.resourceDialog} aria-label={catalog === "skills" ? (ko ? "엔진 스킬 카탈로그" : "Engine skill catalog") : (ko ? "앱 연결 카탈로그" : "App connection catalog")} onCancel={() => setCatalog(null)} onClose={() => setCatalog(null)}>
       <button type="button" className={styles.dialogClose} aria-label={ko ? "닫기" : "Close"} onClick={() => setCatalog(null)}><IconClose size={18} /></button>
-      <header><h2>{catalog === "skills" ? (ko ? "엔진 스킬" : "Engine skills") : (ko ? "앱과 연결" : "Apps and connections")}</h2><p>{catalog === "skills" ? (ko ? "엔진의 실제 카탈로그를 읽습니다. 살펴보는 것만으로 에이전트에 스킬이 추가되지는 않습니다." : "Read the engine’s real catalog. Browsing does not add a skill to an agent.") : (ko ? "구성된 연결도 이 초안의 사용 승인을 뜻하지 않습니다. 설치와 계정 권한은 연결 관리 화면에서 검토합니다." : "A configured connection is not approval for this draft. Review installation and account access in connection settings.")}</p></header>
+      <header><h2>{catalog === "skills" ? (ko ? "엔진 스킬" : "Engine skills") : (ko ? "앱과 연결" : "Apps and connections")}</h2><p>{catalog === "skills" ? (ko ? "둘러보기만으로는 스킬이 추가되지 않아요." : "Browsing does not add a skill to an agent.") : (ko ? "연결돼 있어도 이 초안에서 사용하려면 승인이 필요해요." : "A configured connection is not approval for this draft.")}</p></header>
       <label className={styles.search}><IconSearch size={14} /><input aria-label={ko ? "카탈로그 검색" : "Search catalog"} value={query} onChange={event => { readGeneration.current += 1; setQuery(event.target.value); setSkillText(null); setReadFailed(false); setReading(false); }} /></label>
-      {loading ? <p role="status">{ko ? "불러오는 중…" : "Loading…"}</p> : failed ? <p role="alert">{ko ? "카탈로그를 읽지 못했습니다. 연결 관리에서 다시 확인하세요." : "Could not read the catalog. Check connection settings."}</p> : <div className={styles.resourceCatalog}>
+      {loading ? <p role="status">{ko ? "불러오는 중…" : "Loading…"}</p> : failed ? <p role="alert">{ko ? "카탈로그를 불러오지 못했어요." : "Could not load the catalog."}</p> : <div className={styles.resourceCatalog}>
         <aside>{rows.length ? rows.map(item => <button type="button" key={item.id} aria-pressed={active?.id === item.id} onClick={() => select(item.id)}>{item.name}</button>) : <p>{query.trim() ? (ko ? "검색 결과가 없습니다." : "No matching entries.") : (ko ? "현재 카탈로그에 항목이 없습니다." : "The current catalog is empty.")}</p>}</aside>
-        <article>{active && <><h3>{active.name}</h3><p>{active.description}</p>{catalog === "apps" ? <p>{installed === null ? (ko ? "설정 상태를 확인하지 못했습니다." : "Configuration status is unavailable.") : installed.has(active.id) ? (ko ? "이 컴퓨터에 구성됨 · 이번 빌드 사용은 별도 검토" : "Configured on this computer · build access requires review") : (ko ? "이 컴퓨터에 구성되지 않음" : "Not configured on this computer")}</p> : <><button type="button" disabled={reading} onClick={() => void readSkill()}>{ko ? "스킬 원문 읽기" : "Read skill source"}</button>{reading && <p role="status">{ko ? "읽는 중…" : "Reading…"}</p>}{readFailed && <p role="alert">{ko ? "원문을 읽지 못했습니다." : "Could not read this skill."}</p>}{skillText !== null && <pre>{skillText}</pre>}</>}</>}</article>
+        <article>{active && <><h3>{active.name}</h3><p>{active.description}</p>{catalog === "apps" ? <p>{installed === null ? (ko ? "설정 상태를 확인하지 못했어요." : "Configuration status is unavailable.") : installed.has(active.id) ? (ko ? "이 데스크탑에 구성됨 · 이번 빌드 사용은 별도 검토" : "Configured on this computer · build access requires review") : (ko ? "이 데스크탑에 구성되지 않음" : "Not configured on this computer")}</p> : <><button type="button" disabled={reading} onClick={() => void readSkill()}>{ko ? "스킬 원문 읽기" : "Read skill source"}</button>{reading && <p role="status">{ko ? "읽는 중…" : "Reading…"}</p>}{readFailed && <p role="alert">{ko ? "원문을 불러오지 못했어요." : "Could not read this skill."}</p>}{skillText !== null && <pre>{skillText}</pre>}</>}</>}</article>
       </div>}
-      <footer>{onStop && <button type="button" onClick={() => { setCatalog(null); onStop(); }}>{ko ? "제작 중지" : "Stop build"}</button>}{catalog === "apps" ? <Link href="/library/mcps">{ko ? "연결 관리 열기" : "Open connection settings"}</Link> : <button type="button" disabled={!canAttach} onClick={() => { setCatalog(null); onAttachFolder(); }}>{ko ? "실제 스킬 폴더 첨부" : "Attach a real skill folder"}</button>}<Link href="/marketplace">{ko ? "Hub에서 앱·스킬 찾기" : "Find apps and skills in Hub"}</Link><span>{ko ? "설치·저장은 각 화면에서 확인 후 진행합니다." : "Confirm installation and saves in their respective screens."}</span></footer>
+      <footer>{onStop && <button type="button" onClick={() => { setCatalog(null); onStop(); }}>{ko ? "제작 중지" : "Stop build"}</button>}{catalog === "apps" ? <Link href="/library/mcps">{ko ? "연결 관리 열기" : "Open connection settings"}</Link> : <button type="button" disabled={!canAttach} onClick={() => { setCatalog(null); onAttachFolder(); }}>{ko ? "실제 스킬 폴더 첨부" : "Attach a real skill folder"}</button>}<Link href="/marketplace">{ko ? "Hub에서 앱·스킬 찾기" : "Find apps and skills in Hub"}</Link><span>{ko ? "설치·저장은 각 화면에서 확인 후 진행해요." : "Confirm installation and saves in their respective screens."}</span></footer>
     </dialog>
   </section>;
 }

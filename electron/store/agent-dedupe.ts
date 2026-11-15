@@ -473,8 +473,16 @@ function mergeReferences(db: Database.Database, duplicateId: string, canonicalId
     }
   }
   if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_runtime_overrides'").get()) {
-    db.prepare("UPDATE OR IGNORE agent_runtime_overrides SET target_id = ? WHERE scope = 'agent' AND target_id = ?")
-      .run(canonicalId, duplicateId);
+    // The duplicate's model order (store/agent-runtime-overrides.ts: its own lines, the later lines, the follow marker) moves as ONE
+    // setting to the canonical agent, unless the canonical agent already has one (then its own wins and the duplicate's rows go).
+    const rowsOf = (id: string): number => (db.prepare("SELECT COUNT(*) AS n FROM agent_runtime_overrides WHERE scope = 'agent' AND (target_id = ? OR substr(target_id, 1, ?) = ?)")
+      .get(id, id.length + 1, `${id}#`) as { n: number }).n;
+    if (rowsOf(canonicalId) === 0) {
+      db.prepare("UPDATE OR IGNORE agent_runtime_overrides SET target_id = ? || substr(target_id, ?) WHERE scope = 'agent' AND (target_id = ? OR substr(target_id, 1, ?) = ?)")
+        .run(canonicalId, duplicateId.length + 1, duplicateId, duplicateId.length + 1, `${duplicateId}#`);
+    }
+    db.prepare("DELETE FROM agent_runtime_overrides WHERE scope = 'agent' AND (target_id = ? OR substr(target_id, 1, ?) = ?)")
+      .run(duplicateId, duplicateId.length + 1, `${duplicateId}#`);
   }
 }
 

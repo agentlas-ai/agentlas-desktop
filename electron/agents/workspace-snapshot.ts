@@ -5,6 +5,7 @@ import { TextDecoder } from "node:util";
 import { readCanonicalPromptFromDirectory } from "./prompt-authority";
 import type { AgentWorkspaceFile, AgentWorkspaceFileRole } from "../../shared/agent-workspace";
 import { sameFileIdentity } from "../../shared/file-identity";
+import { isAgentLocalStatePath } from "../../shared/agent-local-state";
 
 export const AGENT_TREE_SCHEMA = "agentlas.agent-tree.v1" as const;
 export const AGENT_ASSET_POLICY = "agentlas.runtime-assets.v1" as const;
@@ -37,7 +38,8 @@ export function normalizeWorkspacePath(value: string): string {
 /** The private-name rules of the asset policy, for a path that need not be portable (the run view must still keep private files out). */
 function isPrivateAssetPath(relativePath: string): boolean {
   const lower = relativePath.split("/").map(part => part.toLowerCase());
-  return lower.some(part => PRIVATE_DIRECTORIES.has(part) || part.startsWith(".env"))
+  // 이 컴퓨터에만 있는 에이전트 상태(기억·원장·소유 표식)는 업로드 제외 목록의 정본(upload-scan-catalog)을 그대로 따른다. 이름과 경로(.agentlas/ledgers) 둘 다.
+  return isAgentLocalStatePath(relativePath) || lower.some(part => PRIVATE_DIRECTORIES.has(part) || part.startsWith(".env"))
     || ROOT_PRIVATE_DIRECTORIES.has(lower[0]) || PRIVATE_NAMES.has(lower.at(-1)!)
     || /\.(?:log|sqlite(?:-wal|-shm)?|db|pem|key|p12|pfx)$/i.test(lower.at(-1)!);
 }

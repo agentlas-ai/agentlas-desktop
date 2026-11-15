@@ -10,8 +10,15 @@ import type { HostFacts } from "./handoff-facts";
 
 /** 인수인계에 싣는 최근 대화 예산(토큰). 목표 계약/계획은 turnContext가 따로 싣는다. */
 export const HANDOFF_HISTORY_TOKENS = 6_000;
-/** 인수인계 메시지 한 건 글자 상한 — 도구 덤프/로그가 섞여 들어오는 것을 막는다. */
+/**
+ * 인수인계 메시지 한 건 글자 상한 — 도구 덤프/로그가 섞여 들어오는 것을 막는다.
+ * basis: 정한 값 — 근거 없음. 닿으면: 그 메시지 끝이 잘리고 `…[truncated]`가 붙는다(모델이 본다).
+ */
 export const HANDOFF_MESSAGE_CHARS = 1_200;
+/**
+ * basis: 정한 값 — 근거 없음. 닿으면: 더 오래된 메시지는 새 스레드에 실리지 않고, 맨 앞 메시지 첫 줄이 몇 건이 빠졌는지 말한다(이전에는 말없이 빠졌다).
+ * (HANDOFF_HISTORY_TOKENS 6,000은 어디서도 적용되지 않는다 — 실제 상한은 12건 × 1,200자뿐이라 영어로는 약 3,600토큰, 글자당 토큰이 많은 한국어는 6,000을 넘을 수 있다.)
+ */
 export const HANDOFF_MAX_MESSAGES = 12;
 
 export interface ThreadHealth {
@@ -41,14 +48,18 @@ export function stripHeavyContent(text: string): string {
 
 /** 최근 N건만, 건당 글자 상한, 텍스트만. system 역할 기록은 인수인계에서 제외한다. */
 export function boundHandoffHistory(history: ChatHistoryEntry[]): ChatHistoryEntry[] {
-  const kept = history.filter((m) => m.role !== "system" && typeof m.text === "string" && m.text.trim() !== "")
-    .slice(-HANDOFF_MAX_MESSAGES);
-  return kept.map((m) => {
+  const usable = history.filter((m) => m.role !== "system" && typeof m.text === "string" && m.text.trim() !== "");
+  const kept = usable.slice(-HANDOFF_MAX_MESSAGES);
+  const rows = kept.map((m) => {
     const clean = stripHeavyContent(m.text);
     const text = clean.length > HANDOFF_MESSAGE_CHARS
       ? `${clean.slice(0, HANDOFF_MESSAGE_CHARS)} …[truncated]` : clean;
     return { ...m, text };
   });
+  // Older messages that did not fit were dropped without a word; the first carried message now says how many (one line, only when something was dropped).
+  const dropped = usable.length - kept.length;
+  if (dropped > 0 && rows.length > 0) rows[0] = { ...rows[0], text: `[earlier messages not carried: ${dropped}]\n${rows[0].text}` };
+  return rows;
 }
 
 export interface RotationReceipt {

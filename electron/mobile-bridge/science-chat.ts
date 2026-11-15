@@ -21,6 +21,7 @@ type Client = Pick<ScienceDaemonClient, "commandObserved">;
 type Scope = { projectId: string; conversationId: string };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CODE = /^(?:science[-_][a-z0-9_-]{1,159}|sign_in_required|account_mismatch)$/;
+const isMobileScienceStart = (method: string): boolean => method === "science.chat.send";
 const TURN_STATES = new Set(["queued", "running", "cancelling", "completed", "failed", "cancelled", "interrupted"]);
 const TEXT_BYTES = 65_536;
 const HISTORY_BYTES = 3 * 1024 * 1024;
@@ -48,8 +49,8 @@ function desktopServices(): MobileScienceChatServices {
   return {
     client: () => configuredClient,
     assertPermission(permission) {
-      const { scienceExtensionStatus } = require("../extensions/science") as typeof import("../extensions/science");
-      const { assertScienceExtensionReleasePermission } = require("../extensions/view-host") as typeof import("../extensions/view-host");
+      // ./science has no window code, so the background service can answer this too (the window module is main-only).
+      const { scienceExtensionStatus, assertScienceExtensionReleasePermission } = require("../extensions/science") as typeof import("../extensions/science");
       const status = scienceExtensionStatus();
       if (status.phase !== "installed" || !status.enabled) throw new Error("science-extension-not-active");
       assertScienceExtensionReleasePermission(permission);
@@ -195,6 +196,9 @@ export class MobileScienceChat {
     let writeDispatched = false;
     const deadline = performance.now() + 12_000;
     try {
+      // Mobile may inspect or stop existing Science work, but cannot start or steer it.
+      // This is an ingress rule, independent of client version or supplied fields.
+      if (isMobileScienceStart(method)) throw new Error("science_mobile_disabled");
       const invalid = validateMobileScienceChatParams(method, params);
       if (invalid) throw new Error(invalid);
       if (method === "science.chat.send" && input.idempotencyKey !== params.requestId) throw new Error("science_chat_idempotency_invalid");

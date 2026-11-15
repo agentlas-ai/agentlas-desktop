@@ -2,6 +2,7 @@ import "./runtime/host-session-env-boot";
 import {createNativeHistoryWorkOwner,type HistoryWorkOwner} from './one/history-work-owner';
 import { startOrgSeatSync } from "./org-seat/org-seat-main";
 import { initializeOneContext } from "./one/context-platform";
+import { guiLeaseRoadOn } from "./one/companion-take-roads";
 import { assertOneContextTask } from "./one/context-task-scope";
 import { getOneProfile } from "./store/one-profile";
 import { configureOneSupervisorScience } from "./one/supervisor";
@@ -95,7 +96,7 @@ import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
 import { closeStore, getDb, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
-import { getDaemonAutostartEnabled, markDaemonAutostartStoreReady, readDaemonAutostartStoreReady, resolveDaemonAutostartPolicy } from "./store/daemon-autostart";
+import { getDaemonAutostartEnabled, markDaemonAutostartStoreReady, readDaemonAutostartStoreReady } from "./store/daemon-autostart";
 import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { GUI_BACKGROUND_START_ARG } from "./daemon/gui-background-launch";
 import { mainWindowDevToolsAllowed } from "./devtools-policy";
@@ -103,9 +104,12 @@ import { rememberedMainWindowRoute, rememberMainWindowUrl } from "./main-route-m
 import { mainWindowInitialRoute } from "../shared/restorable-route";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
-import { watchExternalChatChanges } from "./store/external-chat-changes";
+import { createExternalChatWatch } from "./store/external-chat-changes";
+import { createExternalWriterGate, type ExternalWriterGate } from "./store/external-writer-gate";
 import { clearDetectCache } from "./runtime/detect";
 import { chatOriginSurface, getChat, repairPlaceholderTaskTitles } from "./store/chats";
+import { isPersonalAgentId } from "./one/personal-agent-id";
+import { isLeadRoomMemberChat } from "./runtime/session-scope";
 import { notificationClickTarget, retainNotification } from "./notification-target";
 import { createSessionEndingHandler, protocolRegistrationPlan, wireWindowsSessionEnd, windowsAppUserModelId } from "./windows-shell-integration";
 import { expireOrphanedSurfaceJobs } from "./store/agent-surface-jobs";
@@ -117,7 +121,7 @@ import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-event
 import { automationWorkInFlight, closeAutomationDispatchForShutdown, quiesceAutomationSchedulerForUpdate, startAutomationScheduler } from "./automation-scheduler";
 import { setGoalWaitHost, pollGoalWaitSubscriptions, reconcileClaimedGoalWaitsAtStartup,
   interruptGoalWaitReplans, goalWaitReplansSettled } from "./long-run/wait-subscriptions";
-import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
+import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime, startOneBriefingNotificationScheduler } from "./one/briefing";
 import { invocationService } from "./invocation/service";
 import { createInvocationOwnerClient } from "./daemon/invocation-owner-client";
 import { configureInvocationOwnerTransport, handleInvocationOwnerControl } from "./runtime/invocation-owner-control";
@@ -193,20 +197,21 @@ import { backfillDurableOneArtifactChatImages, serveOneArtifactProtocolRequest }
 import { resolveOneTeamAvatarProtocolPath } from "./one/avatar";
 import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
-import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
+import { cancelStartupRecovery, recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, installMainProcessErrorSink, installStdioErrorGuard, mainLogFilePath } from "./logging";
 import { shouldYieldToNativeInstall } from "./updater/yield-to-native-install";
 import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
 import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitCensus, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
 import { fitWindowToWorkArea, secondInstanceWindowAction, watchWindowForLastVisibleClose } from "./window-lifecycle";
-import { cleanupDoneExit, createQuitStepClock, createRelaunchAfterQuit, relaunchArgsForLaunchDuringQuit, relaunchExecPath, type QuitStepClock } from "./quit-exit";
+import { cleanupDoneExit, createQuitStepClock, createRelaunchAfterQuit, quitOutsideBeforeQuit, relaunchArgsForLaunchDuringQuit, relaunchExecPath, type QuitStepClock } from "./quit-exit";
 import { anyWindowWatched, decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
 import { settledRunIsNotAFailure } from "../shared/run-failure-cause";
 import { queueWillStartRunAgain } from "./invocation/queue-retry-fact";
 import { onOwnerAsk } from "./owner-ask-alerts";
 import { supervisorQuietRun } from "./one/supervisor-presentation";
 import { currentUiLocale, readUiLocaleCore, setCurrentUiLocale } from "./ui-locale";
+import { firstRunMigrationEnabled } from "./migration/gate";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
 import {
   issueMobileBridgePairing,
@@ -219,10 +224,14 @@ import {
   startAgentlasMobileBridge,
   stopAgentlasMobileBridge,
 } from "./mobile-bridge/runtime";
+import { registerOneHomeIpc } from "./one/home";
+import { installOneHomeConfirmWindow } from "./one/home-confirm-window-real";
+import { installOneHomeHardenNotice } from "./one/home-harden-notice";
 import { MOBILE_BRIDGE_TLS_READ_FAILED } from "./mobile-bridge/tls";
 import { userDataDir, userDataPath } from "./runtime-paths";
 import { assertPendingInstallBrowserBoundary, configureInstallBrowserBoundary, prepareInstallBrowserBoundary } from "./browser/install-browser-boundary";
 import { runHostShutdownHooks } from "./host-lifecycle";
+import { stopDefectReportFlush } from "./support/defect-report-host";
 import {
   initializeAppRuntimeCoordinator,
   desktopAppInstanceId,
@@ -671,9 +680,20 @@ async function initializeDesktopStore(options: Parameters<typeof initStore>[0] =
     appVersion: app.getVersion(), requiredSchemaVersion: STORE_SCHEMA_VERSION,
   });
   if (daemon.status === "failed") throw new Error(daemon.reason);
+  // Agentlas 2.0 first-run migration (off by default): the one conductor is the owner-role Main. While the migration may be pending and the service is provably
+  // idle, the service is stopped so this Desktop opens the store as owner (the normal start-up starts it again); otherwise this Desktop follows, as before.
+  let storeHandedToMain = false;
+  if (daemon.status === "compatible" && firstRunMigrationEnabled()) {
+    const { firstRunLikelyPending } = await import("./migration/start-guard");
+    if (firstRunLikelyPending(resolveStorePath())) {
+      const { stopIdleDaemonForFirstRunMigration } = await import("./daemon/app-launcher");
+      storeHandedToMain = await stopIdleDaemonForFirstRunMigration({ userDataDir: userDataDir(), storePath: resolveStorePath(), installIdentity });
+      console.info(`[first-run] hand-over of the store from the background service: ${storeHandedToMain ? "stopped (this Desktop is the owner)" : "not possible now (this Desktop follows)"}`);
+    }
+  }
   // The service we reattach to keeps the turns it hosts running; startup recovery must not read them as the previous Desktop's orphans.
-  if (daemon.status === "compatible" && daemon.bootId) startupLiveDaemonBootId = daemon.bootId;
-  initStore({ ...options, ...(daemon.status === "compatible" ? { migrationRole: "follower" as const } : {}) });
+  if (daemon.status === "compatible" && daemon.bootId && !storeHandedToMain) startupLiveDaemonBootId = daemon.bootId;
+  initStore({ ...options, ...(daemon.status === "compatible" && !storeHandedToMain ? { migrationRole: "follower" as const } : {}) });
 }
 
 /** All native clients address the exact opened store and installation. */
@@ -830,8 +850,7 @@ let lastStartupNavigationFailure: {
 } | null = null;
 let shellReadyForWindows = false;
 let restoreMobileBridgeOwnership: (() => Promise<void>) | null = null;
-let oneBriefingLaunchTimer: NodeJS.Timeout | null = null;
-let oneBriefingInterval: NodeJS.Timeout | null = null;
+let oneBriefingScheduler: { poke(): void; stop(): void } | null = null;
 
 async function presentStartupRecovery(presentation: StartupRecoveryPresentation): Promise<string | null> {
   // A background start (for One) that cannot open its store needs the owner: it shows the recovery window like any launch.
@@ -881,9 +900,19 @@ async function openOneFromNotification(input: { taskId?: string; chatId?: string
  * A notification click opens the place it came from (owner 2026-10-24, ui.md #12): a Work chat opens its
  * Work room in the main window, anything else opens One (notification-target.ts).
  */
+/** "work" and "room" (an Agent Chat room that is not the personal agent's own) open in Space; "one" opens One. */
+function notificationOrigin(chatId: string | undefined): "one" | "work" | "room" | null {
+  try {
+    const surface = chatId ? chatOriginSurface(chatId) : null;
+    if (surface === "one" && chatId) {
+      const chat = getChat(chatId);
+      if (chat && chat.kind === "user" && !isPersonalAgentId(chat.agentId)) return "room";
+    }
+    return surface;
+  } catch { return null; }
+}
 async function openNotificationOrigin(input: { chatId?: string; taskId?: string }): Promise<void> {
-  let originSurface: "one" | "work" | null = null;
-  try { originSurface = input.chatId ? chatOriginSurface(input.chatId) : null; } catch { originSurface = null; }
+  const originSurface = notificationOrigin(input.chatId);
   const target = notificationClickTarget({ ...input, originSurface });
   if (target.kind === "one" || !shellReadyForWindows) { await openOneFromNotification(input); return; }
   leaveBackgroundHold();
@@ -896,8 +925,7 @@ async function openNotificationOrigin(input: { chatId?: string; taskId?: string 
 }
 /** The window a run alert flashes: the one its click opens. */
 function notificationFlashWindow(chatId: string | undefined): BrowserWindow | null {
-  let surface: "one" | "work" | null = null;
-  try { surface = chatId ? chatOriginSurface(chatId) : null; } catch { surface = null; }
+  const surface = notificationOrigin(chatId);
   const main = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
   return surface === "work" ? main ?? getOneWindow() : getOneWindow() ?? main;
 }
@@ -969,6 +997,27 @@ function supervisorQuietRunInStore(runId: string): boolean {
   try { return supervisorQuietRun(getDb(), runId); } catch { return false; }
 }
 let workSessionRecoveryReady = false;
+/**
+ * The background service went away or came back: a turn it held in a Goal's room and the room's lease end without a chat row for Main to see, so
+ * the Goals get one full look (long-run/goal-signals.ts wakeGoalLooksAfterServiceChange; two in 10 s are one). No timer of its own.
+ */
+function wakeGoalLooksAfterServiceChange(): void {
+  void import("./long-run/goal-signals").then((m) => m.wakeGoalLooksAfterServiceChange()).catch(() => undefined);
+}
+
+/**
+ * Whether another process may be writing the store (store/external-writer-gate.ts): the external-change poll runs only then. noteServicePresent and
+ * noteServiceMaybeGone are called from the places that already hear of the background service coming and going; before the gate exists (the poll is on
+ * by default) they do nothing.
+ */
+let externalWriterGate: ExternalWriterGate | null = null;
+function noteServicePresent(): void { try { externalWriterGate?.servicePresent(); } catch { /* the poll stays as it is */ } }
+function noteServiceMaybeGone(): void { void externalWriterGate?.serviceMaybeGone().catch(() => undefined); }
+/** A service channel now exists: the One domain hand-over is tried (its 1.5 s retry stands only with a channel; one/supervisor-native-runtime.ts). */
+function wakeOneSupervisorHandoffAfterAttach(): void {
+  void import("./one/supervisor-native-runtime").then((m) => m.wakeOneSupervisorHandoff()).catch(() => undefined);
+}
+
 function wakeWorkSessionRecovery(reason: string): void {
   if (!workSessionRecoveryReady || quitServicesStopPromise || quitCleanupPromise) return;
   void import("./work/session-dispatch")
@@ -1030,7 +1079,7 @@ function startRunAlertBridge(): void {
       // 알람은 부가 기능이다 — 무슨 일이 있어도 실행 정산을 건드리지 않는다.
     }
   });
-  // A card the HOST wrote (the AGI monitor's ask) has no run settlement to ring from: it reports through the owner-ask seam
+  // A card the HOST wrote (askOwnerOnce, harness/owner-ask.ts) has no run settlement to ring from: it reports through the owner-ask seam
   // and rings by the same rule as a model's question card — "Needs your input", whatever the length (owner 2026-10-20).
   const stopOwnerAsk = onOwnerAsk((ask) => {
     try {
@@ -1047,7 +1096,7 @@ function startRunAlertBridge(): void {
         flashWindow: () => notificationFlashWindow(ask.chatId),
       });
     } catch {
-      // 알람은 부가 기능이다 — AGI 의 질문 게시를 건드리지 않는다.
+      // 알람은 부가 기능이다 — 질문 게시를 건드리지 않는다.
     }
   });
   disposeRunAlertBridge = () => { stopSettled(); stopOwnerAsk(); };
@@ -1091,23 +1140,27 @@ function startOneTeamNotificationBridge(): void {
   });
 }
 
+// A timer does not count the time the computer sleeps, so a briefing aimed at the morning would fire hours late
+// after a night asleep: waking looks again at once.
+const pokeOneBriefingOnWake = (): void => { oneBriefingScheduler?.poke(); };
+/** The wake-from-sleep readers on Electron's PowerMonitor (thirteen today, see the start of app.whenReady below). */
+const POWER_MONITOR_LISTENER_CAP = 26;
+
 function startOneBriefingScheduler(): void {
-  if (oneBriefingLaunchTimer || oneBriefingInterval) return;
+  if (oneBriefingScheduler) return;
   configureOneBriefingRuntime({ activeChatIds: () => invocationService.activeChatIds() });
-  oneBriefingLaunchTimer = setTimeout(() => {
-    oneBriefingLaunchTimer = null;
-    checkOneBriefingDesktopNotification();
-  }, 8_000);
-  oneBriefingLaunchTimer.unref();
-  oneBriefingInterval = setInterval(checkOneBriefingDesktopNotification, 15 * 60 * 1_000);
-  oneBriefingInterval.unref();
+  // No fixed period: one timer aimed at the next moment a briefing can be due, and none when nothing is configured.
+  oneBriefingScheduler = startOneBriefingNotificationScheduler({
+    check: checkOneBriefingDesktopNotification,
+    signedIn: () => getAuthSession().signedIn,
+  });
+  try { powerMonitor.on("resume", pokeOneBriefingOnWake); } catch { /* no power events here: the timer and store changes remain */ }
 }
 
 function stopOneBriefingScheduler(): void {
-  if (oneBriefingLaunchTimer) clearTimeout(oneBriefingLaunchTimer);
-  if (oneBriefingInterval) clearInterval(oneBriefingInterval);
-  oneBriefingLaunchTimer = null;
-  oneBriefingInterval = null;
+  try { powerMonitor.removeListener("resume", pokeOneBriefingOnWake); } catch { /* never attached */ }
+  oneBriefingScheduler?.stop();
+  oneBriefingScheduler = null;
 }
 
 const allowMultiInstance = !app.isPackaged && process.env.AGENTLAS_ALLOW_MULTI_INSTANCE === "1";
@@ -1707,8 +1760,6 @@ let quitCleanupDone = false;
 let quitCleanupPromise: Promise<void> | null = null;
 /** Set once the One import module loads; quitting ends its chunked pass at the next block. */
 let stopOneImport: (() => void) | null = null;
-/** Stops the Alive organisms, the AGI monitor and the AGI bug-report timers (set once they start). */
-let stopAliveOrganismsOnQuit: (() => void) | null = null;
 /** Upper bound on waiting for the daemon ensure before the One import starts anyway. */
 const ONE_IMPORT_DAEMON_WAIT_MS = 30_000;
 let quitServicesStopPromise: Promise<void> | null = null;
@@ -1792,9 +1843,9 @@ function stopQuitServices(): Promise<void> {
   try { closeAutomationDispatchForShutdown(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
   try { stopOneImport?.(); } catch {}
-  // Nothing stopped them before: their timers outlived closeStore, and the AGI bug-report flush threw "The database
-  // connection is not open" 11 s into a quit (2026-10-05 12:55 UTC; found by the monitoring peer session).
-  try { stopAliveOrganismsOnQuit?.(); } catch {}
+  // Its timer must not outlive closeStore: the defect-report flush threw "The database connection is not open" 11 s into a
+  // quit (UTC; found by the monitoring peer session).
+  try { stopDefectReportFlush(); } catch {}
   try { stopBrowserOrphanSweep(); } catch {}
   try { stopBrowserApprovalServer(); } catch {}
   try { stopMcpProxyApprovalServer(); } catch {}
@@ -1867,8 +1918,13 @@ function collectUpdateWork(): UpdateWorkItem[] {
   const title = (chatId: string): string | null => {
     try { return getChat(chatId)?.title?.trim() || null; } catch { return null; }
   };
+  const leadRoomMember = (chatId: string): boolean => { try { return isLeadRoomMemberChat(getDb(), chatId); } catch { return false; } };
+  // A Goal that has not ended is bound to this chat: its own resume (the startup checkpoint) continues the chat, not the update ledger's generic turn.
+  const goalBound = (chatId: string): boolean => {
+    try { return Boolean(getDb().prepare("SELECT 1 FROM long_runs WHERE root_chat_id = ? AND status NOT IN ('completed','failed','cancelled') LIMIT 1").get(chatId)); } catch { return false; }
+  };
   const items = invocationService.activeWorkSummaries()
-    .map((fact) => classifyInvocationWork(fact, { title: title(fact.chatId), teamChild: teamChild(fact.chatId) }));
+    .map((fact) => classifyInvocationWork(fact, { title: title(fact.chatId), teamChild: teamChild(fact.chatId), leadRoomMember: leadRoomMember(fact.chatId), goalBound: goalBound(fact.chatId) }));
   // Graph/automation work that is not a model turn right now (a tool node, a hold) still counts.
   const automationTurns = items.filter((item) => item.kind === "automation").length;
   for (let i = automationWorkInFlight() - automationTurns; i > 0; i -= 1) {
@@ -1940,7 +1996,7 @@ configureUpdateResumeHost({
   },
 });
 
-let restoreDaemonAutostartAfterFailedUpdate: (() => void) | null = null;
+let restoreDaemonAutostartAfterFailedUpdate: (() => Promise<void>) | null = null;
 async function prepareAutomaticUpdateQuit(): Promise<void> {
   // The daemon may own work that has no GUI invocation. An automatic install
   // cannot stop that service merely because the last window has closed.
@@ -1962,15 +2018,27 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
   await quiesceAutomationSchedulerForUpdate();
   // An update explicitly stops the execution service before replacing files.
   // Close observers first so no UI reconnect can respawn it during the handoff.
-  const { buildDaemonAutostartCommand, reconcileDaemonAutostart, suspendDaemonAutostart, stopDaemonService } = await import("./daemon/app-launcher");
+  const { buildDaemonAutostartCommand, stopDaemonService } = await import("./daemon/app-launcher");
   const storeBootstrapToken = readDaemonAutostartStoreReady({ appVersion: app.getVersion(), requiredSchemaVersion: STORE_SCHEMA_VERSION });
   const autostartCommand = storeBootstrapToken ? buildDaemonAutostartCommand({
     ...desktopDaemonClientOptions(), storeBootstrapToken,
   }) : null;
-  const suspended = autostartCommand ? suspendDaemonAutostart(autostartCommand) : null;
-  restoreDaemonAutostartAfterFailedUpdate = autostartCommand && suspended && (suspended.wasInstalled || suspended.wasLoaded)
-    ? () => { reconcileDaemonAutostart(true, autostartCommand); }
-    : null;
+  if (autostartCommand) {
+    const coordinator = await import("./daemon/autostart-coordinator");
+    coordinator.setAutostartUpdateSuspended(true);
+    restoreDaemonAutostartAfterFailedUpdate = async () => {
+      coordinator.setAutostartUpdateSuspended(false);
+      await coordinator.reconcileAutostartIntent(autostartCommand);
+    };
+    try { await coordinator.reconcileAutostartIntent(autostartCommand); }
+    catch (error) {
+      coordinator.setAutostartUpdateSuspended(false);
+      restoreDaemonAutostartAfterFailedUpdate = null;
+      try { await coordinator.reconcileAutostartIntent(autostartCommand); }
+      catch (restoreError) { throw new AggregateError([error, restoreError], "daemon_autostart_suspend_restore_failed"); }
+      throw error;
+    }
+  }
   try {
     scienceExecutionIpc?.close();
     scienceDaemonClient?.close();
@@ -1997,7 +2065,7 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
     const restore = restoreDaemonAutostartAfterFailedUpdate;
     restoreDaemonAutostartAfterFailedUpdate = null;
     if (restore) {
-      try { restore(); }
+      try { await restore(); }
       catch (restoreError) { console.error("[daemon] update autostart restore failed", restoreError); }
     }
     throw error;
@@ -2100,6 +2168,15 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     await clock.step("store", () => {
       try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
     });
+    // Agentlas 2.0 one VACUUM of the memory root through the engine, after every connection of ours is closed (only with the migration on, and only if this run deleted or moved rows).
+    if (firstRunMigrationEnabled()) {
+      await clock.step("first-run-vacuum", async () => {
+        try {
+          const vacuum = await (await import("./migration/first-run")).runFirstRunVacuumAtQuit();
+          if (vacuum) console.info(`[first-run] vacuum at quit: ${vacuum.state}${vacuum.reason ? `/${vacuum.reason}` : ""}`);
+        } catch { /* the next run that writes asks again */ }
+      }, { budgetMs: 8_000 });
+    }
     quitCleanupDone = true;
     console.info(`[shutdown] cleanup steps ${JSON.stringify(clock.summary())}`);
   })();
@@ -2113,7 +2190,7 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
   onAbandoned: async () => {
     const restore = restoreDaemonAutostartAfterFailedUpdate;
     restoreDaemonAutostartAfterFailedUpdate = null;
-    restore?.();
+    await restore?.();
   },
   install: installDownloadedUpdate,
   relaunch: () => relaunchWithWindow(),
@@ -2226,7 +2303,8 @@ function commitQuit(plan: Extract<QuitPlan, { kind: "quit" }>): void {
   quitPlanCommitted = true;
   if (backgroundHoldActive()) leaveBackgroundHold();
   console.info("[quit] quitting", { daemon: plan.daemon });
-  app.quit();
+  // Not app.quit() directly: resolveOrdinaryQuit runs inside the first before-quit, and a nested quit there is lost (quit-exit.ts).
+  quitOutsideBeforeQuit(() => app.quit());
 }
 
 /** A relaunch the app makes itself (an update, a refused hand-off, a startup recovery retry) comes back as an ordinary launch: the
@@ -2324,6 +2402,8 @@ async function resolveOrdinaryQuit(): Promise<void> {
 // windows. On macOS, a native credential lookup can outlive every visible
 // window and prevent `will-quit` from being reached at all.
 app.on("before-quit", (event) => {
+  // A startup recovery judgment still running must not hold the quit (trial D10: the quit waited 30 s and more for a model).
+  cancelStartupRecovery();
   // Quit policy first (quit-policy.ts): decide once what this quit does to the
   // service and to running work. Update installs own their own lifetime.
   if (!quitPlanCommitted && automaticQuitInstaller.quitDisposition() === "ordinary") {
@@ -2398,6 +2478,10 @@ class StartupAbandonedForQuit extends Error {
 }
 
 app.whenReady().then(async () => {
+  // Every start printed "MaxListenersExceededWarning: 11 resume listeners added to [PowerMonitor]" (trial, repair 8 R5). Not a leak: each of the app's wake-from-sleep readers (the briefing
+  // scheduler, the four unattended memory jobs, the phone relay, reach, the One home, the context platform, the org seat, the mail sync, the goal signals, the external-writer gate ...) attaches ONCE
+  // (the ones with a lifecycle remove theirs in their own stop(); none attaches twice; ten attach points in the source, the four unattended memory jobs share one: thirteen listeners once everything runs). Node's default cap is 10; the cap is about twice the count, so a real leak still warns.
+  try { powerMonitor.setMaxListeners(POWER_MONITOR_LISTENER_CAP); } catch { /* no power events here */ }
   // Native installers can launch the replacement before the old process has
   // released Electron's single-instance lock. Do not run migrations, updater
   // reconciliation, or window startup until the replacement owns that lock.
@@ -2653,7 +2737,7 @@ app.whenReady().then(async () => {
   const invocationOwnerClient = developmentEffectsSuppressed() ? null : createInvocationOwnerClient({
     ...desktopDaemonClientOptions(), ...invocationProcessOwner() as { ownerId: string; ownerKind: "desktop" },
     onControl: handleInvocationOwnerControl,
-    onDisconnect: () => wakeWorkSessionRecovery("owner-control-disconnected"),
+    onDisconnect: () => { wakeWorkSessionRecovery("owner-control-disconnected"); wakeGoalLooksAfterServiceChange(); noteServiceMaybeGone(); },
   });
   if (invocationOwnerClient) {
     configureInvocationOwnerTransport((owner, method, control) => invocationOwnerClient.dispatch(owner, method, control));
@@ -2931,8 +3015,51 @@ app.whenReady().then(async () => {
   registerArchiveIpc(ipcMain);
   registerReachIpc(ipcMain);
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
-  ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
+  // F1: the "screen" stamp of a pairing record means "the owner's window asked for it". Any other sender (another window, a sub-frame, an app-control call) is refused.
+  const oneHomeOwnerSender = (event: unknown): boolean => {
+    try {
+      const e = event as Electron.IpcMainInvokeEvent;
+      if (isAppControlEvent(e) || !e.senderFrame || e.senderFrame !== e.sender.mainFrame) return false;
+      const window = assertTrustedSitePublishIpcSender(e);
+      return window === mainWindow || window === getOneWindow();
+    } catch { return false; }
+  };
+  ipcMain.handle("mobileBridge:issuePairing", (event) => {
+    if (!oneHomeOwnerSender(event)) throw new Error("untrusted-pairing-sender");
+    return issueMobileBridgePairing("screen");
+  });
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());
+  registerOneHomeIpc(ipcMain, {
+    isOwnerSender: oneHomeOwnerSender,
+    ownerWindowShown: (event) => { try { const w = BrowserWindow.fromWebContents((event as Electron.IpcMainInvokeEvent).sender); return !!w && !w.isDestroyed() && w.isVisible() && !w.isMinimized(); } catch { return false; } },
+  }); // O-M3a: the personal agent's home (no screen yet)
+  // The Main-owned confirmation window for the yes that passes power: its own preload, its own session, one page. Until this line a request ended `confirm_window_unavailable`.
+  installOneHomeConfirmWindow({
+    preloadPath: path.join(__dirname, "one", "home-confirm-preload.js"),
+    rendererBaseUrl: () => (isDev && process.env.ELECTRON_START_URL ? process.env.ELECTRON_START_URL : "agentlas://app"),
+    prepareSession: (isolated) => {
+      isolated.protocol.handle("agentlas", (request) => {
+        const url = new URL(request.url);
+        if (url.hostname !== "app" || !(url.pathname === "/one-confirm" || url.pathname.startsWith("/_next/static/") || url.pathname.startsWith("/fonts/"))) return new Response("not found", { status: 404 });
+        return net.fetch(pathToFileURL(resolveRendererFile(request.url)).toString());
+      });
+    },
+  });
+  // AO: 7 days before an unconfirmed connection confirms itself the owner is told once (home.ts decides when; a click opens Settings > Personal agent).
+  installOneHomeHardenNotice({
+    locale: () => (currentUiLocale() === "ko" ? "ko" : "en"),
+    retain: retainNotification,
+    allowed: () => !developmentEffectsSuppressed(),
+    open: async (route) => {
+      leaveBackgroundHold();
+      const created = !mainWindow || mainWindow.isDestroyed();
+      if (created) await createWindow({ initialRoute: route });
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show(); mainWindow.focus();
+      if (!created) mainWindow.webContents.send("menu:navigate", route);
+    },
+  });
   ipcMain.handle("mobileBridge:retry", async () => {
     if (!mobileBridgeRuntimeStatus().running) {
       if (!restoreMobileBridgeOwnership) throw new Error("mobile-bridge-startup-not-ready");
@@ -4896,6 +5023,10 @@ app.whenReady().then(async () => {
     return scienceStore().answerDecision(input as AnswerScienceDecisionInput);
   });
   disposeMobileBridgeStateChange = onMobileBridgeStateChanged((reason) => {
+    if (reason === "device-ready") {
+      void reconcileAutostartAfterSciencePolicy?.().catch(error =>
+        console.error("[daemon] mobile continuity reconcile failed", error));
+    }
     for (const window of BrowserWindow.getAllWindows()) {
       if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
       window.webContents.send("mobileBridge:changed", { reason });
@@ -4910,7 +5041,12 @@ app.whenReady().then(async () => {
     }
   });
   // Chat rows the background service commits (daemon-hosted One, room and Goal turns) reach the same broadcast.
-  try { watchExternalChatChanges(getDb); } catch (error) { console.warn("[store] external chat watch unavailable", error); }
+  // On until the service is proven gone, back on at its first sign (store/external-writer-gate.ts, P5-2).
+  try {
+    externalWriterGate = createExternalWriterGate(createExternalChatWatch(getDb), async () => (await import("./daemon/app-launcher")).desktopDaemonAbsent(desktopDaemonClientOptions()));
+    externalWriterGate.servicePresent();
+    void import("./daemon/app-launcher").then((m) => m.setDaemonPresenceListener(noteServicePresent)).catch(() => undefined);
+  } catch (error) { console.warn("[store] external chat watch unavailable", error); }
   // The saved core setting wins over the OS locale; the OS locale only seeds a first run.
   const savedUiLocale = readUiLocaleCore();
   if (!savedUiLocale) setCurrentUiLocale(resolveMenuLocale(), "system");
@@ -5011,6 +5147,16 @@ app.whenReady().then(async () => {
     console.error("[architecture] backfillEntityKinds failed:", err);
   }
   traceStartup("entity-kinds-ready");
+  // Agentlas 2.0 O2: a folder move interrupted between its rename and its route update (kill -9, power loss) is finished before anything reads
+  // the routes. Synchronous, no table, nothing to do (and nothing read) when no route points at a missing path.
+  try {
+    if ((await import("./store/db")).openedStoreMigrationRole() !== "follower") (await import("./agents/home-move")).repairInterruptedMoves();
+    // Desktop repair 6 (first run B8): a second Main (follower) used to skip the whole repair, so an interrupted root move (the journal is a file in the agent home, not a row of the
+    // app DB) stayed unsettled until an owner-role start. The journal's own writer check (journalOwnerBusy) already keeps a live mover's journal alone, so this is safe for any role.
+    else (await import("./agents/root-move")).recoverAgentRootMove();
+  } catch (err) {
+    console.error("[agent-home-move] interrupted-move repair failed:", err);
+  }
   // 설치된 에이전트 폴더의 파일을 보장 — 라이브러리 우측 패널이 즉시 보여줄 수 있게.
   if (process.env.AGENTLAS_QA_SKIP_AGENT_MATERIALIZATION !== "1") {
     materializeAllAgents();
@@ -5037,8 +5183,20 @@ app.whenReady().then(async () => {
       }
     };
     try {
+      // Agentlas 2.0 O1/O2: the folders the app made move into ~/.agentlas/agents, one agent at a time, here in the idle slot after the first
+      // window (no timer of its own). A folder the owner registered in place is never touched; a failed one keeps working where it is.
+      const homeMoveReport = await step("agent-home-move", async () => (await import("./agents/home-move")).runAgentHomeMovePass({ signal }));
+      // The engine registry is told afterwards and apart from this chain: an engine that does not answer must not hold up the steps below.
+      void import("./agents/home-move").then((move) => move.syncMovedFoldersWithEngine({ signal })).catch(() => undefined);
+      // Agentlas 2.0 once at start, after the folder merge (a merged store may carry words forgotten elsewhere): finish the forgets a crash or a lagging store left — blank rows, log files,
+      // search indexes, MEMORY.md — and retry the project deletions that were not finished. Nothing is opened while the layout switch is off or nothing was ever forgotten. No timer.
+      await step("memory-forget-catch-up", async () => (await import("./memory/forget-stores")).runStartupForgetCatchUp());
       const definitions = await step("route-definition-backfill", backfillLegacyLocalRouteDefinitionHashes)
         ?? { updated: 0, failed: 0 };
+      // Agentlas 2.0 promoted experience chips become agent memory before anything can delete an agent (the candidate rows go with it).
+      // Dedupe below is the first step here that can; the steps before it only update rows or move folders. Groups of rows, the event loop
+      // handed back between them; one marker row, so a second run finds nothing to do.
+      const chipReport = await step("experience-chips-to-agent-memory", async () => (await import("./memory/chip-absorb")).absorbPromotedExperienceChips());
       const duplicates = await step("dedupe-local-agents", dedupeLocalInstalledAgents)
         ?? { groups: 0, merged: 0 };
       const experience = await step("experience-reconcile", () => reconcileExistingCuratedMemoryCandidatesAtStartup(2_000, { signal }))
@@ -5066,6 +5224,12 @@ app.whenReady().then(async () => {
           skipped: experience.skipped,
           deferred: experience.deferred,
         });
+      }
+      // Agentlas 2.0 the first-run migration continues from here (the One drawer's last import, the engine's steps, the harness cleanup, the end notice).
+      // Off by default (migration/gate.ts): nothing below runs, and this chain is what it was.
+      if (firstRunMigrationEnabled()) {
+        const { startFirstRunMigration, noteLegacySteps } = await import("./migration/first-run");
+        if (await startFirstRunMigration({ signal })) noteLegacySteps({ homeMove: homeMoveReport, chips: chipReport });
       }
     } catch (err) {
       if (signal.aborted) return;
@@ -5139,6 +5303,8 @@ app.whenReady().then(async () => {
   }, 15_000).unref?.();
   startOneTeamNotificationBridge();
   startRunAlertBridge();
+  // A short title for a Work session after its first answer, once (chat/session-title.ts). The background service binds its own copy for the turns it hosts.
+  void import("./chat/session-title").then((m) => m.startSessionTitles()).catch((error) => console.warn("[session-title] not started:", error instanceof Error ? error.message : error));
   /*
    * Establish the daemon before choosing the physical Mobile Bridge owner.
    * Previously Desktop opened its listener first and `ensureDaemonRunning`
@@ -5170,6 +5336,8 @@ app.whenReady().then(async () => {
       const outcome = await module.ensureDaemonRunning({ ...options, daemonStarter: true, nativeInvocationResources: policy.NATIVE_DAEMON_INVOCATION_POLICY, ...(enrollment ? { nativeEnrollment: enrollment } : {}) });
       if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
       else console.info(`[daemon] ${outcome.status}`);
+      // A launch that left no service (disabled, or failed with nothing listening) ends the poll; a service ends it never.
+      if (outcome.status === "disabled" || outcome.status === "failed") noteServiceMaybeGone();
       let nativeAttachment: Awaited<ReturnType<typeof native.attachNativeGuiDaemon>> | undefined;
       if (enrollment && outcome.status !== "failed" && outcome.status !== "disabled") {
         try {
@@ -5185,6 +5353,7 @@ app.whenReady().then(async () => {
           nativeChannelReattacher ??= (await import("./invocation/native-gui-reattach")).createNativeChannelReattacher({
             discoverBoot: async () => {
               try { return await module.discoverNativeDaemonBoot(options); }
+              catch (error) { noteServiceMaybeGone(); throw error; }
               finally { wakeWorkSessionRecovery("daemon-reattach-observation"); }
             },
             attach: async (nextBootId) => {
@@ -5193,6 +5362,9 @@ app.whenReady().then(async () => {
               if (!next.ready || !bridge.available || !controls.available) throw new Error("native_gui_attach_not_ready");
               if (bridge.available && controls.available && !native.configuredNativeGuiOwner()) initializeNativeGuiInvocationOwner(originalEnrollment, policy.NATIVE_MAIN_PREPARATION_POLICY);
               wakeWorkSessionRecovery("daemon-reattached");
+              wakeGoalLooksAfterServiceChange();
+              noteServicePresent();
+              wakeOneSupervisorHandoffAfterAttach();
             },
             currentChannel: () => native.nativeGuiEnrollmentChannel(originalEnrollment),
             isQuitting: () => quitPlanCommitted || quitRelaunching || quitCleanupDone || automaticQuitInstaller.quitInProgress(),
@@ -5231,6 +5403,7 @@ app.whenReady().then(async () => {
           if (!attachment.ready) reattacher.trigger("observation not ready");
           nativeAttachment = attachment;
           wakeWorkSessionRecovery("daemon-attached");
+          wakeOneSupervisorHandoffAfterAttach();
           // General starts remain blocked until actual event/replay, approval,
           // recovery and original service cwd/noBrain observers are integrated.
           // The original Main guards/router, source observations, public receiver
@@ -5242,6 +5415,7 @@ app.whenReady().then(async () => {
     })
     .catch((error) => {
       console.error("[daemon] launcher wiring failed:", error);
+      noteServiceMaybeGone();
       return null;
     });
   let daemonStartupPromise = ensureDesktopDaemon();
@@ -5306,12 +5480,20 @@ app.whenReady().then(async () => {
           try { hasRecoverableScienceWork = await scienceDaemonClient.commandObserved({ op: "autostart.hasRecoverableScienceWork" }) === true; }
           catch (error) { console.error("[daemon] recoverable Science work observation failed", error); }
         }
-        const policy = resolveDaemonAutostartPolicy({ hasRecoverableScienceWork });
         const daemon = await daemonStartupPromise;
         if (!daemon || daemon.outcome.status === "failed" || daemon.outcome.status === "disabled") return;
+        // Re-read after every await, so an explicit OFF during startup wins.
+        // Only an authenticated ready phone, not a pairing record or hint,
+        // selects the new default; an existing paired phone qualifies on reconnect.
+        const coordinator = await import("./daemon/autostart-coordinator");
+        const bridge = mobileBridgeRuntimeStatus();
+        const hasPairedMobile = getAuthSession().signedIn && bridge.running &&
+          bridge.connectedDeviceIds.some(id => bridge.devices.some(device => device.deviceId === id && device.revokedAt === null));
+        coordinator.recoverAutostartUpdateSuspension();
+        coordinator.observeAutostartDefault(hasRecoverableScienceWork || hasPairedMobile);
         const command = daemon.module.buildDaemonAutostartCommand({ ...desktopDaemonClientOptions(), storeBootstrapToken: daemonStoreBootstrapToken });
-        const result = daemon.module.reconcileDaemonAutostart(policy.enabled, command);
-        console.info("[daemon] login continuity", { enabled: policy.enabled, reason: policy.reason, installed: result.installed, loaded: result.loaded });
+        const result = await coordinator.reconcileAutostartIntent(command);
+        console.info("[daemon] login continuity", { enabled: getDaemonAutostartEnabled(), installed: result.installed, loaded: result.loaded });
       });
       return reconciliation;
     };
@@ -5407,6 +5589,7 @@ app.whenReady().then(async () => {
   disposeAuthSessionRestoration = onAuthSessionRestored((sessionSnapshot) => {
     if (!shellReadyForWindows || !sessionSnapshot.signedIn || !getAuthSession().signedIn) return;
     wakeWorkSessionRecovery("authentication-restored");
+    oneBriefingScheduler?.poke();
     reconcileMobileBridgeDevicesForAccount(userDataDir());
     failCloseActiveHubBookmarks();
     broadcastAuthSession(sessionSnapshot);
@@ -5480,6 +5663,9 @@ app.whenReady().then(async () => {
     }
     const recoveredSteers = invocationService.recoverQueuedSteers();
     if (recoveredSteers.examined > 0) console.info("[invocation] recovered queued steers", recoveredSteers);
+    // A turn another conversation's message opened that the last close cut short is continued once, inside its chain (harness/peer-turn-resume.ts).
+    const resumedPeerTurns = invocationService.resumeInterruptedPeerTurns();
+    if (resumedPeerTurns.examined > 0) console.info("[invocation] peer turns cut by the last close", resumedPeerTurns);
   } catch (error) {
     console.error("[invocation] queued steer recovery failed", error);
   }
@@ -5490,22 +5676,13 @@ app.whenReady().then(async () => {
       .catch((error) => console.warn("[browser] page-check continuation sweep failed", error));
     try {
       // Install durable retry ownership before optional classification or observation.
-      const { sweepBlockedGoals, BLOCKED_GOAL_SWEEP_INTERVAL_MS } = await import("./long-run/blocked-goal-sweep");
-      const sweep = (trigger: "startup" | "periodic") => {
-        try {
-          const swept = sweepBlockedGoals(invocationService, trigger).filter((entry) => entry.action !== "deferred");
-          if (swept.length) console.info("[long-run] blocked goal sweep", swept);
-        } catch (error) {
-          console.error("[long-run] blocked goal sweep failed", error);
-        }
-      };
-      const timer = setInterval(() => sweep("periodic"), BLOCKED_GOAL_SWEEP_INTERVAL_MS);
-      timer.unref?.();
-      sweep("startup");
-      // A relay a waiting Goal or a refused steer parked waits for a turn that nothing starts: hurry the Goal's own retry, or wake
-      // the room (also recovers relays parked before this launch or by the background service).
-      try { (await import("./invocation/parked-relay-delivery")).startParkedRelayRecovery(); }
-      catch (error) { console.warn("[parked-relay] recovery not started:", error instanceof Error ? error.message : error); }
+      // The Agentlas Harness' one timer (Agentlas 2.0 N3c): aimed at the next look any Goal, parked relay or unanswered owner review owes,
+      // never a period. A resting app arms nothing. Signals (an owner message from any surface, a card pressed, a turn's end, another
+      // process's settlement, the machine waking) look at one chat; the startup look below catches up what a signal missed while the app
+      // was closed. The sweep's own decisions are unchanged (long-run/blocked-goal-sweep.ts).
+      const { installGoalSignals } = await import("./long-run/goal-signals");
+      const goalSignals = installGoalSignals({ dispatcher: invocationService, power: powerMonitor });
+      try { await goalSignals.start(); } catch (error) { console.error("[long-run] blocked goal startup look failed", error); }
       setGoalWaitHost({
         dispatch: (input) => invocationService.resumeGoalWait(input),
         isChatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),
@@ -5531,9 +5708,17 @@ app.whenReady().then(async () => {
       const reopened = rescheduleExhaustedRuntimeRetryGoals();
       if (reopened) console.info("[long-run] spent runtime retry goals rescheduled", reopened);
       // Goals an earlier build held for the host's own idle-stop card go back onto a retry schedule (idempotent query).
-      const { releaseIdleStopCardHolds } = await import("./long-run/goal-no-progress-wait");
+      const { releaseIdleStopCardHolds, closeSettledAutomaticNoProgressRests } = await import("./long-run/goal-no-progress-wait");
       const releasedCards = releaseIdleStopCardHolds();
       if (releasedCards) console.info("[long-run] idle-stop card holds released", releasedCards);
+      // An automatic Goal an earlier build left resting on the no-progress timer after its result was delivered is closed (idempotent query).
+      const closedRests = closeSettledAutomaticNoProgressRests();
+      if (closedRests) console.info("[long-run] settled automatic no-progress rests closed", closedRests);
+      // Seats of agents the owner removed before removal took its seat along (one/org.ts dropOrphanedOneOrgSeats; idempotent query).
+      try {
+        const orphanSeats = (await import("./one/org")).dropOrphanedOneOrgSeats();
+        if (orphanSeats) console.info("[one-org] seats of removed agents dropped", orphanSeats);
+      } catch (error) { console.warn("[one-org] orphan seat cleanup skipped:", error instanceof Error ? error.message : String(error)); }
       const resumed = await resumeSettledGoalCheckpoints(invocationService);
       if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
       const scheduled = scheduleUnverifiedOngoingGoalCycles();
@@ -5572,17 +5757,30 @@ app.whenReady().then(async () => {
       } else console.error("[one-supervisor] cold start failed", error);
     }
   }
-  // One/Work Alive organisms (AGI toggle) — after DB migration and long-run admission. Enabled lives
-  // resume on their own; wakes the previous process lost are reconciled on the first beat (hostLost).
-  // AGENTLAS_ALIVE_ORGANISMS=off is an operator kill switch (lives stay durable and resume when it is removed).
-  if (!developmentEffectsSuppressed() && process.env.AGENTLAS_ALIVE_ORGANISMS !== "off") {
+  // Optional GUI-owned signing for direct Companion Work. It remains gated
+  // until both endpoints and the actual device path have been verified.
+  if (!developmentEffectsSuppressed() && guiLeaseRoadOn(process.env)) {
     try {
-      const { startAliveOrganisms, stopAliveOrganisms } = await import("./alive-organisms");
-      startAliveOrganisms();
-      stopAliveOrganismsOnQuit = stopAliveOrganisms;
-    } catch (error) {
-      console.error("[alive-organisms] start failed", error);
-    }
+      const [{createCompanionGuiCoordinator},{configuredNativeGuiChannel},{nativeGuiChannelIdentity},
+        {personalDomainHeldByDaemon},{callOneSupervisorRuntime},{getOneProfile}] = await Promise.all([
+        import("./one/companion-gui-coordinator"),import("./invocation/native-gui-startup"),import("./daemon/native-auth-channel"),
+        import("./one/supervisor"),import("./one/supervisor-native-runtime"),import("./store/one-profile")]);
+      const coordinator=createCompanionGuiCoordinator({db:getDb(),oneId:()=>getOneProfile().oneId,
+        channel:()=>{if(!personalDomainHeldByDaemon())return null;const channel=configuredNativeGuiChannel();
+          return channel ? nativeGuiChannelIdentity(channel) ?? null : null;},
+        admit:async value=>{await callOneSupervisorRuntime("companion.work.admit",value);},
+        retireUnstarted:async value=>{await callOneSupervisorRuntime("companion.work.retireUnstarted",value);},
+        executionEvidence:process.env.AGENTLAS_COMPANION_WORK_RECEIPT_V3 === "enabled"});
+      registerAppRuntimeParticipant("companion-gui-coordinator",{interrupt:()=>coordinator.stop()});coordinator.start();
+    } catch(error) { console.warn("[companion] GUI coordination deferred",error instanceof Error ? error.message : "unknown"); }
+  }
+  // Companion front turns have a separate, opt-in GUI lifecycle and authority.
+  if (!developmentEffectsSuppressed() && process.env.AGENTLAS_COMPANION_FRONT_GUI_V1 === "enabled") {
+    try {
+      const {createCompanionFrontGuiRuntime}=await import("./one/companion-front-gui-runtime");
+      const front=createCompanionFrontGuiRuntime({db:getDb(),locale:()=>currentUiLocale()==="ko"?"ko":"en"});
+      registerAppRuntimeParticipant("companion-front-gui",{interrupt:()=>front.stop()});front.start();
+    } catch(error) { console.warn("[companion] front GUI deferred",error instanceof Error?error.message:"unknown"); }
   }
   startAutomationScheduler(); // 자동화 스케줄러 — 60초마다 due 자동화를 백그라운드로 실행
   // A sign-in made outside Agentlas (terminal, the vendor's app) re-reads that provider's usage within 30 s instead of
@@ -5602,13 +5800,15 @@ app.whenReady().then(async () => {
       return reconcileTelegramWorkers();
     })
     .catch((err) => console.error("[telegram] worker restore failed:", err));
-  // 유휴 드리밍 큐레이션 — 옵트인(기본 OFF). 5분마다 조건만 확인(유휴/슬롯/쿨다운), 발화는 드묾.
+  // 유휴 드리밍 큐레이션 — 기본 ON. 주기 타이머 없음: 기억이 바뀌고 쉬는 때(유휴/슬롯) 신호로만 한 번 발화.
   try {
     const { startDreamingScheduler, ensureDreamingDefault } = await import("./memory/dreaming");
     // Measured 2026-08-11: default-OFF opt-in meant decay never ran anywhere.
     // Recover installs that never chose; an explicit user choice is untouched.
     ensureDreamingDefault();
     startDreamingScheduler();
+    // K3': 턴마다의 기억 정리 잡 큐는 없어졌다 — 이전 판이 남긴 잡은 시작 때 한 번 치운다(모델 호출도 타이머도 없음). 쌓인 턴 기록은 위 드리밍이 쉬는 동안 한 번에 합친다.
+    (await import("./memory/turn-record")).retireCurationQueue();
   } catch (err) {
     console.error("[dreaming] scheduler start failed:", err);
   }
@@ -5637,14 +5837,7 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[learning-proposer] start failed:", err);
   }
-  // 전면 영어 마이그레이션(기획 2026-09-23 데스크탑 절) — 한 번 큐를 채우고 유휴에서 끝까지 번역한다.
-  // dreaming 설정과 무관(별도 1회 작업), 하드 옵트아웃 meta 만 존중. 부팅 경로 밖(지연·유휴 타이머).
-  try {
-    const { startEnglishMemoryMigration } = await import("./memory/english-migration");
-    startEnglishMemoryMigration();
-  } catch (err) {
-    console.error("[english-memory] scheduler start failed:", err);
-  }
+  // K3': 영어 번역 워커는 없어졌다 — 줄의 영어는 쉬는 동안의 합치기가 그 줄을 고쳐 쓰거나 합칠 때 같이 만든다(memory/gathering.ts).
   // 조건 트리거 매니저(설계 §3) — fs 변경/체인 완료 이벤트를 리스너에 등록(유휴 0).
   // 헤드리스 러너에서는 등록하지 않는다(위 early-return 분기). 스케줄러의 실행 함수를 주입.
   try {
@@ -5673,14 +5866,17 @@ app.whenReady().then(async () => {
     const { runOneImportInBackground, startOneImportScheduler, stopOneImportScheduler } =
       await import("./memory/one-import");
     stopOneImport = stopOneImportScheduler;
+    // Agentlas 2.0 with the first-run migration on, the drawer is imported once by the migration (step 3') and retired; there is no start-up call here and no
+    // five-minute timer. The timer's start also resumed the automatic curation, which stays at this lifecycle boundary.
+    const oneImportRetiredByMigration = (await import("./migration/start-guard")).firstRunStartRefusal() === null;
     // Boot-only import measured a 73-block backlog while the app stayed open —
     // re-import when the soul file actually changes (cheap mtime watch).
-    startOneImportScheduler();
-    const daemonSettled = Promise.race([
+    if (!oneImportRetiredByMigration) startOneImportScheduler();
+    const daemonSettled = oneImportRetiredByMigration ? Promise.resolve() : Promise.race([
       daemonStartupPromise.then(() => undefined, () => undefined),
       new Promise<void>((resolve) => setTimeout(resolve, ONE_IMPORT_DAEMON_WAIT_MS).unref?.()),
     ]);
-    void daemonSettled.then(() => {
+    if (!oneImportRetiredByMigration) void daemonSettled.then(() => {
       if (quitServicesStopPromise || quitCleanupPromise) return;
       let lastLoggedAt = 0;
       return runOneImportInBackground({

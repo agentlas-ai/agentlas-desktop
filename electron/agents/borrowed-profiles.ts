@@ -22,6 +22,7 @@ import {
 import {
   normalizeHubMemorySlug,
   readableActiveHubMemoryNestRoots,
+  hubMemoryNestRootsForRecall,
 } from "./hub-memory-nest";
 import { autoLocalEmbedding, rankHybridLocal } from "../memory/local-embedding";
 import { revokedMemorySourceIds } from "../memory/revocations";
@@ -223,7 +224,7 @@ export function recordBorrowedAgentCareer(input: {
 function readNestCounts(memoryKey: string): { memoryCount: number; relationCount: number } {
   let memoryCount = 0;
   let relationCount = 0;
-  for (const root of readableActiveHubMemoryNestRoots(memoryKey)) {
+  for (const root of hubMemoryNestRootsForRecall(memoryKey)) {
     let db: Database.Database | null = null;
     try {
       db = openReadonlyNestDatabase(root);
@@ -374,7 +375,7 @@ export function getBorrowedAgentOntologyGraph(profileIdValue: string): Experienc
     profile.agentReleaseId,
     profile.componentId,
   );
-  for (const root of readableActiveHubMemoryNestRoots(memoryKey)) {
+  for (const root of hubMemoryNestRootsForRecall(memoryKey)) {
     let db: Database.Database | null = null;
     try {
       db = openReadonlyNestDatabase(root);
@@ -467,7 +468,7 @@ export function buildBorrowedAgentMemoryContext(memoryKeyValue: string, task: st
   const memoryKey = normalizeHubMemorySlug(memoryKeyValue);
   if (!memoryKey || !task.trim()) return "";
   const rows = new Map<string, { id: string; text: string; embedding: number[]; prior: number }>();
-  for (const root of readableActiveHubMemoryNestRoots(memoryKey)) {
+  for (const root of hubMemoryNestRootsForRecall(memoryKey)) {
     let db: Database.Database | null = null;
     try {
       db = openReadonlyNestDatabase(root);

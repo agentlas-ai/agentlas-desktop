@@ -33,15 +33,14 @@ export function isSingleInstalledAgent(agent: Pick<InstalledAgent, "kind">): boo
 export function entityClassLabel(kind: AgentEntityClass, locale: "ko" | "en"): string {
   if (kind === "plugin") return locale === "ko" ? "플러그인" : "Plugin";
   if (kind === "graph") return locale === "ko" ? "자동화 그래프" : "Automation graph";
-  if (kind === "multi") return locale === "ko" ? "멀티 에이전트 팀" : "Multi-agent team";
-  return locale === "ko" ? "싱글 에이전트" : "Single agent";
+  // Agentlas 2.0: one kind of thing on screen. `multi` / `single` stay as internal classes (filters, storage); they read the same.
+  return locale === "ko" ? "에이전트" : "Agent";
 }
 
 export function entityClassShortLabel(kind: AgentEntityClass, locale: "ko" | "en"): string {
   if (kind === "plugin") return locale === "ko" ? "도구" : "Tool";
   if (kind === "graph") return locale === "ko" ? "그래프" : "Graph";
-  if (kind === "multi") return locale === "ko" ? "멀티" : "Multi";
-  return locale === "ko" ? "싱글" : "Single";
+  return locale === "ko" ? "에이전트" : "Agent";
 }
 
 export function entityClassTone(kind: AgentEntityClass): string {

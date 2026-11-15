@@ -1,4 +1,6 @@
-import { withNativeApprovalAsk, stampNativeToolApproval, stampNativeDeniedApproval, nativeToolApprovalOwner, assertNativeToolApproval, assertNativeToolApprovalJoin } from "./native-approval-provenance";
+import { isAppWorkFolder } from "./session-cwd";
+import { waitingForPerson } from "./run-slot-lease";
+import { nativeApprovalSignalChain, withNativeApprovalAsk, stampNativeToolApproval, stampNativeDeniedApproval, nativeToolApprovalOwner, assertNativeToolApproval, assertNativeToolApprovalJoin } from "./native-approval-provenance";
 /**
  * 도구 승인 계약 — 런타임이 제각각 말하는 "승인"을 한 모양으로 모은다.
  *
@@ -30,6 +32,7 @@ import type {
   ToolApprovalConsentBinding,
   ToolApprovalDurableConsentReceipt,
   ToolApprovalResolutionReceipt,
+  SettledToolApproval,
 } from "../../shared/types";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
 import {
@@ -38,6 +41,8 @@ import {
   type ToolPermission,
 } from "../../shared/builtin-tools";
 import { askUser } from "../confirm/ask-user";
+import { APPROVAL_REFUSAL_RESULT_MODULE, approvalRefusalResultText, type ApprovalRefusal, type ApprovalToolAnnotations } from "./approval-rule";
+import { registerDeclaredPromptModule } from "./prompt-order";
 
 /** 승인 요청 하나 — 화면과 같은 정의를 쓴다(shared/types.ts). */
 export type ToolApprovalRequest = ToolApprovalRequestEvent;
@@ -72,6 +77,8 @@ export interface RuntimeToolPermissionAsk {
   detail?: string;
   /** Main-only parsed call arguments. Only their recipient/amount facts enter the consent identity; never serialized. */
   arguments?: unknown;
+  /** Main-only: the app operation a host-raised ask stands for (harness/app-call-approval.ts); the approval rule reads the act from it. */
+  hostOperation?: string;
   cwd?: string;
   /** 이번 실행의 권한(러너 계약과 같은 값). undefined 는 read 와 같게 취급한다. */
   permission: "read" | "write" | "full" | undefined;
@@ -84,6 +91,18 @@ export interface RuntimeToolPermissionAsk {
   consentBinding?: ToolApprovalConsentBinding;
   /** 자동화·그래프처럼 답할 사람이 없는 실행 — 묻지 않고 즉시 거부한다. */
   unattended?: boolean;
+  /** Main-only: the registry identity of the server this call goes to (never a name prefix). Read by the approval rule alone. */
+  catalogId?: string | null;
+  /** Main-only: what the tool says about itself in the server's tool list (MCP annotations). Read by the approval rule alone. */
+  annotations?: ApprovalToolAnnotations | null;
+  /** Main-only: the whole shell command line of a shell-tool ask (codex command approval, the in-process `bash`, an ACP execute call). Read by the approval rule alone; never serialized into a card or a consent identity. */
+  command?: string;
+  /**
+   * Main-only: this ask is the GATEWAY tool's own (`harness_call` running `tool.call`). The tool.call port asks its own rule for the connector's tool right after
+   * (harness/app-call-approval.ts approveConnectorToolCall, in every permission mode), so a run that can be asked is not asked a second, generic time for the gateway. It never widens
+   * anything: with no conversation, an unattended run, or a stored/plan refusal the ask is decided exactly as before.
+   */
+  portAsksItsOwnRule?: true;
 }
 
 /**
@@ -142,6 +161,10 @@ export interface AlwaysAllowGrant {
   scope: string;
   tool: string;
   consentBinding?: ToolApprovalConsentBinding;
+  /** The card's kind (money | delete | send for the approval rule's cards) and its conversation: the persister keeps a delete / send
+   * answer for the conversation's project (runtime/approval-scope.ts), not for the one exact call the request's binding names. */
+  kind?: string;
+  chatId?: string;
 }
 export type CapabilityGrantPersistenceResult =
   | { ok: true; id: number }
@@ -149,6 +172,9 @@ export type CapabilityGrantPersistenceResult =
 export type CapabilityGrantPersister = (grant: AlwaysAllowGrant) => CapabilityGrantPersistenceResult;
 
 let capabilityGrantPersister: CapabilityGrantPersister | null = null;
+/** Does a saved "always allow" cover this open card right now? Injected with the persister (this file knows no store). */
+let alwaysAllowedNow: ((request: ToolApprovalRequestEvent) => boolean) | null = null;
+export function setAlwaysAllowedReader(reader: ((request: ToolApprovalRequestEvent) => boolean) | null): void { alwaysAllowedNow = reader; }
 
 export function setCapabilityGrantPersister(persister: CapabilityGrantPersister | null): void {
   capabilityGrantPersister = persister;
@@ -171,6 +197,8 @@ function persistAlwaysGrant(request: ToolApprovalRequest): ToolApprovalDurableCo
       scope: "consent:v1",
       tool: request.tool,
       consentBinding: request.consentBinding,
+      ...(request.capability ? { kind: request.capability } : {}),
+      ...(request.chatId ? { chatId: request.chatId } : {}),
     });
     if (!result?.ok) return { status: "failed", code: "storage-failure" };
     if (!Number.isInteger(result.id) || result.id <= 0) {
@@ -196,15 +224,45 @@ function persistAlwaysGrant(request: ToolApprovalRequest): ToolApprovalDurableCo
 export interface ToolApprovalLedger {
   persist(request: ToolApprovalRequest): void;
   decide(id: string, decision: ToolApprovalDecision, actionId: string,
-    assertCurrent: (request: ToolApprovalRequest) => void): ToolApprovalResolutionReceipt;
+    assertCurrent: (request: ToolApprovalRequest) => void, via?: ToolApprovalVia): ToolApprovalResolutionReceipt;
+  /** BB-1a: one settled row for a delete / send call that went through with no card. False when the ledger refuses it (any other kind, no conversation). */
+  recordAuto?(event: { runtime: string; tool: string; detail?: string; cwd?: string; chatId: string; capability: string; agentId?: string }, basis: ToolApprovalAutoBasis): boolean;
+  /** BB-1a: names the device of an answer a host-held request got (only a resolved row with no device yet). */
+  markHandler?(id: string, via: "desktop" | "phone"): boolean;
   consume(id: string, assertCurrent: (request: ToolApprovalRequest) => void):
     { decision: ToolApprovalDecision; decidedAt: string } | null;
   cancel(id: string): void;
   recordConsent(id: string, receipt: ToolApprovalDurableConsentReceipt): void;
   get(id: string): ToolApprovalResolutionReceipt;
+  /** The answered or closed cards of these conversations (oldest first); a read of the ledger's own rows. */
+  settled?(chatIds: readonly string[]): SettledToolApproval[];
 }
 
 let toolApprovalLedger: ToolApprovalLedger | null = null;
+
+/** BB-1a: where a decision came from, written on the settled row: the owner's device, or (for the cards one "always allow" closes together) the saved rule. */
+export type ToolApprovalVia = "desktop" | "phone" | "always_allow";
+/** BB-1a: why a call went through with no card. `unattended` (BB-1c): a run with nobody to ask (no person is attending it) let a delete / send call through in write mode, as it always did. */
+export type ToolApprovalAutoBasis = "always_allow" | "full_access" | "unattended";
+
+/**
+ * BB-1a: the one place a card-less pass is recorded. The host policy (host-tool-permission-policy.ts, the one arbiter every runtime, the local tool loop, the MCP proxy and the room teammates go through)
+ * calls this where a saved "always allow" or full access let a delete / send call run without a card. A payment is never recorded here because it never passes without one; a call of no
+ * kind, and a call with no conversation, are not recorded (no row per ordinary tool call). A record, never a gate: nothing here can change the decision, and a failing ledger changes nothing.
+ */
+export function recordAutoApprovedToolCall(input: { runtime: string; tool: string; detail?: string; cwd?: string; chatId?: string; capability: string; agentId?: string }, basis: ToolApprovalAutoBasis): void {
+  if ((input.capability !== "delete" && input.capability !== "send") || !input.chatId) return;
+  try { toolApprovalLedger?.recordAuto?.({ runtime: input.runtime, tool: input.tool, ...(input.detail ? { detail: input.detail } : {}), ...(input.cwd ? { cwd: input.cwd } : {}), chatId: input.chatId, capability: input.capability, ...(input.agentId ? { agentId: input.agentId } : {}) }, basis); } catch { /* the record is a courtesy */ }
+}
+/** BB-1a: the device of an answer the host holding the request gave back (the background service's approvals). No effect on the decision. */
+export function noteToolApprovalHandler(id: string, via: "desktop" | "phone"): void {
+  try { toolApprovalLedger?.markHandler?.(id, via); } catch { /* the record is a courtesy */ }
+}
+
+/** The answered or closed cards of these conversations; nothing when no ledger is installed (the line is a record, never a gate). */
+export function listSettledToolApprovals(chatIds: readonly string[]): SettledToolApproval[] {
+  try { return toolApprovalLedger?.settled?.(chatIds) ?? []; } catch { return []; }
+}
 
 export function setToolApprovalLedger(ledger: ToolApprovalLedger | null): void {
   toolApprovalLedger = ledger;
@@ -226,6 +284,22 @@ export function toolApprovalFaultCode(ask: object): string | undefined { return 
 const expiredAsks = new WeakSet<object>();
 export function markToolApprovalExpired(ask: object): void { expiredAsks.add(ask); }
 export function toolApprovalExpired(ask: object): boolean { return expiredAsks.has(ask); }
+/**
+ * Why a call the approval rule asks about (money, delete, sending out) ended without a "yes": the owner said no, nobody answered
+ * the card, or the run has nobody to ask. Written by the arbiter on the ask it refused; the surfaces that return text to the model
+ * (MCP proxy, the in-process tool loop) add approvalRefusalResultText() to the refused result so the model can choose what to do
+ * next instead of repeating the call (item 5).
+ */
+const refusedAsks = new WeakMap<object, ApprovalRefusal>();
+export function markToolApprovalRefusal(ask: object, refusal: ApprovalRefusal): void { refusedAsks.set(ask, refusal); }
+export function toolApprovalRefusal(ask: object): ApprovalRefusal | undefined { return refusedAsks.get(ask); }
+/** The one model-facing line for a refused ask ("" when the rule did not refuse it): the registered module, rendered from typed host data. */
+export function toolApprovalRefusalText(ask: object): string {
+  const refusal = refusedAsks.get(ask);
+  if (!refusal) return "";
+  registerDeclaredPromptModule(APPROVAL_REFUSAL_RESULT_MODULE);
+  return approvalRefusalResultText(refusal);
+}
 function faultCodeOf(error: unknown): string {
   // Only an identifier-shaped code or message is passed on; free text (paths, ids) never leaves the process.
   for (const raw of [(error as { code?: unknown } | null)?.code, (error as { message?: unknown } | null)?.message]) {
@@ -300,6 +374,7 @@ type Pending = {
 
 const pending = new Map<string, Pending>();
 const pendingByKey = new Map<string, string>();
+let moneyCallSeq = 0;
 const sessionGrants = new Map<string, Set<string>>();
 const listeners = new Set<(request: ToolApprovalRequest) => void>();
 const resolvedListeners = new Set<(id: string, outcome: ToolApprovalOutcome) => void>();
@@ -363,7 +438,9 @@ function unresolvedReceipt(
 }
 
 /** 같은 도구·대상을 한 세션에서 다시 묻지 않기 위한 키. */
-function grantKey(request: Pick<ToolApprovalRequest, "tool" | "detail" | "consentBinding">): string {
+function grantKey(request: Pick<ToolApprovalRequest, "tool" | "detail" | "consentBinding" | "capability">): string {
+  // A delete / sending-out card asks about the TOOL ("for this task" keeps the tool quiet for the task, whatever the file or recipient).
+  if (request.capability === "delete" || request.capability === "send") return `approval-rule::${request.capability}::${request.tool}`;
   const resource = request.detail ? `${request.tool}::${request.detail}` : request.tool;
   const binding = consentBindingKey(request.consentBinding);
   return binding ? `${resource}::${binding}` : resource;
@@ -390,7 +467,8 @@ function approvalDedupeKey(
   request: Pick<ToolApprovalRequest, "tool" | "detail" | "chatId" | "consentBinding">,
 ): string {
   const binding = consentBindingKey(request.consentBinding);
-  if (binding) return `binding\u0000${request.chatId ?? ""}\u0000${binding}`;
+  // The detail is part of the key: a broad binding (a tool asked about as a whole) must not let a second, different call join the first one's card.
+  if (binding) return `binding\u0000${request.chatId ?? ""}\u0000${binding}\u0000${request.detail ?? ""}`;
   return `session\u0000${sessionKey}\u0000${grantKey(request)}`;
 }
 
@@ -399,6 +477,11 @@ function settleApproval(
   sessionKeys: Iterable<string>,
   outcome: ToolApprovalOutcome,
 ): ToolApprovalOutcome {
+  // Money (a payment or a transfer) is asked every time: an "always" or "for this task" answer from any surface (the phone shows all
+  // four buttons) is taken as "this once" and nothing is remembered (decision, runtime/approval-rule.ts).
+  if (request.capability === "money" && (outcome.decision === "allow_session" || outcome.decision === "allow_always")) {
+    outcome = { ...outcome, decision: "allow_once" };
+  }
   for (const sessionKey of sessionKeys) {
     if (outcome.decision === "allow_session") {
       rememberSessionGrant(sessionKey, request);
@@ -425,7 +508,7 @@ export function listPendingToolApprovals(): ToolApprovalRequest[] {
 /** 세션 단위 허용이 이미 있는가. live 요청은 이걸 먼저 본다. */
 export function hasSessionGrant(
   sessionKey: string,
-  request: Pick<ToolApprovalRequest, "tool" | "detail" | "consentBinding">,
+  request: Pick<ToolApprovalRequest, "tool" | "detail" | "consentBinding" | "capability">,
 ): boolean {
   return sessionGrants.get(sessionKey)?.has(grantKey(request)) === true;
 }
@@ -452,9 +535,53 @@ function detachPending(entry: Pending): void {
   if (pendingByKey.get(entry.dedupeKey) === entry.request.id) pendingByKey.delete(entry.dedupeKey);
 }
 
-function expirePending(entry: Pending): void {
+/*
+ * 승인 카드가 "아무도 안 눌러서" 닫힌 것을 폰이 말할 수 있게 짧게 기억한다 (Agentlas 2.0 desktop values S3 ⑤, 짝 시험대 2차).
+ * 전에는 5분이 지나면 데스크탑 칩과 폰 카드가 말없이 사라졌다(폰의 "만료" 안내는 폰 시계가 expiresAt 을 지났을 때만 나온다 —
+ * 폰 시계가 조금 느리면 안내 없이 사라진다). 그래서 시간 초과로 닫힌 카드의 id만(요청 본문은 버린다) 최근 것 몇 개를 메모리에 둔다.
+ * 취소(실행이 멈춰 대기자가 모두 빠진 경우)는 시간 초과가 아니므로 넣지 않는다.
+ * 크기: 8개 상한(정한 값 — 근거 없음: 한 컴퓨터에서 동시에 열리는 승인 카드는 한두 장이며, 넘치면 가장 오래된 것부터 잊는다 — 닿으면 그 폰은 지금과 같이
+ * 시계 규칙으로 안내한다). 유지 시간 2분(정한 값 — 근거 없음: 폰이 끊겼다 바로 붙는 사이를 덮는다. 닿으면 폰의 시계 규칙으로 돌아간다 — 5분 뒤 폰은 어차피 expiresAt 을 지났다).
+ * 파일·DB에 쓰지 않는다(재시작하면 비어 있고, 그 사이 폰은 시계 규칙을 쓴다).
+ */
+const EXPIRED_APPROVAL_MEMORY_MAX = 8;
+const EXPIRED_APPROVAL_MEMORY_MS = 2 * 60_000;
+const recentlyExpired: Array<{ id: string; at: number }> = [];
+
+/** 시간이 지나 거절된 카드의 id (최근 2분, 최대 8개, 오래된 것부터). 폰 snapshot 의 `expiredToolApprovals` 가 읽는다. */
+export function listRecentlyExpiredToolApprovalIds(now: number = Date.now()): string[] {
+  while (recentlyExpired.length && now - recentlyExpired[0].at > EXPIRED_APPROVAL_MEMORY_MS) recentlyExpired.shift();
+  return recentlyExpired.map((row) => row.id);
+}
+
+/**
+ * L1 D6 (contracts/phone-long-ops.md 6): the background service (daemon) holds a card this process shows to the phone. When the daemon closes it because
+ * nobody answered, the daemon's `invocation.approval.resolved` notice says so with `expiredByTimeout: true` and this process puts the id in the SAME memory
+ * (8 ids, 2 minutes - no new value) so the snapshot's `expiredToolApprovals` names it. A cancel carries no such flag and is not put here.
+ */
+export function noteToolApprovalExpiredByTimeout(id: string, now: number = Date.now()): void {
+  if (typeof id !== "string" || !id || id.length > 256) return;
+  listRecentlyExpiredToolApprovalIds(now);
+  if (recentlyExpired.some((row) => row.id === id)) return;
+  recentlyExpired.push({ id, at: now });
+  while (recentlyExpired.length > EXPIRED_APPROVAL_MEMORY_MAX) recentlyExpired.shift();
+}
+
+/**
+ * R3-3: where a request that closed unanswered is kept in the conversation (runtime/approval-closure-notice.ts). Injected by the host that
+ * installs the durable ledger (host-tool-permission-policy.ts), so this module stays free of the store. A failing recorder changes nothing.
+ */
+let closureRecorder: ((closure: { requestId: string; chatId: string | undefined; reason: "timed_out" | "cancelled"; at: string }) => void) | null = null;
+export function setApprovalClosureRecorder(fn: typeof closureRecorder): void { closureRecorder = fn; }
+
+function expirePending(entry: Pending, byTimeout = false): void {
   if (pending.get(entry.request.id) !== entry) return;
   detachPending(entry);
+  try { closureRecorder?.({ requestId: entry.request.id, chatId: entry.request.chatId, reason: byTimeout ? "timed_out" : "cancelled", at: new Date().toISOString() }); } catch { /* the record is a courtesy */ }
+  if (byTimeout) {
+    recentlyExpired.push({ id: entry.request.id, at: Date.now() });
+    while (recentlyExpired.length > EXPIRED_APPROVAL_MEMORY_MAX) recentlyExpired.shift();
+  }
   if (entry.durable) {
     try { toolApprovalLedger?.cancel(entry.request.id); } catch { /* the ledger's own expiry closes it */ }
   }
@@ -488,24 +615,27 @@ export function requestToolApproval(
 ): Promise<ToolApprovalOutcome> {
   const { sessionKey, timeoutMs = 5 * 60_000, signal, ...rest } = input;
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("tool_approval_cancelled"));
-  if (hasSessionGrant(sessionKey, rest)) {
+  if (rest.capability !== "money" && hasSessionGrant(sessionKey, rest)) {
     return Promise.resolve({ decision: "allow_session", decidedAt: new Date().toISOString() });
   }
-  const dedupeKey = approvalDedupeKey(sessionKey, rest);
+  // A money card belongs to ONE call (defect 2): two calls with the same recipient and amount are two payments, so a
+  // single "yes" must not let both go. Its key is never shared; other cards keep merging a repeated request into one card.
+  const dedupeKey = rest.capability === "money" ? `${approvalDedupeKey(sessionKey, rest)}\u0000money-call\u0000${++moneyCallSeq}` : approvalDedupeKey(sessionKey, rest);
   const existingId = pendingByKey.get(dedupeKey);
   if (existingId) {
     const existing = pending.get(existingId);
-    if (existing) { assertNativeToolApprovalJoin(existing.request, signal); return joinApproval(existing, sessionKey, signal); }
+    if (existing) { assertNativeToolApprovalJoin(existing.request, signal); return waitingForPerson(joinApproval(existing, sessionKey, signal), signal && nativeApprovalSignalChain(signal)); }
     pendingByKey.delete(dedupeKey);
   }
   const requestedAt = new Date();
   const request: ToolApprovalRequest = {
     ...rest, id: `approval:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
+    ...(isAppWorkFolder(rest.cwd) ? { cwdIsAppFolder: true as const } : {}),
     mode: "live", requestedAt: requestedAt.toISOString(),
     expiresAt: new Date(requestedAt.getTime() + timeoutMs).toISOString(),
   };
   const entry: Pending = { request, dedupeKey, waiters: new Set(),
-    timer: setTimeout(() => expirePending(entry), timeoutMs) };
+    timer: setTimeout(() => expirePending(entry, true), timeoutMs) };
   entry.timer.unref?.();
   if (toolApprovalLedger && request.chatId) {
     try { toolApprovalLedger.persist(request); entry.durable = true; } catch { /* in-process only, as before */ }
@@ -515,10 +645,12 @@ export function requestToolApproval(
   pending.set(request.id, entry);
   pendingByKey.set(dedupeKey, request.id);
   const promise = joinApproval(entry, sessionKey, signal);
+  // N0b: the card is shown and a person decides - this turn's run slot is let go meanwhile and taken again with the answer.
+  const waiting = waitingForPerson(promise, signal && nativeApprovalSignalChain(signal));
   if (pending.get(request.id) === entry) {
     for (const fn of listeners) { try { fn(request); } catch { /* UI cannot block settlement. */ } }
   }
-  return promise;
+  return waiting;
 }
 
 /*
@@ -596,7 +728,7 @@ function ledgerResolution(id: string): ResolutionRecord | undefined {
  * only while the request is still current. Returns a receipt to answer with instead of settling, or
  * null to settle normally. A deny always settles — refusing is safe even when the ledger cannot write.
  */
-function commitDurableDecision(entry: Pending, decision: ToolApprovalDecision, actionId: string): ToolApprovalResolutionReceipt | null {
+function commitDurableDecision(entry: Pending, decision: ToolApprovalDecision, actionId: string, via?: ToolApprovalVia): ToolApprovalResolutionReceipt | null {
   const ledger = toolApprovalLedger as ToolApprovalLedger;
   const id = entry.request.id;
   const assertCurrent = () => {
@@ -604,13 +736,13 @@ function commitDurableDecision(entry: Pending, decision: ToolApprovalDecision, a
   };
   let receipt: ToolApprovalResolutionReceipt;
   try {
-    receipt = ledger.decide(id, decision, actionId, assertCurrent);
+    receipt = ledger.decide(id, decision, actionId, assertCurrent, via);
   } catch {
     // Not written: an allow stays pending so the owner can answer again; nothing has run.
     return decision === "deny" ? null : unresolvedReceipt(id, decision, "pending");
   }
   if (receipt.status === "expired") {
-    expirePending(entry);
+    expirePending(entry, true); // the ledger's clock ran out: time, not a cancellation
     return resolutionReceipt(resolutions.get(id) as ResolutionRecord, decision, "expired");
   }
   if (receipt.status !== "resolved") return decision === "deny" ? null : receipt;
@@ -631,6 +763,7 @@ export function resolveToolApproval(
   id: string,
   decision: ToolApprovalDecision,
   actionId = toolApprovalActionId(id, decision),
+  via?: ToolApprovalVia,
 ): ToolApprovalResolutionReceipt {
   if (actionId !== toolApprovalActionId(id, decision)) {
     return unresolvedReceipt(id, decision, "invalid_action");
@@ -654,7 +787,7 @@ export function resolveToolApproval(
   let outcome: ToolApprovalOutcome = { decision, decidedAt: new Date().toISOString() };
   if (entry) {
     if (entry.durable && toolApprovalLedger) {
-      const committed = commitDurableDecision(entry, decision, actionId);
+      const committed = commitDurableDecision(entry, decision, actionId, via);
       if (committed) return committed;
     }
     detachPending(entry);
@@ -674,14 +807,24 @@ export function resolveToolApproval(
       decidedAt: outcome.decidedAt,
       ...(outcome.durableConsent ? { durableConsent: outcome.durableConsent } : {}),
     });
+    // "Always allow" was pressed and saved: the other cards open right now for the very same permission (the same tool asked by
+    // other teammates at the same moment) are the question the owner just answered, so they close as allowed instead of waiting
+    // to be pressed one by one (after "always allow" it is not asked again; T6).
+    if (outcome.decision === "allow_always" && outcome.durableConsent?.status === "persisted" && alwaysAllowedNow) {
+      const same = [...pending.values()].filter((other) => other.request.tool === entry.request.tool && other.request.capability === entry.request.capability);
+      for (const other of same) {
+        // Only where the answer just saved really covers that card (the same project): the stored rule is read, nothing is assumed.
+        try { if (alwaysAllowedNow(other.request)) resolveToolApproval(other.request.id, "allow_once", undefined, "always_allow"); } catch { /* that card stays for the owner */ }
+      }
+    }
   } else if (announced.has(id)) {
     // 이미 거부된 호출이라 이번 실행은 되살릴 수 없다 — 그래서 이 선택이 뜻하는 바는
     // 오직 "다음부터는 묻지 말고 허용하라"이고, 그것만은 반드시 남아야 한다.
     const known = announced.get(id);
-    if (decision === "allow_session" && known?.sessionKey) {
+    if (decision === "allow_session" && known?.sessionKey && known.request.capability !== "money") {
       rememberSessionGrant(known.sessionKey, known.request);
     }
-    if (known && decision === "allow_always") {
+    if (known && decision === "allow_always" && known.request.capability !== "money") {
       outcome = {
         ...outcome,
         durableConsent: persistAlwaysGrant(known.request),

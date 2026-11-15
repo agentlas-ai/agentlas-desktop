@@ -154,8 +154,6 @@ const terminalBrowserGrants = createTerminalBrowserGrants({
 });
 let daemonInvocationService: typeof import("../invocation/service")["invocationService"] | null = null;
 let daemonNativeInvocation: Awaited<ReturnType<typeof import("./native-invocation-runtime")["createNativeInvocationRuntime"]>> | null = null;
-/** NH21: the One/Work Alive domain (loaded once the enrolled native service is up). */
-let aliveOrganisms: typeof import("../alive-organisms") | null = null;
 let nativeInvocationUnavailableCode: string | null = "native_invocation_not_configured";
 let daemonInvocationControl: typeof import("../runtime/invocation-owner-control") | null = null;
 let workSessionAuthRestore: (() => void) | null = null;
@@ -174,6 +172,10 @@ async function getDaemonInvocationControl() {
     });
     daemonInvocationControl = control;
     daemonInvocationService = (await import("../invocation/service")).invocationService;
+    // Desktop repair 11 (N2): a single turn this service's sudden end cut off gets its one plain line, once (nothing is run again by itself).
+    setImmediate(() => { try { daemonInvocationService?.noteCutOffOwnerTurns(); } catch { /* the next start looks again */ } });
+    // A short title for a Work session after its first answer (chat/session-title.ts); bound once per service, one call per session across processes.
+    void import("../chat/session-title").then((m) => m.startSessionTitles(daemonInvocationService ?? undefined)).catch((error) => console.warn("[agentlasd] session titles not started:", error instanceof Error ? error.message : error));
     // The same once-per-start judgment of a page check the owner passed (the service runs daemon-hosted turns too).
     void import("../browser/page-release-resume").then((m) => m.pageReleaseResume().sweep())
       .catch((error) => console.warn("[agentlasd] page-check continuation sweep failed:", error instanceof Error ? error.message : error));
@@ -200,7 +202,6 @@ function residencyInput(): DaemonResidencyInput {
     desktopAttached: desktopParentPid !== null,
     supervisorDomain: daemonNativeInvocation?.supervisorActive ?? false,
     hostGoalDomain: science?.hostGoalWakePending ?? false,
-    aliveDomain: aliveOrganisms?.daemonAliveResident() ?? false,
     loginContinuity: loginContinuityEnabled(),
     graphRuns: graphRunsInFlight + graphLoginWaits.size,
     runChildren: liveRunChildCount(),
@@ -342,6 +343,7 @@ let mobileBridgeStartPromise: Promise<void> | null = null;
 let mobileBridgeRecoveryFailureLogged = false;
 let mobileBridgeRuntime: typeof import("../mobile-bridge/runtime") | null = null;
 let mobileBridgeLeaseTail: Promise<unknown> = Promise.resolve();
+let mobileContinuityObserverInstalled = false;
 
 function serializeMobileBridgeLease<T>(action: () => Promise<T>): Promise<T> {
   const result = mobileBridgeLeaseTail.then(action, action);
@@ -365,6 +367,30 @@ function startDaemonMobileBridge(): Promise<void> {
   mobileBridgeStartPromise = (async () => {
     const runtime = await import("../mobile-bridge/runtime");
     mobileBridgeRuntime = runtime;
+    if (!mobileContinuityObserverInstalled) {
+      mobileContinuityObserverInstalled = true;
+      runtime.onMobileBridgeStateChanged((reason) => {
+        if (reason !== "device-ready" || closing || mobileBridgeLeaseOwnerPid !== null) return;
+        void (async () => {
+          const [{ getAuthSession }, identity, store, coordinator, launcher] = await Promise.all([
+            import("../auth"), import("../install-identity"), import("../store/db"),
+            import("./autostart-coordinator"), import("./app-launcher"),
+          ]);
+          const { readDaemonAutostartStoreReady } = await import("../store/daemon-autostart");
+          const bridge = runtime.mobileBridgeRuntimeStatus();
+          if (closing || mobileBridgeLeaseOwnerPid !== null || !getAuthSession().signedIn || !bridge.running || !bridge.connectedDeviceIds.some(id =>
+            bridge.devices.some(device => device.deviceId === id && device.revokedAt === null))) return;
+          const token = readDaemonAutostartStoreReady({ appVersion: daemonVersion(), requiredSchemaVersion: store.STORE_SCHEMA_VERSION });
+          const storePath = store.openedStorePath(); if (!token || !storePath) return;
+          coordinator.recoverAutostartUpdateSuspension();
+          coordinator.observeAutostartDefault(true);
+          const command = launcher.buildDaemonAutostartCommand({ userDataDir: userDataDir(), storePath,
+            installIdentity: identity.requireConfiguredInstallIdentity(), appVersion: daemonVersion(),
+            execPath: process.execPath, daemonEntry: __filename, requiredSchemaVersion: store.STORE_SCHEMA_VERSION, storeBootstrapToken: token });
+          await coordinator.reconcileAutostartIntent(command);
+        })().catch(error => console.error("[agentlasd] mobile continuity reconcile failed", error));
+      });
+    }
     await getDaemonInvocationControl();
     const { mobileBridgeRuntimeStatus, startAgentlasMobileBridge } = runtime;
     // The owner can change while the dynamic import is resolving. Never race a
@@ -1125,6 +1151,8 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
   ]);
   console.log("[agentlasd] store ready");
   recordServicePhase("store_ready");
+  // K3': the per-turn memory-curation queue is gone; a job an earlier build left queued is retired (one cheap look; the app does the same at its start).
+  void import("../memory/turn-record").then((record) => record.retireCurationQueue()).catch(() => undefined);
   // Canonical registry readiness for this process's own registry (Main installs the same): installed rows, value-free
   // credential presence, the last exact connection observation; no network, no secret read.
   void import("../harness/canonical-server-state").then((m) => m.installCanonicalServerStateReader()).catch(() => undefined);
@@ -1319,6 +1347,9 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
         assertServiceOwner();
         const report = daemonInvocationService.recoverQueuedSteers(chatId);
         if (report.examined > 0) console.log(`[agentlasd] recovered queued steers of a replaced service chat=${chatId}`, report);
+        // A peer turn the replaced service was running when it died is continued once, inside its chain (harness/peer-turn-resume.ts).
+        const peerReport = daemonInvocationService.resumeInterruptedPeerTurns(chatId);
+        if (peerReport.examined > 0) console.log(`[agentlasd] peer turns of a replaced service chat=${chatId}`, peerReport);
       } catch (error) {
         console.warn(`[agentlasd] queued steer recovery deferred chat=${chatId}:`, error instanceof Error ? error.message : error);
       }
@@ -1353,22 +1384,6 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       }).finally(() => { inFlight = false; });
     };
     goalWaitHeartbeat();
-  }
-
-  // NH21: the enrolled service is the preferred owner of the One/Work Alive domain. It takes the lease when free (or
-  // when the window hands it over at a quiescent point) and keeps the lives beating after the window closes; Goal
-  // actions go back to the window, which owns Goal custody. AGENTLAS_ALIVE_ORGANISMS=off is the same kill switch as Main's.
-  if (daemonNativeInvocation && process.env.AGENTLAS_ALIVE_ORGANISMS !== "off") {
-    try {
-      const [alive, { daemonDeviceBridge }] = await Promise.all([import("../alive-organisms"), import("./device-bridge")]);
-      aliveOrganisms = alive;
-      alive.startDaemonAliveOrganisms({
-        action: (input) => daemonDeviceBridge().aliveAction(input),
-        changed: (event) => daemonDeviceBridge().aliveChanged(event),
-      });
-    } catch (error) {
-      console.error("[agentlasd] alive organisms failed to start:", error);
-    }
   }
 
   try {

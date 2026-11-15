@@ -50,11 +50,14 @@ type ImportResult = {
 export function CredentialImportDialog({
   ko,
   taskScopeId,
+  consentGiven = false,
   onClose,
   onDone,
 }: {
   ko: boolean;
   taskScopeId?: string;
+  /** The caller's screen already said what connecting copies and the person pressed its action (first-run Chrome step): no second checkbox. */
+  consentGiven?: boolean;
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
@@ -68,7 +71,7 @@ export function CredentialImportDialog({
   const [historyChecked, setHistoryChecked] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<"cookies" | "passwords" | "history">("cookies");
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [consented, setConsented] = useState(false);
+  const [consented, setConsented] = useState(consentGiven);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [query, setQuery] = useState("");
   const [scanning, setScanning] = useState(true);
@@ -115,7 +118,7 @@ export function CredentialImportDialog({
         if (first && !res.ok) setError(res.error ?? (ko ? "프로필 목록을 일부 읽지 못했습니다." : "Some profiles could not be scanned."));
         if (!first) {
           setScanning(false);
-          setError(res.error ?? (ko ? "이 컴퓨터에서 Chrome 계열 브라우저 프로필을 찾지 못했습니다." : "No Chrome-family browser profile was found on this computer."));
+          setError(res.error ?? (ko ? "이 데스크탑에서 Chrome 계열 브라우저 프로필을 찾지 못했어요." : "No Chrome-family browser profile was found on this computer."));
         }
       } catch {
         if (!alive) return;
@@ -400,7 +403,7 @@ export function CredentialImportDialog({
               </div>
             </div>}
 
-            <div className="cid-consent"><div className="cid-storage-facts"><span><IconKey size={16} />{ko ? "비밀번호 · 암호화 저장" : "Passwords · encrypted vault"}</span><span><IconLock size={16} />{ko ? "쿠키 · 전용 세션" : "Cookies · dedicated session"}</span><span><IconRefresh size={16} />{ko ? "기록 · 현재 작업" : "History · this task"}</span></div><details><summary>{ko ? "가져오기 안내" : "Import details"}</summary><p>{ko ? "선택한 항목만 이 컴퓨터의 브라우저 프로필에서 읽어 Agentlas로 복사합니다. 비밀번호는 암호화된 저장소에, 쿠키는 전용 브라우저 세션에 저장되며 방문 기록은 현재 작업에만 추가됩니다. 브라우저 보호로 일부 항목은 가져올 수 없을 수 있습니다." : "Only selected items are copied from this computer's browser profile. Passwords go into the encrypted vault, cookies into the dedicated browser session, and history into this task only. Browser protection may prevent some transfers."}</p></details><label><input type="checkbox" checked={consented} disabled={importingNow} onChange={(event) => setConsented(event.target.checked)}/><span>{ko ? "선택한 브라우저 데이터를 Agentlas로 가져오는 데 동의합니다." : "I agree to import the selected browser data into Agentlas."}</span></label></div>
+            <div className="cid-consent"><div className="cid-storage-facts"><span><IconKey size={16} />{ko ? "비밀번호 · 암호화 저장" : "Passwords · encrypted vault"}</span><span><IconLock size={16} />{ko ? "쿠키 · 전용 세션" : "Cookies · dedicated session"}</span><span><IconRefresh size={16} />{ko ? "기록 · 현재 작업" : "History · this task"}</span></div><details><summary>{ko ? "가져오기 안내" : "Import details"}</summary><p>{ko ? "선택한 항목만 이 데스크탑의 브라우저 프로필에서 읽어 Agentlas로 복사합니다. 비밀번호는 암호화된 저장소에, 쿠키는 전용 브라우저 세션에 저장되며 방문 기록은 현재 작업에만 추가됩니다. 브라우저 보호로 일부 항목은 가져올 수 없을 수 있습니다." : "Only selected items are copied from this computer's browser profile. Passwords go into the encrypted vault, cookies into the dedicated browser session, and history into this task only. Browser protection may prevent some transfers."}</p></details>{!consentGiven && <label><input type="checkbox" checked={consented} disabled={importingNow} onChange={(event) => setConsented(event.target.checked)}/><span>{ko ? "선택한 브라우저 데이터를 Agentlas로 가져오는 데 동의합니다." : "I agree to import the selected browser data into Agentlas."}</span></label>}</div>
             {error && <div className="cid-error-row"><p className="cid-error" role="alert">{error}</p>{!scanning && selectedCount === 0 && <button type="button" onClick={() => { if (profileId) { void loadProfile(profileId); } else { setScanning(true); setError(null); setScanNonce((value) => value + 1); } }}>{ko ? "다시 찾기" : "Scan again"}</button>}</div>}
           </div>
         )}
@@ -489,7 +492,7 @@ export function CredentialImportDialog({
           gap: 4px;
           padding: 3px;
           border-radius: 10px;
-          background: var(--paper-soft);
+          background: var(--paper-2);
         }
         .cid-tabs button {
           display: flex;

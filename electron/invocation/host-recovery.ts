@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { McpInvocationRequest } from "../../shared/types";
 import {
-  classifyOwnerFailureDetailed, internalFailureOwnerLine, waitingOwnerLine, WAITABLE_EXTERNAL_CAUSES,
+  classifyOwnerFailureDetailed, internalFailureOwnerLine, isOutOfMemoryFailure, waitingOwnerLine, WAITABLE_EXTERNAL_CAUSES,
   type InternalFailurePlan, type OwnerFailureFacts, type OwnerFailureVerdict,
 } from "../../shared/owner-failure-class";
 import { quotaRetryAfterAt } from "../../shared/runtime-quota";
@@ -296,12 +296,14 @@ export function decideOwnerFailure(input: OwnerFailureInput): OwnerFailureDecisi
     return waiting ?? { verdict, action: "external", defect: false, reason: `external:${verdict.cause}` };
   }
   // An active Goal in this room carries the work on at its next turn: the line says that instead of asking the owner to resend.
+  // Desktop R part 2: a confirmed memory kill names the computer's memory instead of "an app-side problem" (the plan and what the app does are unchanged).
+  const memory = isOutOfMemoryFailure(input.facts.runtimeFailure);
   const say = (plan: InternalFailurePlan, reason: string): OwnerFailureDecision => {
     const worded: InternalFailurePlan = input.goalCarries && input.ownerTurn && (plan === "uncertain" || plan === "exhausted" || plan === "repeated" || plan === "manual" || plan === "checking") ? "goal" : plan;
-    return { verdict, action: "say", plan: worded, line: internalFailureOwnerLine(input.locale, worded), defect: true, reason };
+    return { verdict, action: "say", plan: worded, line: internalFailureOwnerLine(input.locale, worded, memory), defect: true, reason };
   };
   if (!input.ownerTurn) return say(input.goalWake && input.goalCarries ? "goal" : "background", input.goalWake && input.goalCarries ? "goal_wake_failed" : "not_owner_turn");
-  if (input.queueOwnsRetry && !input.hostRecovery) return { verdict, action: "queue", plan: "recovering", line: internalFailureOwnerLine(input.locale, "recovering"), defect: true, reason: "queue_retries" };
+  if (input.queueOwnsRetry && !input.hostRecovery) return { verdict, action: "queue", plan: "recovering", line: internalFailureOwnerLine(input.locale, "recovering", memory), defect: true, reason: "queue_retries" };
   if (input.hostRecovery) {
     // The retry may itself have acted: then nothing runs again by itself. Nothing acted: the claim kept the request, and it is tried
     // once more when something changed (a runtime signal, a restart, an update) or after one timed check. The same failure coming back
@@ -316,7 +318,7 @@ export function decideOwnerFailure(input: OwnerFailureInput): OwnerFailureDecisi
   if (!input.nothingActed) return say(input.queueResends ? "checking" : "uncertain", "effects_uncertain");
   if (ownerSpokeAfter(input.db, input.chatId, input.userMessageId, input.startedAtIso)) return say("newer", "owner_wrote_newer");
   if (!input.replayable) return say("manual", "request_not_replayable");
-  return { verdict, action: "recover", plan: "recovering", line: internalFailureOwnerLine(input.locale, "recovering"), defect: true, reason: "nothing_acted" };
+  return { verdict, action: "recover", plan: "recovering", line: internalFailureOwnerLine(input.locale, "recovering", memory), defect: true, reason: "nothing_acted" };
 }
 
 /**
@@ -982,4 +984,59 @@ export function sweepOrphanedHostRecoveries(db: Db, say: (chatId: string, plan: 
       .run(HOST_RECOVERY_REQUESTED, keepSince);
   } catch { /* a store that cannot be read is swept at the next boot */ }
   return settled;
+}
+
+/** Run-end kinds of the ledger (store/run-events.ts INVOCATION_TERMINAL_KINDS): a started run with none of them was cut off. */
+const CUT_OFF_TERMINAL_KINDS = ["invoke_waiting", "invoke_completed", "mcp_final", "invoke_cancelled", "invoke_interrupted", "invoke_failed", "invoke_threw", "mcp_error"] as const;
+/** A cut-off turn is told once, at the app's start, for a day; an older one is history the owner has long since moved past. */
+export const CUT_OFF_NOTICE_WINDOW_MS = 24 * 3_600_000;
+export const CUT_OFF_NOTICED_REASON = "cut_off_noted";
+
+/**
+ * Desktop repair 11 (N2, decision): a single turn the app's sudden end (kill -9, a crash, power loss) cut off is NOT run again by itself
+ * (a tool it had called could run twice) and must not stay a silent unanswered message. At the app's start, one plain line under the owner's message says it was
+ * cut off and that sending it again is the next step (the same `host-status` row the other host lines use, so the desktop and the phone read it, no new table).
+ * Machine facts only: the ledger's receipt (a started run with no end row, no host stop cause, no steering), the chat's last row (the owner's own, unanswered),
+ * no run after it. A run of a room member, a peer turn, a background or Science run, a retry the host already owns, a personal-agent conversation (the supervisor
+ * has its own review) and a run another process still holds are left alone. At most once per run (an outcome row, the one at-most-once marker the retry claims use).
+ * Returns how many lines were said.
+ */
+export function sweepCutOffOwnerTurns(db: Db, say: (chatId: string, plan: InternalFailurePlan, runId: string) => void, ports: { chatBusy(chatId: string): boolean }, nowMs = Date.now()): number {
+  let said = 0;
+  try {
+    const since = new Date(nowMs - CUT_OFF_NOTICE_WINDOW_MS).toISOString();
+    const ended = CUT_OFF_TERMINAL_KINDS.map(() => "?").join(",");
+    const rows = db.prepare(`SELECT s.run_id AS runId, s.chat_id AS chatId, s.ts AS ts, s.payload_json AS payloadJson FROM run_events s
+      WHERE s.kind = 'invoke_started' AND s.ts > ? AND s.chat_id IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM run_events t WHERE t.run_id = s.run_id AND t.kind IN (${ended}))
+        AND NOT EXISTS (SELECT 1 FROM run_events o WHERE o.run_id = s.run_id AND o.kind IN (?, ?, 'user_steering', 'invoke_cancel_requested'))
+      ORDER BY s.ts DESC LIMIT 50`).all(since, ...CUT_OFF_TERMINAL_KINDS, HOST_RECOVERY_REQUESTED, HOST_RECOVERY_OUTCOME) as Array<{ runId: string; chatId: string; ts: string; payloadJson: string }>;
+    const seenChats = new Set<string>();
+    for (const row of rows) {
+      if (seenChats.has(row.chatId)) continue; // the newest cut run of a chat is the one that speaks
+      seenChats.add(row.chatId);
+      let payload: Record<string, unknown> = {};
+      try { payload = JSON.parse(row.payloadJson) as Record<string, unknown>; } catch { /* a damaged row names no facts: the checks below decide */ }
+      // Not the owner's own message: a background, peer, Science, automation or graph run. A chat with a Goal is continued by the Goal's own recovery at start (it may run again).
+      if (payload.background === true || payload.peerChain || payload.invocationSource === "science" || payload.invocationSource === "automation" || payload.invocationSource === "graph") continue;
+      const chat = db.prepare("SELECT kind, archived_at AS archivedAt, goal_id AS goalId FROM chats WHERE id = ?").get(row.chatId) as { kind: string | null; archivedAt: string | null; goalId: string | null } | undefined;
+      if (!chat || chat.archivedAt || chat.goalId || (chat.kind !== "user" && chat.kind !== null)) continue;
+      try {
+        if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'one_supervisor_conversations'").get()
+          && db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE chat_id = ? LIMIT 1").get(row.chatId)) continue;
+      } catch { continue; }
+      if (ports.chatBusy(row.chatId)) continue;
+      // A newer run of the chat (the owner sent it again, a recovery ran): the request is not lost.
+      if (db.prepare("SELECT 1 FROM run_events n WHERE n.kind = 'invoke_started' AND n.chat_id = ? AND n.ts > ? AND n.run_id <> ? LIMIT 1").get(row.chatId, row.ts, row.runId)) continue;
+      // The owner's message is the chat's newest row and nothing answered it (a partial answer already in the chat is its own marked line).
+      const last = db.prepare("SELECT role FROM chat_messages WHERE chat_id = ? ORDER BY rowid DESC LIMIT 1").get(row.chatId) as { role: string } | undefined;
+      if (last?.role !== "user") continue;
+      const receipt = getInvocationRunReceipt(row.runId);
+      if (!receipt || receipt.status !== "interrupted" || receipt.hostStopCause || receipt.interruptionCause) continue;
+      say(row.chatId, "cut_off", row.runId);
+      recordHostRecoveryOutcome(row.runId, row.chatId, "skipped", CUT_OFF_NOTICED_REASON);
+      said += 1;
+    }
+  } catch { /* a store that cannot be read is looked at again at the next start */ }
+  return said;
 }

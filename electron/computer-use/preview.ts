@@ -4,6 +4,7 @@ import { checkComputerUsePermissions } from "../mac-permissions";
 import { reportSystemPermissionIssue } from "../os-permission-guidance";
 import type { ComputerUseCaptureOptions, ComputerUsePreview } from "../../shared/types";
 import { nativeInputDriverAvailable } from "./native-driver";
+import { noteScreenControl } from "../one/screen-control";
 
 function screenPermission(): ComputerUsePreview["screenPermission"] {
   if (process.platform === "win32") return "unknown";
@@ -19,6 +20,8 @@ export async function captureComputerUsePreview(
   sourceId?: string,
   options?: ComputerUseCaptureOptions,
 ): Promise<ComputerUsePreview> {
+  // N2 (security review of O-M3a): this IPC puts a screen capture in the renderer's hands, like the control server's /capture. Both are noted here, in one place.
+  noteScreenControl("capture");
   return withOneSensitiveOperation(() => captureComputerUsePreviewUnlocked(sourceId, options));
 }
 async function captureComputerUsePreviewUnlocked(

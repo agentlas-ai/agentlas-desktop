@@ -1,0 +1,19 @@
+.body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.search { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--rd-hair); border-radius: 10px; color: var(--rd-ink-3); }
+.search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--rd-ink); font: inherit; }
+.list { display: flex; flex-direction: column; gap: 2px; max-height: 340px; overflow: auto; }
+.row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 6px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--rd-ink); text-align: left; cursor: pointer; font: inherit; }
+.row:hover:not(:disabled) { background: var(--rd-surface-2); }
+.row[data-checked="true"] { background: var(--rd-surface-2); }
+.row:disabled { opacity: 0.5; cursor: default; }
+.copy { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.copy small { color: var(--rd-ink-3); font-size: 11px; }
+.check { width: 18px; height: 18px; flex: 0 0 18px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--rd-hair-2); border-radius: 5px; }
+.row[data-checked="true"] .check { background: var(--rd-ink); color: var(--rd-surface); border-color: var(--rd-ink); }
+.title { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 600; color: var(--rd-ink-2); }
+.title small { color: var(--rd-ink-3); font-size: 11px; font-weight: 400; }
+.title select, .title input { font-weight: 400; padding: 7px 10px; border: 1px solid var(--rd-hair); border-radius: 9px; background: transparent; color: var(--rd-ink); font: inherit; }
+.note { margin: 8px 4px; color: var(--rd-ink-3); font-size: 12px; }
+.error { margin: 0; color: var(--rd-danger, #c0392b); font-size: 12px; }
+.retryRow { display: flex; margin: 0 4px 8px; }

@@ -2,6 +2,7 @@ import { inspectAgentFileText, listAgentFiles } from "./files";
 import { getExperienceOntologySummary } from "../experience/store";
 import { getAgentById } from "../mcp/registry";
 import { getMemoryDb as getDb } from "../memory/database";
+import { agentStoreRowCount } from "../memory/store";
 import type { AgentLearningSummary } from "../../shared/types";
 
 const TERMINAL_KINDS = [
@@ -179,10 +180,13 @@ export async function getAgentLearningSummary(agentIdValue: string): Promise<Age
     legacyChatLinkedRunCount: legacyChatLinked.runs,
     legacyChatLinkedLastRunAt: legacyChatLinked.last,
     legacyChatLinkedFailureCount: legacyChatLinked.failures,
+    // The lines the agent's own memory screen lists (agentMemory:entries, store.ts listMemoryEntriesForAgentUi): agent-global lines only. A line the
+    // agent learned inside a project belongs to that project (it is recalled there and listed with the project's memory), so this count no longer
+    // says 1 over an empty list (desktop trial F3). Rows the agent keeps in its own store count too (0 while the layout switch is OFF).
     durableMemoryCount: scalar(
-      "SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = ? AND superseded_at IS NULL",
+      "SELECT COUNT(*) AS n FROM memory_entries WHERE agent_id = ? AND superseded_at IS NULL AND scope = 'agent_repo' AND project_id IS NULL AND project_path IS NULL",
       agentId,
-    ),
+    ) + agentStoreRowCount(agentId),
     curationTurnCount: curation.turns,
     noNewMemoryTurnCount: curation.no_new,
     memoryEventCount: curation.events,

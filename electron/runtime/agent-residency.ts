@@ -19,6 +19,7 @@
 //     상주 형태를 아직 못 가지는 런타임(일회성 `-p` CLI)을 "상주 중"이라고 말하지 않기
 //     위해서다 — 예산은 붙든 것(holdsSession)만 센다.
 import { onHostShutdown } from "../host-lifecycle";
+import { setResourceWork } from "../diagnostics/resource-sampler";
 import type { ProcessRow } from "./process-table";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type {
@@ -39,7 +40,9 @@ export const AGENT_RESIDENCY_IDLE_REAP_MS = 12 * 60 * 60_000;
  */
 export const AGENT_RESIDENCY_WARM_RECENT_MS = 15 * 60_000;
 export const AGENT_RESIDENCY_WARM_OTHER_MS = 2 * 60_000;
-const AGENT_RESIDENCY_TRIM_INTERVAL_MS = 60_000;
+/** After a due pass that could not close an overdue resident (process table unreadable, background work), try again after this, doubling to the cap. */
+const OVERDUE_RETRY_MIN_MS = 60_000;
+const OVERDUE_RETRY_MAX_MS = 5 * 60_000;
 
 /** 어디서 온 에이전트인가 — 로컬 설치 / 오너 Agent Cloud / 공개 Hub. */
 export type AgentResidencySource = "local" | "cloud" | "hub";
@@ -274,35 +277,118 @@ export function retainAgentResidencyAdmissionUntilClosed(
 const entries = new Map<string, AgentResidencyEntry>();
 const changeListeners = new Set<(change: AgentResidencyChange) => void>();
 let shutdownDetach: (() => void) | null = null;
-let sweepTimer: NodeJS.Timeout | null = null;
-
-/** 스위퍼 주기. 12시간 상한을 이 간격으로 확인한다(데몬 keepAlive 와 같은 주기). */
-const RESIDENCY_SWEEP_INTERVAL_MS = 10 * 60_000;
+/*
+ * One timer for both idle rules (the 12h reap and the early trim of resting CLIs), aimed at the first moment any resident
+ * could become due: last activity plus its limit. Nothing wakes while no resident can expire (none registered, or every
+ * one in use or exempt). Activity only ever moves a due time later, so a timer that fires early finds nothing due and
+ * re-aims; it never needs to be re-aimed on each touch. Each process (Main, daemon) has its own `entries`, so each
+ * timer only ever closes that process's own residents.
+ */
+let housekeepingTimer: NodeJS.Timeout | null = null;
+let housekeepingDueAt = Infinity;
+let overdueRetryMs = OVERDUE_RETRY_MIN_MS;
+let trimRunning = false;
 
 function ensureShutdownHook(): void {
   if (!shutdownDetach) {
     // 호스트가 죽으면 붙든 상주도 함께 죽는다 — 좀비 방지는 상주보다 항상 우선한다.
     shutdownDetach = onHostShutdown(() => disposeAgentResidency());
   }
-  if (!sweepTimer) {
-    /*
-     * ★12h 규칙은 데몬에만 있으면 안 된다. 데스크탑 앱도 자기 프로세스에서 상주 세션을
-     * 들고 있고, 앱에 스위퍼가 없으면 그 세션들은 앱이 켜져 있는 한 영원히 산다 —
-     * "12시간 무입력이면 종료"가 절반만 참인 상태가 된다. 그래서 상한은 등록소 자신이
-     * 들고 있고, 첫 등록과 함께 돈다(데몬은 자기 주기에서 같은 함수를 한 번 더 부른다).
-     */
-    sweepTimer = setInterval(() => {
-      try { sweepIdleAgentResidency(); enforceAgentResidencyBudget(); } catch { /* 다음 주기가 다시 시도한다 */ }
-    }, RESIDENCY_SWEEP_INTERVAL_MS);
-    sweepTimer.unref?.();
-  }
+  /*
+   * ★12h 규칙은 데몬에만 있으면 안 된다. 데스크탑 앱도 자기 프로세스에서 상주 세션을
+   * 들고 있고, 앱에 타이머가 없으면 그 세션들은 앱이 켜져 있는 한 영원히 산다. 그래서 상한은
+   * 등록소 자신이 들고 있다(데몬은 자기 주기에서 같은 함수를 한 번 더 부른다).
+   */
+  aimHousekeeping();
 }
 
-function stopSweeper(): void {
-  if (sweepTimer) {
-    clearInterval(sweepTimer);
-    sweepTimer = null;
+/** Tells the resource sampler whether this process has a turn in use or a resident CLI (it samples only then). */
+function publishResourceWork(): void {
+  let busy = false;
+  for (const entry of entries.values()) if (entry.inUse || entry.holdsSession) { busy = true; break; }
+  setResourceWork("agent-residency", busy);
+}
+
+/** The longest single wait of the housekeeping timer (the old sweep period); see armHousekeepingTimer. */
+const HOUSEKEEPING_CLOCK_STEP_MS = 10 * 60_000;
+
+function stopHousekeeping(): void {
+  if (housekeepingTimer) clearTimeout(housekeepingTimer);
+  housekeepingTimer = null;
+  housekeepingDueAt = Infinity;
+  overdueRetryMs = OVERDUE_RETRY_MIN_MS;
+}
+
+function idleTrimEnabled(): boolean { return process.env.AGENTLAS_RESIDENCY_IDLE_TRIM !== "0"; }
+
+/** A resting resident the next turn can do without (the early-trim candidates). */
+function isTrimmable(entry: AgentResidencyEntry): boolean {
+  return entry.holdsSession && !entry.closing && !entry.inUse && !entry.reaperExempt
+    && Boolean(entry.close && entry.idleProbe?.resumable()) && !isAwakeAgentResidencyAdmission(entry.awakeAdmission);
+}
+
+/** The first moment the 12h reap or the early trim could act on some resident; Infinity when none can. */
+function nextHousekeepingDueAt(): number {
+  let due = Infinity;
+  for (const entry of entries.values()) {
+    if (entry.closing || entry.inUse || entry.reaperExempt || isAwakeAgentResidencyAdmission(entry.awakeAdmission)) continue;
+    due = Math.min(due, entry.lastActivityAt + Math.max(1_000, AGENT_RESIDENCY_IDLE_REAP_MS));
   }
+  if (idleTrimEnabled()) {
+    const resting = [...entries.values()].filter(isTrimmable).sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+    resting.forEach((entry, index) => {
+      due = Math.min(due, entry.lastActivityAt + (index === 0 ? AGENT_RESIDENCY_WARM_RECENT_MS : AGENT_RESIDENCY_WARM_OTHER_MS));
+    });
+  }
+  return due;
+}
+
+/** Aims the single timer at the next due moment; keeps an earlier aim; clears the timer when nothing can expire. */
+function aimHousekeeping(afterPass = false): void {
+  if (!shutdownDetach) return;
+  let due: number;
+  // An idle probe belongs to a runner; if one throws, the registry must still register and release.
+  try { due = nextHousekeepingDueAt(); } catch { return; }
+  if (due === Infinity) { stopHousekeeping(); return; }
+  const now = Date.now();
+  let delay = due - now;
+  if (delay <= 0) {
+    // Still overdue: either a pass has not run yet, or it ran and could not close it. Do not spin.
+    delay = afterPass ? overdueRetryMs : 0;
+    if (afterPass) overdueRetryMs = Math.min(overdueRetryMs * 2, OVERDUE_RETRY_MAX_MS);
+  } else {
+    overdueRetryMs = OVERDUE_RETRY_MIN_MS;
+  }
+  const at = now + delay;
+  if (housekeepingTimer && housekeepingDueAt <= at) return;
+  if (housekeepingTimer) clearTimeout(housekeepingTimer);
+  housekeepingDueAt = at;
+  armHousekeepingTimer();
+}
+
+/**
+ * Timers do not count the time a computer sleeps, so a 12 h wait set before an 8 h sleep would fire 8 h late and the
+ * resident process would stay in memory that long. A long wait is therefore taken in steps: each step only reads the
+ * clock (no process table, no I/O) and waits again, so after a wake the pass runs within one step.
+ */
+function armHousekeepingTimer(): void {
+  // A little slack: a timer may fire a millisecond early and would only wait again.
+  const wait = Math.max(0, housekeepingDueAt - Date.now()) + 25;
+  housekeepingTimer = setTimeout(() => {
+    housekeepingTimer = null;
+    if (Date.now() < housekeepingDueAt) { armHousekeepingTimer(); return; }
+    runHousekeeping();
+  }, Math.min(wait, HOUSEKEEPING_CLOCK_STEP_MS));
+  housekeepingTimer.unref?.();
+}
+
+function runHousekeeping(): void {
+  housekeepingTimer = null;
+  housekeepingDueAt = Infinity;
+  try { sweepIdleAgentResidency(); enforceAgentResidencyBudget(); } catch { /* the next aim retries */ }
+  if (!idleTrimEnabled() || trimRunning) { aimHousekeeping(true); return; }
+  trimRunning = true;
+  void trimIdleAgentResidency().catch(() => 0).finally(() => { trimRunning = false; aimHousekeeping(true); });
 }
 
 /* ────────────────────────────── 예산 ────────────────────────────── */
@@ -515,11 +601,12 @@ export function registerAgentResidency(input: RegisterAgentResidencyInput): Agen
   };
   entries.set(input.key, entry);
   finishAgentResidencyAdmission(input.admission);
-  if (entry.idleProbe) ensureIdleTrimTimer();
   if (entry.holdsSession && !existing?.holdsSession) {
     emitAgentResidencyChange(entry, "running", "spawned");
   }
   if (entry.holdsSession) enforceAgentResidencyBudget();
+  aimHousekeeping();
+  publishResourceWork();
   return entry;
 }
 
@@ -555,6 +642,8 @@ export function touchAgentResidency(key: string, patch?: { inUse?: boolean; now?
     );
   }
   if (entry.holdsSession) enforceAgentResidencyBudget();
+  aimHousekeeping();
+  publishResourceWork();
 }
 
 /** 등록을 지운다. `close: true` 면 붙든 자원도 놓는다. */
@@ -574,6 +663,8 @@ export function dropAgentResidency(
     // A late completion cannot delete a replacement row or emit its lifecycle.
     if (entries.get(key) !== entry) return;
     entries.delete(key);
+    if (entries.size === 0) stopHousekeeping();
+    publishResourceWork();
     if (entry.holdsSession) emitAgentResidencyChange(entry, "closed", opts?.reason ?? "process-exit");
   };
   if (opts?.close && entry.close) {
@@ -618,22 +709,6 @@ export function sweepIdleAgentResidency(maxIdleMs = AGENT_RESIDENCY_IDLE_REAP_MS
   return reaped;
 }
 
-let idleTrimTimer: ReturnType<typeof setInterval> | null = null;
-let idleTrimRunning = false;
-function ensureIdleTrimTimer(): void {
-  if (idleTrimTimer || process.env.AGENTLAS_RESIDENCY_IDLE_TRIM === "0") return;
-  idleTrimTimer = setInterval(() => {
-    if (idleTrimRunning) return;
-    idleTrimRunning = true;
-    void trimIdleAgentResidency().catch(() => 0).finally(() => { idleTrimRunning = false; });
-  }, AGENT_RESIDENCY_TRIM_INTERVAL_MS);
-  idleTrimTimer.unref?.();
-}
-function stopIdleTrimTimer(): void {
-  if (idleTrimTimer) clearInterval(idleTrimTimer);
-  idleTrimTimer = null;
-}
-
 /**
  * Closes resting residents the next turn can do without. Never touches a turn in progress, an exempt or awake resident,
  * one that cannot continue natively, or one holding background work. An unreadable process table closes nothing.
@@ -642,8 +717,7 @@ export async function trimIdleAgentResidency(
   now = Date.now(),
   readTable?: () => Promise<readonly ProcessRow[] | null>,
 ): Promise<number> {
-  const trimmable = (entry: AgentResidencyEntry) => entry.holdsSession && !entry.closing && !entry.inUse && !entry.reaperExempt
-    && Boolean(entry.close && entry.idleProbe?.resumable()) && !isAwakeAgentResidencyAdmission(entry.awakeAdmission);
+  const trimmable = isTrimmable;
   const resting = [...entries.values()].filter(trimmable).sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   const due = resting.filter((entry, index) =>
     now - entry.lastActivityAt >= (index === 0 ? AGENT_RESIDENCY_WARM_RECENT_MS : AGENT_RESIDENCY_WARM_OTHER_MS));
@@ -799,8 +873,8 @@ export function disposeAgentResidency(): void {
   for (const entry of [...entries.values()]) {
     dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
   }
-  stopSweeper();
-  stopIdleTrimTimer();
+  stopHousekeeping();
+  publishResourceWork();
   if (shutdownDetach) {
     shutdownDetach();
     shutdownDetach = null;
@@ -814,8 +888,8 @@ export function __resetAgentResidencyForTests(): void {
   activeContextTurns.clear();
   openingAdmissions.clear();
   sourceCache.clear();
-  stopSweeper();
-  stopIdleTrimTimer();
+  stopHousekeeping();
+  publishResourceWork();
   if (shutdownDetach) {
     shutdownDetach();
     shutdownDetach = null;

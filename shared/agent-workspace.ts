@@ -91,6 +91,22 @@ export interface AgentWorkspaceExperience {
   /** run:<id> lines, at least one. */
   evidence: string[];
 }
+/**
+ * The data the "skill candidate" card shows. `redactedCount` private values (e-mail, link query, path, long number, amount, the owner's
+ * own project/chat/member/account names) were replaced by `[가림]` in what the change writes; `mayLeaveThisComputer` is always true for a skill: it is
+ * the one thing an agent keeps that Sync can carry to another computer or the cloud, so the card says so. `fixes` are machine codes of what code put right in a
+ * skill file (name, description, sections, fence, line endings, frontmatter); the corrected file is what the diff shows.
+ */
+export interface AgentWorkspaceSkillPromotion {
+  skills: Array<{ path: string; name: string; description: string; fixes: string[] }>;
+  redactedCount: number;
+  redactedKinds: Partial<Record<"email" | "url" | "path" | "number" | "amount" | "name", number>>;
+  mayLeaveThisComputer: true;
+  /** Present (true) when the list of the owner's own names was cut (more projects, members or chats than the replacement can hold): some names may not have been hidden, so the card says so. Absent = the list was complete. */
+  namesIncomplete?: true;
+}
+/** A skill an agent's turn left out of the skill list, with the machine code why (agents/files.ts); the agent ran with the rest. */
+export interface AgentWorkspaceSkippedSkill { path: string; code: string }
 /** situation: when it applies; observed: what the records show happened; before/after: behaviour without and with the change; limits: when not to apply. */
 export interface AgentWorkspaceLearningCard { situation: string; observed: string; before: string; after: string; limits: string; }
 /** One line per changed file for the owner: what kind of change and how big, without reading the diff. */
@@ -119,6 +135,8 @@ export interface AgentWorkspaceProposal {
   card?: AgentWorkspaceLearningCard;
   /** Files changed, counted by the host. Absent on proposals made before 2026-10-20. */
   changeSummary?: AgentWorkspaceChangeSummary[];
+  /** The skills this learning change creates, what code put right in them, and how many private values it replaced. Absent unless the change creates a skill. */
+  skillPromotion?: AgentWorkspaceSkillPromotion;
   createdAt: string;
   appliedAt?: string;
   appliedRevisionId?: string;
@@ -146,6 +164,8 @@ export interface AgentWorkspaceSnapshot {
   activation: "ready" | "run_active" | "recovery_required";
   /** Owner opt-in: lessons of the host-checkable kind apply without a diff review and are rolled back if runs get worse. Absent on older cores. */
   autoEvolution?: { enabled: boolean };
+  /** Skills the last turn of this agent left out of its prompt and why; absent when none were. Per process: the daemon and Main each report their own turns. */
+  skippedSkills?: AgentWorkspaceSkippedSkill[];
 }
 export interface AgentWorkspaceReadFile {
   path: string;

@@ -1,6 +1,7 @@
 import { PROVIDER_REFUSAL_CODES, PROVIDER_UNAVAILABLE_CODES } from "./run-failure-notice";
 import { TRANSIENT_HOST_ENDED_SILENCE_CODE, isTransientExternalFailure } from "./transient-provider-failure";
 import { formatRuntimeQuotaReset } from "./runtime-quota";
+import { OWNER_FIXABLE_RUN_FAILURE_CODES } from "./transient-send-refusal";
 import type { InvocationRuntimeFailure } from "./types";
 
 /**
@@ -22,7 +23,7 @@ export type OwnerFailureClass = "external" | "internal";
 
 export type ExternalFailureCause =
   | "network" | "provider_outage" | "provider_limit" | "provider_auth" | "provider_refusal"
-  | "provider_empty" | "owner_stop" | "owner_wait" | "site_refusal" | "fixed_limit";
+  | "provider_empty" | "owner_stop" | "owner_wait" | "site_refusal" | "fixed_limit" | "owner_state";
 
 export interface ExternalFailureEntry {
   readonly match: "exact" | "pattern";
@@ -54,6 +55,9 @@ export const EXTERNAL_FAILURE_TABLE: readonly ExternalFailureEntry[] = Object.fr
     "model_context_capacity_exceeded", "codex_context_window_exceeded", "local_context_limit_exceeded", "prompt_too_long", "budget_cost_exhausted", "budget_cost_unavailable",
     "serving_provider_refused",
   ]),
+  // Not waited on either: nothing the app does changes it; the sentence the refusal carries (restore the agent in Settings, pick a runtime) stays as written.
+  ...entry("owner_state", "The owner's own state blocks the turn (an archived or deleted agent, a deleted chat, no runtime chosen, a missing working folder); the same call fails the same way until they act.",
+    [...OWNER_FIXABLE_RUN_FAILURE_CODES]),
   ...entry("provider_auth", "The provider (or the signed-in browser) needs the owner to sign in.", [
     "http_401", "auth", "auth_expired", "auth_required", "auth-required", "login_required", "login-required", "not_signed_in",
     "provider-login-required", "agentlas-browser-host-unavailable", "runtime_not_signed_in", "sign_in_required", "goal_runtime_sign_in_required",
@@ -176,7 +180,7 @@ export function classifyOwnerFailure(failure: OwnerFailureFacts): OwnerFailureCl
  *  - interrupted: nothing ran and the app quit before its own retry started, and that claim kept no restart data (an older row or a request that cannot be rebuilt).
  *  - background: a turn the host started itself (not the owner's words); the problem is logged.
  */
-export type InternalFailurePlan = "recovering" | "recovered" | "uncertain" | "checking" | "exhausted" | "repeated" | "waiting" | "expired" | "newer" | "goal" | "manual" | "interrupted" | "interrupted_exhausted" | "background";
+export type InternalFailurePlan = "recovering" | "recovered" | "uncertain" | "checking" | "exhausted" | "repeated" | "waiting" | "expired" | "newer" | "goal" | "manual" | "interrupted" | "interrupted_exhausted" | "background" | "cut_off";
 
 const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
   ko: {
@@ -194,6 +198,8 @@ const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
     interrupted: "앱이 종료되면서 자동 재시도가 시작되지 못했습니다. 아무것도 실행되지 않았고 요청은 저장되어 있습니다. 문제는 기록으로 남겼습니다. 이어서 하려면 말씀해 주세요.",
     interrupted_exhausted: "재시도가 두 번 중단됐습니다. 일부는 실행됐을 수 있으니 기록을 확인해 주세요. 요청은 저장돼 있습니다.",
     background: "앱 안쪽 문제로 이번 자동 실행이 끝나지 못했습니다. 문제는 기록으로 남겼습니다.",
+    // Desktop repair 11 (N2): a single turn the app's sudden end (kill, crash, power loss) cut off. Nothing was run again by itself: the line says so and where to go on.
+    cut_off: "끊겼어요 · 앱이 갑자기 꺼져 이 요청이 끝나지 못했어요. 자동으로 다시 실행하지 않았으니, 필요하면 다시 보내 주세요.",
   },
   en: {
     recovering: "An app-side problem stopped this attempt. Nothing had run, and the app is handling the same request once more by itself.",
@@ -210,6 +216,7 @@ const OWNER_LINES: Record<"ko" | "en", Record<InternalFailurePlan, string>> = {
     interrupted: "The app quit before its automatic retry could start. Nothing ran and your request is saved. The problem is logged. Tell me to continue and I will pick it up.",
     interrupted_exhausted: "The retry was interrupted twice. Some of it may have run, so please check the record. Your request is saved.",
     background: "An app-side problem stopped this automatic run. The problem is logged.",
+    cut_off: "Cut off · the app closed suddenly before this request finished. It was not run again automatically, so send it again if you still need it.",
   },
 };
 
@@ -244,8 +251,36 @@ export function waitingOwnerLine(locale: "ko" | "en", cause: ExternalFailureCaus
   return OWNER_LINES[ko ? "ko" : "en"].waiting;
 }
 
-export function internalFailureOwnerLine(locale: "ko" | "en", plan: InternalFailurePlan): string {
-  return OWNER_LINES[locale === "ko" ? "ko" : "en"][plan];
+/** The closed word of a model program the computer's memory shortage ended (runtime/child-death.ts RUNTIME_OUT_OF_MEMORY_CODE; the same spelling, kept here so this file stays free of runtime imports). */
+export const OUT_OF_MEMORY_FAILURE_CODE = "runtime_out_of_memory";
+
+/** True when the failure's typed cause behind the unfinished turn is the confirmed memory kill (a code compare, never words). */
+export function isOutOfMemoryFailure(runtimeFailure: OwnerFailureFacts["runtimeFailure"] | undefined): boolean {
+  const cause = runtimeFailure?.cause as { providerCode?: unknown } | undefined;
+  return cause?.providerCode === OUT_OF_MEMORY_FAILURE_CODE || runtimeFailure?.providerCode === OUT_OF_MEMORY_FAILURE_CODE;
+}
+
+/**
+ * `memory`: the cause is a confirmed memory kill. Then the one blame of the line changes - "an app-side problem" becomes the computer's memory - and nothing else
+ * (what the app did about it, and what is asked of the owner, stay the plan's own words). Only the two known openings are replaced; any other line is unchanged.
+ */
+export function internalFailureOwnerLine(locale: "ko" | "en", plan: InternalFailurePlan, memory = false): string {
+  const line = OWNER_LINES[locale === "ko" ? "ko" : "en"][plan];
+  if (!memory) return line;
+  const swap = memoryOpening(locale);
+  return line.startsWith(swap.app) ? `${swap.memory}${line.slice(swap.app.length)}` : line;
+}
+/** The one blame this swap changes: the line's own opening and its memory opening. Held here so the replacement and the test read the same two strings. */
+function memoryOpening(locale: "ko" | "en"): { app: string; memory: string } {
+  return locale === "ko" ? { app: "앱 안쪽 문제로 ", memory: "컴퓨터의 메모리가 부족해 " } : { app: "An app-side problem ", memory: "The computer ran out of memory, which " };
+}
+/**
+ * The plans whose line opens with the app-side blame, per locale: exactly the lines a memory kill rewrites. A line that is reworded and stops opening this way
+ * would silently stop being rewritten; the gate (dd-source-gate) compares this list with the one it was written against, so such a rewording breaks it.
+ */
+export function plansWithAppSideOpening(locale: "ko" | "en"): InternalFailurePlan[] {
+  const open = memoryOpening(locale).app;
+  return (Object.keys(OWNER_LINES[locale]) as InternalFailurePlan[]).filter((plan) => OWNER_LINES[locale][plan].startsWith(open));
 }
 
 /**

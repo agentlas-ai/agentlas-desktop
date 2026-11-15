@@ -1,7 +1,7 @@
 // macOS 권한(접근성/화면기록) preflight — 컴퓨터유즈(CUA) 자동화가 권한 부재로
 // "부분 실행 후 먹통"되는 걸 막는다. 권한이 없으면 실행 전에 빠르게 감지해
 // 대기 상태로 스킵하고(다음 예약에 자동 재시도) 사용자에게 정확한 조치를 안내한다.
-import { systemPreferences } from "electron";
+import { isElectronMainProcess } from "./main-process-host";
 import { currentUiLocale } from "./ui-locale";
 import { reportSystemPermissionIssue } from "./os-permission-guidance";
 import type { SystemPermissionFeature } from "../shared/os-permissions";
@@ -28,14 +28,16 @@ export function checkComputerUsePermissions(): MacPermissionState {
   }
   let accessibility = true;
   let screenRecording = true;
+  // Only the window host can ask the OS. The background service gets "unknown", which is never read as permitted.
+  const systemPreferences = isElectronMainProcess() ? (require("electron") as typeof import("electron")).systemPreferences : null;
   try {
     // prompt=false — 시스템 팝업을 띄우지 않고 조용히 상태만 읽는다(안내는 앱이 직접 한다).
-    accessibility = systemPreferences.isTrustedAccessibilityClient(false);
+    accessibility = systemPreferences ? systemPreferences.isTrustedAccessibilityClient(false) : false;
   } catch {
     accessibility = false; // Unknown is not evidence that input is permitted.
   }
   try {
-    screenRecording = systemPreferences.getMediaAccessStatus("screen") === "granted";
+    screenRecording = systemPreferences ? systemPreferences.getMediaAccessStatus("screen") === "granted" : false;
   } catch {
     screenRecording = false;
   }

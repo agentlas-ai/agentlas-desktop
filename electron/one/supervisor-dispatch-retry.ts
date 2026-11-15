@@ -10,7 +10,11 @@ import { UNCONFIRMED_MAX_RESENDS, UNCONFIRMED_VERIFY_CONTINUATIONS } from "../in
 /** The sends of one command that may have acted: the plain resend, then one verify-first send (earlier-attempt.ts). */
 export const SUPERVISOR_UNCONFIRMED_MAX_SENDS = UNCONFIRMED_MAX_RESENDS + UNCONFIRMED_VERIFY_CONTINUATIONS;
 
-export interface SupervisorDispatchFrame { locale: "ko" | "en"; runtimeSelection: RuntimeSelection | undefined }
+/**
+ * What a command's start is made of, read ONCE and kept so a start sent again is byte-identical. `ownerSpoke` (#3): the reply turn answers a message the owner
+ * wrote on the personal agent's screen (invocation/owner-spoke.ts). A frame written before this build has none and keeps starting without it.
+ */
+export interface SupervisorDispatchFrame { locale: "ko" | "en"; runtimeSelection: RuntimeSelection | undefined; ownerSpoke?: true }
 /** Older host adapters use this machine code without a typed provider failure. Signing in remains an owner action. */
 export function supervisorInternalStartRefusal(error: unknown): boolean {
   const code = sendRefusalCode(error);
@@ -82,6 +86,12 @@ function save(store: OneSupervisorStore, row: SupervisorRequestRow, value: Dispa
     WHERE command_id=? AND one_id=? AND payload_hash=? AND run_id IS ? AND state=? AND dispatch_retry_json IS ?`)
     .run(JSON.stringify(value), row.command_id, row.one_id, row.payload_hash, row.run_id, row.state, row.dispatch_retry_json ?? null);
   if (changed.changes !== 1) throw supervisorError("supervisor_request_state_conflict");
+}
+/** Parked owner-review work must not enter the uncertain-outcome resend lane. */
+export function stopSupervisorRetryForReview(store: OneSupervisorStore, row: SupervisorRequestRow): void {
+  const retry=supervisorDispatchRetry(row);
+  if(!retry) throw supervisorError('supervisor_retry_frame_missing');
+  save(store,row,{...retry,retryStopped:true});
 }
 /** Read the frame only once, including when the next start is made by a different process/host. */
 export function supervisorDispatchFrame(store: OneSupervisorStore, row: SupervisorRequestRow, create: () => SupervisorDispatchFrame, now = Date.now()): SupervisorDispatchFrame {

@@ -18,10 +18,7 @@ import { createRuntimePlanEmitter, planFromCodexTodoList, planFromCodexTurnPlan 
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
-import { runCodexNoTools, runCodexAliveNoTools, composeCodexHostInstructions, codexNoToolsModel } from "./codex-no-tools";
-import { runCodexAliveResidentTurn, closeCodexAliveResidentOwner,
-  codexAliveResidentGeneration, consumeCodexAliveResidentResult } from "./codex-alive-session";
-import { aliveDecisionProfileForRequest } from "./alive-decision-context";
+import { runCodexNoTools, composeCodexHostInstructions, codexNoToolsModel } from "./codex-no-tools";
 import { resolveEffectiveContextWindow } from "../../shared/models";
 import { accountCodexHome, adoptCodexThreadIntoProductStore, isIsolatedCodexProductHome, withCodexProductHome } from "./codex-product-home";
 import { linkMirrorEntry, reconcileMirrorLinks, reportIsolationUnavailable } from "./mirror-link";
@@ -34,9 +31,16 @@ import type { ObservedTokenUsage } from "../../shared/observed-usage";
 import { StringDecoder } from "node:string_decoder";
 import { codexOutputSchemaFallbackBlock, openAiStrictSchemaOrNull } from "./strict-output-schema";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
+import { codexAnswerMark, countAgentMessages, normalizeMessagePhase, type AgentMessageCounts, type AnswerMark } from "./final-answer-turns";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
+import { toolApprovalSessionKey } from "./tool-approval";
+import { codexExecDeleteGateArgs } from "./codex-delete-gate";
+import { openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
+import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
+import { mcpProxyControlInfoPath } from "../mcp-tools/proxy-channel";
 import { ensureSandboxNpmCacheDir, ensureSandboxRunTmpDir, sandboxNpmCacheDir, sandboxTmpEnvConfigArgs, sandboxTmpRoot, sandboxTmpScope } from "./sandbox-tool-cache";
+import { memoryDeathCause } from "./child-death";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, cliToolSilenceWindowMs, type CliSilenceGuard, childExitReason, RUNTIME_SILENT_TIMEOUT_CODE, runtimeProtocolUnrecognizedFailure, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError, unsettledTurnError, markRefusedBeforeDispatch, preDispatchRefusal, spawnStartFailureRefusal } from "./runner";
 import { decideTurnSettlement, normalEndToolEvidence, settleNormalEnd, trackReportedToolCalls } from "../../shared/turn-settlement";
 import { detectRuntimeRefusal } from "./runtime-refusal";
@@ -79,6 +83,7 @@ import {
   CodexSessionContinuityError,
   acknowledgeCodexThreadModel,
   answerCodexApproval,
+  noteCodexFileChangeDeletes,
   codexApprovalCapability,
   codexAppServerSupported,
   codexExecutableKey,
@@ -104,7 +109,8 @@ import {
 } from "./codex-session";
 import { CodexWorkforceObservation, inspectCodexWorkforceGrant, readCodexWorkforceInventory, waitForCodexWorkforceInventory } from "./codex-workforce";
 import { answerCodexMcpElicitation } from "./codex-elicitation";
-import { codexMcpCallIsMutating } from "./codex-mcp-admission";
+import { codexMcpCallIsMutating, codexMcpCallIsToolCall, codexMcpServerIdentity } from "./codex-mcp-admission";
+import { grantHostCall, hostCallMarks } from "../harness/host-call-ticket";
 import { residencyDisabledFor } from "./claude-session";
 import { codexDesktopSurfaceArgs } from "./codex-desktop-surface";
 import { codexPersonalContextArgs, codexPersonalHomeOptions } from "./codex-personal-context";
@@ -1447,6 +1453,12 @@ function runCodexProcess(
       if (silence.tripped && !req.signal?.aborted && !terminalObserved) {
         runnerFailure = runtimeSilentTimeoutFailure("codex", silence.trippedWith?.limitMs ?? silenceWindowMs, { toolInFlight: silence.trippedWith?.toolInFlight === true });
       }
+      // Desktop R part 2: a child the computer's memory shortage ended before its turn finished (a machine fact, runtime/child-death.ts) is that turn's typed cause,
+      // ahead of a diagnostic line it happened to print last. Any other ending keeps what it had.
+      if (!terminalObserved && !silence.tripped && !req.signal?.aborted) {
+        const memoryCause = memoryDeathCause(child, KIND);
+        if (memoryCause) runnerFailure = memoryCause;
+      }
       if (code === 0 && !runnerFailure && recognizedExecEvents === 0 && !text.trim()) {
         runnerFailure = runtimeProtocolUnrecognizedFailure("codex", stderr);
       }
@@ -1520,7 +1532,11 @@ export function codexThreadPolicy(
     const writableRoot = path.resolve(cwd);
     return {
       sandbox: "workspace-write",
-      approvalPolicy: "on-request",
+      // `on-request` asks only when a command needs more than the sandbox gives: a `rm` or a patch that deletes inside the working folder never
+      // reached the host (measured with the real codex 0.169: 0 requests; defect 7). `untrusted` sends every command that is not a known read,
+      // and every patch, to the host arbiter, which reads what it does (approval-rule.ts) and asks the owner only for a delete, a send, or money.
+      // The reviewer `auto_review` has its own route for approvals and keeps `on-request`.
+      approvalPolicy: approvalsReviewer === "auto_review" ? "on-request" : "untrusted",
       sandboxPolicy: {
         type: "workspaceWrite",
         // Plus the product's sandbox npm cache, so `npm install` works in the project, and its temp root, which the shell's
@@ -1832,7 +1848,7 @@ async function runCodexResidentTurn(input: {
       ...surfaceArgs,
       ...(sandboxTmp ? sandboxTmpEnvConfigArgs(sandboxTmp) : []),
       // ChatGPT apps where this thread's approvals reach the Agentlas arbiter or under full access (runtime-builtin-egress-policy.ts).
-      ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: policy.approvalPolicy === "on-request" && approvalsReviewer === "user", fullAccess: req.permission === "full" }),
+      ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: (policy.approvalPolicy === "on-request" || policy.approvalPolicy === "untrusted") && approvalsReviewer === "user", fullAccess: req.permission === "full" }),
       ...(mcpThread ? [] : mcpArgs)];
     const poolKey = codexPoolKey({
       // A turn-scoped process is never checked out by another turn.
@@ -1993,6 +2009,16 @@ async function runCodexResidentTurn(input: {
   /* ── 이번 턴의 수신 상태 ── */
   const messageOrder: string[] = [];
   const messages = new Map<string, string>();
+  /**
+   * Each agentMessage's phase as codex-cli 0.167 app-server states it on item/started and item/completed (never on a delta):
+   * `commentary` is the line before a tool call ("명령을 실행합니다."), `final_answer` the answer. Measured (two live turns,
+   * gpt-6.1-terra): every agentMessage carried one, and turn/completed held only the final_answer. The schema warns providers do
+   * not send it consistently ("treat None as phase unknown"; MessagePhase = commentary | partial_answer | final_answer in codex-cli 0.167.0
+   * `app-server generate-json-schema`, v2). The saved text keeps every message joined, as it always did: the desktop timeline anchors
+   * its tool rows to the live text. The phase only decides where the answer starts in it (answerStartFact: the first message marked
+   * final_answer or partial_answer); a phase stated only on item/completed is honoured too. No phase at all: the generic last-tool rule.
+   */
+  const messagePhases = new Map<string, string>();
   const startedTools = new Set<string>();
   const toolRequestReplay = new ToolRequestReplayGuard();
   const nativeFileProofById = new Map<string, NativeFileProofTicket[]>();
@@ -2140,6 +2166,15 @@ async function runCodexResidentTurn(input: {
     }
     return out;
   };
+  /** Run-ledger fact (invoke_result): how many messages of this turn were commentary / answer / unmarked. */
+  const agentMessageFact = (): { agentMessages: AgentMessageCounts } =>
+    ({ agentMessages: countAgentMessages(messageOrder.slice(answerFrom).map((id) => ({ text: messages.get(id) ?? "", phase: messagePhases.get(id) }))) });
+  /** Where the answer starts inside bodyText().trim() (final-answer-turns.ts); the saved text itself keeps every message. */
+  const answerStartFact = (): { answerStart: AnswerMark } | Record<string, never> => {
+    const mark = codexAnswerMark(messageOrder.slice(answerFrom).map((id) =>
+      ({ text: messages.get(id) ?? "", phase: messagePhases.get(id), joined: joinedMessageIds.has(id) })));
+    return mark ? { answerStart: mark } : {};
+  };
   const emitPartial = (force = false): void => {
     const now = Date.now();
     if (!force && now - lastEmit <= 60) return;
@@ -2183,8 +2218,15 @@ async function runCodexResidentTurn(input: {
   const NON_TOOL_ITEM_TYPES = new Set(["agentMessage", "reasoning", "userMessage", "plan", "hookPrompt", "contextCompaction", "context_compaction", "compaction"]);
   let serverRequestSeq = 0;
 
+  /** Ids of this turn's patch items that delete a file: the patch approval names only the item (codex-session.ts noteCodexFileChangeDeletes). */
+  const fileChangeDeletes = new Set<string>();
   const onNotification = (method: string, params: any): void => {
     silence?.touch();
+    if (method === "item/started") noteCodexFileChangeDeletes(fileChangeDeletes, params?.item);
+    if ((method === "item/started" || method === "item/completed") && params?.item?.type === "agentMessage"
+      && typeof params.item.id === "string" && typeof params.item.phase === "string") {
+      messagePhases.set(params.item.id, normalizeMessagePhase(params.item.phase) ?? "");
+    }
     // TurnStartParams.clientUserMessageId comes back as this turn's user item clientId: a typed acknowledgement of the
     // request that survives a lost turn/start receipt (RuntimeTurnDelivery "accepted").
     if ((method === "item/started" || method === "item/completed") && sentClientUserMessageId && params?.threadId === session.threadId
@@ -2509,6 +2551,7 @@ async function runCodexResidentTurn(input: {
     ...(req.agentId ? { agentId: req.agentId } : {}),
     permission: req.permission,
     unattended: req.unattended === true,
+    fileChangeDeletes,
   };
   const sink: CodexTurnSink = {
     onNotification,
@@ -2610,11 +2653,17 @@ async function runCodexResidentTurn(input: {
               sessionKey: `${KIND}:${req.sessionFingerprintSeed ?? chatId}`,
               tool: `mcp__${serverName}__${toolName}`,
               kind: "other",
+              // Which server this is: Main's own (bound for this run) or just a name (defect 8).
+              catalogId: codexMcpServerIdentity(serverName, req.mcpCodexConfigArgs),
+              // A connected app on the server: the marks the host declared for the tool (Codex's own request carries none), so a change asks the class a CLI behind the proxy asks.
+              ...((marks) => marks ? { annotations: marks } : {})(hostCallMarks(serverName, toolName, toolParams)),
               cwd,
               permission: req.permission,
               // Codex only asks for calls it judged not read-only (mcp_tool_call.rs:2466-2497), and it judges every call of
               // our one-gateway tools that way: a first-party read is told apart from its own arguments (codex-mcp-admission.ts).
               mutating: await codexMcpCallIsMutating({ serverName, toolName, ...(toolParams ? { toolParams } : {}) }),
+              // The gateway tool of a tool.call: the port asks the connector tool's own rule next, so the generic gateway card is not asked as well.
+              ...(codexMcpCallIsToolCall({ serverName, toolName, ...(toolParams ? { toolParams } : {}) }) ? { portAsksItsOwnRule: true as const } : {}),
               chatId: req.approvalChatId ?? chatId,
               ...(req.agentId ? { agentId: req.agentId } : {}),
               ...(req.unattended || req.noSynchronousAsk ? { unattended: true as const } : {}),
@@ -2625,6 +2674,8 @@ async function runCodexResidentTurn(input: {
               try { decision = await arbiter(ask); } catch { decision = "deny"; }
             }
             events.onStatus(`[tool-approval] runtime=${KIND} capability=other tool=${ask.tool} decision=${decision}`);
+            // The window answered "go" for this call of a connected app on the server: the bridge reads this record once (harness/host-call-ticket.ts).
+            if (decision !== "deny" && ask.mutating) grantHostCall(serverName, toolName, toolParams ?? {});
             return decision;
           },
         });
@@ -3018,6 +3069,8 @@ async function runCodexResidentTurn(input: {
           ...(health.contextWindowTokens ? { contextWindowTokens: health.contextWindowTokens } : {}),
           ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
           ...(normalEnd ? normalEndToolEvidence(normalEnd) : {}),
+          ...agentMessageFact(),
+          ...answerStartFact(),
           appliedEffort,
           // Reached only after the turn/start receipt: an uncertain result here is a turn the session holds.
           turnDelivery: "accepted",
@@ -3336,7 +3389,8 @@ async function runCodexResidentTurn(input: {
       if (turnDispatchAttempted && !terminalObserved) throw unsettledTurnError({ runtimeKind: KIND, locale: req.locale, sessionId: session.threadId, proof: lastProofStatus, actionItems: proofActionItems,
         // The typed failure the app-server reported before it went silent (the `error` notification) stays the cause; the
         // provider's own words lead the message, else the CLI's stderr.
-        cause: failure ?? undefined,
+        // Desktop R part 2: with no typed failure, a resident app-server the computer's memory shortage ended (machine fact, runtime/child-death.ts) is the cause.
+        cause: failure ?? memoryDeathCause(session.child, KIND) ?? undefined,
         providerReason: failure?.message ?? childExitReason(session.child?.exitCode, session.conn?.lastStderr),
         // Protocol fact: the turn/start receipt or this turn's turn/started notification is the session's acknowledgement.
         // A host continuation that never reached its own receipt still follows a turn this session accepted (cutResult).
@@ -3491,9 +3545,6 @@ export const runCodex: Runner = async (
 ): Promise<RunnerResult> => {
   publishCodexNativeControlState(events, "unselected", "pending", "native_control_pending");
   assertScienceRecoveryRequest(req, "codex");
-  // Validate before adding internal account/cwd transport fields. These fields
-  // cannot turn a copied JSON request into the host's opaque Alive admission.
-  const aliveAdmission = aliveDecisionProfileForRequest(req) ? req : null;
   // Judgment's gateway replaces all model input and runs with --ignore-user-config. It runs from the isolated product
   // mirror (sign-in linked, empty config) so its one-off threads land in the product store, not in the person's Codex
   // app (owner 2026-10-12: about 100 AGI judgments a day were listed there). A home that cannot be mirrored (keyring
@@ -3578,34 +3629,10 @@ export const runCodex: Runner = async (
       return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
         ownerControlTerminal: run.code === 0 && run.turnCompleted && !run.failure && run.text.trim()
           ? "completed" : "uncertain",
-        ...(aliveAdmission && run.code === 0 && run.turnCompleted && !run.failure && run.text.trim() && run.threadId
-          ? { sessionId: run.threadId } : {}),
         ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}), ...(request.effort ? { appliedEffort: request.effort } : {}) };
     };
     const dependencies = { ...(capacities.length ? { contextWindowTokens: Math.min(...capacities) } : {}) };
-    if (!aliveAdmission) return runCodexNoTools({ ...noToolsReq, effort: effort ?? undefined }, events, executeNoTools, dependencies);
-    const aliveRequest = { ...aliveAdmission, ...(aliveAdmission.model?.trim() || !noToolsModel ? {} : { model: noToolsModel }),
-      effort: effort ?? undefined };
-    const profile = aliveDecisionProfileForRequest(aliveRequest)!;
-    // The daemon profile alone selects this lane. A native boundary failure
-    // cannot retry through ordinary exec after input may have been delivered.
-    let residentFingerprint: string;
-    try { residentFingerprint = await codexAliveResidentGeneration(bin); }
-    catch (error) {
-      const code = error instanceof Error && /^codex_alive_[a-z_]+$/u.test(error.message)
-        ? error.message : "codex_alive_native_failed";
-      return { text: "", ownerControlTerminal: "uncertain", failure: {
-        kind: code.endsWith("unsupported") ? "unsupported" : "unavailable", runtime: KIND,
-        source: "marker", providerCode: code, message: code } };
-    }
-    return runCodexAliveNoTools(aliveRequest, events, executeNoTools, {
-      ...dependencies, residentFingerprint,
-      resident: input => runCodexAliveResidentTurn({ ...input, bin, originalRequest: aliveRequest,
-        executionEnv: req.env ?? process.env }, events),
-      closeResident: () => closeCodexAliveResidentOwner(profile.resourceOwnerKey),
-      verifyResidentResult: (result, nonce, expectedNativeHandle) =>
-        consumeCodexAliveResidentResult(result, aliveRequest, nonce, expectedNativeHandle),
-    }, req.env);
+    return runCodexNoTools({ ...noToolsReq, effort: effort ?? undefined }, events, executeNoTools, dependencies);
   }
   if (req.minimalObservation && !req.untrustedNoTools) return runCodexMinimalObservation(bin, req, events, observeNativeFile);
 
@@ -3681,6 +3708,18 @@ export const runCodex: Runner = async (
     const dir = ensureSandboxRunTmpDir(sandboxTmpScope(runReq.chatId));
     return dir ? sandboxTmpEnvConfigArgs(dir) : [];
   };
+  // `codex exec` has no approval loop, so a write run's shell asks the owner's card before it deletes through a PreToolUse hook (codex-delete-gate.ts,
+  // shell-delete-gate.ts). Opened per turn below; the handle is stable for the run key. Only exec carries it: the app-server asks the host itself.
+  const execGateWanted = runReq.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools;
+  const execGateKey = `${KIND}\0${runReq.chatId ?? ""}\0${runReq.cwd ?? agentRunCwd()}\0${runtimeSessionOwnerId ?? ""}`;
+  const execDeleteGateArgs = (): string[] => {
+    if (!execGateWanted) return [];
+    // Main and the daemon start the wire at boot; this only re-binds it if it went away, and only on the exec path (the hook refuses a delete it cannot ask about).
+    void ensureMcpProxyApprovalServer().catch(() => undefined);
+    const args = codexExecDeleteGateArgs({ control: mcpProxyControlInfoPath(), handle: shellDeleteGateHandle(execGateKey) });
+    if (args.length === 0) events.onStatus("[shell-delete-gate] runtime=codex-exec unavailable (no hook form on this OS): shell deletes are not asked about");
+    return args;
+  };
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
@@ -3701,15 +3740,11 @@ export const runCodex: Runner = async (
   // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를
   // 지원하지만, 프로필이 없거나 손상된 경우에는 2026-07-12 사고 방지용 max->xhigh
   // legacy guard를 유지한다. 그 외 미지값은 넘기지 않아 기기 설정을 따른다.
-  if (runReq.effort || runReq.model) {
-    // Read the same account home the child process will use. Main's process env
-    // may differ from a runtime-owned CODEX_HOME, and consulting another cache
-    // can validate an effort for the wrong account/model catalog.
-    // The product mirror links models_cache.json, and the cache reader refuses links: read the account's own file.
+  if (runReq.effort) {
+    // Only an explicit effort should override the CLI's configured default.
+    // Read the account home the child process will use when validating it.
     const inventory = await readCodexModelInventory(accountCodexHome(runReq.env?.CODEX_HOME));
-    const effort = runReq.effort
-      ? resolveCodexModelEffort(inventory, runReq.model, runReq.effort)
-      : defaultCodexModelEffort(inventory, runReq.model);
+    const effort = resolveCodexModelEffort(inventory, runReq.model, runReq.effort);
     if (effort) {
       appliedEffort = effort;
       modelArgs.push("-c", `model_reasoning_effort=${effort}`);
@@ -3755,6 +3790,12 @@ export const runCodex: Runner = async (
     sessionId: runReq.runtimeSessionId ? null : storedSessionId,
     unattended: runReq.unattended,
   });
+  const execShellGate = execGateWanted ? openShellDeleteGate(execGateKey, {
+    runtime: KIND, sessionKey: toolApprovalSessionKey(KIND, runReq.chatId, runReq.cwd ?? agentRunCwd()),
+    ...((runReq.approvalChatId ?? runReq.chatId) ? { chatId: (runReq.approvalChatId ?? runReq.chatId)! } : {}),
+    ...(runReq.agentId ? { agentId: runReq.agentId } : {}), cwd: runReq.cwd ?? agentRunCwd(),
+    ...(runReq.unattended ? { unattended: true } : {}), ...(runReq.signal ? { signal: runReq.signal } : {}),
+  }) : null;
   try {
   let freshReason: UnattendedFreshSessionReason | null = sessionTurn.contended ? "parallel_turn" : null;
   if (freshReason) events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
@@ -3891,6 +3932,7 @@ export const runCodex: Runner = async (
     ...isolatedConfigArgs,
     ...browserOnlyConfigArgs,
     ...execShellTmpArgs(),
+    ...execDeleteGateArgs(),
     // `codex exec` has no approval loop: ChatGPT apps only under full access (runtime-builtin-egress-policy.ts).
     ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: false, fullAccess: runReq.permission === "full" }),
     "--json",
@@ -4112,6 +4154,7 @@ export const runCodex: Runner = async (
     ...isolatedConfigArgs,
     ...browserOnlyConfigArgs,
     ...execShellTmpArgs(),
+    ...execDeleteGateArgs(),
     // `codex exec` has no approval loop: ChatGPT apps only under full access (runtime-builtin-egress-policy.ts).
     ...codexBuiltinEgressConfigArgs({ approvalsReachArbiter: false, fullAccess: runReq.permission === "full" }),
     "--json",
@@ -4182,6 +4225,7 @@ export const runCodex: Runner = async (
     `codex CLI exit ${created.code}${created.stderr ? `\n${created.stderr.slice(0, 500)}` : ""}`,
   );
   } finally {
+    execShellGate?.close();
     sessionTurn.release();
   }
 };

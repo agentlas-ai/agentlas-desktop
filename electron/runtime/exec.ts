@@ -8,6 +8,7 @@ import crossSpawn from "cross-spawn";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { StringDecoder } from "node:string_decoder";
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { userDataPath } from "../runtime-paths";
 import { onHostShutdown } from "../host-lifecycle";
@@ -17,9 +18,13 @@ import {
   recordSpawnedRunChild,
   rememberSpawnedRunChildCommand,
 } from "./spawn-registry";
+import { markChildHostKilled, observeChildDeath } from "./child-death";
 import { resolveManagedNodeRuntime } from "./managed-node";
 import { nativeCliBinDirs } from "./native-cli";
 import { claimAttemptChild, type AttemptChildren } from "./attempt-children";
+import { memoryEnvForSpawn } from "./memory-env";
+import { windowsCmdSpawnArgs } from "./windows-cmd-quote";
+import { commandForSpawn, isAbsolutePathEntry, resolveBareCommand, withNoCurrentDirectoryExeSearch } from "./safe-executable";
 
 /**
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
@@ -125,7 +130,8 @@ export function setCliPath(env: NodeJS.ProcessEnv, value: string): NodeJS.Proces
 /** Agentlas 관리 CLI를 우선하고 그 뒤에 기존 PATH와 보충 경로를 둔 새 env 반환. */
 export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const sep = path.delimiter;
-  const existing = cliPathValue(base).split(sep).filter(Boolean);
+  // Relative and empty entries resolve against the child's working folder (the user's project): never inherited.
+  const existing = cliPathValue(base).split(sep).filter((entry) => isAbsolutePathEntry(entry, process.platform));
   const managed = preferredManagedCliDir();
   const bundledNode = bundledNodeBinDir();
   const merged = Array.from(new Set([
@@ -262,12 +268,9 @@ const crossSpawnInternals = crossSpawn as unknown as {
   _parse(command: string, args: string[], options: SpawnOptions): CrossSpawnParsed;
   _enoent: { hookChildProcess(child: ChildProcess, parsed: CrossSpawnParsed): void };
 };
-// cross-spawn's own escaping (lib/util/escape.js), so the double-escaped line is the one cross-spawn would build.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const crossSpawnEscape = require("cross-spawn/lib/util/escape") as {
-  command(value: string): string;
-  argument(value: string, doubleEscapeMetaChars: boolean): string;
-};
+// cross-spawn's escape.js mis-escapes a run of two or more backslashes before a quote or at the end (a `\\"` ending
+// swallowed the arguments after it), so the cmd line is built by windows-cmd-quote.ts, not by cross-spawn.
+const CROSS_SPAWN_CMD_SHIM = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i;
 
 export const WINDOWS_CMD_ARGUMENT_NEWLINE = "windows_cmd_argument_newline";
 export const WINDOWS_UNC_CWD_CMD_UNSUPPORTED = "windows_unc_cwd_cmd_unsupported";
@@ -324,11 +327,15 @@ export function planWindowsCliSpawn(
   options: SpawnOptions,
   opts: { validate?: boolean } = {},
 ): WindowsCliSpawnPlan {
+  // cross-spawn and libuv look in options.cwd before PATH on Windows; resolve a bare name from PATH first, so a
+  // program of that name in the project folder is never the one that starts. Explicit paths are unchanged.
+  const requested = command;
+  command = commandForSpawn(command, options.env ?? process.env, "win32");
   const parsed = crossSpawnInternals._parse(command, args, options);
   const viaCmd = Boolean(parsed.file) && /\.(?:cmd|bat)$/i.test(parsed.file ?? "")
     && parsed.options.windowsVerbatimArguments === true;
   if (!viaCmd) {
-    return { command, args: [...args], options, file: parsed.file, route: "native", identity: command };
+    return { command, args: [...args], options, file: parsed.file, route: "native", identity: requested };
   }
   const batch = parsed.file!;
   const text = readWindowsBatch(batch);
@@ -341,7 +348,8 @@ export function planWindowsCliSpawn(
         return { command: program, args: [...args], options, file: program, route: "npm-shim-direct", identity: program };
       }
       const local = path.join(dir, "node.exe");
-      const node = regularFile(local) ? local : crossSpawnInternals._parse("node", [], options).file;
+      const found = resolveBareCommand("node", options.env ?? process.env, "win32");
+      const node = regularFile(local) ? local : found.kind === "resolved" ? found.command : undefined;
       if (node && /\.exe$/i.test(node)) {
         return { command: node, args: [program, ...args], options, file: node, route: "npm-shim-direct", identity: node };
       }
@@ -360,11 +368,10 @@ export function planWindowsCliSpawn(
   // A batch that forwards its arguments re-parses them: escape for both passes (cross-spawn does this only under
   // node_modules\.bin). One that cannot be read is treated as an npm-style shim, the common case.
   const reparses = text === null || /%\*|%~?[0-9]/.test(text);
-  if (reparses && !/node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(batch)) {
-    const line = [crossSpawnEscape.command(path.normalize(command)), ...args.map((arg) => crossSpawnEscape.argument(arg, true))].join(" ");
-    parsed.args = ["/d", "/s", "/c", `"${line}"`];
-  }
-  return { command: parsed.command, args: parsed.args, options: parsed.options, file: batch, route: "cmd", parsed, identity: command };
+  parsed.args = windowsCmdSpawnArgs(path.normalize(command), args, reparses || CROSS_SPAWN_CMD_SHIM.test(batch));
+  // cmd.exe itself searches the working folder for what the batch starts (`node` inside a shim) unless this is set.
+  parsed.options = { ...parsed.options, env: withNoCurrentDirectoryExeSearch(parsed.options.env) };
+  return { command: parsed.command, args: parsed.args, options: parsed.options, file: batch, route: "cmd", parsed, identity: requested };
 }
 
 /** child_process.spawn 대체 — Windows `.cmd`/`.bat` 심 해석 + GUI용 PATH 보강. */
@@ -376,7 +383,7 @@ export function spawnCli(
   args: string[],
   options: SpawnOptions,
 ): ChildProcess {
-  const env = envForCli(command, options.env ?? process.env);
+  const env = envForCli(command, memoryEnvForSpawn(options.env ?? process.env));
   if (isCurrentElectronExecutable(command)) {
     const now = Date.now();
     if (lastSelfSpawnDiagnosticAt === null || now - lastSelfSpawnDiagnosticAt >= 60_000) {
@@ -484,6 +491,15 @@ export function nodeExecPathForCode(): string {
   return process.env.npm_node_execpath || process.env.NODE || (versions.electron ? "node" : process.execPath);
 }
 
+/**
+ * The node to START now. A bare "node" (what nodeExecPathForCode returns under Electron) is a name Windows looks up in the
+ * child's working folder before PATH, and these children run in a project, tool or app folder: resolve it from PATH to the
+ * absolute file. Explicit paths and the other platforms are unchanged. (Do not store the result: it is machine-specific.)
+ */
+export function nodeCommandToStart(command: string): string {
+  return process.platform === "win32" ? commandForSpawn(command, withCliPath(process.env), "win32") : command;
+}
+
 export function agentRunCwd(): string {
   if (_runCwd) return _runCwd;
   const dir = userDataPath("agent-cwd");
@@ -550,22 +566,56 @@ function probeCliVersionOutcome(command: string, timeoutMs: number): Promise<Cli
   const key = `${command}\0${timeoutMs}`;
   const now = Date.now();
   const cached = versionProbeCache.get(key);
-  if (cached && now - cached.at < cacheMs) return cached.promise;
+  if (cached) {
+    // Inside the window nothing changed: an answer, or a probe still in flight, is shared as before.
+    if (now - cached.at < cacheMs) return cached.promise;
+    // Past the window the same executable file still answers the same version, so no process is started until the file
+    // changes (an update or a reinstall is a new identity). Measured a real installation: an idle background
+    // service started `kimi --version` (a 175 MB node process) and `agy --version` every 30 s, each time this window
+    // ended, for as long as anything kept asking which runtimes exist. No identity (a Windows command shim, an unresolved
+    // name) or no version read: asked again, as before.
+    if (cached.version && cached.identity !== null && cached.identity === cliFileIdentity(command)) return cached.promise;
+  }
 
   const promise = runProbeCliVersion(command, timeoutMs);
-  const entry = { at: now, promise };
+  const entry: VersionProbeEntry = { at: now, identity: cliFileIdentity(command), version: null, promise };
   versionProbeCache.set(key, entry);
-  // A timed-out probe answers this caller only: the next one probes again instead of reading "no version" for 30 s.
   void promise.then((outcome) => {
+    entry.version = outcome.version;
+    // A timed-out probe answers this caller only: the next one probes again instead of reading "no version" for 30 s.
     if (outcome.timedOut && versionProbeCache.get(key) === entry) versionProbeCache.delete(key);
   });
   return promise;
 }
 
-const versionProbeCache = new Map<string, { at: number; promise: Promise<CliVersionProbeOutcome> }>();
+interface VersionProbeEntry { at: number; identity: string | null; version: string | null; promise: Promise<CliVersionProbeOutcome> }
+const versionProbeCache = new Map<string, VersionProbeEntry>();
+
+/**
+ * Which executable file a version answer was read from: the resolved real path with its size, times and inode. Null when
+ * the file proves nothing about the version: it cannot be resolved, or it is a Windows command shim (.cmd/.bat/.ps1), which
+ * stays the same file while the package behind it is updated. A hand-written wrapper script that starts another binary is
+ * the one case this cannot see; the owner's full re-check (clearCliVersionProbeCache) and an app restart read it again.
+ */
+function cliFileIdentity(command: string): string | null {
+  try {
+    const resolved = path.isAbsolute(command) ? command : bareCliFileOnPath(command);
+    if (!resolved) return null;
+    const real = fs.realpathSync(resolved);
+    if (process.platform === "win32" && /\.(cmd|bat|ps1)$/i.test(real)) return null;
+    const stat = fs.statSync(real);
+    if (!stat.isFile()) return null;
+    return `${real}\0${stat.size}\0${stat.mtimeMs}\0${stat.ctimeMs}\0${stat.ino}`;
+  } catch { return null; }
+}
 
 /** Whether a bare command name is an executable file on the PATH its CLI child receives (found without starting it). */
 function bareCliOnPath(command: string): boolean {
+  return bareCliFileOnPath(command) !== null;
+}
+
+/** The executable file a bare command name resolves to on the PATH its CLI child receives, or null. */
+function bareCliFileOnPath(command: string): string | null {
   const dirs = cliPathValue(envForCli(command)).split(path.delimiter).filter(Boolean);
   const extensions = process.platform === "win32"
     ? ["", ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)]
@@ -575,11 +625,11 @@ function bareCliOnPath(command: string): boolean {
       const file = path.join(dir, command + extension);
       try {
         fs.accessSync(file, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
-        if (fs.statSync(file).isFile()) return true;
+        if (fs.statSync(file).isFile()) return file;
       } catch { /* not here */ }
     }
   }
-  return false;
+  return null;
 }
 
 /** 사용자가 명시적으로 전체 재확인을 요청했을 때 CLI 버전 증거도 새로 읽는다. */
@@ -632,15 +682,17 @@ function runProbeCliVersion(command: string, timeoutMs: number): Promise<CliVers
 
     let out = "";
     let err = "";
-    const appendBounded = (current: string, chunk: Buffer): string => {
+    const appendBounded = (current: string, text: string): string => {
       if (current.length >= 16_384) return current;
-      return (current + chunk.toString("utf8")).slice(0, 16_384);
+      return (current + text).slice(0, 16_384);
     };
+    const outDecoder = new StringDecoder("utf8");
+    const errDecoder = new StringDecoder("utf8");
     child.stdout?.on("data", (chunk: Buffer) => {
-      out = appendBounded(out, chunk);
+      out = appendBounded(out, outDecoder.write(chunk));
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      err = appendBounded(err, chunk);
+      err = appendBounded(err, errDecoder.write(chunk));
     });
     child.on("error", () => finish(null));
     child.on("close", (code) => {
@@ -816,6 +868,7 @@ function forceKillWindowsTree(child: ChildProcess): void {
 }
 
 export function killCliTree(child: ChildProcess, graceMs = 4000): void {
+  markChildHostKilled(child);   // this app ends it: the ending is never "the system killed it" (runtime/child-death.ts)
   if (process.platform === "win32" && child.pid) {
     forceKillWindowsTree(child);
     return;
@@ -976,6 +1029,8 @@ export function trackRunChild(child: ChildProcess): void {
   child.once("close", () => liveRunChildren.delete(child));
   child.once("error", () => liveRunChildren.delete(child));
   recordSpawnedRunChild(child);
+  // Desktop R part 2: the child's ending (code, signal, whether this app sent it, the kernel's memory-kill count) is kept for the runner that reads it (runtime/child-death.ts).
+  observeChildDeath(child);
   if (child.pid != null) {
     try {
       os.setPriority(child.pid, nicenessForPriority(currentRunPriority()));

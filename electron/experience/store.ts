@@ -18,6 +18,7 @@ import type {
 } from "../../shared/types";
 import { getAgentById } from "../mcp/registry";
 import { getMemoryDb as getDb } from "../memory/database";
+import { tasteDraftsWithLineInAgentStore } from "../memory/store";
 import { hasDurableRunStartReceipt } from "../store/run-events";
 import { assertMemoryWriteAllowed, revokedMemorySourceIds } from "../memory/revocations";
 import { nativeTextsFor } from "../memory/native-text";
@@ -602,7 +603,10 @@ export function listLocalTasteDrafts(agentIdValue: string): LocalTasteDraftRecor
       ORDER BY d.updated_at DESC, d.id ASC
       LIMIT 200`,
   ).all(agentId) as TasteDraftRow[];
-  return rows.map(tasteDraftFromRow);
+  // Layout switch on: a draft whose line moved to the agent's own store has no root row to JOIN (#11). Switch off: nothing is added.
+  const moved = tasteDraftsWithLineInAgentStore<TasteDraftRow>(agentId, "d.*", "", 200);
+  if (!moved.length) return rows.map(tasteDraftFromRow);
+  return [...rows, ...moved].sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 200).map(tasteDraftFromRow);
 }
 
 export interface AutoExperienceIntakeInput {
@@ -927,7 +931,7 @@ export function getExperienceOntologySummary(agentIdValue: string): ExperienceOn
        JOIN memory_entries m ON m.id = d.source_memory_id AND m.agent_id = d.agent_id
       WHERE d.agent_id = ? AND d.status = 'observation' AND m.superseded_at IS NULL`,
     agentId,
-  );
+  ) + tasteDraftsWithLineInAgentStore<TasteDraftRow>(agentId, "d.id, d.source_memory_id", "AND d.status = 'observation'", 5_000).length;
   const tasteUnclassifiedCount = scalar(
     `SELECT COUNT(*) AS n
        FROM taste_draft_candidates d
@@ -935,7 +939,7 @@ export function getExperienceOntologySummary(agentIdValue: string): ExperienceOn
       WHERE d.agent_id = ? AND d.status = 'observation' AND d.axis_candidates_json = '[]'
         AND m.superseded_at IS NULL`,
     agentId,
-  );
+  ) + tasteDraftsWithLineInAgentStore<TasteDraftRow>(agentId, "d.id, d.source_memory_id", "AND d.status = 'observation' AND d.axis_candidates_json = '[]'", 5_000).length;
   const cloudCount = packIds.size
     ? scalar(`SELECT COUNT(*) AS n FROM experience_cloud_uploads WHERE pack_id IN (${placeholders})`, ...relationParams)
     : 0;

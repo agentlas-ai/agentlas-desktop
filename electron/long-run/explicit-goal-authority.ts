@@ -12,6 +12,7 @@
 import type Database from "better-sqlite3";
 import { getDb } from "../store/db";
 import { appendLongRunEvent } from "../store/long-runs";
+import { closeGoal } from "../store/goal-close";
 import { AUTO_GOAL_SCHEMA, type GoalRevision } from "../../shared/auto-goal";
 import { resolveGoalLifecycle } from "../../shared/auto-goal";
 
@@ -188,8 +189,9 @@ export function ensureExplicitGoalContract(db: Database.Database, goalId: string
   let criteria: string[] = [];
   try { criteria = (JSON.parse(run.acceptance_criteria_json) as unknown[]).filter((c): c is string => typeof c === "string"); } catch { criteria = []; }
   const now = new Date().toISOString();
-  db.prepare(`UPDATE chat_goal_contracts SET status = 'cancelled', updated_at = ?, completed_at = ?
-    WHERE chat_id = ? AND goal_id <> ? AND status = 'active'`).run(now, now, run.root_chat_id, goalId);
+  // An older active contract of another Goal in this chat is an orphan of a cleared binding: the one close ends it (store/goal-close.ts).
+  for (const orphan of db.prepare("SELECT goal_id FROM chat_goal_contracts WHERE chat_id = ? AND goal_id <> ? AND status = 'active'")
+    .all(run.root_chat_id, goalId) as Array<{ goal_id: string }>) closeGoal(orphan.goal_id, "cancelled", "replaced", { reason: "replaced_by_explicit_goal" });
   db.prepare(`INSERT INTO chat_goal_contracts (goal_id, chat_id, objective, acceptance_criteria_json, status, created_at, updated_at, completed_at)
     SELECT ?, ?, ?, ?, 'active', ?, ?, NULL WHERE NOT EXISTS (SELECT 1 FROM chat_goal_contracts WHERE goal_id = ?)`)
     .run(goalId, run.root_chat_id, objective, JSON.stringify(criteria), run.created_at, now, goalId);

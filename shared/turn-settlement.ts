@@ -77,6 +77,43 @@ export function innermostTypedCode(error: unknown): string | undefined {
   return chain[chain.length - 1];
 }
 
+/**
+ * The machine code of "this computer could not reach the model provider" (owner-failure-class.ts reads it as the `network` external cause,
+ * which the app waits out; run-failure-notice.ts words it as a connection failure, not as the provider's refusal).
+ */
+export const NETWORK_UNREACHABLE_CODE = "network_unreachable";
+/** Socket-level errors that prove a connection to the host was not made or was lost (Node's / undici's own `code`, never prose). */
+const NETWORK_SOCKET_CODES: ReadonlySet<string> = new Set([
+  "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "ENETDOWN", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT",
+  // A connection lost after it was made carries no target in some errors: told as the network only when the error names a target that is not this computer.
+  "ENETRESET", "ECONNRESET", "ECONNABORTED", "UND_ERR_SOCKET",
+]);
+const NETWORK_TARGET_REQUIRED_CODES: ReadonlySet<string> = new Set(["ENETRESET", "ECONNRESET", "ECONNABORTED", "UND_ERR_SOCKET"]);
+/** A target on this computer (a local model server that is switched off): the internet is not the cause, so it is not told as one. */
+const LOOPBACK_TARGET_RE = /^(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|\[::1\]|localhost|0\.0\.0\.0|::ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i;
+
+/**
+ * `network_unreachable` for an error whose cause chain carries a socket-level code (data properties only, like typedCodeChain) and whose
+ * target is not this computer; null otherwise. A request that did reach the provider and was answered (any HTTP status) is never here.
+ */
+export function networkFailureCode(error: unknown): typeof NETWORK_UNREACHABLE_CODE | null {
+  let current: unknown = error;
+  const seen = new Set<object>();
+  for (let depth = 0; depth < CHAIN_LIMIT && current && (typeof current === "object" || typeof current === "function"); depth += 1) {
+    if (seen.has(current as object)) break;
+    seen.add(current as object);
+    const code = dataProperty(current, "code");
+    if (typeof code === "string" && NETWORK_SOCKET_CODES.has(code)) {
+      const target = dataProperty(current, "address") ?? dataProperty(current, "hostname");
+      if (typeof target === "string") return LOOPBACK_TARGET_RE.test(target) ? null : NETWORK_UNREACHABLE_CODE;
+      return NETWORK_TARGET_REQUIRED_CODES.has(code) ? null : NETWORK_UNREACHABLE_CODE;
+    }
+    const cause = dataProperty(current, "cause");
+    current = cause !== undefined ? cause : dataProperty(current, "error");
+  }
+  return null;
+}
+
 /** The same values as runtime/runner.ts RunnerFailureKind. */
 export type TurnFailureKind = "quota" | "rate_limit" | "auth" | "refused" | "empty" | "exit" | "timeout" | "unavailable" | "unsupported";
 

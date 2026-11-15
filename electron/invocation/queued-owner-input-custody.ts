@@ -11,6 +11,7 @@ import { pickLocale } from "../runtime/status-i18n";
 import { getProject } from "../store/projects";
 import { getSeatForChat } from "../store/seats";
 import { ensureCanonicalTaskForChat } from "../store/tasks";
+import { markedOwnerSpokeCopy } from "./owner-spoke";
 import { getInvocationAdmission, canonicalInvocationRequestJson, INVOCATION_ADMISSION_DIGEST_VERSION } from "../store/invocation-admissions";
 import { getInvocationRunReceipt } from "../store/run-events";
 import { createQueuedOwnerInputStore, type QueuedOwnerInputRow } from "../store/queued-owner-inputs";
@@ -286,6 +287,8 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
       try { assertOwner(store.ownerOf(row),queueId,"attempt"); return true; } catch { return false; }
     },
     resumeHeldQueues(restoreAuthority=false): {chatId:string;queueId:string}[] {
+      // The 2 s recovery pass runs with nothing held almost always: read first, take the write lock only with a candidate.
+      if (!store.active().some(row => row.state === "active" && row.queue_id && row.hold_code)) return [];
       return db.transaction(() => {
         const resumed: {chatId:string;queueId:string}[]=[];
         for (const row of store.active()) {
@@ -309,6 +312,8 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
       }).immediate();
     },
     recoverableRequests(restoreAuthority=false): McpInvocationRequest[] {
+      // Same as resumeHeldQueues: no unqueued active input means nothing to recover, so no write lock.
+      if (!store.active().some(row => row.state === "active" && !row.queue_id)) return [];
       return db.transaction(() => store.active().filter(row => {
         if (row.state !== "active" || row.queue_id || !ownsInput(original(row)) || !canQueuePendingSend(original(row),true)) return false;
         if (row.capture_complete!==1) {
@@ -386,7 +391,8 @@ export function createQueuedOwnerInputCustody(options: QueuedOwnerInputCustodyOp
         escrow.withAttempt(owner,attempt,() => {
           store.bindAttempt(owner,execution,epoch);
           const {preflightSubmissionId:_submission,...admittedRequest}=execution;
-          const canonical=canonicalInvocationRequestJson(admittedRequest);
+          // The start below marks the owner's own words (ipc.ts startRendererInvocation) before it computes the admission digest: this digest must see the same request.
+          const canonical=canonicalInvocationRequestJson(markedOwnerSpokeCopy(admittedRequest));
           const digest=createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION+"\0").update(canonical).digest("hex");
           db.prepare("INSERT INTO queued_owner_input_admissions VALUES (?,?)").run(execution.runId,digest);
         });

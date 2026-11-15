@@ -12,6 +12,7 @@ import {
   APP_CONTROL_MAIN_BUDGET_MS, DEVICE_BRIDGE_VERSION, DEVICE_STATE_VERSION, type DeviceOp, type DeviceSession,
 } from "../daemon/device-bridge";
 import { answerAppCallWithin, appCallKey, appCallPendingNotice } from "../app-control/pending-calls";
+import { createDaemonPhoneJobs, type DaemonPhoneStep } from '../mobile-bridge/personal-one-phone-daemon';
 
 type Channel = object & { dispatch(method: string, params: unknown): Promise<unknown>; onClose(listener: () => void): () => void };
 type Identity = object & { bootId: string };
@@ -33,10 +34,8 @@ export interface DeviceBridgeMainPorts {
   /** Runtime installation, availability or configuration changed; the store notification carries no private content. */
   subscribeRuntimeChange?(listener: () => void): () => void;
   pendingGoalIntakeRetryDelay?(): number;
-  /** NH21: execute a Goal action the service's Alive host reserved (Main owns Goal custody). Answers a value, never throws. */
-  aliveAction?(input: { domain: "work" | "one"; actionId: string }): { ok: true; result: unknown } | { ok: false; error: string };
-  /** NH21: a life changed in the service; refresh this process's screens. */
-  aliveChanged?(event: Record<string, unknown>): boolean;
+  phoneTool?(input: DaemonPhoneStep, bootId: string,
+    channel: object, channelCurrent: () => boolean): Promise<Record<string, unknown>>;
   session(): DeviceSession;
   idleSeconds(): number | null;
   subscribePower(handler: (event: "lock-screen" | "unlock-screen" | "suspend" | "resume") => void): () => void;
@@ -150,7 +149,7 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
         if (!exactKeys(payload, Object.hasOwn(payload, "permission") ? ["kind", "ownerTurn", "permission", "input"] : ["kind", "ownerTurn", "input"]) || !["operations", "call"].includes(String(payload.kind)) || typeof payload.ownerTurn !== "boolean"
           || (payload.permission !== undefined && (typeof payload.permission !== "string" || !["read", "write", "full"].includes(payload.permission)))
           || !payload.input || typeof payload.input !== "object" || Array.isArray(payload.input) || JSON.stringify(payload.input).length > 65536 || !ports.appControl) return { ok: false, error: "device_bridge_refused" };
-        // Main answers within the channel's limit (it closes for good on a request that outlives 10 s). A catalog read that runs longer is
+        // Main answers within the channel's reply bound (10 s; a request that misses it fails alone, the channel stays up: native-auth-channel.ts:46-55). A catalog read that runs longer is
         // reported; an operation call that runs longer keeps running here and the daemon asks again with the same payload: the call is
         // keyed by what it is, so the repeat joins the running operation (or takes its finished result once) instead of starting a second
         // one (app-control/pending-calls.ts). An older daemon passes the notice on to the model, which repeats the call the same way.
@@ -169,14 +168,11 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
         if (answer.outcome === "value" && JSON.stringify(answer.value ?? null).length > 600_000) return { ok: true, outcome: "error", code: "result-too-large", message: "The result is too large; narrow the query." };
         return { ok: true, ...answer };
       }
-      if (op === "aliveAction") {
-        if (!exactKeys(payload, ["domain", "actionId"]) || (payload.domain !== "work" && payload.domain !== "one") || !id(payload.actionId) || !ports.aliveAction) return { ok: false, error: "device_bridge_refused" };
-        const answer = ports.aliveAction({ domain: payload.domain, actionId: payload.actionId });
-        return answer.ok ? { ok: true, result: answer.result } : { ok: false, error: /^[a-z][a-z0-9_]{1,99}$/.test(answer.error) ? answer.error : "device_bridge_refused" };
-      }
-      if (op === "aliveChanged") {
-        if (!ports.aliveChanged || !ports.aliveChanged(payload)) return { ok: false, error: "device_bridge_refused" };
-        return { ok: true };
+      if (op === "phoneTool") {
+        if (!exactKeys(payload, ["phase", "runId", "chatId", "inputDigest", "callId", "name", "input"]) || !ports.phoneTool) return { ok: false, error: "device_bridge_refused" };
+        const result = await ports.phoneTool(payload as unknown as DaemonPhoneStep,
+          live.bootId, channel, () => ports.channelIdentity(channel) === live);
+        return ports.channelIdentity(channel) === live ? { ok: true, ...result } : { ok: false, error: "device_bridge_disconnected" };
       }
       if (op === "disposeOsExecution") {
         if (!exactKeys(payload, ["executionId"]) || !id(payload.executionId)) return { ok: false, error: "device_bridge_refused" };
@@ -211,6 +207,7 @@ export async function deviceBridgeMain(): Promise<ReturnType<typeof createDevice
     import("../daemon/native-auth-channel"), import("../one/supervisor-os-execution"), import("../runtime/chat-host-handover"), import("./goal-intake-forward"), import("electron"),
   ]);
   const power = electron.powerMonitor;
+  const phoneJobs = new WeakMap<object, ReturnType<typeof createDaemonPhoneJobs>>();
   instance ??= createDeviceBridgeMain({
     channelIdentity: channel => nativeGuiChannelIdentity(channel) as Identity | undefined,
     prepare: input => {
@@ -227,11 +224,34 @@ export async function deviceBridgeMain(): Promise<ReturnType<typeof createDevice
       const { onDesktopStoreChange } = require("../store/change-bus") as typeof import("../store/change-bus");
       return onDesktopStoreChange(change => { if (change.entity === "runtime") listener(); });
     },
-    aliveAction: input => {
-      try { return require("../alive-organisms").executeForwardedAliveAction(input); }
-      catch (error) { return { ok: false, error: codeOf(error) === "device_bridge_refused" ? "alive_action_failed" : codeOf(error) }; }
+    phoneTool: async (input, bootId, channel, channelCurrent) => {
+      let jobs = phoneJobs.get(channel);
+      if (!jobs) {
+        jobs = createDaemonPhoneJobs({
+          current: async (step, daemonBoot, live) => {
+            if (!live()) return false;
+            const [{ getDb }, { getOneProfile }, { getInvocationAdmission }, { invocationRunOwners }, { phoneOriginForRun }] = await Promise.all([
+              import('../store/db'), import('../store/one-profile'), import('../store/invocation-admissions'), import('../store/invocation-run-owners'), import('../one/personal-one-phone-origin'),
+            ]);
+            const db = getDb(), oneId = getOneProfile().oneId;
+            const rows = db.prepare("SELECT one_id,origin_chat_id,state FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND kind='reply'").all(oneId, step.runId) as Array<{one_id:string;origin_chat_id:string;state:string}>;
+            const owner = invocationRunOwners.getRunOwner(step.chatId, step.runId), admission = getInvocationAdmission(step.runId);
+            const domain = db.prepare("SELECT one_id,owner_epoch,phase,lease_until FROM one_supervisor_runtime_owner WHERE slot='personal'").get() as {one_id:string;owner_epoch:string;phase:string;lease_until:number}|undefined;
+            return live() && rows.length === 1 && rows[0]!.origin_chat_id === step.chatId && ['dispatching','accepted'].includes(rows[0]!.state)
+              && !!phoneOriginForRun(db, oneId, step.runId) && owner?.state === 'active' && owner.ownerKind === 'daemon' && owner.ownerId === daemonBoot
+              && admission?.status === 'admitted' && admission.chatId === step.chatId && admission.ownerProcessEpoch === daemonBoot && admission.inputDigest === step.inputDigest
+              && domain?.one_id === oneId && domain.owner_epoch === daemonBoot && domain.phase === 'active' && domain.lease_until > Date.now();
+          },
+          request: async (step, signal) => {
+            const [{ getOneProfile }, { requestPersonalOnePhoneToolForRun }] = await Promise.all([import('../store/one-profile'), import('../mobile-bridge/personal-one-phone-tools')]);
+            return requestPersonalOnePhoneToolForRun(getOneProfile().oneId, step.runId, step.callId, step.name, step.input, signal);
+          },
+        });
+        phoneJobs.set(channel, jobs);
+        (channel as Channel).onClose(() => { jobs?.close(); phoneJobs.delete(channel); });
+      }
+      return jobs.step(input, bootId, channelCurrent);
     },
-    aliveChanged: event => { try { return require("../alive-organisms").aliveChangedFromService(event) as boolean; } catch { return false; } },
     appControl: async input => {
       // A Reach call handed over by the background service, which has no screen driver of its own (reach-host/forward.ts).
       if (input.kind === "call") {

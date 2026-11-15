@@ -1,10 +1,11 @@
 import { stableScienceRuntimeChatId } from "../runtime/science-transport-identity";
+import { answerTailHash, locateAnswerStart } from "../runtime/final-answer-turns";
 import { SCIENCE_SURFACE_PACK, tagSurfacePackChatsInDb } from "./surface-conversation-schema";
 // Chat CRUD + chat_messages.
 // 사이드바 "최근 채팅" 섹션은 listRecent로 채운다.
 // 프로젝트 페이지는 listByProject로, 회사 페이지는 listByFirm으로 채운다.
 import { createHash, randomUUID } from "node:crypto";
-import { AGI_ACTION_NOTICE_AUTOMATION_ID, normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-host-notice";
+import { AGI_ACTION_NOTICE_AUTOMATION_ID, agiActionNoticeLine, normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-host-notice";
 import { invocationFailureNoticeStatuses } from "./run-events";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
@@ -20,7 +21,10 @@ import { repairAskOpenMarkers } from "../../shared/agent-control-blocks";
 import { emitDesktopStoreChange, emitTaskStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
 import { evictRuntimeSessionsForChat, recordRuntimeSessionsCleared } from "./runtime-sessions";
-import { inheritWorkingSessionScope, bindManagedWorkingSessionScope, bindWorkingSessionScope, workingSessionScope, type WorkingSessionScope } from "../runtime/session-scope";
+import { removeRoomMemberCwd } from "../runtime/room-member-cwd";
+import { removeSessionCwd } from "../runtime/session-cwd";
+import { purgeOrphanRoomRows, purgeRoomRows, roomMemberSessionIds } from "./room-purge";
+import { inheritWorkingSessionScope, bindManagedWorkingSessionScope, bindWorkingSessionScope, workingSessionScope, isolatedChildKey, purgeOrphanChatMarks, type WorkingSessionScope } from "../runtime/session-scope";
 import { getProject, touchProject } from "./projects";
 import {
   listChatMessageImageUrls,
@@ -49,6 +53,7 @@ import {
 
 interface ChatRow {
   id: string;
+  parent_chat_id?: string | null;
   project_id: string | null;
   firm_id: string | null;
   agent_id: string;
@@ -183,6 +188,7 @@ function toChat(row: ChatRow, resolvedTaskId?: string | null, supervisedRooms?: 
     swarmMode: row.swarm_mode === 1,
     goalId: row.goal_id ?? null,
     originSurface: row.origin_surface === "one" ? "one" : "work",
+    ...(row.parent_chat_id ? { parentChatId: row.parent_chat_id } : {}),
     runtimeSelection: parseChatRuntimeSelection(row.runtime_selection_json),
     // 좌석 상호참조 + 표시 스냅샷(I2) — 좌석이 소멸해도 이 칸만으로 렌더된다.
     seatId: row.seat_id ?? null,
@@ -515,9 +521,13 @@ export function createChat(input: {
       seatId = parent?.seatId ?? null;
     }
     if (!seatId) {
+      // A teammate's own Agent Chat inside a project sits in that project's seat; every other One
+      // chat (the personal agent's, Telegram, mail, a briefing review) keeps the global seat exactly as before.
+      const projectSeat = originSurface === "work"
+        || (input.kind !== "division" && isOneOrgMemberAgentId(resolvedAgentId));
       seatId = ensureSoloSeatForAgent(
         resolvedAgentId,
-        originSurface === "work" ? input.projectId ?? null : null,
+        projectSeat ? input.projectId ?? null : null,
       );
     }
   } catch {
@@ -754,6 +764,7 @@ export function getOrCreateOneMemberChat(agentId: string, title: string): Chat {
          AND kind = 'user'
          AND archived_at IS NULL
          AND agent_id = ?
+         AND project_id IS NULL
          ${oneDispatchSidebarPredicate()}
        ORDER BY (used_at IS NOT NULL) DESC, updated_at DESC
        LIMIT 1`,
@@ -790,6 +801,7 @@ export function getOrCreateEmptyOneMemberChat(agentId: string, title: string): C
          AND c.kind = 'user'
          AND c.archived_at IS NULL
          AND c.agent_id = ?
+         AND c.project_id IS NULL
          AND c.used_at IS NULL
          AND c.parent_chat_id IS NULL
          AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id)
@@ -910,6 +922,9 @@ export function renameChat(id: string, title: string): Chat {
 }
 
 export function archiveChat(id: string): Chat {
+  try { (require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).stopLeadRoom(id); } catch { /* not a group room */ } // eslint-disable-line @typescript-eslint/no-require-imports
+  // An archived room keeps nothing running: the members' resident CLIs are registered under their child sessions, not the room.
+  try { (require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).releaseRoomMemberResidency(id); } catch { /* the idle trim finds them */ } // eslint-disable-line @typescript-eslint/no-require-imports
   getDb()
     .prepare("UPDATE chats SET archived_at = ? WHERE id = ?")
     .run(new Date().toISOString(), id);
@@ -940,6 +955,22 @@ export function unarchiveChat(id: string): Chat {
 }
 
 export function removeChat(id: string): void {
+  // The room goes with everything of its own (removeChatTree). What an older build left behind for rooms that were already gone is
+  // swept once at app start (recoverInterruptedLeadRooms), not on every delete: this build makes no new orphans, and the sweep reads
+  // seven tables against the whole chat list each time.
+  removeChatTree(id);
+}
+
+/** Removes one chat with everything that goes with it (and, for a room, its member sessions). True when the chat existed. */
+function removeChatTree(id: string): boolean {
+  try { (require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).stopLeadRoom(id); } catch { /* not a group room */ } // eslint-disable-line @typescript-eslint/no-require-imports
+  // A room's members work in hidden child sessions: they, their idle CLIs, the room's message index and cursors go with the room
+  // (item 1: only the room row was deleted, so a 500-turn room left its children, its answers and every index row for good).
+  const memberSessions = roomMemberSessionIds(getDb(), id);
+  if (memberSessions.length > 0) {
+    try { (require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).releaseRoomMemberResidency(id); } catch { /* the idle trim finds them */ } // eslint-disable-line @typescript-eslint/no-require-imports
+    for (const child of memberSessions) { try { removeChatTree(child); } catch { /* the next sweep takes what is left */ } }
+  }
   const task = findCanonicalTaskForChat(id);
   const folders = (() => {
     try {
@@ -947,14 +978,71 @@ export function removeChat(id: string): void {
       return [row?.workingFolder, row?.projectId ? getProject(row.projectId)?.folderPath : null, userDataPath("agent-cwd")];
     } catch { return []; }
   })();
-  const result = getDb().prepare("DELETE FROM chats WHERE id = ?").run(id);
+  const db = getDb();
+  // The checkpoints in the root memory store go with the conversation (after the commit, like the session file's); its parent is read now.
+  const parentChatId = (db.prepare("SELECT parent_chat_id AS p FROM chats WHERE id = ?").get(id) as { p: string | null } | undefined)?.p ?? null;
+  const result = db.transaction(() => {
+    // Agentlas 2.0 N4: the conversation's Goals and their records go with it, in this transaction (store/goal-close.ts): each Goal it owns
+    // is closed through closeGoal and then its run (events, tasks, workers, attempts, receipts), plan tree, KPIs, episode captures,
+    // queued steers and journal heads are deleted. A Goal another conversation holds, a Science run and the seat journals other
+    // conversations share are left alone.
+    if (db.prepare("SELECT 1 FROM chats WHERE id = ?").get(id)) {
+      const chain = require("./goal-close") as typeof import("./goal-close"); // eslint-disable-line @typescript-eslint/no-require-imports
+      chain.removeGoalRecordsOfChat(db, id);
+      chain.removeJournalHeadsOfChat(db, id);
+    }
+    const deleted = db.prepare("DELETE FROM chats WHERE id = ?").run(id);
+    if (deleted.changes > 0) purgeRoomRows(db, [id]);
+    return deleted;
+  }).immediate();
   if (result.changes > 0) {
+    // A big Goal ledger or journal the transaction only detached is removed in small pieces now (storage/deleted-chat-ledgers.ts); a no-op
+    // when nothing was detached.
+    try { (require("../storage/deleted-chat-ledgers") as typeof import("../storage/deleted-chat-ledgers")).scheduleDeletedChatLedgerDrainIfDetached(); } catch { /* the next start continues it */ } // eslint-disable-line @typescript-eslint/no-require-imports
+    // The conversation leaves every chain of messages between conversations it was in (harness/peer-chain.ts); a waiting message of it went with its row.
+    try { (require("../harness/peer-chain") as typeof import("../harness/peer-chain")).forgetChatInPeerChains(getDb(), id); } catch { /* the weekly sweep takes what is left */ } // eslint-disable-line @typescript-eslint/no-require-imports
+    // The room's isolation mark has no reader once the room is gone (session-scope.ts reads it by chat id only).
+    try { getDb().prepare("DELETE FROM meta WHERE key = ?").run(isolatedChildKey(id)); } catch { /* a stale mark is harmless */ }
+    // Its children go with it (cascade) and so do their marks.
+    purgeOrphanChatMarks(getDb());
+    // The folder a group room without a folder of its own gave its members (agent-cwd/<room id>) goes with the room.
+    try { removeRoomMemberCwd(id); } catch { /* the room is gone; a leftover folder holds nothing the app reads */ }
+    // A session without a project had its own folder (agent-cwd/<chat id>, runtime/session-cwd.ts): it goes with the session.
+    try { removeSessionCwd(id); } catch { /* best effort */ }
     if (task?.originChatId === id) removeCanonicalTaskForOriginChat(id);
     removeCanvasExports(id);
+    // The chat's continuation checkpoints in the session store. Best effort: a line left behind is hidden with the chat and pruned at 90 days.
+    try { (require("../memory/session-store") as typeof import("../memory/session-store")).forgetSessionCheckpointsForChat(id); } catch { /* retention removes it */ }
+    try { (require("../memory/session-checkpoints") as typeof import("../memory/session-checkpoints")).forgetRootSessionCheckpointsForChat(id, parentChatId); } catch { /* retention removes it */ } // eslint-disable-line @typescript-eslint/no-require-imports
     // The oversized inputs kept as files for this conversation (store/chat-input-spill.ts): in its working folder, its project folder and the default run folder.
     void removeChatInputSpills(id, folders).catch(() => undefined);
     emitDesktopStoreChange({ entity: "chat", id });
   }
+  return result.changes > 0;
+}
+
+/**
+ * Removes what deleted rooms left in an older store: their message-index and cursor rows, and the hidden member sessions that still
+ * name a parent that is gone. Runs once at app start (recoverInterruptedLeadRooms). Returns the number
+ * of sessions and rows removed. Never throws.
+ */
+export function sweepOrphanRoomRows(): number {
+  try {
+    const db = getDb();
+    const found = purgeOrphanRoomRows(db);
+    // trial: a dev app opened on a copy of the owner's data lost 27 conversations, 918 messages and 1,777 room messages at start and nothing said where it went. What this sweep removes is only the
+    // leftovers of rooms the owner deleted earlier (unreachable from every screen); it is counted here, once, as numbers only - never a body, title or name. Nothing is stored; nothing is logged when nothing was removed.
+    let messages = 0, attachments = 0, sessions = 0, removed = found.rows;
+    const countOf = (table: string, id: string): number => { try { return Number((db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE chat_id = ?`).get(id) as { n: number }).n); } catch { return 0; } };
+    for (const sessionId of found.orphanSessionIds) {
+      const m = countOf("chat_messages", sessionId), a = countOf("chat_message_attachments", sessionId);
+      try { if (removeChatTree(sessionId)) { removed += 1; sessions += 1; messages += m; attachments += a; } } catch { /* kept for the next sweep */ }
+    }
+    if (found.rows > 0 || sessions > 0) {
+      console.info(`[storage] orphan room sweep ${JSON.stringify({ roomRows: found.byTable, orphanSessions: sessions, messages, attachments })}`);
+    }
+    return removed;
+  } catch { return 0; }
 }
 
 // ── working folder (워크스페이스 패널) ──────────────────────
@@ -989,18 +1077,6 @@ export function setChatGoalBinding(chatId: string, goalId: string | null): void 
     .prepare("UPDATE chats SET goal_id = ?, updated_at = ? WHERE id = ?")
     .run(goalId, new Date().toISOString(), chatId);
   emitDesktopStoreChange({ entity: "chat", id: chatId });
-}
-
-/** goal 축으로 바인딩 해제 — 목표가 완료/종료되면 그 goal_id를 문 채팅의 칩을
- *  정직하게 끈다. 프롬프트 문자열 파싱 없이 축으로만 찾는다. */
-export function clearChatGoalBindingByGoalId(goalId: string): number {
-  if (!goalId.trim()) return 0;
-  const now = new Date().toISOString();
-  const result = getDb()
-    .prepare("UPDATE chats SET goal_id = NULL, continuous_mode = 0, updated_at = ? WHERE goal_id = ?")
-    .run(now, goalId);
-  if (result.changes > 0) emitDesktopStoreChange({ entity: "chat" });
-  return result.changes;
 }
 
 /** 가벼운 goal 축 판독 — toChat(Task 재조정) 없이 goal_id만 읽는다(핫패스: 실행 루프). */
@@ -1346,6 +1422,54 @@ function storedGoalResults(chatId: string, messageIds: string[]): Map<string, Go
     if (parsed) result.set(JSON.parse(row.payload_json).messageId, parsed);
   }
   return result;
+}
+
+/**
+ * Where a saved answer starts inside its text (runtime/final-answer-turns.ts): the sentences before the last tool call are progress,
+ * and only a phone and a notification body leave them out. The saved text and every desktop surface keep all of it.
+ *
+ * Writer: mcp/client.ts, once per answered turn whose answer does not start at 0. Readers: the phone's history projection, the phone's
+ * final event and the notification body (mobile-bridge/projector.ts, authority.ts). One small ledger row per such answer (message id, the
+ * start, the saved text's length, a hash of the 32 characters before the start: no chat text), kept under the run-event ledgers rule
+ * and read by message id with the (chat, kind) index like goal_result_presentation. A row older than its retention, or from before this
+ * existed, simply means "the whole text": nothing reads a missing row as an error.
+ */
+export interface StoredAnswerStart { at: number; len: number; tailHash: number | null }
+
+export function recordAnswerStart(p: { chatId: string; runId: string; messageId: string; text: string; from: number }): boolean {
+  if (!p.chatId || !p.runId || !p.messageId || p.messageId.length > 256 || !Number.isInteger(p.from) || p.from <= 0 || p.from >= p.text.length) return false;
+  const db = getDb();
+  runWithStoreBusyRetry(() => db.prepare(`INSERT INTO run_events(id, run_id, seq, ts, kind, chat_id, payload_json)
+    VALUES (?, ?, (SELECT COALESCE(MAX(seq) + 1, 0) FROM run_events WHERE run_id = ?), ?, 'answer_start', ?, ?)`)
+    .run(randomUUID(), p.runId, p.runId, new Date().toISOString(), p.chatId,
+      JSON.stringify({ messageId: p.messageId, at: p.from, len: p.text.length, tailHash: answerTailHash(p.text, p.from) })));
+  return true;
+}
+
+/** The recorded answer starts of these messages of one chat (a message with none is absent). */
+export function storedAnswerStarts(chatId: string, messageIds: readonly string[]): Map<string, StoredAnswerStart> {
+  const result = new Map<string, StoredAnswerStart>();
+  if (!chatId || messageIds.length === 0) return result;
+  try {
+    const rows = getDb().prepare(`SELECT payload_json FROM run_events WHERE chat_id = ? AND kind = 'answer_start'
+      AND json_extract(payload_json, '$.messageId') IN (${messageIds.map(() => "?").join(",")}) ORDER BY rowid ASC`)
+      .all(chatId, ...messageIds) as { payload_json: string }[];
+    for (const row of rows) {
+      const value = JSON.parse(row.payload_json) as Record<string, unknown>;
+      if (typeof value.messageId === "string" && Number.isInteger(value.at) && Number.isInteger(value.len)) {
+        result.set(value.messageId, { at: value.at as number, len: value.len as number,
+          tailHash: typeof value.tailHash === "number" ? value.tailHash : null });
+      }
+    }
+  } catch { /* an unreadable ledger means "the whole text", never a failed read of the chat */ }
+  return result;
+}
+
+/** Where the answer starts in `text` (a copy of the saved text or of what the phone event carried); 0 = the whole text. */
+export function answerStartIn(text: string, recorded: StoredAnswerStart | undefined): number {
+  if (!recorded || recorded.at <= 0) return 0;
+  if (text.length === recorded.len) return recorded.at < text.length && text.slice(recorded.at).trim() ? recorded.at : 0;
+  return recorded.tailHash === null ? 0 : locateAnswerStart(text, { at: recorded.at, tailHash: recorded.tailHash });
 }
 
 /** Bind by exact persisted body and invocation interval, never by "latest answer" alone. */
@@ -1751,15 +1875,28 @@ export function listAgentRoomWorkMessages(agentId: string, limit: number): Array
 }
 
 const AGI_ACTION_RUN_PREFIX = "agi-action:";
+/** The two sentences the retired unblocker's restart ask was written with (the line without its "AGI:" lead). Fixed host text, never model text. */
+const RETIRED_RESTART_ASK_LINES: ReadonlySet<string> = new Set([
+  "앱을 다시 시작하면 풀릴 것 같아요 — 괜찮을 때 재시작해 주세요",
+  "restarting the app should clear this — please restart when convenient",
+]);
 
-/** AGI restart asks (action ids) whose incident has closed. Stores without the AGI tables withdraw nothing. */
-function closedAgiRestartAskIds(actionIds: readonly string[]): ReadonlySet<string> {
-  const ids = [...new Set(actionIds)].slice(0, 200);
+/**
+ * "Restart the app" asks the retired AGI unblocker wrote (action ids). The update that retired it restarted the app, so none is current
+ * any more. Read from the unblocker's own receipts while that table exists; once the 2.0 harness cleanup dropped it, every such line is withdrawn (below).
+ */
+function retiredRestartAskIds(asks: ReadonlyArray<{ id: string; line: string | null }>): ReadonlySet<string> {
+  const ids = [...new Set(asks.map((ask) => ask.id))].slice(0, 200);
   if (!ids.length) return new Set();
   try {
-    const rows = getDb().prepare(`SELECT r.action_id FROM agi_action_receipts r JOIN agi_incidents i ON i.id = r.incident_id
-      WHERE r.action = 'request_app_restart' AND r.ok = 1 AND i.status = 'resolved'
-        AND r.action_id IN (${ids.map(() => "?").join(",")})`).all(...ids) as Array<{ action_id: string }>;
+    // Agentlas 2.0: the first-run migration's harness cleanup drops the receipts table. Without it the receipt cannot say which line was the restart ask, so the host's own
+    // fixed sentence of that ask (both languages, `RETIRED_RESTART_ASK_LINES`) decides: only those lines stay withdrawn. A failed ask, a "changed the runtime" report and
+    // every other line the unblocker wrote are history the owner may still read (defect 10).
+    if (!getDb().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agi_action_receipts'").get()) {
+      return new Set(asks.filter((ask) => ask.line !== null && RETIRED_RESTART_ASK_LINES.has(ask.line)).map((ask) => ask.id));
+    }
+    const rows = getDb().prepare(`SELECT action_id FROM agi_action_receipts
+      WHERE action = 'request_app_restart' AND ok = 1 AND action_id IN (${ids.map(() => "?").join(",")})`).all(...ids) as Array<{ action_id: string }>;
     return new Set(rows.map((row) => row.action_id));
   } catch { return new Set(); }
 }
@@ -1769,19 +1906,19 @@ function closedAgiRestartAskIds(actionIds: readonly string[]): ReadonlySet<strin
  * is never rewritten; every history reader (One, Work, split pane, phone, thread read) gets the same projection:
  *  - a run failure line whose request a later run took over reads "recovered" (quiet on every surface);
  *  - a "needs-owner" run failure whose code is inside the app reads "app-failed" (shared/run-failure-cause.ts);
- *  - an AGI "restart the app" ask whose incident has closed is withdrawn (drawn nowhere).
+ *  - a "restart the app" ask the retired AGI unblocker wrote is withdrawn (drawn nowhere).
  */
-function createSettledHostNoticeProjector(chatId: string, notices: ReadonlyArray<ChatHostNotice | undefined>): (notice: ChatHostNotice | undefined) => ChatHostNotice | undefined {
-  const failureRunIds: string[] = [], askIds: string[] = [];
-  for (const notice of notices) {
+function createSettledHostNoticeProjector(chatId: string, notices: ReadonlyArray<ChatHostNotice | undefined>, texts: ReadonlyArray<string> = []): (notice: ChatHostNotice | undefined) => ChatHostNotice | undefined {
+  const failureRunIds: string[] = [], askIds: Array<{ id: string; line: string | null }> = [];
+  notices.forEach((notice, index) => {
     if (notice?.purpose === "host-status" && (notice.status === "needs-owner" || notice.status === "app-failed")) failureRunIds.push(notice.runId);
     if (notice?.purpose === "automation-report" && notice.automationId === AGI_ACTION_NOTICE_AUTOMATION_ID
-      && notice.runId.startsWith(AGI_ACTION_RUN_PREFIX)) askIds.push(notice.runId.slice(AGI_ACTION_RUN_PREFIX.length));
-  }
+      && notice.runId.startsWith(AGI_ACTION_RUN_PREFIX)) askIds.push({ id: notice.runId.slice(AGI_ACTION_RUN_PREFIX.length), line: agiActionNoticeLine(notice, texts[index] ?? "") });
+  });
   if (!failureRunIds.length && !askIds.length) return (notice) => notice;
   let statuses: ReadonlyMap<string, "recovered" | "app-failed"> = new Map();
   try { statuses = failureRunIds.length ? invocationFailureNoticeStatuses(chatId, failureRunIds) : statuses; } catch { /* written status stands */ }
-  const withdrawn = closedAgiRestartAskIds(askIds);
+  const withdrawn = retiredRestartAskIds(askIds);
   return (notice) => {
     if (notice?.purpose === "host-status") {
       const next = statuses.get(notice.runId);
@@ -1800,7 +1937,7 @@ function projectChatMessageRows(chatId: string, rows: MessageRow[]): ChatHistory
   const legacyResults = legacyGoalResults(chatId, rows.filter((row) => row.role === "assistant" && !goalResults.has(row.id)).map((row) => row.id));
   const projectDispatchNotice = createOneDispatchNoticeProjector(chatId);
   const parsedNotices = rows.map((r) => parseChatHostNotice(r.role, r.host_notice_json));
-  const projectSettledNotice = createSettledHostNoticeProjector(chatId, parsedNotices);
+  const projectSettledNotice = createSettledHostNoticeProjector(chatId, parsedNotices, rows.map((row) => row.text));
   return rows.map((r, index) => {
     const hostNotice = projectSettledNotice(projectDispatchNotice(parsedNotices[index]));
     return {
@@ -1840,10 +1977,41 @@ export function markChatViewed(chatId: string): void {
 }
 
 /** 채팅의 가장 마지막 메시지 1개 (확인 대기 판별용 — 마지막이 미답변 질문 fence면 pending). */
+/** Id prefix of the one-line record of a permission request that closed without this phone's answer (runtime/approval-closure-notice.ts). */
+export const APPROVAL_CLOSED_ROW_PREFIX = "approval-closed:";
+
+/**
+ * R3-3: the one quiet line "this request closed (timed out / answered on the computer / ...)" kept in the conversation, so a phone that was
+ * away when the card closed reads it from history later. A 'view' row: shown by the history readers (phone history page, One/Room panes), never
+ * part of the runtime's input (listChatMessages leaves 'view' rows out, so the model reads nothing new). The id is the request's own, so a second
+ * call for the same request inserts nothing. Read by: invoke.historyPage / chats.messagesPage. Removed with the chat's messages (clearChatMessages,
+ * removeChat); no table of its own. Returns "written", "exists" (this request already has its line), or "refused" (no such chat / unusable input).
+ */
+export function recordApprovalClosedRow(input: { requestId: string; chatId: string; text: string; createdAt: string }): "written" | "exists" | "refused" {
+  if (!input.requestId || input.requestId.length > 256) return "refused";
+  return recordViewNoticeRow({ id: `${APPROVAL_CLOSED_ROW_PREFIX}${input.requestId}`, chatId: input.chatId, text: input.text, createdAt: input.createdAt });
+}
+
+/** Id prefix of the one-line notice "a connected app finished a job" (one/server-apps-real.ts; F6). Like the closed-request line it is a display row, never the runtime's input, never the last message. */
+export const SERVER_APP_DONE_ROW_PREFIX = "server-app-done:";
+
+/** One quiet display row (a 'view' system row) with an id the caller owns: the shared body of the closed-request line and the finished-job line. Same rules: no such chat = refused, same id twice = "exists". */
+export function recordViewNoticeRow(input: { id: string; chatId: string; text: string; createdAt: string }): "written" | "exists" | "refused" {
+  if (!input.id || input.id.length > 300 || !input.text.trim() || !Number.isFinite(Date.parse(input.createdAt))) return "refused";
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM chats WHERE id = ?").get(input.chatId)) return "refused";
+  // A locked store is waited out the way every chat write does it (the line is written from a timer or an abort handler and must not be lost to a busy moment).
+  const changed = runWithStoreBusyRetry(() => db.prepare("INSERT OR IGNORE INTO chat_messages (id, chat_id, role, text, created_at, row_scope) VALUES (?, ?, 'system', ?, ?, 'view')")
+    .run(input.id, input.chatId, input.text, input.createdAt).changes);
+  if (changed) emitDesktopStoreChange({ entity: "chat", id: input.chatId });
+  return changed > 0 ? "written" : "exists";
+}
+
 export function getLastChatMessage(chatId: string): ChatHistoryEntry | null {
+  // The closed-request line is a record beside the conversation, never its last message (a pending question card is judged by the last row).
   const row = getDb()
     .prepare(
-      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND id NOT LIKE 'approval-closed:%' AND id NOT LIKE 'server-app-done:%' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .get(chatId) as MessageRow | undefined;
   return row
@@ -1877,7 +2045,7 @@ export function clearChatContext(chatId: string): void {
   emitDesktopStoreChange({ entity: "chat", id: chatId });
 }
 
-function autoTitleValue(message: string): string {
+export function autoTitleValue(message: string): string {
   const condensed = message.replace(/\s+/g, " ").trim();
   return condensed.length > 36 ? condensed.slice(0, 34) + "…" : condensed;
 }

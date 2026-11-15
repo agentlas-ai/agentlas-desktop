@@ -288,9 +288,9 @@ export default function CloudAgentPublishPage() {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--muted-deep)", fontSize: 11 }}>
-            <span style={{ height: 1, background: "var(--line)", flex: 1 }} />
+            <span style={{ height: 1, background: "var(--paper-edge)", flex: 1 }} />
             {ko ? "또는 로컬 폴더" : "or a local folder"}
-            <span style={{ height: 1, background: "var(--line)", flex: 1 }} />
+            <span style={{ height: 1, background: "var(--paper-edge)", flex: 1 }} />
           </div>
           <button onClick={chooseFolder} disabled={Boolean(running)} style={folderPicker}>
             <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>
@@ -824,7 +824,7 @@ function classifyUploadFailure(
       issue: {
         severity: "warning",
         message: ko
-          ? `Cloud에 같은 이름의 항목이 ${saved ? `${saved}에 저장된 채로 ` : ""}있는데, 이 컴퓨터에는 그걸 이 폴더에서 올렸다는 기록이 없습니다. 아무것도 올라가지 않았고 바뀐 것도 없습니다.`
+          ? `Cloud에 같은 이름의 항목이 ${saved ? `${saved}에 저장된 채로 ` : ""}있는데, 이 데스크탑에는 그걸 이 폴더에서 올렸다는 기록이 없어요. 아무것도 올라가지 않았고 변경된 내용도 없어요.`
           : `A listing with this name is already in your Cloud${saved ? `, last saved ${saved}` : ""}, and this computer has no record of uploading it from this folder. Nothing was uploaded and nothing changed.`,
         remediation: ko
           ? "이 폴더가 더 최신이면 아래에서 바꿔치기할 수 있습니다. 확실하지 않으면 Cloud 쪽을 먼저 확인하세요."

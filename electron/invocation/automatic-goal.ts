@@ -68,6 +68,15 @@ export type AutomaticGoalPreparation =
       causeCode?: string;
     };
 
+/**
+ * Agentlas 2.0 whether a conversation can hold a Goal at all, so the intake judgment (a model call whose answer would have no reader
+ * otherwise) is worth asking. A session with no project cannot (the composer's Goal row is off there and says why); the personal agent's own
+ * conversation keeps the intake (its recurring briefs become Goals there), and a chat that already holds a Goal is handled before this question.
+ */
+export function chatCanHoldAutomaticGoal(chat: { projectId?: string | null; goalId?: string | null; agentId?: string | null }, personalAgentId: string): boolean {
+  return Boolean(chat.projectId) || Boolean(chat.goalId) || chat.agentId === personalAgentId;
+}
+
 /** The decision prepareInvocationAutomaticGoal turns into a Goal: an execute-now request that is not a one-reply turn. */
 export function isGoalAdmittingDecision(decision: GoalIntakeDecision): boolean {
   return decision.intent === "execute" && decision.commitment === "now" && decision.turnScope !== "single";

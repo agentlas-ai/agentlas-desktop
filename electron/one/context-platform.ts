@@ -10,6 +10,7 @@ import type { OneContextReadiness, OneContextScope } from "../../shared/one-cont
 import { invokeNativeInputDriver, nativeInputDriverAvailable } from "../computer-use/native-driver";
 import { OneContextError, OneContextService, configureOneContextService, type ContextTarget } from "./context-service";
 import { isSupervisorDockOverlayWindow, supervisorDock } from "../computer-use/supervisor-dock";
+import { noteScreenControl } from "./screen-control";
 import { OneOsResourceLeaseBroker, configureOneOsLeaseBroker, type OneOsActionTarget, type OneOsExecutionBinding } from "./context-lease";
 
 type WindowMetadata = { appName: string; windowId: number; pid: number; processStartMs: number; name: string; bundleIdentifier: string; active: boolean; bounds: { x: number; y: number; width: number; height: number } };
@@ -75,6 +76,7 @@ async function captureExact(target: ContextTarget, signal: AbortSignal): Promise
   return withOneSensitiveOperation(() => captureExactUnlocked(target, signal));
 }
 async function captureExactUnlocked(target: ContextTarget, signal: AbortSignal): Promise<{ dataUrl:string; capturedAt:string }> {
+  noteScreenControl("capture"); // a read of the screen or of Agentlas's own window: a pairing QR on screen could be read (one/screen-control.ts)
   if (signal.aborted) throw new OneContextError("one-context-revoked");
   if (target.owned) {
     const match = /^electron:(\d+):(\d+)$/.exec(target.sourceId), window = match ? BrowserWindow.fromId(Number(match[1])) : null;

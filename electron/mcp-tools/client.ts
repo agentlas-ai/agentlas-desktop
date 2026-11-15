@@ -51,6 +51,7 @@ import { rejectHephaestusRuntimeRoot } from "../hephaestus/root";
 import { retainTrustedMemoryOwnerEnvironment } from "../memory/trusted-owner-binding";
 import workforceProtocolContract from "./workforce-protocol-contract.json";
 import { electronAppVersion } from "../runtime-paths";
+import { credentialDigestOf, isKeyProven, keyVerdictOf, markKeyProven } from "./key-verdict";
 
 /** npx 첫 다운로드까지 고려한 넉넉한 연결 타임아웃. */
 const CONNECT_TIMEOUT_MS = 45_000;
@@ -819,6 +820,13 @@ export async function listCompleteToolInventory(client: Pick<Client, "listTools"
   return { tools };
 }
 
+/** VD: what this probe proved about the server's KEYS (key-verdict.ts): a closed word beside the status, none for a server with no keys. */
+function withKeyVerdict(server: InstalledMcpServer, status: McpServerStatus, resolved: Record<string, string>): McpServerStatus {
+  const proven = Object.keys(resolved).length > 0 && isKeyProven(server.id, credentialDigestOf(resolved));
+  const verdict = keyVerdictOf(server, status, proven);
+  return verdict ? { ...status, ...verdict } : status;
+}
+
 /** 한 서버에 붙어 tools/list 해보고 상태 반환. 연결은 즉시 닫는다(테스트 전용). */
 export async function testServerConnection(
   server: InstalledMcpServer,
@@ -853,8 +861,8 @@ export async function testServerConnection(
       return result.tools;
     })(), timeoutMs, stop, controller.signal), options?.signal, stop);
     await closeMcpProbeBounded(client, transport);
-    return { id: server.id, connected: missing.length === 0, tools, error: null, missingEnv: missing, checkedAt,
-      ...(missing.length ? { failureCode: 'configuration_missing' as const } : {}) };
+    return withKeyVerdict(server, { id: server.id, connected: missing.length === 0, tools, error: null, missingEnv: missing, checkedAt,
+      ...(missing.length ? { failureCode: 'configuration_missing' as const } : {}) }, resolved);
   } catch (err) {
     stop();
     await closeMcpProbeBounded(client, transport);
@@ -865,8 +873,8 @@ export async function testServerConnection(
       : observation?.status ?? observation?.statusCode;
     const failureCode = err instanceof UnauthorizedError || httpStatus === 401 ? 'authentication_required' as const
       : options?.signal?.aborted ? 'connection_cancelled' as const : 'connection_unavailable' as const;
-    return { id: server.id, connected: false, tools: [], error: message.slice(0, 300), missingEnv: missing, checkedAt, failureCode,
-      ...(typeof httpStatus === "number" && Number.isInteger(httpStatus) ? { httpStatus } : {}) };
+    return withKeyVerdict(server, { id: server.id, connected: false, tools: [], error: message.slice(0, 300), missingEnv: missing, checkedAt, failureCode,
+      ...(typeof httpStatus === "number" && Number.isInteger(httpStatus) ? { httpStatus } : {}) }, resolved);
   }
 }
 
@@ -1265,6 +1273,8 @@ async function callServerToolContentInternal(
           const res = await withCurrentHistoryTool({kind:"mcp",serverId:server.id,catalogId:server.catalogId??null,toolName,args,schemaDigest:options?.expectedToolSchemaDigest??(modernDefinition?mcpToolSchemaDigest(modernDefinition):null)},callOriginal);
           const projected = remoteCuration ? remoteCuration(res) : res;
           const normalized = normalizeMcpToolContentResult(projected, maxTextChars, options?.retainFullResult === true);
+          // VD: the first call that returns a result that is not an error is what a local program's keys were waiting for ("saved" -> "connected", key-verdict.ts); exactly these key values, memory only.
+          if (credentialDigest && server.envKeys.length > 0 && (projected as { isError?: unknown } | null)?.isError !== true) markKeyProven(server.id, credentialDigest);
           if (session && sessionEntry) session.touch();
           else await closeMcpClientAndTransport(activeClient, transport);
           client = null;

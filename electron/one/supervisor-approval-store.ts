@@ -1,8 +1,19 @@
 import type Database from "better-sqlite3";
-import type { ToolApprovalDecision, ToolApprovalDurableConsentReceipt, ToolApprovalRequestEvent, ToolApprovalResolutionReceipt } from "../../shared/types";
+import type { SettledToolApproval, ToolApprovalDecision, ToolApprovalDurableConsentReceipt, ToolApprovalRequestEvent, ToolApprovalResolutionReceipt } from "../../shared/types";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
 import { supervisorHash } from "./supervisor-store";
 import { redactSecrets } from "../../shared/secret-patterns";
+
+/**
+ * BB-1a: who closed a settled request, one closed word in the optional column `handled_by`.
+ *   desktop | phone      the owner's answer came from this desktop's screen / from the phone (a human answer)
+ *   always_allow | full_access | unattended   no card was shown: a saved "always allow" / the run's full access covered a delete or send call, or the run had nobody to ask (BB-1c: an unattended write-mode run; an automatic approval, recorded once, see `recordAuto`)
+ * NULL = not said (an expired card, an answer through a path that does not know its device, every row written before this column). Read by `listSettled` (the conversation's quiet line);
+ * it lives and dies with its row (`prune` keeps the newest settled rows, as for every settled row).
+ */
+export type ApprovalHandledBy = "desktop" | "phone" | "always_allow" | "full_access" | "unattended";
+const HANDLED_BY: ReadonlySet<string> = new Set(["desktop", "phone", "always_allow", "full_access", "unattended"]);
+const AUTO_KINDS: ReadonlySet<string> = new Set(["delete", "send"]);   // money is asked every time and never passes without a card; the other kinds are not asked at all
 
 interface ApprovalRow {
   id: string; owner_epoch: string; owner_identity: string; chat_id: string; request_json: string; request_hash: string;
@@ -10,6 +21,7 @@ interface ApprovalRow {
   expires_at: number; lease_until: number; decision: ToolApprovalDecision | null;
   action_id: string | null; decided_at: string | null; reason: string | null;
   consent_json: string | null;
+  handled_by?: string | null;
 }
 export interface DurableToolApprovalOwner {
   epoch: string;
@@ -22,6 +34,8 @@ export interface DurableToolApprovalOwner {
  * Runtime waiters and policy checks must use consume() under their own live epoch.
  */
 export class OneSupervisorApprovalStore {
+  /** The ledger of this database has the optional column (added by the schema owner; a reader opened first on an older file simply does not read or write it). */
+  private readonly hasHandledBy: boolean;
   constructor(readonly db: Database.Database, schemaOwner = true, private readonly now = Date.now) {
     if (schemaOwner) db.exec(`
       CREATE TABLE IF NOT EXISTS one_supervisor_tool_approvals (
@@ -37,6 +51,10 @@ export class OneSupervisorApprovalStore {
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_tool_approvals'").get()) {
       throw new Error("supervisor_approval_schema_not_ready");
     }
+    const hasColumn = (): boolean => (db.prepare("PRAGMA table_info(one_supervisor_tool_approvals)").all() as Array<{ name: string }>).some((column) => column.name === "handled_by");
+    // A file made before BB-1a gets the one optional column here, once; the rows it already holds are not rewritten (they stay NULL = not said). A second process adding it at the same moment loses the race harmlessly.
+    if (schemaOwner && !hasColumn()) { try { db.exec("ALTER TABLE one_supervisor_tool_approvals ADD COLUMN handled_by TEXT"); } catch { /* added by the other host */ } }
+    this.hasHandledBy = hasColumn();
   }
   private row(id: string): ApprovalRow | null {
     return this.db.prepare("SELECT * FROM one_supervisor_tool_approvals WHERE id=?").get(id) as ApprovalRow | undefined ?? null;
@@ -107,7 +125,7 @@ export class OneSupervisorApprovalStore {
     return row ? this.receipt(row, null) : this.missing(id, null, "not_found");
   }
   decide(id: string, decision: ToolApprovalDecision, actionId: string,
-    assertCurrent: (request: ToolApprovalRequestEvent) => void): ToolApprovalResolutionReceipt {
+    assertCurrent: (request: ToolApprovalRequestEvent) => void, via?: ApprovalHandledBy): ToolApprovalResolutionReceipt {
     if (!["allow_once", "allow_session", "allow_always", "deny"].includes(decision)
       || actionId !== toolApprovalActionId(id, decision)) return this.missing(id, decision, "invalid_action");
     return this.db.transaction(() => {
@@ -118,9 +136,10 @@ export class OneSupervisorApprovalStore {
       // authority to a new owner. consume() checks epoch/lifetime independently.
       if (prior.status !== "pending") return this.receipt(prior, decision, true);
       assertCurrent(JSON.parse(prior.request_json) as ToolApprovalRequestEvent);
-      const changed = this.db.prepare(`UPDATE one_supervisor_tool_approvals SET status='resolved',decision=?,action_id=?,decided_at=?
+      const handler = this.hasHandledBy && via && HANDLED_BY.has(via) ? via : null;
+      const changed = this.db.prepare(`UPDATE one_supervisor_tool_approvals SET status='resolved',decision=?,action_id=?,decided_at=?${handler ? ",handled_by=?" : ""}
         WHERE id=? AND status='pending' AND lease_until>? AND expires_at>?`)
-        .run(decision, actionId, new Date(this.now()).toISOString(), id, this.now(), this.now());
+        .run(decision, actionId, new Date(this.now()).toISOString(), ...(handler ? [handler] : []), id, this.now(), this.now());
       if (changed.changes !== 1) throw new Error("supervisor_approval_state_conflict");
       return this.receipt(this.row(id)!, decision);
     }).immediate();
@@ -143,6 +162,76 @@ export class OneSupervisorApprovalStore {
         .run(id, ownerEpoch, row.request_hash, row.decision, row.decided_at, this.now(), this.now());
       return changed.changes === 1 ? {decision: row.decision, decidedAt: row.decided_at} : null;
     }).immediate();
+  }
+  /**
+   * The answered or closed cards of these conversations, newest last, for the one quiet line the conversation keeps where the card was
+   * (Agentlas 2.0 AL). A read of the rows the ledger already keeps (no new table, no new column); the retention is `prune`. Only the
+   * closed words and the fields of the redacted request projection leave: no hash, owner identity or consent receipt.
+   */
+  listSettled(chatIds: readonly string[], limit = 200): SettledToolApproval[] {
+    this.expire();
+    if (chatIds.length === 0) return [];
+    if (chatIds.length > 128 || chatIds.some((id) => !id || id.length > 256)) throw new Error("supervisor_approval_scope_invalid");
+    const cap = Math.max(1, Math.min(500, Math.floor(limit)));
+    const rows = this.db.prepare(`SELECT id, chat_id, request_json, status, decision, decided_at, reason${this.hasHandledBy ? ", handled_by" : ""} FROM one_supervisor_tool_approvals
+      WHERE status!='pending' AND chat_id IN (${chatIds.map(() => "?").join(",")}) ORDER BY rowid DESC LIMIT ?`)
+      .all(...chatIds, cap) as Array<{ id: string; chat_id: string; request_json: string; status: "resolved" | "expired"; decision: ToolApprovalDecision | null; decided_at: string | null; reason: string | null; handled_by?: string | null }>;
+    const out: SettledToolApproval[] = [];
+    for (const row of rows.reverse()) {
+      let request: ToolApprovalRequestEvent;
+      try { request = JSON.parse(row.request_json) as ToolApprovalRequestEvent; } catch { continue; }
+      const outcome = row.status === "expired" ? "expired" : row.decision === "deny" ? "declined" : row.decision ? "approved" : null;
+      if (!outcome) continue;
+      out.push({
+        id: row.id, chatId: row.chat_id, tool: String(request.tool ?? "").slice(0, 200),
+        ...(request.detail ? { detail: String(request.detail).slice(0, 600) } : {}),
+        ...(request.capability ? { capability: String(request.capability).slice(0, 32) } : {}),
+        ...(request.agentId ? { agentId: String(request.agentId).slice(0, 200) } : {}),
+        requestedAt: String(request.requestedAt ?? ""), outcome,
+        ...(outcome !== "expired" && row.decision ? { choice: row.decision } : {}),
+        decidedAt: row.decided_at ?? String(request.requestedAt ?? ""),
+        // The device only for a human answer, the basis only for an automatic one; a value this build does not know is not drawn.
+        ...(outcome !== "expired" && (row.handled_by === "desktop" || row.handled_by === "phone") ? { device: row.handled_by } : {}),
+        ...(outcome === "approved" && (row.handled_by === "always_allow" || row.handled_by === "full_access" || row.handled_by === "unattended") ? { auto: row.handled_by } : {}),
+      });
+    }
+    return out;
+  }
+  /**
+   * BB-1a: a call that went through with no card because a saved "always allow" or the run's full access covered it. One settled row (a record, never an authority: lease 0, so `consume` cannot return it
+   * and a restart has nothing to retire), kept only for delete and send calls of a conversation; the same retention as every settled row (`prune`). Anything else is refused (false): a payment is never
+   * passed without a card, and a call of no kind is not recorded (no row per ordinary tool call). Returns whether a row was written; never throws on a refusal.
+   */
+  recordAuto(event: { runtime: string; tool: string; detail?: string; cwd?: string; chatId: string; capability: string; agentId?: string }, owner: { epoch: string; identity: string }, basis: "always_allow" | "full_access" | "unattended"): boolean {
+    if (!this.hasHandledBy || !HANDLED_BY.has(basis) || (basis !== "always_allow" && basis !== "full_access" && basis !== "unattended") || !AUTO_KINDS.has(event.capability)) return false;
+    if (!event.chatId || event.chatId.length > 256 || !event.tool || !owner.epoch || owner.epoch.length > 200 || !owner.identity || owner.identity.length > 256) return false;
+    const at = this.now(), iso = new Date(at).toISOString();
+    const id = `auto:${at.toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
+    const projection: ToolApprovalRequestEvent = { id, runtime: event.runtime, tool: event.tool.slice(0, 200), mode: "live", requestedAt: iso, chatId: event.chatId,
+      ...(event.detail ? { detail: redactSecrets(event.detail).slice(0, 600) } : {}), ...(event.cwd ? { cwd: redactSecrets(event.cwd).slice(0, 600) } : {}),
+      capability: event.capability, ...(event.agentId ? { agentId: event.agentId.slice(0, 200) } : {}) };
+    const json = JSON.stringify(projection);
+    if (Buffer.byteLength(json, "utf8") > 64 * 1024) return false;
+    this.db.prepare(`INSERT INTO one_supervisor_tool_approvals(id,owner_epoch,owner_identity,chat_id,request_json,request_hash,status,expires_at,lease_until,decision,decided_at,reason,handled_by)
+      VALUES(?,?,?,?,?,?,'resolved',?,0,'allow_once',?,?,?)`).run(id, owner.epoch, owner.identity, event.chatId, json, supervisorHash([owner.epoch, owner.identity, projection]), at, iso, "auto_" + basis, basis);
+    // The ledger's own keep ("the newest 1000 settled rows", `prune`, which used to run at start only) is applied here too: a run that passes many calls with no card must not grow the table until the next start.
+    try { this.prune(); } catch { /* the next start prunes */ }
+    return true;
+  }
+  /**
+   * BB-1a: names the device of an answer that was given through a host that holds the request itself (the background service's approvals, answered from this desktop or the phone). Only a row that is
+   * resolved and has no device yet; a second answer or a replay never overwrites it. Returns whether the row was marked.
+   */
+  markHandler(id: string, via: "desktop" | "phone"): boolean {
+    if (!this.hasHandledBy || (via !== "desktop" && via !== "phone")) return false;
+    return this.db.prepare("UPDATE one_supervisor_tool_approvals SET handled_by=? WHERE id=? AND status='resolved' AND handled_by IS NULL").run(via, id).changes === 1;
+  }
+  /** The requests of this host's earlier process generations still pending (read just before retireEarlierOwners closes them). */
+  pendingOfEarlierOwners(ownerEpoch: string, hostKind: "main" | "daemon" = "main"): Array<{ id: string; chatId: string }> {
+    const prefix = `${hostKind}:`;
+    if (!ownerEpoch.startsWith(prefix)) return [];
+    return (this.db.prepare(`SELECT id, chat_id FROM one_supervisor_tool_approvals WHERE status='pending' AND owner_epoch!=? AND substr(owner_epoch,1,?)=?`)
+      .all(ownerEpoch, prefix.length, prefix) as Array<{ id: string; chat_id: string }>).map((row) => ({ id: row.id, chatId: row.chat_id }));
   }
   /** Restart retires this native host's waiters, never the other host's live requests. */
   retireEarlierOwners(ownerEpoch: string, hostKind: "main" | "daemon" = "main"): number {

@@ -21,6 +21,11 @@ import {
   type UpdateWorkItem,
 } from "./update-resume";
 
+/** A message of this chat waits in, or is being started by, the owner's send queue. A store without the table has none. */
+function sendQueueHoldsChat(chatId: string): boolean {
+  try { return Boolean(getDb().prepare("SELECT 1 FROM pending_chat_sends WHERE chat_id = ? AND state IN ('queued','starting') LIMIT 1").get(chatId)); } catch { return false; }
+}
+
 export interface UpdateResumeDispatcher {
   activeChatIds(): string[];
   start(request: McpInvocationRequest, workspaceBinding?: undefined, executionContext?: undefined,
@@ -60,6 +65,8 @@ export function resumeWorkInterruptedByUpdate(userDataPath: string, dispatcher: 
         latestRunId: latest?.runId ?? null,
         latestStatus: latest?.status ?? null,
         newerUserMessage: newerUser,
+        // The send queue sends its own waiting or starting message again (pending-chat-sends.ts): a second continuation beside it ran the request twice.
+        sendQueueOwns: chat ? sendQueueHoldsChat(item.chatId) : false,
       }, nowMs);
       if (!decision.resume) {
         outcomes.push({ ...base, action: "skipped", reason: decision.reason });

@@ -65,3 +65,38 @@ export function normalizeMemoryOwnership<S extends string>(
   if (owner) return { scope, agentId: owner };
   return { scope: sharedScope, agentId: null };
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// 누가 쓰는가. 엔진 `schemas/memory-scopes.json` 의 `oneActorFamily`·`specialAgentIds`·`systemActorPrefixes`·`hubAgentIdPrefix`·`personalSet` 과
+// 같은 답을 낸다(엔진 `memory_scopes.py actor_kind()`·`personal_set()`). 데스크탑은 그 JSON 의 사본을 두지 않으므로 값은 상수이고, 공유 벡터 시험이 엔진 JSON 에서 직접 읽어 대조한다.
+
+import { BUILTIN_ONE_AGENT_ID } from "./builtin-agent-ids";
+import { CONTRACT_SPECIAL_STORE_AGENT_IDS } from "./memory-special-agents";
+
+/** 상주 액터(One 가족·`host:*`·Finance/Science 가 아닌 `builtin-agentlas-*`) / 폴더 있는 에이전트 / 스페셜 / 허브에서 빌린 에이전트. */
+export type MemoryActorKind = "resident" | "folderAgent" | "special" | "hub";
+
+const ONE_ACTOR_IDS: readonly string[] = [BUILTIN_ONE_AGENT_ID, "agentlas-one"];
+const SYSTEM_ACTOR_PREFIXES: readonly string[] = ["host:", "builtin-agentlas-"];
+const HUB_AGENT_ID_PREFIX = "hub:";
+
+/** 계약 `personalSet`: Personal 은 `user_identity` 범위이고, 상주 액터가 거기 쓸 수 있는 종류는 `residentActorKinds` 뿐이다. */
+export const PERSONAL_SET: { readonly scopes: readonly string[]; readonly residentActorKinds: readonly string[] } = Object.freeze({
+  scopes: Object.freeze(["user_identity"]),
+  residentActorKinds: Object.freeze(["preference"]),
+});
+
+/** 이 주체를 기억 계약이 어떻게 보는가. 계약만으로 계산하고 던지지 않는다. 에이전트 id 가 없으면 폴더 있는 에이전트(상주가 아니다). */
+export function memoryActorKind(agentId: string | null | undefined): MemoryActorKind {
+  const id = typeof agentId === "string" ? agentId.trim() : "";
+  const folded = id.toLowerCase();
+  if (id && folded.startsWith(HUB_AGENT_ID_PREFIX)) return "hub";
+  if (id && CONTRACT_SPECIAL_STORE_AGENT_IDS.some(special => special.toLowerCase() === folded)) return "special";
+  if (id && (ONE_ACTOR_IDS.includes(id) || SYSTEM_ACTOR_PREFIXES.some(prefix => folded.startsWith(prefix)))) return "resident";
+  return "folderAgent";
+}
+
+/** 상주 액터가 프로젝트 안에서 낸 `agent_repo` 줄은 프로젝트 줄이다(선호만 예외: Personal 로 간다 — 엔진 F2 항상 부분과 같은 규칙). */
+export function residentAgentRepoBelongsToProject(agentId: string | null | undefined, hasProject: boolean, kind: string): boolean {
+  return hasProject && memoryActorKind(agentId) === "resident" && !PERSONAL_SET.residentActorKinds.includes(kind);
+}

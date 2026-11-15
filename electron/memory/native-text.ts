@@ -159,6 +159,7 @@ export function nativeTextsFor(kind: TranslationTargetKind, ids: readonly string
   } catch {
     // table absent: nothing was ever translated on this store
   }
+  if (kind === "memory_entry" && subStoreNatives.size) for (const id of unique) if (!result.has(id)) { const kept = subStoreNatives.get(id); if (kept) result.set(id, kept.text); }
   return result;
 }
 
@@ -166,6 +167,50 @@ export interface NativeRecall {
   text: string;
   vector: readonly number[];
 }
+
+// ── original wording of lines that moved to an agent / project store (trial: the Korean wording of a moved line was not found) ────────────────────────────
+// After the split layout is on, the engine moves a line AND its original wording into the agent's or project's own store (`memory_entry_native` there); the root no longer has it,
+// and `nativeRecallFor` / `nativeTextsFor` read the root only, so a question in the user's language stopped finding a moved translated line. The union read
+// (`store.ts withSubStoreRows`) already knows which stores THIS read may open (the same scope rule that picked the lines: the agent's own store and the stores of the project keys, nothing else);
+// it hands those stores' original wording for the lines it let through to `rememberSubStoreNatives`. Lookups only ever ask for ids of lines the caller already holds, the root still wins for a line
+// that is in the root, and nothing is read from a store this read may not open. In memory only, capped; with the layout switch off nothing is ever put here (the root answers alone, byte for byte as before).
+const SUB_STORE_NATIVE_MAX = 4_000;
+const subStoreNatives = new Map<string, NativeRecall>();
+type ReadableStore = { prepare(sql: string): { all(...params: unknown[]): unknown[] } };
+
+export function rememberSubStoreNatives(ids: readonly string[], stores: readonly ReadableStore[]): void {
+  const wanted = [...new Set(ids.filter((id) => typeof id === "string" && id.length > 0))];
+  if (!wanted.length || !stores.length) return;
+  const { table, key, column } = NATIVE_TABLES.memory_entry;
+  const found = new Map<string, { text: string; embedding: string | null }>();
+  for (const store of stores) {
+    for (let offset = 0; offset < wanted.length; offset += 400) {
+      const chunk = wanted.slice(offset, offset + 400).filter((id) => !found.has(id));
+      if (!chunk.length) continue;
+      const marks = chunk.map(() => "?").join(",");
+      let rows: Array<{ id: string; text: string; embedding?: string | null }> = [];
+      try { rows = store.prepare(`SELECT ${key} AS id, ${column} AS text, native_embedding AS embedding FROM ${table} WHERE ${key} IN (${marks})`).all(...chunk) as typeof rows; }
+      catch {
+        try { rows = store.prepare(`SELECT ${key} AS id, ${column} AS text FROM ${table} WHERE ${key} IN (${marks})`).all(...chunk) as typeof rows; }
+        catch { rows = []; }   // this store has no original wording table: nothing was ever translated in it
+      }
+      for (const row of rows) if (row.text && !found.has(row.id)) found.set(row.id, { text: row.text, embedding: row.embedding ?? null });
+    }
+  }
+  for (const [id, row] of found) {
+    const kept = subStoreNatives.get(id);
+    if (kept && kept.text === row.text) continue;   // same wording: the vector is already there
+    // The sub-store is open read-only: a missing vector is computed here and not written back (the root's lazy backfill does not apply).
+    const embedding = parseNativeEmbedding(row.embedding, row.text) ?? autoLocalEmbedding(row.text);
+    subStoreNatives.set(id, { text: row.text, vector: embedding.vector });
+  }
+  if (subStoreNatives.size > SUB_STORE_NATIVE_MAX) {
+    for (const id of [...subStoreNatives.keys()].slice(0, subStoreNatives.size - SUB_STORE_NATIVE_MAX)) subStoreNatives.delete(id);
+  }
+}
+/** Test seam. */
+export function resetSubStoreNativesForTests(): void { subStoreNatives.clear(); }
+export function subStoreNativeCountForTests(): number { return subStoreNatives.size; }
 
 export function serializeNativeEmbedding(embedding: LocalMemoryEmbedding): string {
   return JSON.stringify({
@@ -231,6 +276,8 @@ export function nativeRecallFor(kind: TranslationTargetKind, ids: readonly strin
   } catch {
     // table absent: nothing was ever translated on this store
   }
+  // Lines that moved to an agent / project store: the wording the union read of this scope remembered (the root's own answer wins).
+  if (kind === "memory_entry" && subStoreNatives.size) for (const id of unique) if (!result.has(id)) { const kept = subStoreNatives.get(id); if (kept) result.set(id, kept); }
   return result;
 }
 
@@ -239,29 +286,3 @@ export function displayText(kind: TranslationTargetKind, id: string, stored: str
   return nativeTextsFor(kind, [id]).get(id) ?? stored;
 }
 
-// ── write-path queue ─────────────────────────────────────────────────────────
-/**
- * Queue a non-English row for background translation. Never blocks the turn:
- * SQL only, failures are swallowed (the migration sweep re-finds the row).
- */
-export function enqueueEnglishTranslation(
-  kind: TranslationTargetKind,
-  id: string,
-  text: string,
-  priority = 10,
-): boolean {
-  if (!id || !isNonEnglishText(text)) return false;
-  try {
-    const db = getDb();
-    ensureNativeTextTables(db);
-    const now = new Date().toISOString();
-    const inserted = db.prepare(
-      `INSERT OR IGNORE INTO memory_translation_jobs
-         (target_kind, target_id, source_hash, priority, state, attempts, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)`,
-    ).run(kind, id, translationSourceHash(text), priority, now, now);
-    return inserted.changes === 1;
-  } catch {
-    return false;
-  }
-}

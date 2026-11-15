@@ -13,7 +13,7 @@ import { bindResolvedOrgAgentIds, saveResolvedOrg, getResolvedOrg } from "../sto
 import { pickActiveRunner } from "../mcp/client";
 import { PROJECT_MEMORY_DIR } from "../architecture/manifest";
 import { getRoute } from "./routes";
-import { agentFolderPath } from "./files";
+import { currentAgentFolderPath } from "./files";
 import { getMeta, setMeta } from "../store/meta";
 
 const SKIP_DIRS = new Set([
@@ -337,7 +337,7 @@ function agentSourceDir(agentId: string): string | null {
   if (!agent) return null;
   const route = getRoute(agentId);
   if (route?.path && fs.existsSync(route.path)) return route.path;
-  const materialized = agentFolderPath(agent.slug);
+  const materialized = currentAgentFolderPath(agent.slug);
   return fs.existsSync(materialized) ? materialized : null;
 }
 

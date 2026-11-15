@@ -1,15 +1,9 @@
 import { createDaemonOneSupervisorHost } from "./one-supervisor-host";
 import { createOwnedAskUserHost } from "../confirm/owned-ask-user-host";
 import { mergePendingAskUserRequests } from "../confirm/ask-user";
-import { ALIVE_DECISION_PROTOCOL, createDaemonAliveDecisionPort } from "./alive-decision-port";
-import { ALIVE_RUNTIME_PROTOCOL } from "../alive-organisms/runtime-protocol";
 import { getDb } from "../store/db";
 import { tryRecordRunEvent } from "../store/run-events";
 import { agentContextOwnerBinding } from "../runtime/agent-context-admission";
-import { withAgentContext } from "../runtime/agent-context";
-import { detectRuntimes } from "../runtime/detect";
-import { pickRunner } from "../runtime/selection";
-import { runAliveServingDecision } from "../alive-organisms/serving-wake";
 import { ONE_SUPERVISOR_RUNTIME_PROTOCOL } from "../../shared/one-supervisor-runtime";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import { daemonOwnedObservation as observeDaemonOwned } from "./daemon-owned-observation";
@@ -77,33 +71,6 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   assertNativeAuthBinding(options.binding); options.assertOwner();
   let accepting = true;
   const supervisor=createDaemonOneSupervisorHost({bootId:options.bootId,assertOwner:options.assertOwner,restartForOwner:options.restartForOwner,science:options.science});
-  // Created after the original GUI session is adopted; an unauthenticated
-  // startup snapshot cannot bind a later account's context lifetime.
-  let alive:ReturnType<typeof createDaemonAliveDecisionPort>|undefined;
-  let aliveOwnerBinding:string|undefined;
-  const alivePort=()=>{
-    const binding=JSON.stringify(agentContextOwnerBinding());
-    if(aliveOwnerBinding!==binding){alive?.close();alive=undefined;aliveOwnerBinding=binding;}
-    return alive??(alive=createDaemonAliveDecisionPort({db:getDb(),bootId:options.bootId,
-    assertOwner:options.assertOwner,ownerBinding:agentContextOwnerBinding,now:Date.now,
-    async resolveRuntime(choice, signal, assertCurrent){
-      const exact=(value: import("../../shared/types").RuntimeStatus)=>value.kind===choice.kind
-        && (value.backend??null)===choice.backend && (value.source??null)===choice.source
-        && (choice.kind!=="acp" || value.acpAgentId===choice.acpAgentId);
-      assertCurrent();
-      let status=(await detectRuntimes(false, signal)).find(exact);
-      if(!status){
-        assertCurrent();
-        status=(await detectRuntimes(true, signal)).find(exact);
-      }
-      assertCurrent();
-      if(!status)return null;
-      const selected={...status,model:choice.model};
-      const picked=selected.kind==="agentlas"?{runner:withAgentContext(runAliveServingDecision,{kind:"agentlas"}),label:"Agentlas"}:pickRunner(selected);
-      return picked?{...picked,status:selected}:null;
-    },
-  }));
-  };
   let host: ReturnType<typeof createDaemonNativeInvocationHost> | undefined;
   type Captured = { peer: ControlSocketPeer; identity: NativeAuthenticatedIdentity; start: NativeStartDescriptor; released: boolean };
   type Attached = { identity: NativeAuthenticatedIdentity; publisher: ReturnType<typeof createNativeInvocationPublicPublisher>;
@@ -155,6 +122,34 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     attached.delete(peer); record.publisher.dispose(); record.approvals.dispose(); for (const value of record.recoveryRecords.values()) record.recovery.release(value); record.recoveryRecords.clear(); }
   async function dispatch(method: string, params: unknown, peer: ControlSocketPeer): Promise<unknown> {
     options.assertOwner();
+    if (method === "companion.daemonPossession") {
+      if (!accepting || process.env.AGENTLAS_COMPANION_DAEMON_V1 !== "enabled") fail("daemon_possession_unavailable");
+      // This proof is not consent. Require the same attached native GUI, the
+      // current account, original pairing and existing One for every check.
+      if(!exact(params,["version","binding"])||params.version!=="agentlas.daemon-possession.v1")fail("daemon_possession_request_invalid");
+      const attachment=current(peer),identity=attachment.identity;
+      const [{getAuthenticatedSessionBinding},{peekOneProfile},{userDataDir},{MobileBridgePairingManager,mobileBridgeHostIdentityPath},{MobileBridgeAccountPairingClient},{readFileSync},{createCompanionDaemonPossessionPermit},{signNativeCompanionDaemonPossession},{MOBILE_BRIDGE_PROTOCOL_VERSION}]=await Promise.all([
+        import("../auth"),import("../store/one-profile"),import("../runtime-paths"),import("../mobile-bridge/pairing"),import("../mobile-bridge/account-pairing"),import("node:fs"),import("./companion-daemon-delegation-possession"),import("./native-auth-credentials"),import("../../shared/mobile-bridge")]);
+      const actor=getAuthenticatedSessionBinding();if(!actor)fail("daemon_possession_owner_required");
+      const dir=userDataDir(),pairing=new MobileBridgePairingManager(dir),account=new MobileBridgeAccountPairingClient();
+      let firstIssuedAt:string|null=null;
+      const guard=(binding:import("../../shared/companion-daemon-delegation").CompanionDaemonDelegation)=>{
+        if(current(peer).identity!==identity)fail("daemon_possession_peer_changed");const live=getAuthenticatedSessionBinding(),profile=peekOneProfile();
+        if(!live||live.userId!==actor.userId||live.workspaceId!==actor.workspaceId||live.sessionId!==actor.sessionId||
+          profile.state!=="present"||profile.userId!==actor.userId||profile.workspaceId!==actor.workspaceId||profile.oneId!==binding.oneId||
+          binding.userId!==actor.userId||binding.workspaceId!==actor.workspaceId)fail("daemon_possession_owner_changed");
+        const paired=pairing.deviceAccountBinding(binding.deviceId),clock=Math.floor(Date.now()/1000);
+        if(!paired||paired.ownerUserId!==actor.userId||paired.workspaceId!==actor.workspaceId||paired.accountSubject!==binding.accountSubject||
+          paired.accountAuthorityOrigin!==account.origin||binding.issuedAt>clock+5||binding.issuedAt<clock-60||binding.expiresAt<=clock)fail("daemon_possession_device_changed");
+        if(firstIssuedAt===null)firstIssuedAt=paired.issuedAt;else if(firstIssuedAt!==paired.issuedAt)fail("daemon_possession_device_changed");
+        const host=JSON.parse(readFileSync(mobileBridgeHostIdentityPath(dir),"utf8")) as {version?:unknown;hostId?:unknown;createdAt?:unknown};
+        if(!host||Object.keys(host).sort().join(",")!=="createdAt,hostId,version"||host.version!==MOBILE_BRIDGE_PROTOCOL_VERSION||typeof host.hostId!=="string"||!/^host_[a-f0-9]{32}$/.test(host.hostId)||host.hostId!==binding.hostId||
+          typeof host.createdAt!=="string"||!Number.isFinite(Date.parse(host.createdAt)))fail("daemon_possession_host_changed");
+      };
+      const permit=createCompanionDaemonPossessionPermit(params.binding,guard);if(!permit)fail("daemon_possession_request_invalid");
+      const signed=signNativeCompanionDaemonPossession(options.credential,permit);guard(params.binding as import("../../shared/companion-daemon-delegation").CompanionDaemonDelegation);
+      return {version:"agentlas.daemon-possession.v1",signature:signed};
+    }
     if (method === "native.attach") {
       if (params && typeof params === "object" && (params as {version?:unknown}).version === "agentlas.followup-custody.v2") {
         current(peer);
@@ -203,17 +198,6 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         const record = current(peer);
         for (const kind of nativePublicKindsRequest(params)) record.publicKinds.add(kind);
         return { version: NATIVE_PUBLIC_KINDS_VERSION, kinds: [...record.publicKinds] };
-      }
-      if(params && typeof params==="object" && (params as {version?:unknown}).version===ALIVE_DECISION_PROTOCOL){
-        const attachment=current(peer),identity=attachment.identity;
-        return alivePort().dispatch(params,{identity,
-          assertCurrent(){if(current(peer).identity!==identity)fail("alive_decision_native_peer_changed");},
-          onClose:listener=>peer.onClose(listener)});
-      }
-      // NH21: the service holds the Alive domain; the window forwards the owner's AGI edits here.
-      if(params && typeof params==="object" && (params as {version?:unknown}).version===ALIVE_RUNTIME_PROTOCOL){
-        current(peer);
-        return (await import("../alive-organisms")).answerAliveRuntimeRequest(params,options.bootId);
       }
       // Chat host handover (1.3.0 A2): Desktop is about to run this chat's next turn and asks the service to release.
       if(params && typeof params==="object" && (params as {version?:unknown}).version===CHAT_HANDOVER_VERSION){
@@ -513,6 +497,6 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   try{await supervisor.recover();}catch(error){console.warn("[one-supervisor] domain recovery held",(error as Error).message);}
   return { address: server.address, status, get supervisorActive(){return supervisor.active;}, closeAdmission() { accepting = false; supervisor.closeAdmission(); },
     get pendingCount() { return host?.retainedRecordCount ?? 0; },
-    async close() { accepting = false; questions.close(); unregisterHandoverPeer(); alive?.close(); for (const peer of [...attached.keys()]) disposeAttachment(peer); await server.close(); },
+    async close() { accepting = false; questions.close(); unregisterHandoverPeer(); for (const peer of [...attached.keys()]) disposeAttachment(peer); await server.close(); },
     settleDispatched: () => server.settleDispatched() };
 }

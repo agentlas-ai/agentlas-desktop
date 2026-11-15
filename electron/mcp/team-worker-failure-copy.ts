@@ -114,7 +114,7 @@ const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, ProviderSentence>
     en: (name) => `The subscription limit of the model ${name} uses is reached and automatic credit use is off, so this step was not started.` },
   unsettled: { ko: () => "응답이 끝나기 전에 멈춰 이 단계를 마치지 못했습니다.", en: () => "This step stopped before its reply finished." },
   // The host-owned classes of the run-level notice that had no worker sentence, so a teammate that ended with one read the neutral line
-  // below instead of the cause (E22). The tool and Goal-state classes reuse the host sentences above: one wording per cause.
+  // below instead of the cause. The tool and Goal-state classes reuse the host sentences above: one wording per cause.
   tool_missing: { ko: (name) => `${name}에게 필요한 도구(이미지 생성)가 이 앱에 연결돼 있지 않아 이 단계를 마치지 못했습니다. 설정에서 이미지 모델을 연결해 주세요.`,
     en: (name) => `A tool ${name} needs (image generation) is not connected in this app, so this step could not finish. Connect an image model in Settings.` },
   tool_failed: { ko: (name) => `${name}이(가) 쓴 이미지 생성 도구가 결과를 만들지 못해 이 단계를 마치지 못했습니다.`,
@@ -130,6 +130,8 @@ const PROVIDER_SENTENCE: Partial<Record<RunFailureNoticeCause, ProviderSentence>
     en: (name) => `An agent is still running in another chat of this Work project, so ${name}'s step was not started.` },
   session_reopen: { ko: (name) => `${name}의 이전 실행 세션을 다시 열지 못해 이 단계를 시작하지 못했습니다.`,
     en: (name) => `${name}'s previous run session could not be reopened, so this step was not started.` },
+  memory_exhausted: { ko: (name) => `${name}이(가) 쓰는 모델 프로그램이 메모리 부족으로 중단되어 이 단계를 마치지 못했습니다.`,
+    en: (name) => `The model program ${name} uses was stopped because the computer ran out of memory, so this step could not finish.` },
   working_folder: { ko: (name) => `${name}의 작업 폴더를 쓸 수 없어(없거나, 폴더가 아니거나, 열 수 없습니다) 이 단계를 시작하지 못했습니다.`,
     en: (name) => `${name}'s working folder cannot be used (it is missing, is not a folder, or cannot be opened), so this step was not started.` },
 };

@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import type Database from "better-sqlite3";
@@ -38,7 +39,7 @@ export interface DbRetentionReport {
   ran: boolean;
   skipped: "none" | "wrong-host" | "not-owner" | "lease-held" | "disabled";
   chatDetail: { runs: number; deleted: number };
-  stepEvents: { entities: number; deleted: number };
+  stepEvents: { deleted: number };
   toolEntries: { compacted: number };
   turnContextEntries: { compacted: number };
   sessionCheckpoints: { deleted: number };
@@ -179,38 +180,20 @@ function sweepChatDetail(db: Database.Database, now: number, scan: ChatScan, sta
 
 /* ------------------------------------------------------ domain step events */
 
-function trimStepEvents(db: Database.Database, now: number, budget: Budget, queue: { entities: Array<{ run_id: string }> | null; at: number }): { entities: number; deleted: number; done: boolean } {
+/** No writer and no reader: every stored step event goes, newest included, in bounded slices over the event-type index. */
+function purgeStepEvents(db: Database.Database, budget: Budget): { deleted: number; done: boolean } {
   const rule = retentionRule("run_events.one_domain_event.run.step_changed");
-  if (rule.action.type !== "keep-newest-per-key") throw new Error("db_retention_rule_shape");
-  const window = Math.max(rule.action.keepRows, DB_RETENTION_LIMITS.domainEventReadWindow);
-  const cutoff = new Date(now - (rule.action.days ?? 0) * DAY_MS).toISOString();
-  if (queue.entities === null) {
-    // Covered by the partial index on (run_id, version): a few tens of ms for the whole ledger.
-    queue.entities = db.prepare(`SELECT run_id FROM run_events INDEXED BY idx_one_domain_event_entity_version
-      WHERE kind = 'one_domain_event' GROUP BY run_id HAVING COUNT(*) > ?`).all(window) as Array<{ run_id: string }>;
-    queue.at = 0;
+  if (rule.action.type !== "delete-all") throw new Error("db_retention_rule_shape");
+  const remove = db.prepare(`DELETE FROM run_events WHERE rowid IN (
+    SELECT rowid FROM run_events WHERE kind = 'one_domain_event' AND ${ONE_DOMAIN_EVENT_TYPE_SQL} = 'run.step_changed' LIMIT ?)`);
+  const out = { deleted: 0, done: false };
+  const started = Date.now();
+  while (!exhausted(budget) && Date.now() - started < DB_RETENTION_LIMITS.sliceMs) {
+    const changes = remove.run(DB_RETENTION_LIMITS.sliceRows).changes;
+    out.deleted += changes;
+    if (changes < DB_RETENTION_LIMITS.sliceRows) { out.done = true; return out; }
   }
-  // The seq of the 500th newest row of the entity: every reader's window starts there, nothing older can be reached.
-  const edge = db.prepare("SELECT seq FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1 OFFSET ?");
-  const remove = db.prepare(`DELETE FROM run_events WHERE id IN (
-    SELECT id FROM run_events WHERE run_id = ? AND seq < ? AND ts < ? AND kind = 'one_domain_event'
-      AND instr(payload_json, 'run.step_changed') > 0 AND ${ONE_DOMAIN_EVENT_TYPE_SQL} = 'run.step_changed' LIMIT ?)`);
-  const result = { entities: 0, deleted: 0, done: false };
-  while (queue.at < queue.entities.length) {
-    const runId = queue.entities[queue.at]!.run_id;
-    const limit = (edge.get(runId, window - 1) as { seq: number } | undefined)?.seq;
-    if (limit === undefined) { queue.at += 1; continue; }
-    const started = Date.now();
-    for (;;) {
-      const removed = remove.run(runId, limit, cutoff, DB_RETENTION_LIMITS.sliceRows).changes;
-      result.deleted += removed;
-      if (removed < DB_RETENTION_LIMITS.sliceRows) { queue.at += 1; result.entities += 1; break; }
-      if (Date.now() - started > DB_RETENTION_LIMITS.sliceMs || exhausted(budget)) return result;
-    }
-    if (exhausted(budget)) return result;
-  }
-  result.done = true;
-  return result;
+  return out;
 }
 
 /* ------------------------------------------- automation terminal receipts */
@@ -324,10 +307,7 @@ function purgeSourceVersions(memory: Database.Database, budget: Budget): { delet
   return out;
 }
 
-/**
- * A memory-store table, asked through the memory handle. That handle routes `memory_*` names to the attached store
- * (memory/database.ts routeSql); `sqlite_master` is the main store's catalogue, so tableExists never saw these tables.
- */
+/** A memory-store table, asked through the memory handle, which routes `memory_*` names to the attached store (memory/database.ts routeSql). */
 function memoryTableExists(memory: Database.Database, name: string): boolean {
   if (!/^memory_[a-z_]+$/.test(name)) return false;
   try { memory.prepare(`SELECT 1 FROM ${name} LIMIT 0`); return true; } catch { return false; }
@@ -392,6 +372,90 @@ function vacuumMemory(db: Database.Database, free: number, before: number): { ra
   catch (error) { return { ran: false, reason: `vacuum-failed:${(error as { code?: string }).code ?? "error"}` }; }
 }
 
+
+/**
+ * K7'' (audit D2): the root memory file is rewritten once after a forget that blanked something in it (`root_residue_pending`, written in the forget's transaction), and once for the residue a root gathered before that marker existed
+ * (a stamp exists and neither marker was ever written: `root_residue_done` absent). A page the root split or rebalanced without `secure_delete` keeps old cell bytes where no row points; only a rewrite of the file reaches them.
+ * It runs here, at the resting moment this pass already is (complete pass, owner not busy): no timer of its own, and a root with no debt costs two meta reads.
+ * basis (measured, rollback journal, `docs/Agentlas2.0/evidence/k7pp/logs/rootvac-measure.log`): VACUUM of 57 MB takes 0.33 s, 513 MB 5.0 s, 2023 MB 14.8 s (about 7.3 s per GB of live data), and needs about 2.24 times the final size
+ * in free disk while it runs (copy + journal). So: the rewrite runs in a CHILD process (Main's event loop is never frozen by it), only when the volume has 2.5 times the live size + 64 MB free, and never while a run is active.
+ * K7''' (P4): the other processes (the daemon, the engine hook) wait for the file lock that long with a 15 s busy timeout (`STORE_BUSY_TIMEOUT_MS`, store/db.ts), and a wait that reaches it is a lost write (SQLITE_BUSY). So the rewrite is held to
+ * the size whose measured rewrite takes at most HALF of that wait: `ROOT_REWRITE_MAX_LIVE_BYTES`. A root over it is not rewritten: the report says `root-residue-too-large` and the memory screen's "unfinished forget" list says it (`forget_root_residue:too_large`), the debt stays.
+ * A rewrite that cannot start or fails (locked by a reader, disk short, killed) leaves the marker; the reason is returned in the report and shown in that list (never silent), and a rewrite that failed after a child was started is not started
+ * again by this process for `ROOT_REWRITE_RETRY_MS` (a restart tries at once).
+ */
+const ROOT_PENDING = "root_residue_pending", ROOT_DONE = "root_residue_done";
+/**
+ * Largest live data the root rewrite is allowed. basis (`docs/Agentlas2.0/evidence/k7ppp/logs/vac-*.log`, same child script, machine load 8 to 22): 66 to 531 MB took 4.6 to 7.5 s per GB, with spikes of 16 s per GB (a 300 MB root, the
+ * confirmation run) and 31.6 s per GB (one 266 MB run while other jobs wrote the disk). Half of the 15 s wait is 7.5 s; at the worst spike seen, 192 MB takes 6.0 s. Reached: no rewrite, the debt and the code stay (`root-residue-too-large`).
+ * A person's memory root is megabytes; 192 MB is about a hundred thousand lines of 600 characters with their history.
+ */
+export const ROOT_REWRITE_MAX_LIVE_BYTES = 192 * 1024 * 1024;
+/** basis: a lock held past the child's 3 s wait, a disk that had room a moment ago or a killed child rarely clears in minutes, and a retry costs a process; the passes are not periodic (a run ended, a start). Reached: the next pass after it tries again. A restart of the app is a new signal and tries at once. */
+export const ROOT_REWRITE_RETRY_MS = 2 * 60 * 60 * 1000;
+let rootRewriteFailedAt = 0;
+/** The rewrite child waits at most 3 s (`timeout:3000`) for the file lock: the pass runs while the owner is not busy, so a lock that is still held after 3 s belongs to a reader or writer of another process, and the debt waits for the next pass (30 min). It is killed after 120 s (`childMs`): the measured worst case is 22 s for the 3 GB the rewrite is held to (7.3 s per GB), so 120 s is five times that and only a stuck process hits it. */
+export const ROOT_REWRITE_CHILD_SCRIPT = `const D=require(process.argv[1]);const db=new D(process.argv[2],{timeout:3000});db.pragma("secure_delete=ON");try{db.pragma("temp_store_directory='"+require("path").dirname(process.argv[2]).replace(/'/g,"''")+"'")}catch(e){}db.exec("VACUUM");db.close();`;
+
+function rootMeta(db: Database.Database, key: string): string | undefined {
+  try { const row = db.prepare("SELECT value FROM agentlas_memory.memory_store_meta WHERE key=?").get(key) as { value: unknown } | undefined; return row ? String(row.value) : undefined; } catch { return undefined; }
+}
+
+/** K7''' (P4b): what the root rewrite says goes to the memory screen's list of unfinished forgets, in closed words (`forget_root_residue:too_large|disk_low|rewrite_failed|no_file`); a finished or not-owed root takes the word back. Never throws. */
+function noteRootResidue(reason: string): void {
+  try {
+    const forgetStores = require("../memory/forget-stores") as typeof import("../memory/forget-stores");
+    forgetStores.setRootResidueCode(reason.startsWith("root-residue-") ? reason.slice("root-residue-".length).replace(/-/g, "_") : null);
+  } catch { /* a process without the memory module has no list to put it in */ }
+}
+
+export async function rewriteRootIfOwed(db: Database.Database, opts: { alreadyRewritten: boolean; childMs?: number; run?: (file: string) => Promise<boolean>; now?: number }): Promise<{ ran: boolean; reason: string }> {
+  const out = await rewriteRootIfOwedInner(db, opts);
+  noteRootResidue(out.reason);
+  return out;
+}
+
+async function rewriteRootIfOwedInner(db: Database.Database, opts: { alreadyRewritten: boolean; childMs?: number; run?: (file: string) => Promise<boolean>; now?: number }): Promise<{ ran: boolean; reason: string }> {
+  const pending = rootMeta(db, ROOT_PENDING);
+  let owed = pending !== undefined;
+  if (!owed && rootMeta(db, ROOT_DONE) === undefined) {
+    try { owed = db.prepare("SELECT 1 FROM agentlas_memory.memory_revocations LIMIT 1").get() !== undefined; } catch { owed = false; }   // the one-time sweep of the residue that was there before the marker
+  }
+  if (!owed) return { ran: false, reason: "not-owed" };
+  // K7''' (P3): the debt is paid up to the forget number read NOW. A forget that commits while the child rewrites writes a newer number into the marker; the rewrite did not necessarily reach what it blanked, so the marker is deleted only
+  // while it still holds the number read here, and `root_residue_done` records that number (not the clock after the rewrite).
+  const clockAtStart = (): number => { try { return Number((db.prepare("SELECT epoch FROM agentlas_memory.memory_forget_clock WHERE id=1").get() as { epoch: number } | undefined)?.epoch ?? 0); } catch { return 0; } };
+  const startedClock = clockAtStart();
+  const finish = (): void => {
+    try {
+      db.prepare("INSERT INTO agentlas_memory.memory_store_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(ROOT_DONE, String(startedClock));
+      if (pending !== undefined) db.prepare("DELETE FROM agentlas_memory.memory_store_meta WHERE key=? AND value=?").run(ROOT_PENDING, pending);
+    } catch { /* the next pass rewrites once more: harmless */ }
+  };
+  if (opts.alreadyRewritten) { finish(); return { ran: true, reason: "rewritten-by-vacuum" }; }   // the free-pages VACUUM just rewrote the whole file
+  const page = Number(db.pragma("agentlas_memory.page_size", { simple: true }) ?? 4096);
+  const live = (Number(db.pragma("agentlas_memory.page_count", { simple: true }) ?? 0) - Number(db.pragma("agentlas_memory.freelist_count", { simple: true }) ?? 0)) * page;
+  if (live > ROOT_REWRITE_MAX_LIVE_BYTES) return { ran: false, reason: "root-residue-too-large" };
+  const file = (db.pragma("database_list") as Array<{ name: string; file: string }>).find(row => row.name === "agentlas_memory")?.file;
+  if (!file) return { ran: false, reason: "root-residue-no-file" };
+  try { const stat = fs.statfsSync(file); if (stat.bavail * stat.bsize < live * 2.5 + 64 * 1024 * 1024) return { ran: false, reason: "root-residue-disk-low" }; } catch { /* unknown: let the rewrite fail cleanly */ }
+  const now = opts.now ?? Date.now();
+  if (rootRewriteFailedAt > 0 && now >= rootRewriteFailedAt && now - rootRewriteFailedAt < ROOT_REWRITE_RETRY_MS) return { ran: false, reason: "root-residue-rewrite-failed" };   // a child failed a short while ago: no new process for it
+  const run = opts.run ?? ((target: string) => new Promise<boolean>((resolve) => {
+    let modulePath: string;
+    try { modulePath = require.resolve("better-sqlite3"); } catch { resolve(false); return; }
+    execFile(process.execPath, ["-e", ROOT_REWRITE_CHILD_SCRIPT, modulePath, target], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, timeout: opts.childMs ?? 120_000, windowsHide: true }, (error) => resolve(!error));
+  }));
+  const ok = await run(file);
+  if (!ok) { rootRewriteFailedAt = now; return { ran: false, reason: "root-residue-rewrite-failed" }; }
+  rootRewriteFailedAt = 0;
+  finish();
+  return { ran: true, reason: "rewritten" };
+}
+
+/** Test seam: the in-process "a child failed a short while ago" memory is forgotten (a restart of the app does the same). */
+export function resetRootRewriteRetry(): void { rootRewriteFailedAt = 0; }
+
 /* ------------------------------------------------------------------ pass */
 
 interface Cursors { agentContext: { rowid: number }; chat: ChatScan }
@@ -417,7 +481,7 @@ function writeCursors(db: Database.Database, cursors: Cursors): void {
 
 export async function runDbRetentionPass(options: DbRetentionOptions): Promise<DbRetentionReport> {
   const report: DbRetentionReport = {
-    ran: false, skipped: "none", chatDetail: { runs: 0, deleted: 0 }, stepEvents: { entities: 0, deleted: 0 },
+    ran: false, skipped: "none", chatDetail: { runs: 0, deleted: 0 }, stepEvents: { deleted: 0 },
     toolEntries: { compacted: 0 }, turnContextEntries: { compacted: 0 }, sessionCheckpoints: { deleted: 0 }, sourceVersions: { deleted: 0 }, terminalOutputs: { compacted: 0 },
     closedRows: { deleted: 0, byTable: {}, skipped: [], ran: false }, complete: false,
     checkpointedWal: false, vacuum: { ran: false, reason: "not-run", fileBytesBefore: 0, fileBytesAfter: 0, ms: 0 }, workMs: 0, errors: [],
@@ -432,7 +496,6 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
   const budget: Budget = { startedAt: Date.now(), passMs: DB_RETENTION_LIMITS.passMs };
   const cursors = readCursors(db);
   const chatState: ChatSweepState = { goalChats: null, decisions: new Map(), summarized: new Set() };
-  const stepQueue: { entities: Array<{ run_id: string }> | null; at: number } = { entities: null, at: 0 };
   const done = { chat: false, steps: false, journal: false, checkpoints: false, sourceVersions: false, closed: false };
   try {
     report.ran = true;
@@ -454,10 +517,17 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
       return false;
     };
     done.checkpoints = !hasCheckpoints || await sliceLoop("memory_session_checkpoints", () => trimSessionCheckpoints(memory!, budget), (value) => { report.sessionCheckpoints.deleted += value.deleted; });
+    // The session store (session.sqlite): 90-day rows, rows of a forgotten epoch, orphan heads. One bounded transaction; a missing file costs one stat.
+    if (memory !== null) {
+      try {
+        const epochRow = memory.prepare("SELECT epoch FROM memory_forget_clock WHERE id=1").get() as { epoch: number } | undefined;
+        report.sessionCheckpoints.deleted += (require("../memory/session-store") as typeof import("../memory/session-store")).pruneSessionFile(Number(epochRow?.epoch ?? 0), now);
+      } catch (error) { report.errors.push(`session_file:${(error as { code?: string }).code ?? "error"}`); }
+    }
     const hasSourceVersions = memory !== null && memoryTableExists(memory, "memory_source_versions");
     done.sourceVersions = !hasSourceVersions || await sliceLoop("memory_source_versions", () => purgeSourceVersions(memory!, budget), (value) => { report.sourceVersions.deleted += value.deleted; });
     done.chat = await sliceLoop("run_events.chat-call-detail", () => sweepChatDetail(db, now, cursors.chat, chatState), (value) => { report.chatDetail.runs += value.runs; report.chatDetail.deleted += value.deleted; });
-    done.steps = await sliceLoop("run_events.one_domain_event.run.step_changed", () => trimStepEvents(db, now, budget, stepQueue), (value) => { report.stepEvents.entities += value.entities; report.stepEvents.deleted += value.deleted; });
+    done.steps = await sliceLoop("run_events.one_domain_event.run.step_changed", () => purgeStepEvents(db, budget), (value) => { report.stepEvents.deleted += value.deleted; });
     // Delivery rows: scans wide tables, so a drained pass is remembered and the next one waits (closedRescanMs). A pass that ran out of
     // time or hit a busy store is not remembered: the next 30-minute pass continues, every batch is its own transaction.
     const closedDue = (): boolean => {
@@ -503,6 +573,8 @@ export async function runDbRetentionPass(options: DbRetentionOptions): Promise<D
       if (report.complete && !options.busy?.() && options.compact !== false && process.env.AGENTLAS_DB_COMPACT !== "0") {
         const memoryVacuum = vacuumMemory(db, free, total);
         if (memoryVacuum.ran || memoryVacuum.reason !== "not-needed") report.vacuum = { ...report.vacuum, reason: `${report.vacuum.reason}; memory:${memoryVacuum.reason}` };
+        const rootRewrite = await rewriteRootIfOwed(db, { alreadyRewritten: memoryVacuum.ran });
+        if (rootRewrite.reason !== "not-owed") report.vacuum = { ...report.vacuum, reason: `${report.vacuum.reason}; root:${rootRewrite.reason}` };
       }
     }
     return report;

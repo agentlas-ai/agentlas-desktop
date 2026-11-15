@@ -2,6 +2,8 @@ import { ownsHostGoalLoop } from "./host-goal-surface";
 import { createHash } from "node:crypto";
 import type { LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
+import { isEffectStatusOnlyTool } from "../invocation/effect-boundary";
+import { callLeftNoOutsideEffect } from "../invocation/no-effect-failure";
 import { getDb } from "../store/db";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunAttemptGoalRevision, getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
@@ -50,6 +52,51 @@ export function canonicalOngoingEvidenceKey(input: {
   return { state: "evidence_observed", key: `one-host:sha256:${createHash("sha256").update(canonical).digest("hex")}` };
 }
 
+/**
+ * A tool call's stored outcome as a stable token: toolId, run and time are new on every retry, so only the typed outcome and its content
+ * enter it. Identical observations stay identical even when the agent repeats the call with different prose. Null for an event that
+ * does not carry a typed outcome.
+ */
+export function toolOutcomeToken(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const data = payload as Record<string, unknown>;
+  if (typeof data.toolName !== "string" || typeof data.toolResultPreview !== "string" || typeof data.toolIsError !== "boolean") return null;
+  const stablePayload = { toolName: data.toolName, toolIsError: data.toolIsError,
+    toolFailureCode: typeof data.toolFailureCode === "string" ? data.toolFailureCode : null,
+    toolResultPreview: data.toolResultPreview,
+    toolSourceUrls: Array.isArray(data.toolSourceUrls)
+      ? data.toolSourceUrls.filter((value): value is string => typeof value === "string").sort() : [],
+    oneArtifacts: Array.isArray(data.oneArtifacts) ? data.oneArtifacts : [] };
+  return `mcp_tool-use:sha256:${createHash("sha256").update(JSON.stringify(stablePayload)).digest("hex")}`;
+}
+
+/**
+ * The outcomes of this turn's successful calls that may have changed something outside the app (a post, a message, a record written
+ * through a connector): the stored result of each, as toolOutcomeToken. A Goal that advances only through such calls changes no file the
+ * host reads, so these join the verification's outcome digest. Read-only calls (search, fetch, read) and failed calls are left out: a
+ * result that is new on every read, or the same error again, is not progress. The number of calls is never counted, so a turn that
+ * repeats one call with one result reads the same as a turn that made it once. Sorted and unique; empty when there is none or the
+ * events cannot be read (the digest then has the shape it had before this field).
+ */
+export function currentTurnEffectOutcomeTokens(invocationRunId: string | null | undefined): string[] {
+  if (!invocationRunId) return [];
+  try {
+    const rows = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq")
+      .all(invocationRunId) as Array<{ payload_json: string }>;
+    const tokens = new Set<string>();
+    for (const row of rows) {
+      let payload: Record<string, unknown>;
+      try { payload = JSON.parse(row.payload_json); } catch { continue; }
+      const token = toolOutcomeToken(payload);
+      if (!token || payload.toolIsError !== false || !String(payload.toolResultPreview).trim()) continue;
+      if (isEffectStatusOnlyTool({ name: String(payload.toolName), id: payload.toolId, args: payload.toolArgs, isError: payload.toolIsError })) continue;
+      if (callLeftNoOutsideEffect({ toolName: payload.toolName, toolArgs: payload.toolArgs })) continue;
+      tokens.add(token);
+    }
+    return [...tokens].sort();
+  } catch { return []; }
+}
+
 /** Passed verifier references are resolved to stable result content. An
  * invocation terminal, assistant message, or fresh event id by itself is not
  * progress. A repeated tool observation has the same token across episodes. */
@@ -80,22 +127,10 @@ function verifiedEvidenceTokens(runId: string, chatId: string, revision: number,
       if (!attempts.length || attempts.some(attempt => attempt.run_id !== runId
         || getLongRunAttemptGoalRevision(runId, attempt.id) !== revision)) continue;
       if (event.kind !== "mcp_tool-use") continue;
-      let payload: Record<string, unknown>;
+      let payload: unknown;
       try { payload = JSON.parse(event.payload_json); } catch { continue; }
-      if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
-      if (typeof payload.toolName !== "string" || typeof payload.toolResultPreview !== "string"
-        || typeof payload.toolIsError !== "boolean") continue;
-      // toolId/run/time are new on every retry. Only the typed tool outcome
-      // and its content enter the fingerprint; identical observations stay
-      // identical even when the agent repeats the call with different prose.
-      const stablePayload = { toolName: payload.toolName, toolIsError: payload.toolIsError,
-        toolFailureCode: typeof payload.toolFailureCode === "string" ? payload.toolFailureCode : null,
-        toolResultPreview: payload.toolResultPreview,
-        toolSourceUrls: Array.isArray(payload.toolSourceUrls)
-          ? payload.toolSourceUrls.filter((value): value is string => typeof value === "string").sort() : [],
-        oneArtifacts: Array.isArray(payload.oneArtifacts) ? payload.oneArtifacts : [] };
-      const token = createHash("sha256").update(JSON.stringify(stablePayload)).digest("hex");
-      tokens.add(`${event.kind}:sha256:${token}`);
+      const token = toolOutcomeToken(payload);
+      if (token) tokens.add(token);
     }
   }
   return [...tokens];

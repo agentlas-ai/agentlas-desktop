@@ -1,0 +1,101 @@
+/* A table of numbers that can be switched to a chart (AnswerCards.tsx). The chart is a card block drawn without the card's frame, header or source line. */
+.wrap {
+  margin: 10px 0;
+}
+
+.wrap > :global(div:last-child) {
+  margin-top: 0;
+}
+
+.switch {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  margin: 0 0 6px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-md);
+  background: var(--paper-2);
+}
+
+.option {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 10px;
+  border-radius: calc(var(--radius-md) - 2px);
+  cursor: pointer;
+}
+
+.option[aria-pressed="true"] {
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--paper-edge);
+}
+
+.option:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: 1px;
+}
+
+/*
+ * The chart is a card block drawn on the card's own light surface (its text colours are fixed for it), without the card's shadow, header and source line.
+ * A transparent card put those fixed colours on a dark chat and the legend nearly vanished: the surface is kept, a hairline frame sets it off.
+ */
+.bare :global(.fpc-card) {
+  box-shadow: none;
+  margin: 0;
+  padding: 14px 16px;
+  animation: none;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-md);
+}
+
+.bare :global(.fpc .ch),
+.bare :global(.fpc .foot) {
+  display: none;
+}
+
+.bare :global(.fpc .grid) {
+  margin-top: 0;
+}
+
+/* A step card shows every word the list gave it: the block's own clamp (title two lines, text three) cut what a narrow chat could not fit. */
+.bare :global(.fpc .a-process_steps .a-c span),
+.bare :global(.fpc .a-process_steps p) {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+
+.chip {
+  appearance: none;
+  border: 1px solid var(--paper-edge);
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 10px;
+  margin: 2px 0 0;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.chip:hover,
+.chip[aria-pressed="true"] {
+  background: var(--paper-2);
+  color: var(--ink);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: 1px;
+}

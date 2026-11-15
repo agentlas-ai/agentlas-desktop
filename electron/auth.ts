@@ -19,7 +19,7 @@
 //   - 성공 redirect 형태: /account?auth=google (POST /api/auth/google 응답의 redirectTo)
 //   - 사용자 메타(email, name) 조회 endpoint: /api/account/me (없으면 cookie payload만 표시)
  import { app, BrowserWindow, safeStorage, session as electronSession, shell } from "electron";
- import { createHash } from "node:crypto";
+ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { managedOneAuthentication, onManagedOneOwnershipChanged, wasManagedOneConfigured } from "./managed-one/auth";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -105,6 +105,17 @@ export function onAuthSessionOwnershipChanged(listener: () => void): () => void 
   ownershipChangeListeners.add(listener);
   return () => ownershipChangeListeners.delete(listener);
 }
+/** The owner pressed sign out (and only that: not an expired session, not a server-invalid one, not a renewal). Called with the account that is leaving, BEFORE the session is cleared. */
+const explicitSignOutListeners = new Set<(userId: string | null) => void>();
+export function onExplicitSignOut(listener: (userId: string | null) => void): () => void {
+  explicitSignOutListeners.add(listener);
+  return () => explicitSignOutListeners.delete(listener);
+}
+function emitExplicitSignOut(userId: string | null): void {
+  for (const listener of explicitSignOutListeners) {
+    try { listener(userId); } catch { /* One observer cannot block sign-out. */ }
+  }
+}
 function emitAuthSessionOwnershipChanged(): void {
   for (const listener of ownershipChangeListeners) {
     try { listener(); } catch { /* One observer cannot block sign-out or auth. */ }
@@ -153,6 +164,21 @@ export function onAuthSessionRenewed(listener: () => void): () => void {
 export function onAuthSessionRestored(listener: (session: AuthSession) => void): () => void {
   sessionRestorationListeners.add(listener);
   return () => sessionRestorationListeners.delete(listener);
+}
+
+const interactiveSignInListeners = new Set<() => void>();
+/**
+ * The owner just finished a sign-in on purpose (browser or window) — not a restore at launch, not a renewal. One/home (O-M3a) registers
+ * its silent device-key registration on this signal: only a login the person just did counts as "just signed in" for the server.
+ */
+export function onInteractiveSignIn(listener: () => void): () => void {
+  interactiveSignInListeners.add(listener);
+  return () => interactiveSignInListeners.delete(listener);
+}
+function emitInteractiveSignIn(): void {
+  for (const listener of interactiveSignInListeners) {
+    try { listener(); } catch { console.warn("[auth] interactive sign-in listener failed"); }
+  }
 }
 
 function emitAuthSessionRestored(generation: number): void {
@@ -678,7 +704,7 @@ export function invalidateAuthSessionFromServer(expectedCookieHeader?: string): 
 
 /** 세션 쿠키로 Hub를 호출하는 표준 경로 — 쿠키 첨부·타임아웃·확정 401 처리를 한 곳에 묶는다.
  *  호출부가 401을 "자기 화면에서만 미인증"으로 강등하고 auth 캐시는 그대로 두면,
- *  크레딧/퀘스트는 사라졌는데 계정 칩은 계속 로그인(이메일·로그아웃) 상태로 남는 불일치가 생긴다.
+ *  크레딧은 사라졌는데 계정 칩은 계속 로그인(이메일·로그아웃) 상태로 남는 불일치가 생긴다.
  *  강등 판단과 세션 폐기를 분리하지 말 것. 폐기는 항상 그 응답을 부른 쿠키 기준(exact-current)이라
  *  이미 교체된 옛 쿠키의 늦은 401은 새 계정을 건드리지 않는다.
  *  401만 폐기한다 — 403은 same-origin 변형 가드처럼 세션과 무관한 거절일 수 있다. */
@@ -988,6 +1014,9 @@ async function persistSession(value: string): Promise<AuthSession> {
  * the daemon's authenticated control socket, whenever the session is restored or invalidated.
  */
 export interface HostSessionHandoff { cookieValue: string; userId?: string; workspaceId?: string; expiresAt?: number }
+type NativeReadEpoch = { sessionId: string; userId: string; workspaceId: string; epoch: string; revision: number };
+let nativeReadEpoch: NativeReadEpoch | null = null;
+let nativeReadRevision = 0;
 export function sessionForDaemonHandoff(): HostSessionHandoff | null {
   if (!getSessionCookieHeader() || !_cache) return null;
   return { cookieValue: _cache.cookieValue, userId: _cache.userId, workspaceId: _cache.workspaceId, expiresAt: _cache.expiresAt };
@@ -995,6 +1024,10 @@ export function sessionForDaemonHandoff(): HostSessionHandoff | null {
 /** Daemon only: adopt (or clear, with null) the session Main handed over. */
 export function adoptHostSessionHandoff(session: HostSessionHandoff | null): boolean {
   if (process.env.ELECTRON_RUN_AS_NODE !== "1") throw new Error("auth-session-handoff-daemon-only");
+  // Every legacy adoption invalidates the attested handoff, even when the
+  // actor appears unchanged; a second channel cannot carry its authority.
+  nativeReadEpoch = null;
+  nativeReadRevision++;
   const clearSession = (): false => {
     if (_cache !== null) _sessionGeneration += 1;
     _cache = null;
@@ -1051,7 +1084,51 @@ export function getAuthenticatedSessionBinding(): { workspaceId: string; userId:
   return { ...actor, sessionId: `native-session:${_sessionGeneration}`, expiresAt: _cache?.expiresAt ?? null };
 }
 
-export async function signInWithGoogle(parent: BrowserWindow | null): Promise<AuthSession> {
+/** A value-free read for reconciliation previews. Expiration returns null
+ * without invalidation callbacks, cookie deletion, or a restored session. */
+export function peekAuthenticatedSessionBinding(): { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null {
+  const managed = managedOneAuthentication();
+  if (managed) return {userId:managed.userId,workspaceId:managed.workspaceId,sessionId:`managed-one:${managed.hostId}:${managed.generation}`,expiresAt:managed.expiresAt};
+  if (wasManagedOneConfigured() || developmentEffectsSuppressed()) return null;
+  if (USE_E2E_SESSION && !_cache) return {userId:"e2e-user",workspaceId:"e2e",sessionId:`native-session:${_sessionGeneration}`,expiresAt:null};
+  if (!_cache?.cookieValue || !_cache.userId || !_cache.workspaceId || (_cache.expiresAt !== undefined && _cache.expiresAt < Date.now())) return null;
+  return {userId:_cache.userId,workspaceId:_cache.workspaceId,sessionId:`native-session:${_sessionGeneration}`,expiresAt:_cache.expiresAt ?? null};
+}
+
+/** An opaque, process-local witness, meaningful across hosts only after the
+ * signed native channel atomically adopts its matching session. */
+export function nativeReadSessionEpoch(): NativeReadEpoch | null {
+  const current = getAuthenticatedSessionBinding();
+  if (!current) { nativeReadEpoch = null; return null; }
+  const matches = nativeReadEpoch && nativeReadEpoch.sessionId === current.sessionId
+    && nativeReadEpoch.userId === current.userId && nativeReadEpoch.workspaceId === current.workspaceId;
+  if (!matches) {
+    nativeReadEpoch = process.env.ELECTRON_RUN_AS_NODE === "1" ? null
+      : { sessionId: current.sessionId, userId: current.userId, workspaceId: current.workspaceId, epoch: randomBytes(32).toString("hex"), revision: ++nativeReadRevision };
+  }
+  return nativeReadEpoch ? { ...nativeReadEpoch } : null;
+}
+
+/** Called only after the original signed GUI channel was authenticated. */
+export function adoptNativeReadSession(session: HostSessionHandoff, epoch: string): boolean {
+  if (process.env.ELECTRON_RUN_AS_NODE !== "1" || !/^[a-f0-9]{64}$/.test(epoch)) throw new Error("native_read_session_invalid");
+  // Identical local session data needs no re-adoption: the legacy adopter
+  // emits an ownership event even for identical input and would disturb work
+  // already running in this process. The cookie is never returned as identity.
+  const same = !!_cache && _cache.cookieValue === session.cookieValue && _cache.userId === session.userId
+    && _cache.workspaceId === session.workspaceId && _cache.expiresAt === session.expiresAt;
+  // This is an attestation of the session already adopted by the daemon,
+  // never a request to change the daemon's account or interrupt other work.
+  if (!same) { nativeReadEpoch = null; return false; }
+  const current = getAuthenticatedSessionBinding();
+  if (!current || current.userId !== session.userId || current.workspaceId !== session.workspaceId) return false;
+  if (!nativeReadEpoch || nativeReadEpoch.epoch !== epoch || nativeReadEpoch.sessionId !== current.sessionId) {
+    nativeReadEpoch = { userId: current.userId, workspaceId: current.workspaceId, sessionId: current.sessionId, epoch, revision: ++nativeReadRevision };
+  }
+  return true;
+}
+
+export async function signInWithGoogle(parent: BrowserWindow | null, options: { reauth?: boolean } = {}): Promise<AuthSession> {
   assertDesktopCookieAuthority();
   assertDevelopmentEffectAllowed("auth.sign-in-google");
   const { BrowserWindow, session: electronSession } = electronApi();
@@ -1091,7 +1168,8 @@ export async function signInWithGoogle(parent: BrowserWindow | null): Promise<Au
     }
   });
 
-  const loginUrl = `${webBaseUrl()}/account?desktop=1`;
+  // `reauth=1` (O-M3a, contracts/one-home-desktop.md §7): the page shows the sign-in card even when a session exists, so the session gets a new authAt.
+  const loginUrl = `${webBaseUrl()}/account?desktop=1${options.reauth ? "&reauth=1" : ""}`;
 
   return new Promise<AuthSession>((resolve, reject) => {
     let settled = false;
@@ -1116,6 +1194,7 @@ export async function signInWithGoogle(parent: BrowserWindow | null): Promise<Au
       settled = true;
       try {
         const session = await persistSession(value);
+        if (session.signedIn) emitInteractiveSignIn();
         try { win.close(); } catch { /* ignore */ }
         resolve(session);
       } catch (error) {
@@ -1171,15 +1250,29 @@ export async function signInWithGoogle(parent: BrowserWindow | null): Promise<Au
  *   1. 127.0.0.1의 임의 포트로 임시 http 서버를 띄운다.
  *   2. shell.openExternal로 agentlas.cloud 로그인 페이지를 기본 브라우저에서 연다.
  *      (callback=http://127.0.0.1:<port>/callback 을 쿼리로 전달)
- *   3. 웹앱이 로그인 완료 후 callback?session=<cookie> 로 리다이렉트하면 값을 받아 저장.
+ *   3. state와 PKCE로 보호한 일회용 코드를 HTTPS에서 세션으로 교환해 저장.
  *   4. 180초 내 콜백이 없으면 {signedIn:false} 로 resolve (호출측이 창 로그인으로 폴백).
  *
  * 주의: 끝까지 매끄러우려면 웹앱(agentlas.cloud)이 desktop callback 쿼리를 존중해야 한다.
  *       그렇지 않으면 타임아웃 후 폴백된다 — 안전(기존 동작 비파괴).
  */
-export async function signInWithBrowser(): Promise<AuthSession> {
+export async function signInWithBrowser(options: { reauth?: boolean } = {}): Promise<AuthSession> {
   assertDesktopCookieAuthority();
   assertDevelopmentEffectAllowed("auth.sign-in-browser");
+  const endpoint = new URL("/api/auth/desktop/token", webBaseUrl());
+  if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["127.0.0.1", "localhost"].includes(endpoint.hostname))) {
+    return { signedIn: false, error: "Invalid sign-in server." };
+  }
+  try {
+    const capability = await fetch(endpoint, { signal: AbortSignal.timeout(8000), cache: "no-store", redirect: "error" });
+    const result = await capability.json() as { protocol?: string };
+    if (!capability.ok || result.protocol !== "agentlas.desktop-auth-code.v1") throw new Error("unsupported");
+  } catch {
+    return { signedIn: false, error: "The sign-in server needs an update before browser sign-in can continue." };
+  }
+  const state = randomBytes(32).toString("base64url");
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
   return new Promise<AuthSession>((resolve) => {
     let settled = false;
     let acceptingCallback = true;
@@ -1206,35 +1299,44 @@ export async function signInWithBrowser(): Promise<AuthSession> {
         res.writeHead(400).end("bad request");
         return;
       }
-      if (!url.pathname.startsWith("/callback")) {
+      if (url.pathname !== "/callback" || req.method !== "GET") {
         res.writeHead(404).end("not found");
         return;
       }
-      const value = url.searchParams.get("session") ?? url.searchParams.get("token") ?? "";
+      const value = url.searchParams.get("code") || "";
       if (value && !acceptingCallback) {
-        res.writeHead(409, { "content-type": "text/plain; charset=utf-8" });
-        res.end("sign-in callback already accepted");
+        res.writeHead(409).end("sign-in callback already accepted");
         return;
       }
       if (value) acceptingCallback = false;
-      res.writeHead(value ? 200 : 400, { "content-type": "text/html; charset=utf-8" });
-      res.end(callbackHtml(!!value));
-      if (!value) return;
-      /*
-       * ★거부된 약속에 catch 가 없으면 로그인이 **3분간 매달린다** (2026-09-07).
-       *
-       * persistSession 이 던지면(키체인 잠김·디스크 오류·검증 실패) 이 then 은 안 돌고
-       * finish 도 안 불린다. 그러면 아래 setTimeout(180000) 만 남아, 사용자는 브라우저에서
-       * 로그인을 마쳤는데도 3분을 기다린 끝에 이유 없는 "로그인 안 됨"을 받는다.
-       * 실패는 즉시, 그리고 사유와 함께 끝내야 한다.
-       */
-      void persistSession(value)
-        .then((session) => finish(session, server))
-        .catch((error) => {
-          const reason = error instanceof Error ? error.message : String(error);
-          console.error("[auth] sign-in callback could not be saved:", reason);
-          finish({ signedIn: false, error: reason.slice(0, 300) }, server);
-        });
+      if (!value && !acceptingCallback) {
+        res.writeHead(409).end("sign-in callback already accepted");
+        return;
+      }
+      const actualState = Buffer.from(url.searchParams.get("state") || "");
+      const expectedState = Buffer.from(state);
+      const code = value;
+      if (actualState.length !== expectedState.length || !timingSafeEqual(actualState, expectedState) || !code || code.length > 4096) {
+        res.writeHead(400, { "cache-control": "no-store" }).end(callbackHtml(false));
+        finish({ signedIn: false, error: "Invalid sign-in callback." }, server);
+        return;
+      }
+      void (async () => {
+        try {
+          const response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ code, verifier }), signal: AbortSignal.timeout(10000), redirect: "error" });
+          const result = await response.json() as { session?: unknown };
+          if (!response.ok || typeof result.session !== "string" || !result.session || result.session.length > 16384) throw new Error("Sign-in exchange failed.");
+          const session = await persistSession(result.session);
+          if (!session.signedIn) throw new Error("Sign-in session was rejected.");
+          emitInteractiveSignIn();
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(callbackHtml(true));
+          finish(session, server);
+        } catch {
+          res.writeHead(400, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(callbackHtml(false));
+          finish({ signedIn: false, error: "Sign-in exchange failed. Please try again." }, server);
+        }
+      })();
     });
 
     server.on("error", () => finish({ signedIn: false }));
@@ -1248,9 +1350,15 @@ export async function signInWithBrowser(): Promise<AuthSession> {
         finish({ signedIn: false }, server);
         return;
       }
-      const callback = `http://127.0.0.1:${port}/callback`;
-      const loginUrl = `${webBaseUrl()}/account?desktop=1&callback=${encodeURIComponent(callback)}`;
-      void electronApi().shell.openExternal(loginUrl);
+      const callback = new URL(`http://127.0.0.1:${port}/callback`);
+      callback.searchParams.set("state", state);
+      const loginUrl = new URL("/account", webBaseUrl());
+      loginUrl.searchParams.set("desktop", "1");
+      loginUrl.searchParams.set("callback", callback.toString());
+      loginUrl.searchParams.set("desktop_auth", "code");
+      if (options.reauth) loginUrl.searchParams.set("reauth", "1"); // O-M3a: see signInWithGoogle
+      loginUrl.searchParams.set("code_challenge", challenge);
+      void electronApi().shell.openExternal(loginUrl.toString());
       timeout = setTimeout(() => finish({ signedIn: false }, server), 180000);
     });
   });
@@ -1265,6 +1373,9 @@ function callbackHtml(ok: boolean): string {
 
 export async function signOut(): Promise<void> {
   const suppressed = developmentEffectsSuppressed();
+  let leaving: string | null = null;
+  try { leaving = getAuthenticatedActorIds()?.userId ?? null; } catch { leaving = null; }
+  emitExplicitSignOut(leaving);
   _sessionGeneration += 1;
   _cache = null;
   emitAuthSessionOwnershipChanged();

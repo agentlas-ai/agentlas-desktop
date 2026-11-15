@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { agentlasHomeDir } from "./home";
 import {
   activeBorrowedOwnerScopeKey,
   borrowedOwnerPartitionDirectory,
@@ -50,7 +51,7 @@ export function hubMemoryNestPathsForOwnerScope(slugValue: unknown, ownerScopeVa
   if (ownerScopeKey !== DEVICE_LOCAL_BORROWED_OWNER_SCOPE && !ACCOUNT_OWNER_SCOPE_RE.test(ownerScopeKey)) {
     return null;
   }
-  const agentRoot = path.join(os.homedir(), ".agentlas", "networking", "hub-agents", slug);
+  const agentRoot = path.join(agentlasHomeDir(), "networking", "hub-agents", slug);
   const flatMemoryRoot = path.join(agentRoot, "memory");
   if (ownerScopeKey === DEVICE_LOCAL_BORROWED_OWNER_SCOPE) {
     // No Hub account is signed in, so there is nothing to isolate. The flat
@@ -102,4 +103,13 @@ export function readableActiveHubMemoryNestRoots(slugValue: unknown): string[] {
   const paths = activeHubMemoryNestPaths(slugValue);
   if (!paths) return [];
   return paths.readableMemoryRoots.filter((root) => assertDirectoryChain(root, false));
+}
+
+/**
+ * 호출 전용 허브 에이전트의 기억은 어디에도 남지 않고 읽히지도 않는다. 화면·인수인계·회수 프롬프트가 서랍을 읽던 자리는
+ * 이 함수를 부른다 — 항상 빈 목록. 이미 쌓인 서랍(이 기기 167개)은 지우지 않고 그대로 두며, 잊기 정리(`hubMemoryNestPathsForOwnerScope`)와
+ * 소유 조회(`readableActiveHubMemoryNestRoots`)는 옛 서랍을 지울 수 있게 그대로 둔다.
+ */
+export function hubMemoryNestRootsForRecall(_memoryKey: string): string[] {
+  return [];
 }

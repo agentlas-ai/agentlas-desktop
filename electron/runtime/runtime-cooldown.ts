@@ -24,13 +24,37 @@ import type { RunnerFailure, RunnerFailureKind } from "./runner";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import { emitRuntimeSignal } from "./runtime-signals";
 
-/** 시한을 못 읽었을 때의 보수적 기본값. 너무 길면 멀쩡해진 런타임을 잠근다. */
+/**
+ * 시한을 못 읽었을 때의 기본값 — 10분.
+ * 근거: 정한 값, 측정 아님. 공급자가 복구 시각을 말하지 않은 한도(quota)에만 쓴다. 너무 길면 멀쩡해진 런타임을 잠그고, 너무 짧으면
+ * 같은 실패를 또 겪는다. 닿으면: 10분 뒤 스스로 후보로 돌아오고(만료는 읽을 때 지운다), 그 사이 갈 곳이 있으면 다른 런타임으로 가고
+ * 없으면 쿨다운을 지키지 않고 한 번 시도한다(mcp/client.ts clearRuntimeCooldown). 사람에게는 "저장된 선택은 그대로, 사용할 수
+ * 있게 되면 자동으로 돌아갑니다"라는 폴백 알림으로 보인다.
+ */
 const DEFAULT_COOLDOWN_MS = 10 * 60_000;
-/** 런타임이 알려준 시각이라도 이보다 길게는 믿지 않는다(“24시간 롤링”류를 그대로 받으면 하루가 잠긴다). */
-const MAX_COOLDOWN_MS = 60 * 60_000;
+/**
+ * 공급자가 말한 복구 시각은 그대로 믿는다 — 위에서 자르지 않는다. 예전에는 60분에서 잘라 구독 한도(5시간 창)가 난 런타임이 60분 뒤
+ * 후보로 돌아와 또 실패했다(경계 시험 B7: 힌트 61분·5시간 모두 60분).
+ * 남은 상한은 시각의 문제가 아니라 타이머의 한계다: Node 타이머는 2,147,483,647ms(약 24.8일)를 넘으면 곧바로 터지므로, 그보다 먼
+ * 시각(말도 안 되는 힌트)은 그 값으로만 받는다. 바깥 제약이며 우리가 고른 값이 아니다. 잘못 읽은 시각에 갇힐 일은 없다: 쿨다운은
+ * 이 프로세스 메모리에만 있고(재시작이면 사라짐), 사용자가 그 런타임을 직접 다시 고르면 지워지고(clearRuntimeCooldown), 갈 곳이 없으면
+ * 쿨다운 없이 한 번 시도한다.
+ */
+const MAX_COOLDOWN_MS = 2_147_483_647;
+/**
+ * The window the shared cooldown itself uses for a limit that came without a usable retry time: a rate limit steps aside for a minute,
+ * a quota for ten. A caller that waits out a limit on its own (the group room's lead router) never retries sooner than this, whatever
+ * hint a provider keeps giving - a 20 ms hint repeated is 136 calls in 3 seconds otherwise (item 3). No new number: these two.
+ */
+export function cooldownWindowMs(kind: RunnerFailureKind): number {
+  return kind === "rate_limit" ? RATE_LIMIT_DEFAULT_COOLDOWN_MS : DEFAULT_COOLDOWN_MS;
+}
 /** 한도/인증만 시한부다. refused·empty·exit 는 요청 자체의 문제일 수 있어 런타임을 잠그지 않는다. */
 const COOLDOWN_KINDS: ReadonlySet<RunnerFailureKind> = new Set(["quota", "rate_limit", "auth"]);
-/** Request throttling lifts by itself: without the provider's Retry-After, step aside briefly, not for ten minutes. */
+/**
+ * Request throttling lifts by itself: without the provider's Retry-After, step aside briefly, not for ten minutes. 60 s is a chosen
+ * value (no measurement), used only when the provider gave no time; it ends by itself and a person sees no line for it.
+ */
 const RATE_LIMIT_DEFAULT_COOLDOWN_MS = 60_000;
 /**
  * Refusals this host raised itself before anything was sent, typed `auth` but not a provider verdict: the OS keychain could not
@@ -105,8 +129,9 @@ export function parseRetryHint(hint: string | undefined, now: number): number | 
   if (!text) return null;
   const iso = Date.parse(text);
   if (Number.isFinite(iso) && iso > now) return iso;
-  // "Resets in 25m37s" / "resets in 2h" / "try again in 45s"
-  const relative = text.match(/\bin\s+(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?/i);
+  // "Resets in 25m37s" / "resets in 2h" / "try again in 45s" / "in 5 minutes". A unit must end where the letters end, so
+  // "in 1 month" is no minute and "in 3 days" no second (both are left unread rather than misread).
+  const relative = text.match(/\bin\s+(?:(\d+)\s*h(?:ours?|rs?)?(?![a-z]))?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?(?![a-z]))?\s*(?:(\d+)\s*s(?:ec(?:ond)?s?)?(?![a-z]))?/i);
   if (relative && (relative[1] || relative[2] || relative[3])) {
     const ms = (Number(relative[1] ?? 0) * 3_600 + Number(relative[2] ?? 0) * 60 + Number(relative[3] ?? 0)) * 1_000;
     if (ms > 0) return Math.min(8_640_000_000_000_000, now + ms);

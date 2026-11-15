@@ -90,7 +90,8 @@ export async function runHandsFreeAgentOs(
       chatId: input.chat.id,
       surfaceId: input.surfaceId,
       manifest: input.manifest,
-      baseDir,
+      // 프로젝트·작업 폴더가 없으면 비운다: 팀이 에이전트 루트에 태어난다(앱 산출물의 폴백 폴더 `generated-agent-os` 가 아니라).
+      baseDir: explicitBaseDir(input.chat, input.workingFolder) ?? undefined,
     });
     const firmChat = createChat({
       firmId: team.firm.id,
@@ -247,10 +248,16 @@ function findAction(
   return manifest.actions?.find((action) => action.type === type) ?? null;
 }
 
-function resolveBaseDir(chat: Chat, workingFolder?: string | null): string {
+/** 사용자가 정한 작업 폴더·프로젝트 폴더. 없으면 null. */
+function explicitBaseDir(chat: Chat, workingFolder?: string | null): string | null {
   if (workingFolder) return workingFolder;
   const project = chat.projectId ? getProject(chat.projectId) : null;
-  if (project?.folderPath) return project.folderPath;
+  return project?.folderPath || null;
+}
+
+function resolveBaseDir(chat: Chat, workingFolder?: string | null): string {
+  const explicit = explicitBaseDir(chat, workingFolder);
+  if (explicit) return explicit;
   try {
     return userDataPath("generated-agent-os");
   } catch {

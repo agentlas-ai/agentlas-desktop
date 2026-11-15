@@ -56,8 +56,16 @@ export interface ScienceTurnLedgerDb {
   prepare(sql: string): { all(...params: unknown[]): unknown[] };
 }
 
-interface StartRow { run_id: string; chat_id: string; ts: string; payload_json: string }
-interface TerminalRow { run_id: string; kind: ScienceTurnRunFact["terminalKind"] & string; ts: string }
+interface StartRow { run_id: string; chat_id: string; ts: string; payload_json: string; rid: number }
+interface TerminalRow { run_id: string; kind: ScienceTurnRunFact["terminalKind"] & string; ts: string; rid: number }
+
+/**
+ * Newest first with a tie that is the write order, not the index order. `ts` has millisecond resolution, and two rows written in the same
+ * millisecond are read from idx_run_events_chat_kind_ts oldest-write first; the later write (the greater rowid) is the newer one.
+ * The order is fixed here, on the rows already read, so the queries below keep answering from the index with no sort of their own.
+ */
+const newestFirst = (a: { ts: string; rid: number }, b: { ts: string; rid: number }): number =>
+  a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : b.rid - a.rid;
 
 /**
  * The Science turns that ran in one runtime chat, newest first. Bounded by chat on purpose: a run's ledger can be tens of
@@ -66,8 +74,8 @@ interface TerminalRow { run_id: string; kind: ScienceTurnRunFact["terminalKind"]
  */
 export function scienceTurnRunsForChat(db: ScienceTurnLedgerDb, chatId: string, limit = 20): ScienceTurnRunFact[] {
   const bound = Math.max(1, Math.min(200, Math.trunc(limit)));
-  const starts = db.prepare("SELECT run_id, chat_id, ts, payload_json FROM run_events WHERE chat_id = ? AND kind = 'invoke_started' ORDER BY ts DESC LIMIT ?")
-    .all(chatId, bound * 4) as StartRow[];
+  const starts = (db.prepare("SELECT run_id, chat_id, ts, payload_json, rowid AS rid FROM run_events WHERE chat_id = ? AND kind = 'invoke_started' ORDER BY ts DESC LIMIT ?")
+    .all(chatId, bound * 4) as StartRow[]).sort(newestFirst);
   const stamped: Array<{ row: StartRow; stamp: ScienceTurnStamp }> = [];
   for (const row of starts) {
     const stamp = parseStamp(row.payload_json);
@@ -79,8 +87,8 @@ export function scienceTurnRunsForChat(db: ScienceTurnLedgerDb, chatId: string, 
   // push another run's terminal out of a count and make a finished run read as running).
   const oldestStart = stamped[stamped.length - 1].row.ts;
   const marks = SCIENCE_TURN_TERMINAL_KINDS.map(() => "?").join(",");
-  const terminals = db.prepare(`SELECT run_id, kind, ts FROM run_events WHERE chat_id = ? AND kind IN (${marks}) AND ts >= ? ORDER BY ts DESC LIMIT ?`)
-    .all(chatId, ...SCIENCE_TURN_TERMINAL_KINDS, oldestStart, 5000) as TerminalRow[];
+  const terminals = (db.prepare(`SELECT run_id, kind, ts, rowid AS rid FROM run_events WHERE chat_id = ? AND kind IN (${marks}) AND ts >= ? ORDER BY ts DESC LIMIT ?`)
+    .all(chatId, ...SCIENCE_TURN_TERMINAL_KINDS, oldestStart, 5000) as TerminalRow[]).sort(newestFirst);
   const newestTerminal = new Map<string, TerminalRow>();
   for (const row of terminals) if (!newestTerminal.has(row.run_id)) newestTerminal.set(row.run_id, row);
   return stamped.map(({ row, stamp }) => {

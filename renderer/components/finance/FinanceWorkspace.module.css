@@ -9,8 +9,9 @@
 .title { font-size:32px;font-weight:650;letter-spacing:-.055em;line-height:1.2;margin:8px 0; }
 .subtitle { color:var(--ink-soft);font-size:13px;max-width:620px;line-height:1.7;margin:0; }
 .actions { display:flex;gap:7px;align-items:center;flex-wrap:wrap; }
-.button { border:1px solid var(--paper-edge-strong);background:var(--paper);color:var(--ink);padding:8px 12px;border-radius:var(--radius-sm);font-size:12px;white-space:normal; }
+.button { composes:agentlas-btn from global;border:1px solid var(--paper-edge-strong);background:var(--paper);color:var(--ink);padding:8px 12px;border-radius:var(--radius-sm);font-size:12px;white-space:normal; }
 .primary { background:var(--one-primary);border-color:var(--one-primary);color:var(--white); }
+.cardTitle { composes:agentlas-btn from global; }
 .quiet { background:transparent;border-color:transparent;color:var(--ink-soft); }
 .active { background:var(--accent-soft);border-color:var(--accent);color:var(--ink); }
 /* Single definition of the view tabs (final effective values of the former four). */
@@ -18,8 +19,8 @@
 .tab { flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;min-width:44px;min-height:54px;padding:16px 12px;border:0;border-bottom:1px solid transparent;border-radius:0;background:transparent;white-space:nowrap;color:var(--ink-soft);font-size:14px;font-weight:500;line-height:20px;scroll-margin-inline:4px; }
 .tab[aria-selected="true"],.tab[aria-current=page] { border-bottom-color:var(--ink);color:var(--ink);font-weight:500; }
 .tabs .tab:focus-visible { outline-offset:-3px; }
-.notice { padding:11px 14px;border-left:3px solid var(--accent);background:var(--accent-soft);font-size:12px;line-height:1.7;margin-bottom:18px;overflow-wrap:anywhere; }
-.error { border-left-color:var(--danger);background:var(--danger-soft); }
+.notice { padding:11px 14px;border:1px solid var(--paper-edge);border-radius:var(--radius-sm);background:var(--accent-soft);font-size:12px;line-height:1.7;margin-bottom:18px;overflow-wrap:anywhere; }
+.error { border-color:var(--danger);background:var(--danger-soft); }
 .toolbar { display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px; }
 .label { display:grid;gap:6px;font-size:12px;color:var(--ink-soft);min-width:0; }
 .input { min-width:0;width:100%;border:1px solid var(--paper-edge-strong);border-radius:var(--radius-sm);padding:9px 11px;background:var(--paper);color:var(--ink);font-size:13px; }
@@ -97,7 +98,7 @@
 .header { align-items:center;margin-bottom:16px;gap:16px; }
 .title { font-size:24px;line-height:1.3;margin:0;letter-spacing:-.04em; }
 .actions { gap:8px; }
-.button { min-height:32px;padding:8px 12px;font-size:12px;white-space:nowrap; }
+.button { min-height:32px;padding:8px var(--agentlas-btn-pad-x);font-size:12px;white-space:nowrap; }
 .iconButton { display:inline-flex;align-items:center;justify-content:center;flex:0 0 32px;width:32px;height:32px;padding:4px;border:1px solid transparent;border-radius:var(--radius-sm);background:transparent;color:var(--ink-soft); }
 .iconButton:hover { background:var(--paper);border-color:var(--paper-edge);color:var(--ink); }
 .iconButton:disabled { opacity:.35; }
@@ -135,7 +136,7 @@
 .artifactTabs{display:flex;gap:8px;margin:0 0 24px;overflow-x:auto}.artifactTabs button{min-height:36px;padding:7px 12px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--ink-soft);font:inherit;font-size:12px;white-space:nowrap;cursor:pointer}.artifactTabs button[aria-current=page]{background:var(--paper);border-color:var(--paper-edge);color:var(--ink)}.consent{max-width:640px;margin:40px auto;padding:28px;background:var(--paper);border:1px solid var(--paper-edge);border-radius:16px}.consent h1{font-size:26px;font-weight:600;margin:0 0 18px}.consent>p{font-size:13px;color:var(--ink-soft);line-height:1.7}.consent>label{display:flex;gap:10px;align-items:center;margin:18px 0;font-size:13px}.consent input{width:17px;height:17px}.consent .actions{margin-top:24px}
 @container(max-width:650px){.tabs{gap:12px}.consent{padding:20px;margin:20px auto}}@media(pointer:coarse){.artifactTabs button{min-height:44px}}
 
-.chatTools{display:flex;gap:8px;justify-content:center}.chatTools .button{border-color:transparent;background:transparent;color:var(--ink-soft);font-size:12px}.toolsPanel{max-width:1000px;margin:24px auto 0;padding:24px;border:1px solid var(--paper-edge);border-radius:var(--radius-lg);background:var(--paper);max-height:65vh;overflow:auto;overscroll-behavior:contain;scroll-margin:24px}.toolsHead{display:flex;justify-content:flex-end;margin-bottom:12px}.toolsPanel:focus-within{border-color:var(--paper-edge-strong)}
+.chatTools{display:flex;gap:8px;justify-content:center}.chatTools .button{border-color:transparent;background:transparent;color:var(--ink-soft);font-size:12px}.toolsPanel{max-width:1000px;margin:24px auto 0;padding:24px;border:1px solid var(--paper-edge);border-radius:var(--radius-lg);background:var(--paper);max-height:65vh;overflow:auto;overscroll-behavior:contain;scroll-margin:24px}.toolsHead{display:flex;justify-content:flex-end;margin-bottom:12px}
 
 .queryHead{justify-content:space-between;align-items:center;gap:16px}.queryHead .sectionHeading{margin:0;font-size:16px}.queryBody{min-width:0}.queryBody>.importPreview{margin-top:20px;padding-top:16px}.queryBody>.importPreview>.button{margin-bottom:12px}
 
@@ -155,7 +156,7 @@
 @media(max-width:600px){.toolsDialog{width:calc(100% - 24px);max-width:calc(100% - 24px);max-height:calc(100dvh - 24px);padding:16px}.toolsDialog .toolsHead{top:12px;right:12px}}
 
 /* Finance UX: labelled toolbar buttons, hints, inline confirmation. */
-.labelButton { width:auto;flex:0 0 auto;gap:6px;padding:4px 10px;font-size:12px;white-space:nowrap;border-color:var(--paper-edge); }
+.labelButton { composes:agentlas-btn from global;width:auto;flex:0 0 auto;gap:6px;padding:4px 10px;font-size:12px;white-space:nowrap;border-color:var(--paper-edge); }
 .labelButton span { line-height:1.2; }
 @media(pointer:coarse) { .labelButton { width:auto;flex-basis:auto;min-height:44px; } }
 .hint { font-size:12px;line-height:1.5;color:var(--ink-soft); }
@@ -164,11 +165,22 @@
 .moreMenu { font-size:12px;color:var(--ink-soft); }
 .moreMenu>summary { cursor:pointer;min-height:32px;display:inline-flex;align-items:center;padding:0 8px; }
 .scheduleLine { max-width:360px;margin-top:12px; }
-.briefingStatus { display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;padding:12px 14px;margin-bottom:16px;border:1px solid var(--paper-edge);border-radius:var(--radius-md);background:var(--paper);font-size:12px; }
-.firstStep { padding:24px;margin:16px 0;border:1px dashed var(--paper-edge-strong);border-radius:var(--radius-md);background:var(--paper); }
-.firstStep .sectionHeading { margin-bottom:8px; }
+.briefingStatus { display:flex;flex-wrap:nowrap;align-items:center;gap:8px 20px;padding:16px 18px;margin-bottom:16px;border:1px solid var(--paper-edge);border-radius:var(--radius-md);background:var(--paper);font-size:13px; }
+/* F-D17b F: the name, the one sentence (it wraps inside its own column) and the button at the right edge, as in the confirmed picture. */
+.briefingStatus > strong { flex:0 0 auto; }
+.briefingStatus > span { flex:1 1 0; min-width:0; line-height:1.5; }
+.briefingStatus > button { flex:none; margin-left:auto; }
+@media (max-width: 760px) { .briefingStatus { flex-wrap:wrap; } .briefingStatus > span { flex-basis:100%; } }
 .capacityBanner { display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-bottom:16px;font-size:12px;color:var(--ink-soft); }
 .preWrap { white-space:pre-wrap;overflow-wrap:anywhere; }
 .mt12 { margin-top:12px; }
 .mt18 { margin-top:18px; }
 .plainFieldset { border:0;padding:0;margin:0; }
+
+/* F-D17: one monitor is one row (the row itself is FinanceMonitorReceipts); a quiet text button never gets a box. */
+.monitorRow { padding:20px 24px; }
+.monitorNext { font-size:12px;line-height:1.4;color:var(--ink-soft);text-align:right;max-width:240px; }
+.tableNote { margin:0;padding:12px 4px 0;line-height:1.6; }
+.pushEnd { margin-left:auto; }
+.quiet:hover:not(:disabled) { color:var(--ink);background:transparent; }
+.consent .primary { min-width:132px;justify-content:center; }

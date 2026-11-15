@@ -85,7 +85,7 @@ export function LocalModelInstallDialog({ packageId, engineOnly = false, ko, onC
       <div className={styles.total}><span><IconDownload size={16} /> {ko ? "총 다운로드" : "Total download"}</span><span>{gb(total)}</span></div>
       {!engineOnly && <div className={styles.assessment}><LocalModelFitIcon snapshot={snapshot} packageId={packageId} ko={ko}/><span>{ko ? "현재 컴퓨터의 예상 적합도" : "Estimated fit on this computer"}</span></div>}
       {insufficientDisk ? <p role="alert">{ko ? "저장 공간이 부족합니다." : "Not enough storage."}</p> : unavailable && <p role="alert">{ko ? "설치 조건을 확인하지 못했습니다." : "Installation requirements could not be confirmed."}</p>}
-    </> : <p role="status">{failed ? ko ? "컴퓨터 상태를 읽지 못했습니다." : "Could not read computer status." : ko ? "컴퓨터 확인 중…" : "Checking this computer…"}</p>}
+    </> : <p role="status">{failed ? ko ? "데스크탑 상태를 불러오지 못했어요." : "Could not read computer status." : ko ? "데스크탑 확인 중…" : "Checking this computer…"}</p>}
     <div className={styles.actions}><button type="button" className={menu.panelMenuRow} onClick={onCancel}>{ko ? "취소" : "Cancel"}</button><button type="button" className={menu.panelMenuRow} disabled={unavailable} onClick={confirm}>{ko ? "설치" : "Install"}</button></div>
   </div></div>;
 }

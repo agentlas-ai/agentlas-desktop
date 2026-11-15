@@ -5,13 +5,13 @@ import { composeDeclaredPrompt } from "../runtime/prompt-order";
 // rows; all real provider credentials/payments still flow through the OS gates.
 import fs from "node:fs";
 import path from "node:path";
-import { app } from "electron";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getProject } from "../store/projects";
-import { setRoute } from "../agents/routes";
+import { agentHomeDir, ensureAgentOwnerMarker, classifyAgentFolder, invalidateOwnerIndex, ownerIds } from "../agents/home";
+import { getRoute, setRoute } from "../agents/routes";
 import { upsertLocalTeamFirm } from "../store/firms";
 import { saveResolvedOrg } from "../store/org-spec";
 import type {
@@ -23,7 +23,6 @@ import type {
   ResolvedDivision,
   ResolvedOrg,
 } from "../../shared/types";
-import { userDataPath } from "../runtime-paths";
 
 interface TeamProfile {
   name: string;
@@ -76,18 +75,32 @@ export function createCommerceAgentTeam(input: MetaAgentTeamFactoryRequest): Met
   const chat = getChat(input.chatId);
   if (!chat) throw new Error(`Chat not found: ${input.chatId}`);
   const project = chat.projectId ? getProject(chat.projectId) : null;
-  const baseDir =
-    input.baseDir ||
-    getChatWorkingFolder(chat.id) ||
-    project?.folderPath ||
-    userDataPath("generated-teams");
+  // 프로젝트·작업 폴더가 있으면 팀은 그 안에(사용자의 폴더). 없으면 한 에이전트 = 한 폴더로 에이전트 루트(`~/.agentlas/agents/<이름>`)에 태어난다.
+  const workspace = input.baseDir || getChatWorkingFolder(chat.id) || project?.folderPath || null;
   const profile = profileFromManifest(input.manifest);
-  const rootPath = path.join(baseDir, ".agentlas", "generated-teams", profile.slug);
+  const existing = existingTeamAgent(profile.slug);
+  const teamId = existing?.id ?? randomUUID();
+  const rootPath = workspace
+    ? path.join(workspace, ".agentlas", "generated-teams", profile.slug)
+    : appTeamFolder({ id: teamId, slug: profile.slug });
+  // 이 호출이 에이전트 루트에 새로 만드는 폴더인가(이미 있던 팀 폴더·사용자의 프로젝트 폴더는 아니다): 파일을 쓰다 실패하면 이 폴더만 치운다.
+  const born = !workspace && !fs.existsSync(rootPath);
   fs.mkdirSync(rootPath, { recursive: true });
+  if (!workspace) {
+    const placed = classifyAgentFolder(rootPath);
+    if (placed.owner === "app" && placed.appRoot === "agent-home") ensureAgentOwnerMarker(placed.unit, teamId);
+  }
 
   const createdAt = new Date().toISOString();
-  const files = writeTeamFiles(rootPath, profile, input, createdAt);
-  const agent = upsertTeamAgent(rootPath, profile, createdAt);
+  let files: MetaAgentTeamFactoryFile[];
+  try {
+    files = writeTeamFiles(rootPath, profile, input, createdAt);
+  } catch (error) {
+    // 소유 표식은 행을 쓰기 전에 만들어져 있다: 실패한 채 두면 행 없는 id 의 표식을 가진 고아 폴더가 쌓이고 다시 만들 때 `-id6` 이름이 생긴다(감사 35-10). 행·라우트는 아직 없다.
+    if (born) removeBornTeamFolder(rootPath, teamId);
+    throw error;
+  }
+  const agent = upsertTeamAgent(rootPath, profile, createdAt, teamId, existing);
   setRoute({
     agentId: agent.id,
     path: rootPath,
@@ -129,6 +142,19 @@ export function createCommerceAgentTeam(input: MetaAgentTeamFactoryRequest): Met
   return { rootPath, agent, firm, org, files, createdAt };
 }
 
+/** 이 실행이 방금 만든 팀 폴더를 정확한 경로로 지운다: 링크가 아니고, 앱 소유 폴더이고, 소유 표식이 이 id 이고, 단위 폴더 자체일 때만. 던지지 않는다. */
+function removeBornTeamFolder(rootPath: string, teamId: string): void {
+  try {
+    const placed = classifyAgentFolder(rootPath);
+    if (placed.owner !== "app" || placed.appRoot !== "agent-home" || placed.nested || path.resolve(placed.unit) !== path.resolve(rootPath)) return;
+    if (fs.lstatSync(rootPath).isSymbolicLink()) return;
+    const owners = ownerIds(rootPath);
+    if (owners.length !== 1 || owners[0] !== teamId) return;
+    fs.rmSync(rootPath, { recursive: true, force: true });
+    invalidateOwnerIndex();
+  } catch { /* a left-over folder with its own marker is found again by the next create */ }
+}
+
 interface TeamMemberAgent {
   slug: string;
   localPath: string;
@@ -156,17 +182,17 @@ function writeTeamFiles(
   write(
     "AGENTS.md",
     "config",
-    runtimeGuide(profile, rootPath, input, "Codex", createdAt),
+    runtimeGuide(profile, input, "Codex", createdAt),
   );
-  write("CLAUDE.md", "config", runtimeGuide(profile, rootPath, input, "Claude Code", createdAt));
-  write(path.join(".claude", "CLAUDE.md"), "config", runtimeGuide(profile, rootPath, input, "Claude Code", createdAt));
-  write("GEMINI.md", "config", runtimeGuide(profile, rootPath, input, "Gemini", createdAt));
+  write("CLAUDE.md", "config", runtimeGuide(profile, input, "Claude Code", createdAt));
+  write(path.join(".claude", "CLAUDE.md"), "config", runtimeGuide(profile, input, "Claude Code", createdAt));
+  write("GEMINI.md", "config", runtimeGuide(profile, input, "Gemini", createdAt));
 
   write("agents/ceo/agentlas.json", "config", JSON.stringify({ schemaVersion: "1.0", entry: "AGENT.md" }, null, 2));
-  write("agents/ceo/AGENT.md", "prompt", ceoPrompt(profile, rootPath));
-  write("agents/ceo/AGENTS.md", "config", ceoRuntimeGuide(profile, rootPath, "Codex"));
-  write("agents/ceo/CLAUDE.md", "config", ceoRuntimeGuide(profile, rootPath, "Claude Code"));
-  write("agents/ceo/GEMINI.md", "config", ceoRuntimeGuide(profile, rootPath, "Gemini"));
+  write("agents/ceo/AGENT.md", "prompt", ceoPrompt(profile));
+  write("agents/ceo/AGENTS.md", "config", ceoRuntimeGuide(profile, "Codex"));
+  write("agents/ceo/CLAUDE.md", "config", ceoRuntimeGuide(profile, "Claude Code"));
+  write("agents/ceo/GEMINI.md", "config", ceoRuntimeGuide(profile, "Gemini"));
   for (const role of TEAM_ROLES) {
     write(`agents/${role.id}/agentlas.json`, "config", JSON.stringify({ schemaVersion: "1.0", entry: "AGENT.md" }, null, 2));
     write(`agents/${role.id}/AGENT.md`, "prompt", divisionPrompt(profile, role.role, role.name));
@@ -215,14 +241,23 @@ function writeTeamFiles(
   return files;
 }
 
-function upsertTeamAgent(rootPath: string, profile: TeamProfile, createdAt: string): InstalledAgent {
+interface ExistingTeamAgent { id: string; tone: InstalledAgent["tone"]; installed_at: string }
+
+function existingTeamAgent(slug: string): ExistingTeamAgent | undefined {
+  return getDb().prepare("SELECT id, tone, installed_at FROM installed_agents WHERE slug = ?").get(slug) as ExistingTeamAgent | undefined;
+}
+
+/** 같은 팀을 다시 만들면 이미 있는 앱 폴더를 그대로 쓴다(둘로 갈리지 않게). 없으면 에이전트 루트 안의 새 폴더 — 이미 다른 폴더가 쓰는 이름이면 `-id6`. */
+function appTeamFolder(row: { id: string; slug: string }): string {
+  const route = getRoute(row.id);
+  if (route?.path && fs.existsSync(route.path) && classifyAgentFolder(route.path).owner === "app") return route.path;
+  return agentHomeDir(row, null);
+}
+
+function upsertTeamAgent(rootPath: string, profile: TeamProfile, createdAt: string, id: string, existing: ExistingTeamAgent | undefined): InstalledAgent {
   const db = getDb();
-  const existing = db.prepare("SELECT id, tone, installed_at FROM installed_agents WHERE slug = ?").get(profile.slug) as
-    | { id: string; tone: InstalledAgent["tone"]; installed_at: string }
-    | undefined;
-  const id = existing?.id ?? randomUUID();
   const tone = existing?.tone ?? "green";
-  const systemPrompt = ceoPrompt(profile, rootPath);
+  const systemPrompt = ceoPrompt(profile);
   if (existing) {
     db.prepare(
       `UPDATE installed_agents
@@ -462,14 +497,14 @@ function teamOverview(profile: TeamProfile, input: MetaAgentTeamFactoryRequest, 
 /** One shared semantic core in each canonical role prompt, not repeated in adapters. */
 const COMMERCE_ROLE_CORE = `Owner/runtime authorization governs payments and all actions; no added cap/wait. Use OS manifests. Connector recovery: only for requested operations that need a missing connector; reuse existing authorized authentication first, then authorized browser/console/local/alternate paths. Supplied-receipt reports need no service setup or operational declarations. Secrets only secure UI/Vault. Label verified/claimed/estimated/unverified; prove effects. Retain files/screenshots, rollback/launch checks permanently. Return upward; Curator owns durable writes.`;
 
-function runtimeGuide(profile: TeamProfile, rootPath: string, input: MetaAgentTeamFactoryRequest, runtimeName: string, createdAt: string): string {
+function runtimeGuide(profile: TeamProfile, input: MetaAgentTeamFactoryRequest, runtimeName: string, createdAt: string): string {
   return composeDeclaredPrompt([
     { id: "commerce.adapter.reader-policy", stability: "fixed-policy", changeTriggers: ["release"], text: "Read agents/ceo/AGENT.md with the runtime file reader before work. agentlas.json declares this same canonical entry for Agentlas hosts; no second policy copy lives here.\n\nRead agentlas.team.json for roster/layout; division entries live at agents/<division>/AGENT.md and specialist entries at agents/<division>/specialists/<id>/AGENT.md. Return manifests, files, evidence and blockers to the CEO." },
     { id: "commerce.adapter.profile", stability: "configuration", changeTriggers: ["owner-profile", "runtime"], text: `# ${profile.name} - ${runtimeName}` },
-    { id: "commerce.adapter.source", stability: "task-context", changeTriggers: ["task"], text: `team root: ${rootPath}; created: ${createdAt}; source: ${input.surfaceId ?? "not linked"}` },
+    { id: "commerce.adapter.source", stability: "task-context", changeTriggers: ["task"], text: `created: ${createdAt}; source: ${input.surfaceId ?? "not linked"}` },
   ]);
 }
-function ceoRuntimeGuide(profile: TeamProfile, _rootPath: string, runtimeName: string): string {
+function ceoRuntimeGuide(profile: TeamProfile, runtimeName: string): string {
   return composeDeclaredPrompt([
     { id: "commerce.ceo.adapter.reader-policy", stability: "fixed-policy", changeTriggers: ["release"], text: "Read AGENT.md in this folder with the runtime file reader before work; agentlas.json declares that canonical entry. Route typed briefs to divisions and verify their returned results." },
     { id: "commerce.ceo.adapter.profile", stability: "configuration", changeTriggers: ["owner-profile", "runtime"], text: `# ${profile.name} CEO - ${runtimeName}` },
@@ -481,12 +516,12 @@ function divisionRuntimeGuide(profile: TeamProfile, role: string, name: string, 
     { id: "commerce.division.adapter.profile", stability: "configuration", changeTriggers: ["owner-profile", "runtime"], text: `# ${name} - ${runtimeName}\n\n${role} of ${profile.name}.` },
   ]);
 }
-function ceoPrompt(profile: TeamProfile, rootPath: string): string {
+function ceoPrompt(profile: TeamProfile): string {
   return composeDeclaredPrompt([
     { id: "commerce.ceo.mission", stability: "fixed-policy", changeTriggers: ["release"], order: 0, text: "Deliver a running commerce operation: storefront/catalog, verified image capability, payments/database, order desk and dashboard. Assign divisions and merge checkable Surface/OS deltas." },
     { id: "commerce.role.core", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 10, text: COMMERCE_ROLE_CORE },
     { id: "commerce.ceo.receipt", stability: "fixed-policy", changeTriggers: ["release"], order: 20, text: "Payment receipts: merchant, amount/currency, recurrence and purpose." },
-    { id: "commerce.ceo.profile-root", stability: "task-context", changeTriggers: ["owner-profile", "task"], text: `CEO of ${profile.name}; root: ${rootPath}; ${profile.category}; audience: ${profile.audience}` },
+    { id: "commerce.ceo.profile-root", stability: "task-context", changeTriggers: ["owner-profile", "task"], text: `CEO of ${profile.name}; ${profile.category}; audience: ${profile.audience}` },
   ], "\n");
 }
 function divisionPrompt(profile: TeamProfile, role: string, name: string): string {

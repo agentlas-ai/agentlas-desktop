@@ -17,7 +17,7 @@ export function waitingRetryCopy(locale: "ko" | "en"): { waiting: string; stop: 
     : { waiting: "The app is sending your message again.", stop: "Stop", stopped: "Stopped. This message will not be sent again." };
 }
 
-const POLL_WHILE_WAITING_MS = 5_000;
+const POLL_WHILE_WAITING_MS = 60_000;
 const STOPPED_NOTICE_MS = 6_000;
 
 export function WaitingRetryStop({ chatId, locale, live, maxWidth }: { chatId: string | null; locale: "ko" | "en"; live: boolean; maxWidth?: number }) {

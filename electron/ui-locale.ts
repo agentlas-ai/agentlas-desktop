@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { userDataPath } from "./runtime-paths";
 
 let locale: "ko" | "en" = "en";
+let localeChosenInProcess = false;
 let saved: { checkedAt: number; mtimeMs: number; value: "ko" | "en" } | null = null;
 const FILE = "ui-locale.json";
 const RECHECK_MS = 2_000;
@@ -25,7 +26,21 @@ export function currentUiLocale(): "ko" | "en" {
     } else saved.checkedAt = now;
     return saved.value;
   } catch {
-    return locale;
+    return locale !== "en" || localeChosenInProcess ? locale : operatingSystemLocale();
+  }
+}
+
+/** The language of the operating system, read only inside a running Electron Main (never in the daemon, Terminal or a plain Node tool, which keep "en"
+ * until Main saves a choice). A profile that has never saved a language (a first start, a copied profile) used to read "en" for a Korean owner, so the
+ * end-of-cleanup notice and every other Main-made line came out in English until the screen first set the language (fix-desktop-3 T4). */
+function operatingSystemLocale(): "ko" | "en" {
+  try {
+    const { app } = require("electron") as { app?: { isReady?: () => boolean; getLocale?: () => unknown } };
+    if (!app || typeof app.getLocale !== "function" || (typeof app.isReady === "function" && !app.isReady())) return "en";
+    const value = app.getLocale();
+    return typeof value === "string" && value.toLowerCase().startsWith("ko") ? "ko" : "en";
+  } catch {
+    return "en";
   }
 }
 
@@ -54,7 +69,7 @@ export function writeUiLocaleCore(next: "ko" | "en", pref?: UiLocalePref): UiLoc
   if (result.ok) return result.core;
   // Legacy menu/screen setter: without a user data directory (tests, tools) the in-process value still applies. The SDK
   // port (settings.language.set) never reports this as saved; it uses persistUiLocaleCore directly.
-  locale = next;
+  locale = next; localeChosenInProcess = true;
   return result.attempted ?? { locale: next, pref: pref ?? next, revision: (result.current?.revision ?? 0) + 1, updatedAt: new Date().toISOString() };
 }
 
@@ -124,7 +139,7 @@ export function persistUiLocaleCore(next: "ko" | "en", pref?: UiLocalePref, expe
       revision: changed ? (before?.revision ?? 0) + 1 : before.revision,
       updatedAt: changed || !before?.updatedAt ? new Date().toISOString() : before.updatedAt,
     };
-    if (!changed) { locale = next; return { ok: true, core, changed: false }; }
+    if (!changed) { locale = next; localeChosenInProcess = true; return { ok: true, core, changed: false }; }
     try {
       fs.writeFileSync(temp, JSON.stringify(core), { mode: 0o600 });
       fs.renameSync(temp, file);
@@ -137,7 +152,7 @@ export function persistUiLocaleCore(next: "ko" | "en", pref?: UiLocalePref, expe
     if (!readback || readback.revision !== core.revision || readback.locale !== core.locale || readback.pref !== core.pref) {
       return { ok: false, code: "persist_failed", message: "the saved file does not read back as written", current: readback, attempted: core };
     }
-    locale = next;
+    locale = next; localeChosenInProcess = true;
     return { ok: true, core: readback, changed: true };
   } finally {
     release();

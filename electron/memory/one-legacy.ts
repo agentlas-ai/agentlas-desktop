@@ -7,7 +7,7 @@ import { getMemoryDb, getMemoryStoreInfo } from "./database";
 import { insertMemoryEntry } from "./store";
 import { assertMemoryWriteAllowed, revokeOneMemoryEntry } from "./revocations";
 import { clearSelectedMemoryContextCache } from "./selected-context-cache";
-import { recordAutomaticMemoryTurn } from "./automatic-curator";
+import { recordTurnRecord } from "./turn-record";
 import { observeProductSource } from "./source-catalogue";
 import { captureTrustedMemoryIntake, withMemorySourceCustody } from "./source-custody";
 import { nativeTextsFor } from "./native-text";
@@ -259,6 +259,8 @@ function retryDeletes(sourceKey: string): void {
   const db = getMemoryDb();
   const rows = db.prepare("SELECT key,value FROM memory_store_meta WHERE key LIKE ?").all(`one-legacy-delete:${sourceKey}:%`) as Array<{ key: string; value: string }>;
   for (const row of rows) {
+    // K7'' (audit D12): not `forgetOwnedMemory` on purpose - this is the host cleaning the retired One-asset projection it made itself (no owner screen, no revision or epoch fence to hold, nothing the mirror should tell the server, the
+    // asset being the owner's retired legacy one); every part of a forget that is not a screen's report runs inside `revokeOneMemoryEntry` (stamp, same words of the same owner, turn records, stores, indexes, cleanup outbox).
     revokeOneMemoryEntry(row.value, BUILTIN_ONE_AGENT_ID);
     db.prepare("DELETE FROM memory_store_meta WHERE key=?").run(row.key);
   }
@@ -294,15 +296,14 @@ function queuePending(sourceKey: string, state: OneMemoryState): void {
       projectId: candidate.scope === "project" ? candidate.scopeRef : null, projectPath: null,
       hostOutcome: "unknown" as const, memoryChannel: "legacy_one_overlay",
       memoryCompatibilityScope: { scope: candidate.scope, scopeRef: candidate.scopeRef } };
-    const receipt = withMemorySourceCustody(captureTrustedMemoryIntake(context), () => recordAutomaticMemoryTurn({
+    const receipt = withMemorySourceCustody(captureTrustedMemoryIntake(context), () => recordTurnRecord({
       context: { turnId, agentId: BUILTIN_ONE_AGENT_ID, chatId: null,
         projectId: candidate.scope === "project" ? candidate.scopeRef : null, projectPath: null,
         hostOutcome: "unknown", memoryChannel: "legacy_one_overlay",
         memoryCompatibilityScope: { scope: candidate.scope, scopeRef: candidate.scopeRef } },
-      turnSummary: observation.slice(0, 360), replyText: observation,
+      turnSummary: observation.slice(0, 360),
     }));
-    // No selected runtime is invented; the configured host curator pool owns
-    // any later model call. An unavailable pool leaves a durable retry job.
+    // The observation is a turn record only (no model call is made for it); the resting-time gathering reads it.
     db.prepare("INSERT OR IGNORE INTO memory_store_meta(key,value) VALUES(?,?)").run(key, receipt.ticketId);
     enqueued++;
   }

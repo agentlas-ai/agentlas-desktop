@@ -79,6 +79,10 @@ export class OneSupervisorWorkQueue {
   active(): SupervisorWorkLease[] {
     return this.db.prepare("SELECT * FROM one_supervisor_work_jobs WHERE phase IN ('starting','running','held')").all() as SupervisorWorkLease[];
   }
+  /** One read: this identity has a job that is not finished (queued, claimed or waiting out a refusal, starting, running, held). The executor's watchdog runs only while this is true. */
+  hasUnfinished(oneId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM one_supervisor_work_jobs WHERE one_id=? AND phase IN ('queued','claimed','starting','running','held') LIMIT 1").get(oneId);
+  }
   enqueue(row: SupervisorRequestRow, chatId: string): SupervisorWorkLease {
     if (row.kind !== "work" || row.state !== "stored" || !row.task_id || !row.run_id) throw supervisorError('supervisor_work_ingress_invalid');
     return this.write(() => {
@@ -119,6 +123,15 @@ export class OneSupervisorWorkQueue {
         AND one_id=(SELECT one_id FROM one_supervisor_host_identity WHERE slot='active')`)
       .run(now, lease.command_id, lease.owner_epoch, lease.generation, now);
     return changed.changes === 1 ? this.get(lease.command_id) : null;
+  }
+  /** Park an unstarted claim only while its owner and lease still fence the start boundary. */
+  parkForReconfirmation(lease: SupervisorWorkLease): SupervisorWorkLease | null {
+    const now=this.now();
+    const changed=this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='held',reason='held_before_native_dispatch',updated_at=?
+      WHERE command_id=? AND phase='claimed' AND owner_epoch=? AND generation=? AND lease_until>?
+        AND one_id=(SELECT one_id FROM one_supervisor_host_identity WHERE slot='active')`)
+      .run(now,lease.command_id,lease.owner_epoch,lease.generation,now);
+    return changed.changes===1 ? this.get(lease.command_id) : null;
   }
   transition(lease: SupervisorWorkLease, phase: WorkPhase, reason: string | null = null): SupervisorWorkLease | null {
     if (TERMINAL.has(lease.phase)) return null;
@@ -183,10 +196,10 @@ export class OneSupervisorWorkQueue {
       .run(nextRunId,now+Math.max(100,Math.floor(delayMs)),now,lease.command_id,lease.run_id,lease.phase,lease.owner_epoch,lease.generation);
     return changed.changes===1 ? this.get(lease.command_id) : null;
   }
-  cancelUnstarted(lease: SupervisorWorkLease): boolean {
+  cancelUnstarted(lease: SupervisorWorkLease, reason: "cancelled_before_dispatch" | "owner_stopped_outcome_unknown" = "cancelled_before_dispatch"): boolean {
     return this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='cancelled',lease_until=0,
-      reason='cancelled_before_dispatch',updated_at=? WHERE command_id=? AND generation=? AND (phase IN ('queued','claimed') OR (phase='held' AND reason='held_before_native_dispatch'))`)
-      .run(this.now(), lease.command_id, lease.generation).changes === 1;
+      reason=?,updated_at=? WHERE command_id=? AND generation=? AND (phase IN ('queued','claimed') OR (phase='held' AND reason='held_before_native_dispatch'))`)
+      .run(reason, this.now(), lease.command_id, lease.generation).changes === 1;
   }
   canCancelUnstarted(lease: SupervisorWorkLease): boolean {
     return ['queued','claimed'].includes(lease.phase) || lease.phase==='held' && lease.reason==='held_before_native_dispatch';

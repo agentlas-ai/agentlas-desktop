@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { resolveOneTeamAvatarProtocolPath } from "../one/avatar";
+import { oneTeamAvatarRoots, resolveOneTeamAvatarProtocolPath } from "../one/avatar";
 import { getOneProfile } from "../store/one-profile";
-import { userDataPath } from "../runtime-paths";
 
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 const ICON_RE = /^one-avatar:(?:self|[a-f0-9-]{16,80})$/i;
@@ -17,9 +16,15 @@ export function readMobileOneAvatar(icon: string): {
   if (icon === "one-avatar:self" && getOneProfile().avatarIcon !== icon) return null;
   const file = resolveOneTeamAvatarProtocolPath(`agentlas://one-avatar/${icon.slice("one-avatar:".length)}`);
   if (!file) return null;
-  const root = fs.realpathSync.native(userDataPath());
-  const relative = path.relative(root, file);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  // The portrait must be inside a folder the app owns: the profile (One's own portrait, portraits not moved yet) or the agent root (a
+  // seat's portrait lives in its agent folder's local state). The payload the phone reads is unchanged.
+  const inside = oneTeamAvatarRoots().some((candidate) => {
+    try {
+      const relative = path.relative(fs.realpathSync.native(candidate), file);
+      return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+    } catch { return false; }
+  });
+  if (!inside) return null;
   const extension = path.extname(file).toLowerCase();
   const mimeType = extension === ".png" ? "image/png"
     : extension === ".jpg" ? "image/jpeg"

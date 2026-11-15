@@ -25,6 +25,7 @@ export const APP_SCREEN_PAGES: readonly string[] = [
   "/marketplace",
   "/marketplace/profile",
   "/one",
+  "/one-confirm",
   "/one-vault",
   "/project/detail",
   "/project/new",
@@ -35,5 +36,6 @@ export const APP_SCREEN_PAGES: readonly string[] = [
   "/startup-founder-studio",
   "/surface-preview",
   "/workspace",
+  "/workspace/rules",
   "/workspace/task",
 ];

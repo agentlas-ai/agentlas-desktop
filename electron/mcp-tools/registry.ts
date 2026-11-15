@@ -324,7 +324,7 @@ export function revokeServerConnectionSession(id: string, options: { keepEnabled
       .run(id, row.connection_epoch);
     if (changed.changes !== 1) throw Object.assign(new Error("connection_epoch_conflict"), { code: "connection_epoch_conflict" });
     return getServer(id)!;
-  })();
+  }).immediate();
 }
 
 /** A connection's on/off switch (desktop, phone, the model's connector.disconnect): on enables; off is a revoke

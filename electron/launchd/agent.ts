@@ -6,8 +6,8 @@ import { spawnSync } from "node:child_process";
 import type { LaunchdStatus } from "../../shared/types";
 import { requireConfiguredInstallIdentity } from "../install-identity";
 import { openedStorePath, STORE_SCHEMA_VERSION } from "../store/db";
-import { readDaemonAutostartStoreReady, setDaemonAutostartEnabled } from "../store/daemon-autostart";
-import { buildDaemonAutostartCommand, inspectDaemonAutostart, reconcileDaemonAutostart } from "../daemon/app-launcher";
+import { readDaemonAutostartStoreReady } from "../store/daemon-autostart";
+import { buildDaemonAutostartCommand, inspectDaemonAutostart } from "../daemon/app-launcher";
 
 /** Compatibility UI now controls the same identity-scoped agentlasd service,
  * never the old ai.agentlas.automations GUI launcher. */
@@ -21,21 +21,22 @@ function command() {
     installIdentity: requireConfiguredInstallIdentity(), appVersion, execPath: process.execPath,
     daemonEntry: path.join(__dirname, "..", "daemon", "main.js"), requiredSchemaVersion: STORE_SCHEMA_VERSION, storeBootstrapToken });
 }
-function status(action?: boolean): LaunchdStatus {
+async function status(action?: boolean): Promise<LaunchdStatus> {
   if (process.platform !== "darwin") return { supported: false, installed: false, loaded: false, plistPath: "" };
   try {
     const plan = command();
-    const result = action === undefined ? inspectDaemonAutostart(plan) : reconcileDaemonAutostart(action, plan);
-    if (action !== undefined) setDaemonAutostartEnabled(action);
+    const coordinator = await import("../daemon/autostart-coordinator");
+    if (action !== undefined) coordinator.setAutostartIntent(action);
+    const result = action === undefined ? inspectDaemonAutostart(plan) : await coordinator.reconcileAutostartIntent(plan);
     return { supported: true, installed: result.installed, loaded: result.loaded, plistPath: result.filePath };
   } catch (error) {
     return { supported: true, installed: false, loaded: false, plistPath: "",
       error: error instanceof Error ? error.message : "daemon_autostart_failed" };
   }
 }
-export function launchdStatus(): LaunchdStatus { return status(); }
-export function enableLaunchd(): LaunchdStatus { return status(true); }
-export function disableLaunchd(): LaunchdStatus { return status(false); }
+export function launchdStatus(): Promise<LaunchdStatus> { return status(); }
+export function enableLaunchd(): Promise<LaunchdStatus> { return status(true); }
+export function disableLaunchd(): Promise<LaunchdStatus> { return status(false); }
 
 /** Only for the obsolete --headless-automations entry. It can never disable the
  * identity-scoped agentlasd service. Unknown definitions are left untouched. */

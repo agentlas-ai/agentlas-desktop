@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import { IconChevronDown, IconChevronRight } from "@/components/Icon";
 import {
   buildOneSessionTree,
   type OneSessionChildStatus,
+  type OneSessionTreeChild,
   type OneSessionTreeMember,
   type OneSessionTreeRow,
 } from "@/lib/one-session-tree";
@@ -16,6 +17,16 @@ const STATUS_LABEL: Record<"ko" | "en", Partial<Record<OneSessionChildStatus, st
   en: { attention: "Needs attention", running: "Running", failed: "Failed", unavailable: "Unavailable" },
 };
 const NO_MEMBERS: readonly OneSessionTreeMember[] = [];
+const NO_CHILDREN: readonly OneSessionTreeChild[] = [];
+
+/** Rendered only while a room is open: tells the owner of the member list when to read it and when it can forget it. Draws nothing. */
+function RoomOpenSignal({ roomChatId, onChange }: { roomChatId: string; onChange: (roomChatId: string, open: boolean) => void }) {
+  useEffect(() => {
+    onChange(roomChatId, true);
+    return () => onChange(roomChatId, false);
+  }, [roomChatId, onChange]);
+  return null;
+}
 
 /**
  * Session list with group rooms as parent rows and their members as small child rows (owner 2026-10-16).
@@ -31,6 +42,8 @@ export function OneSessionTree<Row extends OneSessionTreeRow>({
   locale,
   renderRow,
   onOpenMember,
+  childrenFor,
+  onRoomOpenChange,
 }: {
   rows: readonly Row[];
   taskforces: readonly Pick<OneTaskforce, "chatId" | "memberAgentIds">[];
@@ -42,7 +55,14 @@ export function OneSessionTree<Row extends OneSessionTreeRow>({
   activeMemberAgentId: string | null;
   locale: "ko" | "en";
   renderRow: (row: Row) => ReactNode;
-  onOpenMember: (agentId: string) => void;
+  onOpenMember: (agentId: string, roomChatId: string) => void;
+  /**
+   * A list whose room rows do not carry their members (the Workspace menu) asks for them here, only for a room that is open.
+   * Absent (the One Session list): the members come from `taskforces` / the chat's seat snapshot, exactly as before.
+   */
+  childrenFor?: (roomChatId: string) => readonly OneSessionTreeChild[] | "loading" | "failed";
+  /** With `childrenFor`: called with true when a room opens and false when it closes or leaves the list. */
+  onRoomOpenChange?: (roomChatId: string, open: boolean) => void;
 }) {
   const nodes = useMemo(
     () => buildOneSessionTree(rows, { taskforces, members: members ?? NO_MEMBERS, runningChatIds, locale }),
@@ -78,12 +98,16 @@ export function OneSessionTree<Row extends OneSessionTreeRow>({
   return (
     <ul className={styles.tree} data-one-session-tree="rooms">
       {nodes.map((node) => {
-        if (!node.roomChatId || node.children.length === 0) {
+        if (!node.roomChatId || (node.children.length === 0 && !childrenFor)) {
           return <li key={node.key} className={styles.item}>{renderRow(node.row)}</li>;
         }
         const roomChatId = node.roomChatId;
         const expanded = isExpanded(roomChatId);
         const groupId = `one-session-members-${roomChatId}`;
+        const loaded = childrenFor ? (expanded ? childrenFor(roomChatId) : NO_CHILDREN) : node.children;
+        const note = loaded === "loading" ? (locale === "ko" ? "불러오는 중…" : "Loading…")
+          : loaded === "failed" ? (locale === "ko" ? "참여자를 불러오지 못했어요" : "Could not load members") : null;
+        const memberRows = typeof loaded === "string" ? NO_CHILDREN : loaded;
         return (
           <li key={node.key} className={styles.item} data-one-tree-room="true" data-expanded={expanded ? "true" : "false"}>
             <div className={styles.roomRow} onKeyDown={(event) => onRoomKeyDown(event, roomChatId)}>
@@ -100,8 +124,10 @@ export function OneSessionTree<Row extends OneSessionTreeRow>({
               </button>
               <div className={styles.roomRowBody} data-one-tree-row-body="true">{renderRow(node.row)}</div>
             </div>
+            {childrenFor && onRoomOpenChange && expanded ? <RoomOpenSignal roomChatId={roomChatId} onChange={onRoomOpenChange} /> : null}
             <ul id={groupId} className={styles.children} hidden={!expanded}>
-              {node.children.map((child) => {
+              {note ? <li className={styles.note} role="status">{note}</li> : null}
+              {memberRows.map((child) => {
                 const active = child.agentId === activeMemberAgentId;
                 const statusLabel = STATUS_LABEL[locale][child.status];
                 return (
@@ -114,7 +140,7 @@ export function OneSessionTree<Row extends OneSessionTreeRow>({
                       data-active={active ? "true" : "false"}
                       aria-current={active ? "page" : undefined}
                       title={child.name}
-                      onClick={() => onOpenMember(child.agentId)}
+                      onClick={() => onOpenMember(child.agentId, roomChatId)}
                       onKeyDown={onChildKeyDown}
                     >
                       <span className={styles.childName}>{child.name}</span>

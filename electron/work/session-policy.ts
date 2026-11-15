@@ -23,8 +23,8 @@ export function workMainOwnsRouting(input: {
  */
 export function workSessionMainPolicy(input: { delegationToolsListed: boolean }): string {
   return composeDeclaredPrompt([
-    { id: "work.session.main.role", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
-      text: "Work: you remain this conversation's main AI; own dialogue, execution choices, progress and recovery. Answer/do work yourself when sufficient; specialists are optional tools, never a mandatory roster." },
+    { id: "work.session.main.role", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
+      text: "Work: you remain this conversation's main AI; own dialogue, execution choices, progress and recovery. Answer/do work yourself when sufficient; agents are optional tools, never a mandatory roster." },
     { id: "work.session.main.delegation", revision: 2, stability: "fixed-policy", changeTriggers: ["release", "tool-grant"], order: 10,
       text: !input.delegationToolsListed ? null : "Delegate independent work through work_session_agents/delegate with focused done criteria and a suitable advertised model/effort. A returned handle is accepted work, not completion. End the turn while children work; their reports return here. Handle new owner messages without restarting the task tree." },
     { id: "work.session.main.recovery", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 20,
@@ -34,6 +34,6 @@ export function workSessionMainPolicy(input: { delegationToolsListed: boolean })
   ], "\n");
 }
 
-registerDeclaredPromptModule({ id: "work.session.tools", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 0 });
+registerDeclaredPromptModule({ id: "work.session.tools", revision: 3, stability: "fixed-policy", changeTriggers: ["release"], order: 0 });
 /** Canonical declared tool descriptions, consumed by native MCP and in-process providers alike. */
 export function workSessionToolDefinitions(): typeof WORK_SESSION_TOOL_DEFINITIONS { return WORK_SESSION_TOOL_DEFINITIONS; }

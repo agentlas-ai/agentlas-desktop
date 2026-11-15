@@ -121,7 +121,7 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
   }, [chatId, refresh]);
   if (!chatId) return null;
   if (!snapshot) return embedded ? null : error
-    ? <p className={styles.unavailable} role="status">{ko ? "작업 상태를 확인하지 못했습니다. Goal과 예약은 변경되지 않았습니다." : "Could not check work status. The Goal and schedules were not changed."}</p>
+    ? <p className={styles.unavailable} role="status">{ko ? "작업 상태를 확인하지 못했어요." : "Could not check work status."}</p>
     : null;
   const independent = snapshot.automations.filter((row) => row.relationship === "independent");
   const unverifiedSchedules = snapshot.automations.filter((row) => row.relationship === "unverified");

@@ -44,9 +44,11 @@ import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@s
 import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
 import { OllamaMigrationPanel } from "@/components/settings/OllamaMigrationPanel";
 import { PersonalAgentFrontPanel } from "@/components/settings/PersonalAgentFrontPanel";
+import { PersonalAgentHome, useOneHomeAvailable } from "@/components/settings/PersonalAgentHome";
 import { AgentMailPanel } from "@/components/settings/AgentMailPanel";
 import { ArchivePanel } from "@/components/settings/ArchivePanel";
 import { ReachPanel } from "@/components/settings/ReachPanel";
+import { AlwaysAllowedPanel } from "@/components/settings/AlwaysAllowedPanel";
 import { PricingPanel } from "@/components/settings/PricingPanel";
 import { multimodalProviderPatch, wholeListWritable, type StoredListLoad } from "@/lib/edit-patch";
 import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
@@ -149,13 +151,14 @@ function backendKeyHint(b: ByokBackend, locale: string): string {
 export default function SettingsPage() {
   const { t, pref, setPref, locale } = useT();
   const [settingsSection, setSettingsSection] = useState("general");
+  const homeShown = useOneHomeAvailable();
   const settingsContentRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const applyHash = () => {
       const hash = window.location.hash.slice(1);
       const targets: Record<string, string> = { multimodal: "models", "run-alerts": "notifications", "service-connections": "connections" };
       const section = targets[hash] ?? (hash.startsWith("settings-") ? hash.slice(9) : "");
-      if (!["general", "mobile", "connections", "models", "notifications", "privacy", "billing"].includes(section)) return;
+      if (!["general", "mobile", "connections", "models", "notifications", "privacy", "billing", "personal"].includes(section)) return;
       setSettingsSection(section);
       if (targets[hash]) requestAnimationFrame(() => document.getElementById(hash)?.scrollIntoView({ block: "start" }));
     };
@@ -539,7 +542,8 @@ export default function SettingsPage() {
         }}
       >
         <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700 }}>
-          {t("settings.title")}
+          {settingsSection === "personal" ? (locale === "ko" ? "설정" : "Settings") : t("settings.title")}
+          {settingsSection === "personal" ? <small style={{ marginLeft: 10, fontFamily: "var(--rd-f-body, inherit)", fontSize: 12.5, fontWeight: 400, color: "var(--muted-deep, var(--ink-soft))" }}>{locale === "ko" ? "개인 에이전트" : "Personal agent"}</small> : null}
         </h1>
       </header>
 
@@ -557,8 +561,8 @@ export default function SettingsPage() {
           ["general", "일반", "General"], ["mobile", "모바일 연결", "Mobile connection"],
           ["connections", "서비스 연결", "Connections"], ["models", "모델과 엔진", "Models and engines"],
           ["notifications", "알림", "Notifications"], ["privacy", "개인정보와 데이터", "Privacy and data"],
-          ["billing", "요금제", "Plan"],
-        ] as const).map(([id, ko, en]) => <button key={id} type="button" aria-current={settingsSection === id ? "page" : undefined}
+          ["billing", "요금제", "Plan"], ["personal", "개인 에이전트", "Personal agent"],
+        ] as const).filter(([id]) => id !== "personal" || homeShown).map(([id, ko, en]) => <button key={id} type="button" aria-current={settingsSection === id ? "page" : undefined}
           onClick={() => { setSettingsSection(id); window.location.hash = `settings-${id}`; settingsContentRef.current?.scrollTo({ top: 0 }); }}>
           {locale === "ko" ? ko : en}
         </button>)}
@@ -571,10 +575,12 @@ export default function SettingsPage() {
         <ScienceExtensionPanel />
         </div>
         <div hidden={settingsSection !== "mobile"}><MobileBridgePanel active={settingsSection === "mobile"} /></div>
+        <div hidden={settingsSection !== "personal"}><PersonalAgentHome /></div>
         <div hidden={settingsSection !== "connections"}><AgentMailPanel locale={locale} /></div>
         <div hidden={settingsSection !== "privacy"}>
           <ArchivePanel locale={locale} />
           <ReachPanel locale={locale} />
+          <AlwaysAllowedPanel locale={locale} active={settingsSection === "privacy"} />
         </div>
         <div hidden={settingsSection !== "billing"}><SettingsPlanRow /></div>
         <div hidden={settingsSection !== "general"}>
@@ -1516,7 +1522,7 @@ function MobileBridgePanel({ active }: { active: boolean }) {
             type="button"
             onClick={() => void revealBridgeLog()}
             style={{
-              border: "1px solid var(--line)",
+              border: "1px solid var(--paper-edge)",
               borderRadius: 999,
               padding: "9px 16px",
               background: "var(--paper)",

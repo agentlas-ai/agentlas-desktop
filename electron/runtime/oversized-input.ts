@@ -27,7 +27,6 @@ import os from "node:os";
 import { agentRunCwd } from "./exec";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { runtimeReadsWithTools } from "../../shared/runtime-capabilities";
-import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { resolveEffectiveContextWindow, UNKNOWN_CONTEXT_WINDOW } from "../../shared/models";
 import { agentlasServingContextWindow } from "../../shared/agentlas-serving";
 import { writeChatInputSpill, type ChatInputSpill } from "../store/chat-input-spill";
@@ -56,7 +55,7 @@ export function spillTokenLimit(provider: Provider, req: Pick<RunnerRequest, "mo
  * conversation without a project reads: a secret in a paste is masked in the file there (the existing secret patterns). */
 function readableFolder(req: RunnerRequest, kind: string): { folder: string; narrow: boolean; shared?: true } | null {
   if (req.untrustedNoTools || req.browserOnly || req.mcpGrantCatalogOnly || req.simulation || req.minimalObservation
-    || req.judgmentOnly || req.outputSchema || aliveDecisionProfileForRequest(req)) return null;
+    || req.judgmentOnly || req.outputSchema) return null;
   // A Science recovery turn's prompt is pinned by its single-use grant (recovery-authority.ts assertScienceRecoveryRequest rejects any other
   // text, and Science builds it bounded by reference): a reference block here would fail the turn as a scope mismatch instead of reaching the model.
   if (req.scienceRecoveryCapability !== undefined) return null;

@@ -3,13 +3,13 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { getRoute } from "../agents/routes";
-import { userDataDir } from "../runtime-paths";
 import { scanAgentFolder } from "../agents/folder-scan";
 import { buildLocalTeamOrgChart } from "../agents/team-org-chart";
 import { isWorkspaceAsset } from "../agents/workspace-snapshot";
 import { materializeTeamMemberCells } from "../store/team-member-cells";
 import { bindResolvedOrgAgentIds } from "../store/org-spec";
 import { readCloudAgentRestoreMarker, readRestoredCloudAgentPackageSnapshot } from "./restore";
+import { cloudManagedFolder } from "./registry-transaction";
 import type { InstalledFirm, ResolvedOrg } from "../../shared/types";
 
 type TeamRow = { id: string; slug: string; name: string; name_en: string; tagline: string;
@@ -59,7 +59,10 @@ export function restoredTeamSourceDigest(agentId: string): string | null {
   if (!row || row.entity_kind !== "team" || !row.system_prompt.trim()
     || ["background", "private"].includes(row.visibility) || !route || route.agentId !== agentId
     || route.source !== "agent-cloud" || route.kind !== "team") return null;
-  const managed = path.join(userDataDir(), "agents", row.slug);
+  // The package's folder is the one the install transaction manages (userData/agents/<slug> before the folder move, the agent's folder
+  // in the agent root after it) — the same answer the transaction itself uses.
+  let managed: string;
+  try { managed = cloudManagedFolder({ id: row.id, slug: row.slug }); } catch { return null; }
   if (path.resolve(route.path) !== path.resolve(managed)) return null;
   const marker = readCloudAgentRestoreMarker(managed);
   if (!marker || marker.slug !== row.slug || marker.fork || marker.packageHash !== route.packageHash) return null;
@@ -91,7 +94,7 @@ export function recoverRestoredTeamFirms(agentId?: string): void {
         || priorProjection.chartDigest !== digest(matches[0].org_chart_json))) continue;
       const priorOrg = matches[0] ? db.prepare("SELECT value FROM meta WHERE key = ?").get(`orgspec:${matches[0].id}`) as { value: string } | undefined : undefined;
       if (matches[0] && (!priorOrg || priorProjection!.orgDigest !== digest(priorOrg.value))) continue;
-      const managed = path.join(userDataDir(), "agents", row.slug);
+      const managed = cloudManagedFolder({ id: row.id, slug: row.slug });
       if (path.resolve(route.path) !== path.resolve(managed)) continue;
       const marker = readCloudAgentRestoreMarker(managed);
       if (!marker || marker.slug !== row.slug || marker.fork || marker.packageHash !== route.packageHash) continue;

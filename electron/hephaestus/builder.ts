@@ -63,6 +63,10 @@ import { runBuildRunnerWithMcpRecovery } from "./mcp-runtime-retry";
 import { buildFallbackAdmits, describeBuildRuntimeAttempts, runBuildTurnOnRuntimeLadder } from "./build-runtime-fallback";
 import { buildRunMcpRunnerBinding, buildRunRequestWithAttachment, withBuildMcpAttachmentForRun } from "./build-run-attachment";
 import { userDataPath } from "../runtime-paths";
+import { importLocalFolder } from "../agents/import-local";
+import { notifyBuildAgentCreated } from "./build-workbench-hooks";
+import { findScopeEscapes, openBuildScope } from "./build-scope";
+import { isEphemeralPackagePath } from "../agents/hephaestus-sync";
 
 export type BuildSink = (ev: HephaestusBuildEvent) => void;
 
@@ -1315,7 +1319,7 @@ async function runHephaestusBuildInScope(
     let runnerOutcome;
     try {
       runnerOutcome = await runBuildRunnerWithMcpRecovery({
-      runner: (request, events) => runObservedRunner(buildPicked.runner, request, events,buildActive.kind),
+      runner: (request, events) => runObservedRunnerAs("build", "build-authoring", buildPicked.runner, request, events, buildActive.kind),
       attachment: req.mcpAttachment,
       makeRequest: makeRunnerRequest,
       events: runnerEvents,
@@ -1408,6 +1412,14 @@ async function runHephaestusBuildInScope(
         sink({ runId, kind: "log", text: ko
           ? `${from.kind} 런타임이 끝내지 못해(${last?.code ?? "unknown"}) 작업 풀의 다음 런타임 ${to.kind}${to.model ? `/${to.model}` : ""}로 같은 턴을 이어갑니다.`
           : `${from.kind} did not finish (${last?.code ?? "unknown"}); the same turn continues on the next runtime of the worker pool, ${to.kind}${to.model ? `/${to.model}` : ""}.` });
+      },
+      onWait: (runtime, failure, waitMs, waits) => {
+        const seconds = Math.max(1, Math.round(waitMs / 1000));
+        const after = seconds >= 120 ? (ko ? `${Math.round(seconds / 60)}분` : `${Math.round(seconds / 60)} min`) : (ko ? `${seconds}초` : `${seconds} s`);
+        markActivity(ko ? `${runtime.kind} 응답을 기다리는 중` : `Waiting for ${runtime.kind}`);
+        sink({ runId, kind: "log", text: ko
+          ? `${runtime.kind} 쪽 사정(${failure.providerCode ?? failure.kind})으로 이번 턴이 끝나지 않았습니다. ${after} 뒤 같은 턴을 다시 시도합니다(${waits}번째). 만든 파일은 그대로 둡니다.`
+          : `${runtime.kind} could not finish this turn (${failure.providerCode ?? failure.kind}). The same turn is tried again in ${after} (attempt ${waits}). The files written so far stay.` });
       },
     });
     const runnerOutcome = ladder.outcome;
@@ -1744,15 +1756,35 @@ async function runHephaestusBuildInScope(
         console.warn(`[build] interview receipt not written: ${err instanceof Error ? err.message : String(err)}`);
       }
 
-      // 정본 /hep-build 9단계: 계약을 통과한 패키지를 로컬 탐색에 등록한다.
+      // 정본 /hep-build 9단계: 만든 패키지를 로컬 탐색에 등록한다.
+      // 계약 지적이 남아 있어도 등록한다. 지적은 위 단계 문구로 알리고,
+      // 파일을 하나도 쓰지 않은 빌드만 등록하지 않는다(계약 목록은 빌더의 숙제지 자격 조건이 아니다).
       // 절대 경로로 넘긴다 — 정본이 측정해 둔 함정이다: "." 로 넘기면 검증한 것과
       // 다른 루트를 잡아 id가 local/agent, workforce가 null이 되고 routing_status가
       // draft에서 trusted로 스스로 승격한다.
-      if (finalBlockers && finalBlockers.length === 0 && !signal.aborted) {
+      // Write scope (Agentlas 2.0 Build): a link inside the build folder that points out of it is how a later read or write would leave the
+      // agent's folder, so such a build is not registered; the files stay for the owner to look at.
+      const escapes = (() => { const opened = openBuildScope(req.workspace); return opened.ok ? findScopeEscapes(opened.scope, 5) : []; })();
+      if (escapes.length > 0) {
+        sink({ runId, kind: "stage", stage: "contract", text: ko
+          ? `빌드 폴더 밖을 가리키는 링크가 있어 등록하지 않았습니다(${escapes.map((e) => e.path).join(", ")}).`
+          : `Not registered: the build folder has a link that points outside it (${escapes.map((e) => e.path).join(", ")}).` });
+      }
+      if (!signal.aborted && escapes.length === 0 && countPackageFiles(completedPackageRoot) > 0) {
         try {
           markActivity(ko ? "로컬 탐색에 등록" : "Registering for local discovery");
           const migrated = await cardsMigrate(completedPackageRoot, { tier: "local", overwrite: true, signal });
           console.log(`[build] cards migrate → ${migrated.error ? `error: ${migrated.error}` : "ok"}`);
+          // 방금 만든 에이전트를 라이브러리에 바로 올린다. 엔진 큐 항목은 늦게 오거나(구 엔진은 표식이 없어 held)
+          // 안 와도 되고, 나중에 도착하면 이미 설치된 폴더라 건너뛴다. 실패해도 Build 는 끝난 것이다 — Agents 화면의 가져오기가 남는다.
+          if (!migrated.error && !isEphemeralPackagePath(path.resolve(completedPackageRoot))) {
+            try {
+              const imported = await importLocalFolder(completedPackageRoot);
+              // The Build window's saved build links to the agent it made (and applies the name and picture chosen there).
+              notifyBuildAgentCreated({ workspace: req.workspace, packageRoot: completedPackageRoot, agentId: imported.agent.id });
+            }
+            catch (importError) { console.warn(`[build] direct library import failed: ${importError instanceof Error ? importError.message : String(importError)}`); }
+          }
           sink({
             runId,
             kind: "stage",

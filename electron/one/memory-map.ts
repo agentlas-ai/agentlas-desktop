@@ -1,3 +1,4 @@
+import { decodeStoredVector } from "../memory/local-embedding";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -11,14 +12,12 @@ import {
   type OneMemoryMapScope,
   type OneMemoryMapSnapshot,
 } from "../../shared/one-memory-map";
-import { getMemoryDb as getDb, getMemoryStoreInfo } from "../memory/database";
+import { getMemoryDb as getDb, getMemoryStoreInfo, memoryRoot } from "../memory/database";
+import { layoutOf, rootClock } from "../memory/stores";
+import { readSet, setFingerprint, setStores } from "../memory/store-set";
 import type { OneDurableMemoryEntryUi } from "../../shared/types";
-import { revokeOneMemoryEntry } from "../memory/revocations";
-import {
-  findAgentNestExperienceSlugs,
-  forgetAgentNestExperienceMemory,
-  forgetProjectMemoryProjection,
-} from "../memory/project-files";
+import { forgetOwnedLine, learningActor, ownedMemoryRecord } from "../memory/owner-mutations";
+import { memoryActorIds } from "../../shared/memory-actor-family";
 
 import { BUILTIN_ONE_AGENT_ID as ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { nativeTextsFor } from "../memory/native-text";
@@ -136,14 +135,10 @@ function parseStringArrayCount(value: string): number {
 
 function parseEmbedding(value: string | null): number[] | null {
   if (!value) return null;
-  try {
-    const parsed = JSON.parse(value);
-    if (!Array.isArray(parsed) || parsed.length < 2) return null;
-    const vector = parsed.map(Number);
-    return vector.every(Number.isFinite) ? vector : null;
-  } catch {
-    return null;
-  }
+  const parsed = decodeStoredVector(value);   // either form of the column (the JSON list, or the q8 form the first-run migration writes)
+  if (!parsed || parsed.length < 2) return null;
+  const vector = parsed.map(Number);
+  return vector.every(Number.isFinite) ? vector : null;
 }
 
 function vectorNorm(vector: number[]): number {
@@ -327,22 +322,61 @@ function rendererEdges(relations: RelationRow[]): OneMemoryMapEdge[] {
   return result;
 }
 
+/**
+ * One's rows that live in another store (the layout switch is not OFF) — project and session rows go to the project's store, so the map reads the root AND every project
+ * store (no limit on how many; a store nobody changed is not opened again, see store-set.ts). `null` when the switch is OFF: the map then reads exactly what it read before.
+ * `fingerprint` is stat-only; `load()` reads the stores that changed.
+ */
+function oneStoreSet(): { fingerprint: string; load: (limit?: number) => { rows: MemoryMapRow[]; relations: RelationRow[]; skips: number } } | null {
+  try {
+    const db = getDb();
+    if (layoutOf(db) === "central") return null;
+    const context = { memoryRoot: memoryRoot(), owner: getMemoryStoreInfo().ownerNamespace, rootDb: db };
+    const stores = setStores(context, { agentId: null }); // One keeps no agent store; its personal rows stay in the root
+    return {
+      fingerprint: setFingerprint(stores, rootClock(db)),
+      load: (limit?: number) => {
+        const rowRead = readSet(context, stores, `one-map-rows:${limit ?? 0}`, (sub) => sub.prepare(
+          `SELECT id, scope, kind, content, project_id, project_path, evidence_json, embedding_json, created_at
+           FROM memory_entries WHERE agent_id = ? AND superseded_at IS NULL AND ${visibleMemory("memory_entries")}
+           ORDER BY created_at DESC, id DESC${limit ? " LIMIT ?" : ""}`).all(...(limit ? [ONE_AGENT_ID, limit] : [ONE_AGENT_ID])) as MemoryMapRow[], (value) => value.length);
+        const relationRead = limit ? { results: [], skips: [] } : readSet(context, stores, "one-map-relations", (sub) => {
+          try {
+            return sub.prepare(
+              `SELECT relation.from_memory_id, relation.to_memory_id, relation.relation_type, relation.score
+               FROM memory_relation_edges relation
+               JOIN memory_entries source ON source.id = relation.from_memory_id
+               JOIN memory_entries target ON target.id = relation.to_memory_id
+               WHERE source.agent_id = ? AND target.agent_id = ?
+                 AND source.superseded_at IS NULL AND target.superseded_at IS NULL
+                 AND ${visibleMemory("source")} AND ${visibleMemory("target")}`).all(ONE_AGENT_ID, ONE_AGENT_ID) as RelationRow[];
+          } catch { return [] as RelationRow[]; }
+        }, (value) => value.length);
+        return { rows: rowRead.results.flatMap((item) => item.value), relations: (relationRead.results as Array<{ value: RelationRow[] }>).flatMap((item) => item.value), skips: rowRead.skips.length };
+      },
+    };
+  } catch { return null; }
+}
+
 /** Main-owned, read-only projection of One's actual durable memory graph. */
 export function getOneMemoryMap(): OneMemoryMapSnapshot {
   const root = oneRoot();
-  const signature = mapSignature(root);
+  const extra = oneStoreSet();
+  const signature = mapSignature(root) + (extra ? `|s:${crypto.createHash("sha256").update(extra.fingerprint).digest("hex").slice(0, 16)}` : "");
   if (cachedMap?.signature === signature) return cachedMap.snapshot;
 
-  const rows = getDb().prepare(
+  const rootRows = getDb().prepare(
     `SELECT id, scope, kind, content, project_id, project_path, evidence_json,
             embedding_json, created_at
      FROM memory_entries
      WHERE agent_id = ? AND superseded_at IS NULL AND ${visibleMemory("memory_entries")}
      ORDER BY created_at ASC, id ASC`,
   ).all(ONE_AGENT_ID) as MemoryMapRow[];
+  const loaded = extra?.load();
+  const rows = loaded ? [...rootRows, ...loaded.rows].sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) : rootRows;
   const ticketSlugs = readTicketSlugIndex(root);
   const positions = projectMemoryEmbeddings(rows.map((row) => ({ id: row.id, embedding: parseEmbedding(row.embedding_json) })));
-  const relations = readRelations();
+  const relations = loaded ? [...readRelations(), ...loaded.relations] : readRelations();
   const relationCounts = new Map<string, number>();
   const relationWeights = new Map<string, number>();
   for (const relation of relations) {
@@ -401,7 +435,7 @@ export function getOneMemoryMap(): OneMemoryMapSnapshot {
  * so the count in the sheet equals the node count on the map. Content is bounded
  * and control characters stripped; only the project folder's basename travels.
  */
-// The host's own record of a turn whose model emitted no Memory Events (memory/curator.ts hostObservedTurnEvents).
+// The "request received" line an earlier build wrote for a turn whose model emitted no Memory Events (the writer, memory/curator.ts hostObservedTurnEvents, is gone; the line stays readable in stores that have it).
 const HOST_OBSERVED_PREFIX = /^이 에이전트는 다음과 같은 요청을 수행한다:\s*/;
 
 /** One or two lines a person can scan. Owner 2026-10-05: "메모리티켓의 제목을 한 두 줄로 정리해서 적는게 나을듯
@@ -452,7 +486,7 @@ function memoryTickets(ids: readonly string[]): Map<string, { summary: string | 
 
 export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryUi[] {
   const capped = Math.min(1_000, Math.max(1, Math.floor(limit) || 300));
-  const rows = getDb().prepare(
+  const rootListed = getDb().prepare(
     `SELECT id, scope, kind, content, project_path, evidence_json, created_at
      FROM memory_entries
      WHERE agent_id = ? AND superseded_at IS NULL AND ${visibleMemory("memory_entries")}
@@ -461,6 +495,9 @@ export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryU
   ).all(ONE_AGENT_ID, capped) as Array<{
     id: string; scope: string; kind: string; content: string; project_path: string | null; evidence_json: string; created_at: string;
   }>;
+  // not OFF — the newest rows across the root and every store, so the count in the sheet equals the node count on the map.
+  const more = oneStoreSet()?.load(capped);
+  const rows = more ? [...rootListed, ...more.rows].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0)).slice(0, capped) : rootListed;
   // People see the original wording; English is the search/model surface.
   const listNatives = nativeTextsFor("memory_entry", rows.map((row) => row.id));
   const tickets = memoryTickets(rows.map((row) => row.id));
@@ -486,33 +523,20 @@ export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryU
   });
 }
 
-/** "잊기": commit a durable fence, then remove every known raw recall projection. */
+/**
+ * "잊기" on the One memory map. K7': it is the same forget as every other door (`forgetOwnedLine` -> `forgetOwnedMemory`: stamp, line, older versions, same words of the same owner, turn records, indexes, project files, agent nest,
+ * the mirror's `gone`), no longer its own copy of half of it. The map shows the personal agent's own lines, so only a line of the One actor is forgotten here, as before.
+ */
 export function forgetOneDurableMemoryEntry(memoryId: string): { ok: boolean; memoryId: string; forgottenAt: string | null } {
   const id = typeof memoryId === "string" ? memoryId.trim() : "";
   if (!id) return { ok: false, memoryId: "", forgottenAt: null };
-  const forgotten = revokeOneMemoryEntry(id, ONE_AGENT_ID);
-  if (!forgotten) return { ok: false, memoryId: id, forgottenAt: null };
+  try {
+    const row = ownedMemoryRecord(id);
+    if (!memoryActorIds(ONE_AGENT_ID).includes(row.agent_id ?? learningActor(row) ?? "")) return { ok: false, memoryId: id, forgottenAt: null };
+    forgetOwnedLine(id);
+  } catch { return { ok: false, memoryId: id, forgottenAt: null }; }
   cachedMap = null;
-
-  for (const projectPath of forgotten.projectPaths) {
-    // The original wording of a translated memory is projected under its own hash.
-    for (const contentHash of [forgotten.contentHash, ...forgotten.nativeContentHashes]) {
-      try {
-        forgetProjectMemoryProjection(
-          projectPath,
-          forgotten.kind,
-          contentHash,
-          forgotten.forgottenAt,
-        );
-      } catch {
-        console.warn("[memory] forgotten project projection reconciliation failed");
-      }
-    }
-  }
-  for (const slug of findAgentNestExperienceSlugs(forgotten.sourceMemoryIds)) {
-    if (!forgetAgentNestExperienceMemory(slug, forgotten.sourceMemoryIds, forgotten.forgottenAt)) {
-      console.warn("[memory] forgotten agent projection reconciliation failed");
-    }
-  }
-  return { ok: true, memoryId: id, forgottenAt: forgotten.forgottenAt };
+  let forgottenAt: string | null = null;
+  try { forgottenAt = (getDb().prepare("SELECT revoked_at AS at FROM memory_revocations WHERE source_memory_id=? LIMIT 1").get(id) as { at: string } | undefined)?.at ?? null; } catch { /* the stamp's time is information */ }
+  return { ok: true, memoryId: id, forgottenAt };
 }

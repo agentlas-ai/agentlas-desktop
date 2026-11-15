@@ -8,9 +8,10 @@ import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from ".
 import { OneSupervisorWorkQueue, type SupervisorWorkLease } from "./supervisor-work-queue";
 import {OneBudgetAdmissionDenied} from "./budget-store";
 import {onRuntimeSignal, runtimeSignalFloor} from "../runtime/runtime-signals";
+import {externalWritersNeedPolling, onExternalWrite, onExternalWritersChange} from "../store/external-writer-presence";
 import {UNDISPATCHED_START_MAX_ATTEMPTS,isTransientSendRefusalCode,sendRefusalCode,startRefusalWaitsLong, isStoreBusyError, isRefusedBeforeDispatch } from "../../shared/transient-send-refusal";
 
-import {rebindSupervisorUnconfirmed, SUPERVISOR_UNCONFIRMED_MAX_SENDS, countSupervisorPreBeginRefusal, retainSupervisorStartVerdict, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, reserveSupervisorDispatch, supervisorRefusalDelay, wakeSupervisorLongWait} from "./supervisor-dispatch-retry";
+import {rebindSupervisorUnconfirmed, SUPERVISOR_UNCONFIRMED_MAX_SENDS, countSupervisorPreBeginRefusal, retainSupervisorStartVerdict, stopSupervisorRetryForReview, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, reserveSupervisorDispatch, supervisorRefusalDelay, wakeSupervisorLongWait} from "./supervisor-dispatch-retry";
 
 
 /** The brief as Work receives it: the brief itself, then One's checklist for "finished" when it gave one. */
@@ -38,6 +39,10 @@ export interface SupervisorWorkExecutorOptions {
   ownerKind: "desktop-main" | "work-daemon";
   assertOwner(): void;
   assertBinding(lease: SupervisorWorkLease, request: SupervisorRequestRow): void;
+  /** Companion runs require their server's exact-command start and liveness fence. */
+  companionLifecycle?(purpose: "start" | "status", binding: Record<string, unknown>, runId: string): Promise<string | null>;
+  /** Opt-in only: caller must know a compatible owner surface can display and approve this exact Work. */
+  requiresReconfirmation?(lease: SupervisorWorkLease, request: SupervisorRequestRow): boolean;
   locale(): "ko" | "en";
   leaseMs?: number;
   tickMs?: number;
@@ -82,6 +87,10 @@ export class OneSupervisorWorkExecutor {
   private timer: NodeJS.Timeout | null = null;
   private lastFailure: string | null = null;
   private readonly dispatching = new Map<string,{runId:string;startedAt:number}>();
+  private readonly checkingCompanion = new Set<string>();
+  private readonly checkedCompanion = new Map<string, number>();
+  private readonly companionStopPending = new Set<string>();
+  private readonly localCompanionRuns = new Map<string, {runId:string;session:{userId:string;workspaceId:string;sessionId:string} | null}>();
   private readonly reconciled = new Map<string, {version: string; checkedAt: number}>();
   private readonly unsubscribe: () => void;
   private readonly stopWakes: Array<() => void> = [];
@@ -89,10 +98,29 @@ export class OneSupervisorWorkExecutor {
   constructor(private readonly deps: SupervisorWorkExecutorOptions) {
     // A runtime signal or a sign-in ends a long refusal wait now (the cause may have cleared).
     try { this.stopWakes.push(onRuntimeSignal(() => this.wakeLongWaits(Infinity))); } catch { /* the step ends by itself */ }
+    // Another process of this store (the service) may write a job this executor is to take, with no wake in this process: the watchdog stands while one may exist.
+    try { this.stopWakes.push(onExternalWritersChange(() => this.tick(false))); } catch { /* the next kick or tick decides */ }
+    // Main's data_version watch hears the other process commit (a job it queued) and wakes this once: no period is needed while that watch runs.
+    try { this.stopWakes.push(onExternalWrite(() => { if (this.started) this.tick(false); })); } catch { /* the next kick or tick decides */ }
     try { this.stopWakes.push((require("../auth") as typeof import("../auth")).onAuthSessionRestored(() => this.wakeLongWaits(Infinity))); } catch { /* the step ends by itself */ }
+    try { const auth = require("../auth") as typeof import("../auth"); this.stopWakes.push(auth.onAuthSessionOwnershipChanged(() => {
+      // These exact runs were started by this executor. Cancellation does not
+      // depend on the newly selected account or claim authority.
+      let current: ReturnType<typeof auth.getAuthenticatedSessionBinding> = null;
+      try { current = auth.getAuthenticatedSessionBinding(); } catch { /* Unknown ownership still requires a stop. */ }
+      for (const [key, run] of this.localCompanionRuns) {
+        if (run.session && current && run.session.userId === current.userId && run.session.workspaceId === current.workspaceId && run.session.sessionId === current.sessionId) continue;
+        this.companionStopPending.add(key);
+        try {
+          const stop = this.deps.runtime.cancel?.(run.runId);
+          if (stop && typeof (stop as Promise<string>).then === "function") void Promise.resolve(stop).catch(error => this.deps.onFailure?.(error));
+        } catch (error) { this.deps.onFailure?.(error); }
+      }
+    })); } catch { /* status checks still fail closed */ }
     if (deps.queue.db !== deps.store.db) throw supervisorError('supervisor_work_store_mismatch');
     this.unsubscribe = deps.runtime.onSettled(event => {
       if (this.closed || !this.started) return;
+      for (const [key, run] of this.localCompanionRuns) if (run.runId === event.runId) { this.localCompanionRuns.delete(key); this.companionStopPending.delete(key); }
       try {
         deps.assertOwner();
         // A sign-in wait continues the job under a successor run in the same conversation: its end is the job's end.
@@ -103,9 +131,22 @@ export class OneSupervisorWorkExecutor {
     });
   }
   start(): void {
-    if (this.closed || this.timer) return;
+    if (this.closed || this.started) return;
     this.started = true;
     this.tick();
+  }
+  /**
+   * The one-second watchdog exists only while a job is unfinished or another process may write one that nothing here would hear (P5-7,
+   * defect 3). With neither there is no timer: a job that appears wakes the executor through kick() (the supervisor service enqueues and calls it; the end of
+   * a run arrives through onSettled), and a job another process queued through the data_version watch (onExternalWrite: Main runs it while the service may
+   * exist, store/external-chat-changes.ts). Only a process with no such watch (the service itself) keeps the period (store/external-writer-presence.ts
+   * externalWritersNeedPolling). Every tick that still sees an unfinished job leaves the timer armed. A tick that fails leaves it armed too (an unknown
+   * state is not an empty queue).
+   */
+  private keepWatchdog(wanted: boolean): void {
+    if (this.closed || !this.started) return;
+    if (!wanted) { if (this.timer) { clearInterval(this.timer); this.timer = null; } return; }
+    if (this.timer) return;
     this.timer = setInterval(() => this.tick(false), this.deps.tickMs ?? 1_000);
     this.timer.unref?.();
   }
@@ -137,6 +178,36 @@ export class OneSupervisorWorkExecutor {
     } catch (error) { this.deps.onFailure?.(error); }
   }
   kick(): void { this.tick(); }
+  private companionBinding(commandId: string): Record<string, unknown> | null {
+    const exists = this.deps.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_companion_handoffs'").get();
+    if (!exists) return null;
+    const row = this.deps.store.db.prepare("SELECT binding_json FROM one_companion_handoffs WHERE command_id=?").get(commandId) as {binding_json:string} | undefined;
+    if (!row) return null;
+    const parsed: unknown = JSON.parse(row.binding_json);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw supervisorError("companion_binding_invalid");
+    return parsed as Record<string, unknown>;
+  }
+  private checkCompanion(job: SupervisorWorkLease): void {
+    const key = `${job.command_id}:${job.run_id}`, now = this.deps.now?.() ?? Date.now();
+    if (job.owner_epoch !== this.deps.ownerEpoch || job.owner_kind !== this.deps.ownerKind ||
+        this.checkingCompanion.has(key) || now - (this.checkedCompanion.get(key) ?? 0) < 5_000) return;
+    let binding: Record<string, unknown> | null;
+    try { binding = this.companionBinding(job.command_id); } catch { binding = {}; }
+    if (!binding) return;
+    this.checkedCompanion.set(key, now); this.checkingCompanion.add(key);
+    void Promise.resolve().then(() => this.deps.companionLifecycle?.("status", binding!, job.run_id) ?? null).catch(() => null).then(status => {
+      if (status === "active" || this.closed) return;
+      this.deps.assertOwner();
+      const current = this.deps.queue.get(job.command_id);
+      if (!current || current.run_id !== job.run_id || current.owner_epoch !== job.owner_epoch ||
+          current.generation !== job.generation || !["starting", "running", "held"].includes(current.phase)) return;
+      // Failure to verify is unknown, never evidence of termination. Request a
+      // stop and leave the durable result to the actual native terminal event.
+      this.companionStopPending.add(key);
+      const result = this.deps.runtime.cancel?.(job.run_id);
+      if (result && typeof (result as Promise<string>).then === "function") void Promise.resolve(result).catch(error => this.deps.onFailure?.(error));
+    }).catch(error => this.deps.onFailure?.(error)).finally(() => this.checkingCompanion.delete(key));
+  }
   tick(reconcileNow = true): void {
     if (this.closed || this.ticking) return;
     // A sign-in or runtime signal heard by the other process of this store reaches this one through the shared floor (one meta row,
@@ -144,10 +215,11 @@ export class OneSupervisorWorkExecutor {
     const floor = runtimeSignalFloor();
     if (floor > this.signalFloorSeen) { this.signalFloorSeen = floor; this.wakeLongWaits(floor, false); }
     this.ticking = true;
+    let unfinished = true;
     try {
       this.deps.assertOwner();
       const identity=this.deps.queue.activeIdentity();
-      if(!identity)return;
+      if(!identity){unfinished=false;return;}
       this.deps.queue.recoverUnstarted(identity);
       const active = this.deps.queue.active().filter(job=>job.one_id===identity), retained = new Set<string>();
       const now = this.deps.now?.() ?? Date.now();
@@ -157,6 +229,7 @@ export class OneSupervisorWorkExecutor {
       const reconcileMs = Math.max(0, Math.min(this.deps.reconcileMs ?? 5_000, (this.deps.leaseMs ?? 30_000) / 3));
       for (const job of active) {
         retained.add(job.command_id);
+        if (job.phase === "starting" || job.phase === "running" || job.phase === "held") this.checkCompanion(job);
         const version = this.deps.queue.version(job), prior = this.reconciled.get(job.command_id);
         const renewalDue = job.owner_epoch === this.deps.ownerEpoch && (job.phase === "starting" || job.phase === "running")
           && this.deps.queue.heartbeatDue(job, this.deps.leaseMs);
@@ -166,6 +239,8 @@ export class OneSupervisorWorkExecutor {
         }
       }
       for (const id of this.reconciled.keys()) if (!retained.has(id)) this.reconciled.delete(id);
+      for (const key of this.checkedCompanion.keys()) if (!active.some(job => `${job.command_id}:${job.run_id}` === key)) this.checkedCompanion.delete(key);
+      for (const key of this.companionStopPending.keys()) if (!this.localCompanionRuns.has(key) && !active.some(job => `${job.command_id}:${job.run_id}` === key)) this.companionStopPending.delete(key);
       // One decides which work to delegate. Claim every queued delegation once;
       // native runtime admission owns resource scheduling, not a fixed Work cap.
       for (;;) {
@@ -174,13 +249,14 @@ export class OneSupervisorWorkExecutor {
         if (!claimed) break;
         void this.dispatch(claimed);
       }
+      unfinished = this.deps.queue.hasUnfinished(identity);
       this.lastFailure = null;
     } catch (error) {
       const code = error instanceof Error ? error.message : "unknown";
       if (code !== this.lastFailure) this.deps.onFailure?.(error);
       this.lastFailure = code;
     }
-    finally { this.ticking = false; }
+    finally { this.ticking = false; this.keepWatchdog(unfinished || externalWritersNeedPolling()); }
   }
   private async dispatch(claimed: SupervisorWorkLease): Promise<void> {
     this.dispatching.set(claimed.command_id,{runId:claimed.run_id,startedAt:this.deps.now?.() ?? Date.now()});
@@ -197,7 +273,41 @@ export class OneSupervisorWorkExecutor {
         throw supervisorError('supervisor_work_payload_changed');
       }
       if (this.workWasStopped(row)) {
-        if (this.deps.queue.cancelUnstarted(claimed)) this.deps.store.update(row,{state:"cancelled",acknowledgement:"settled",reason:"cancelled_before_dispatch"});
+        let unknown = true;
+        try {
+          const retry = supervisorDispatchRetry(row);
+          const firstClaim = !retry && claimed.generation === 1;
+          unknown = !!(retry?.priorRunId || retry?.unconfirmedResends) || !!this.deps.runtime.receipt(claimed.run_id) ||
+            !(firstClaim || this.deps.runtime.noStartProof?.(claimed.run_id) === true);
+        } catch { /* No complete history means the outcome stays unknown. */ }
+        const reason = unknown ? "owner_stopped_outcome_unknown" : "cancelled_before_dispatch";
+        if (this.deps.queue.cancelUnstarted(claimed, reason)) this.deps.store.update(row,{state:"cancelled",acknowledgement:unknown ? "unknown" : "settled",reason});
+        return;
+      }
+      let needsReconfirmation=false;
+      try { needsReconfirmation=this.deps.requiresReconfirmation?.(claimed,row)===true; }
+      catch(error) { try { this.deps.onFailure?.(error); } catch {} return; }
+      if(needsReconfirmation) {
+        let parked=false;
+        try { parked=this.deps.store.db.transaction(()=>{
+          this.deps.assertOwner();
+          const current=this.deps.queue.get(claimed.command_id), saved=this.deps.store.get(claimed.command_id);
+          if(!current || !saved || current.one_id!==this.deps.queue.activeIdentity() || current.owner_epoch!==claimed.owner_epoch
+            || current.generation!==claimed.generation || current.run_id!==claimed.run_id || saved.one_id!==current.one_id
+            || saved.run_id!==current.run_id || saved.task_id!==current.task_id || saved.state!=='stored' || this.workWasStopped(saved)) return false;
+          this.deps.assertBinding(current,saved);
+          const retry=supervisorDispatchRetry(saved);
+          if(retry?.retryStopped || retry?.priorRunId || retry?.unconfirmedResends || this.deps.runtime.receipt(current.run_id)
+            || this.deps.runtime.attach(current.chat_id) || this.deps.runtime.noStartProof?.(current.run_id)!==true) return false;
+          const input=JSON.parse(saved.payload_json);
+          supervisorDispatchFrame(this.deps.store,saved,()=>({locale:this.deps.locale(),runtimeSelection:input.runtimeSelection}),this.deps.now?.() ?? Date.now());
+          stopSupervisorRetryForReview(this.deps.store,this.deps.store.get(saved.command_id)!);
+          if(!this.deps.queue.parkForReconfirmation(current)) throw supervisorError('supervisor_work_owner_fenced');
+          this.deps.store.update(this.deps.store.get(saved.command_id)!,{state:'held',acknowledgement:'stored',reason:'work_reconfirmation_required'});
+          return true;
+        }).immediate(); }
+        catch(error) { try { this.deps.onFailure?.(error); } catch {} return; }
+        if(!parked) try { this.deps.onFailure?.(supervisorError('supervisor_reconfirmation_unproven')); } catch {}
         return;
       }
       if((supervisorDispatchRetry(row)?.unconfirmedResends ?? 0)>0 && !this.unconfirmedAllowed(claimed,row)) {
@@ -205,6 +315,25 @@ export class OneSupervisorWorkExecutor {
         return;
       }
       this.deps.assertBinding(claimed, row);
+      const companionBinding = this.companionBinding(claimed.command_id);
+      if (companionBinding) {
+        // Reusing an authorization is safe only if the local admission ledger
+        // proves this exact run has never crossed the native start boundary.
+        if (this.deps.runtime.noStartProof?.(claimed.run_id) !== true) throw supervisorError("companion_start_unproven");
+        const verdict = await this.deps.companionLifecycle?.("start", companionBinding, claimed.run_id) ?? null;
+        this.deps.assertOwner();
+        const current = this.deps.queue.get(claimed.command_id), saved = this.deps.store.get(claimed.command_id);
+        if (!current || !saved || current.phase !== "claimed" || current.one_id !== this.deps.queue.activeIdentity() ||
+            current.owner_epoch !== claimed.owner_epoch || current.generation !== claimed.generation || current.run_id !== claimed.run_id ||
+            saved.state !== "stored" || saved.run_id !== claimed.run_id || this.workWasStopped(saved) ||
+            this.deps.runtime.noStartProof?.(claimed.run_id) !== true) return;
+        this.deps.assertBinding(current, saved);
+        if (verdict === "cancel") {
+          if (this.deps.queue.cancelUnstarted(current)) this.deps.store.update(saved,{state:"cancelled",acknowledgement:"settled",reason:"cancelled_before_dispatch"});
+          return;
+        }
+        if (verdict !== "authorized" && verdict !== "existing") { this.retryAfterRefusal(current, "companion_start_unavailable", true); return; }
+      }
       const now = this.deps.now?.() ?? Date.now();
       const frame = supervisorDispatchFrame(this.deps.store, row, () => ({locale:this.deps.locale(),runtimeSelection:input.runtimeSelection}), now);
       // Commit the uncertain-effect boundary before any native start. An expired
@@ -217,15 +346,30 @@ export class OneSupervisorWorkExecutor {
       this.deps.assertOwner();
       // A brief One wrote (bound to its reply) is shown in the Work session as handed over by One, never as the
       // owner's words, and carries no owner authority (no automatic Goal, no user model pin). The owner's own brief stays theirs.
-      const byOne = row.source_reply_run_id !== null;
+      const hasCompanionInbox = this.deps.store.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_companion_handoffs'").get();
+      const byOne = row.source_reply_run_id !== null || (!!hasCompanionInbox && !!this.deps.store.db.prepare("SELECT 1 FROM one_companion_handoffs WHERE command_id=?").get(row.command_id));
       const request = {runId: starting.run_id, chatId: starting.chat_id,
         userPrompt: withDoneWhen(input.text, input.doneWhen), taskIntent: "task" as const, permissions: input.permissions,
         locale: frame.locale, runtimeSelection: frame.runtimeSelection,
         ...(byOne ? {promptOrigin: "system" as const} : {})};
       const resends=supervisorDispatchRetry(this.deps.store.get(row.command_id)!)?.unconfirmedResends ?? 0;
+      if (companionBinding) {
+        let session: {userId:string;workspaceId:string;sessionId:string} | null = null;
+        try { session = (require("../auth") as typeof import("../auth")).getAuthenticatedSessionBinding(); } catch { /* cancellation stays fail-closed */ }
+        this.localCompanionRuns.set(`${starting.command_id}:${starting.run_id}`,{runId:starting.run_id,session});
+      }
       const issued=this.deps.runtime.start(resends>0 ? withEarlierAttempt(request,resends>UNCONFIRMED_MAX_RESENDS) : request,byOne ? "one-dispatch-brief" : undefined);
       const started = "then" in issued ? await issued : issued;
       if (started.runId !== starting.run_id) throw supervisorError('supervisor_work_native_run_mismatch');
+      // Logout can change the active One while the native start is pending.
+      // This exact locally issued run remains ours to stop even if that change
+      // has fenced all further writes to the previous owner's journal.
+      if (this.companionStopPending.has(`${starting.command_id}:${starting.run_id}`)) {
+        try {
+          const stop = this.deps.runtime.cancel?.(starting.run_id);
+          if (stop && typeof (stop as Promise<string>).then === "function") void Promise.resolve(stop).catch(error => this.deps.onFailure?.(error));
+        } catch (error) { this.deps.onFailure?.(error); }
+      }
       this.deps.assertOwner();
       const current = this.deps.queue.get(starting.command_id)!;
       if(current.one_id!==this.deps.queue.activeIdentity() || current.run_id!==starting.run_id || current.generation!==starting.generation || current.owner_epoch!==starting.owner_epoch)throw supervisorError('supervisor_work_owner_fenced');
@@ -234,7 +378,7 @@ export class OneSupervisorWorkExecutor {
         const request = this.deps.store.get(current.command_id)!;
         if (request.state === "dispatching") this.deps.store.update(request, {state: "accepted", acknowledgement: "delivered"});
         // A Stop that arrived while preparation was pending is retried against the exact run once its late ACK lands.
-        if(this.workWasStopped(request) && this.deps.runtime.cancel)try {
+        if((this.workWasStopped(request) || this.companionStopPending.has(`${current.command_id}:${current.run_id}`)) && this.deps.runtime.cancel)try {
           const stop=this.deps.runtime.cancel(current.run_id);
           if(stop && typeof (stop as Promise<string>).then==="function")void Promise.resolve(stop).catch(error=>this.deps.onFailure?.(error));
         }catch(error){this.deps.onFailure?.(error);}
@@ -346,6 +490,7 @@ export class OneSupervisorWorkExecutor {
   }
   private unconfirmedAllowed(job: SupervisorWorkLease, row=this.deps.store.get(job.command_id)): boolean {
     if(!row || row.one_id!==job.one_id || row.task_id!==job.task_id || row.run_id!==job.run_id)return false;
+    try { if (this.companionBinding(job.command_id)) return false; } catch { return false; }
     try {return this.deps.runtime.unconfirmedRetryAllowed?.(job.chat_id,supervisorDispatchRetry(row)?.firstAt ?? Date.parse(row.created_at))===true;}
     catch {return false;}
   }
@@ -457,20 +602,22 @@ export class OneSupervisorWorkExecutor {
     if (job.phase !== "held") return false;
     const row = this.deps.store.get(job.command_id);
     if (!row || !this.workWasStopped(row) || this.deps.runtime.receipt(job.run_id) || this.deps.runtime.attach(job.chat_id)) return false;
-    const proven = this.deps.runtime.noStartProof?.(job.run_id) === true;
-    const reason = proven ? "owner_stopped_before_start" : "owner_stopped_outcome_unknown";
     return this.deps.store.db.transaction(() => {
       this.deps.assertOwner();
       const current = this.deps.queue.get(job.command_id), saved = this.deps.store.get(job.command_id);
       if (!current || current.one_id!==this.deps.queue.activeIdentity() || current.run_id!==job.run_id || current.generation!==job.generation
         || current.owner_epoch!==job.owner_epoch || current.phase!=="held" || !saved || saved.run_id!==job.run_id || !this.workWasStopped(saved)) return false;
+      let priorUnknown = true;
+      try { const retry = supervisorDispatchRetry(saved); priorUnknown = !!(retry?.priorRunId || retry?.unconfirmedResends); } catch { /* corrupt history cannot prove no earlier effect */ }
+      const proven = !priorUnknown && this.deps.runtime.noStartProof?.(job.run_id) === true;
+      const reason = proven ? "owner_stopped_before_start" : "owner_stopped_outcome_unknown";
       if (!this.deps.queue.transition(current, "cancelled", reason)) return false;
       if (["stored", "dispatching", "accepted", "held"].includes(saved.state)) {
         this.deps.store.update(saved, {state: "cancelled", acknowledgement: proven ? "settled" : "unknown", reason});
       }
       const stops = this.deps.store.db.prepare(`SELECT * FROM one_supervisor_requests WHERE one_id=? AND task_id=? AND kind='cancel'
         AND state IN ('dispatching','accepted','held') AND (run_id=? OR run_id IS NULL)`).all(saved.one_id, saved.task_id, saved.run_id) as SupervisorRequestRow[];
-      for (const stop of stops) this.deps.store.update(stop, {state: "cancelled", acknowledgement: "settled", reason: "work_closed_by_stop"});
+      for (const stop of stops) this.deps.store.update(stop, {state: "cancelled", acknowledgement: proven ? "settled" : "unknown", reason: proven ? "work_closed_by_stop" : "owner_stopped_outcome_unknown"});
       return true;
     }).immediate();
   }

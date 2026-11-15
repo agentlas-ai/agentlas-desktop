@@ -20,6 +20,7 @@ import type {
 import { IconUser, IconMail, IconShield, IconCheck } from "@/components/Icon";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor } from "@shared/one-profile";
+import { nameSaveAllowed, nextNameInput } from "@shared/one-agent-name";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneProfileSheet.module.css";
 
@@ -307,7 +308,8 @@ export function OneProfileSheet({
               </div>
               <label>
                 <span>{tFor(locale, "one.prof.field.name")}</span>
-                <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={64} required disabled={busy} />
+                <input value={displayName} onChange={(event) => setDisplayName((previous) => nextNameInput(previous, event.target.value))} maxLength={64} required disabled={busy} />
+                <small data-one-name-limit style={{ display: "block", marginTop: 4, color: "var(--muted-deep)", fontSize: 11 }}>{locale === "ko" ? "최대 12자" : "Up to 12 characters"}</small>
               </label>
               <label>
                 <span>{tFor(locale, "one.prof.field.role")}</span>
@@ -324,7 +326,7 @@ export function OneProfileSheet({
                 <textarea value={profileContext} onChange={(event) => setProfileContext(event.target.value)} maxLength={4_000} rows={4} disabled={busy} placeholder={tFor(locale, "one.prof.field.context_ph")} />
               </label>
               <div className={styles.formActions}>
-                <button type="submit" className={styles.primaryButton} disabled={busy}>{tFor(locale, "one.prof.save_profile")}</button>
+                <button type="submit" className={styles.primaryButton} disabled={busy || !nameSaveAllowed(displayName, profile.displayName)}>{tFor(locale, "one.prof.save_profile")}</button>
               </div>
             </form>
 

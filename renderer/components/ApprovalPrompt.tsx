@@ -194,8 +194,8 @@ export function ApprovalPrompt({
     if (event.key === "Enter" && target === event.currentTarget) pick(event, sel);
   };
 
-  const hintFor = (option: ApprovalPromptOption): string | null =>
-    option.role === "primary" ? "Y" : option.role === "deny" ? "N · Esc" : null;
+  // The picture (desktop-impl-gaps-5, 2c) draws the number only: Y, N and Esc still answer, they are no longer printed on the rows.
+  const hintFor = (_option: ApprovalPromptOption): string | null => null;
 
   return (
     <section

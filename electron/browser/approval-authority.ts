@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { BrowserApprovalRequestEvent } from "../../shared/types";
+import { currentSlotLease, type SlotLease } from "../runtime/run-slot-lease";
 
 type Authority = {
   owner: NonNullable<BrowserApprovalRequestEvent["owner"]>;
   permission: "read" | "write" | "full";
   signal: AbortSignal;
   unattended: boolean;
+  /** The run slot of the turn that minted this authority (N0b): the approval sheet lets it go while the owner decides. In-process only. */
+  slotLease?: SlotLease;
   /** Ends the revocation watch of an authority minted by another process. The caller calls it when its request ends. */
   release?: () => void;
 };
@@ -86,7 +89,8 @@ export function registerBrowserApprovalAuthority(
   const token = randomUUID();
   const controller = new AbortController();
   const unattended = options.unattended === true;
-  authorities.set(token, Object.freeze({ owner: Object.freeze({ ...owner }), permission, signal: controller.signal, unattended }));
+  const slotLease = currentSlotLease();
+  authorities.set(token, Object.freeze({ owner: Object.freeze({ ...owner }), permission, signal: controller.signal, unattended, ...(slotLease ? { slotLease } : {}) }));
   const hash = tokenHash(token);
   const now = Date.now();
   const db = store();

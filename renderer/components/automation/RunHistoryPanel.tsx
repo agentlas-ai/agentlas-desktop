@@ -9,10 +9,11 @@ import { automationRunPresentation } from "@shared/automation-run-presentation";
 import { automationRunNeedsAttention } from "@shared/automation-attention";
 import { confirmPopup } from "@/lib/popup";
 import { ipc } from "@/lib/ipc";
+import { subscribeStoreChanges } from "@/lib/store-change-bus";
 import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { askAutomationSession } from "@/components/automation/AutomationSessionPanel";
-import { AgiIncidentReportButton } from "@/components/agi/AgiBugReport";
+import { DefectReportButton } from "@/components/support/DefectReport";
 import { ownerFailureReasonOrNull } from "@shared/owner-visible-activity-text";
 import { IconAlertTriangle, IconClose } from "@/components/Icon";
 import {
@@ -42,7 +43,10 @@ interface RunHistoryPanelProps {
   compact?: boolean;
 }
 
-const POLL_MS = 5_000;
+/** A run in flight moves node by node with no announcement (updateGraphRunNode writes without one): read it every 5 s. */
+const RUNNING_POLL_MS = 5_000;
+/** Nothing in flight: a run starting, finishing or needing input announces itself (store:changed automation); this is the net under it. */
+const IDLE_SAFETY_READ_MS = 60_000;
 
 type NodeDecisionDraft = {
   resolution?: AutomationGraphReconciliationDecision["resolution"];
@@ -209,7 +213,16 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     }
   }, [automation.graph, automation.id, compact, ko]);
 
-  useVisibleInterval(() => load(), POLL_MS, { initial: load });
+  const runInFlight = latest?.status === "running" || Object.values(latest?.nodeStates ?? {}).some((state) => state === "running");
+  useVisibleInterval(() => load(), runInFlight ? RUNNING_POLL_MS : IDLE_SAFETY_READ_MS, { initial: load });
+  useEffect(() => {
+    let burst: ReturnType<typeof setTimeout> | null = null;
+    const off = subscribeStoreChanges((change) => {
+      if (change.entity !== "automation" || (change.id && change.id !== automation.id) || burst || document.visibilityState === "hidden") return;
+      burst = setTimeout(() => { burst = null; void load(); }, 250);
+    });
+    return () => { off(); if (burst) clearTimeout(burst); };
+  }, [automation.id, load]);
   useEffect(() => {
     const onRefresh = (event: Event) => {
       const detail = (event as CustomEvent<{ automationId?: unknown }>).detail;
@@ -821,7 +834,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
 
   return (
     <>
-    {latest?.status === "error" && <AgiIncidentReportButton key={latest.runId} locale={locale} draft={{
+    {latest?.status === "error" && <DefectReportButton key={latest.runId} locale={locale} draft={{
       runId: latest.runId, failureCode: "graph_run_failed", category: "other",
       title: "[Graph] Run failed", summary: current.detail || "The graph run ended with an error.",
       steps: ["Run the automation graph", "The graph run status became error"],
@@ -1160,7 +1173,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
                 disabled={forgetting}
                 onClick={() => void forgetFailedRun()}
                 style={{
-                  borderRadius: 999, border: "1px solid var(--line)", padding: "6px 12px",
+                  borderRadius: 999, border: "1px solid var(--paper-edge)", padding: "6px 12px",
                   fontSize: 12.5, background: "var(--paper)", color: "var(--ink)",
                   cursor: forgetting ? "default" : "pointer",
                 }}

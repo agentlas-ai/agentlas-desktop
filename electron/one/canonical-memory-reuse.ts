@@ -12,6 +12,7 @@ import type { OneExperienceReuseAssetBinding, OneExperienceReuseScope } from "..
 import type { OneValueClosureRecord, OneValueClosureState } from "../../shared/one-value-closure";
 import type { CanonicalTask, InvocationRunReceipt, RunEventUi } from "../../shared/types";
 import { getMemoryDb, getMemoryStoreInfo } from "../memory/database";
+import { queryEntryRowAnywhere, queryEntryRowsInOtherStore } from "../memory/store";
 import {
   MEMORY_RECALL_APPLIED_EVENT_KIND,
   isCanonicalMemoryEntryId,
@@ -75,12 +76,14 @@ function applicability(raw: string | null): Record<string, unknown> {
 export function readActiveCanonicalReuseMemory(entryId: string): CanonicalReuseMemory | null {
   if (!isCanonicalMemoryEntryId(entryId)) return null;
   const store = getMemoryStoreInfo();
-  const row = getMemoryDb().prepare(
+  // The root first; a line that lives in another store (layout switch not OFF) is read there, so its reuse receipt is made too (#11).
+  const row = queryEntryRowAnywhere(
     `SELECT m.id, m.scope, m.content, m.project_id, m.agent_id, m.superseded_at, m.created_at,
             b.owner_namespace, b.actor_id, b.applicability_json, b.revision
        FROM memory_entries m JOIN memory_identity_bindings b ON b.memory_id = m.id
       WHERE m.id = ? LIMIT 1`,
-  ).get(entryId) as {
+    entryId,
+  ) as unknown as {
     id: string; scope: string; content: string; project_id: string | null; agent_id: string | null;
     superseded_at: string | null; created_at: string; owner_namespace: string | null; actor_id: string | null;
     applicability_json: string | null; revision: number;
@@ -112,7 +115,13 @@ export function canonicalMemoryOriginRunIds(entryId: string): string[] {
     `SELECT t.run_id AS source_id FROM memory_origin_links l JOIN memory_tickets t ON t.ticket_id = l.source_id
       WHERE l.memory_id = ? AND l.source_kind = 'ticket' AND t.run_id IS NOT NULL`,
   ).all(entryId) as Array<{ source_id: string }>;
-  return [...new Set([...direct, ...viaTicket].map((row) => row.source_id).filter(Boolean))].sort();
+  // A line that lives in another store (layout switch not OFF; the root has no row for it) keeps its origin links there; the tickets they name are the root's. Switch off: nothing is added.
+  const inStore = queryEntryRowsInOtherStore("SELECT source_kind, source_id FROM memory_origin_links WHERE memory_id = ? AND source_kind IN ('run','ticket')", entryId) as Array<{ source_kind: string; source_id: string }>;
+  const storeRuns = inStore.filter((link) => link.source_kind === "run");
+  const storeTickets = inStore.filter((link) => link.source_kind === "ticket").flatMap((link) => db.prepare(
+    "SELECT run_id AS source_id FROM memory_tickets WHERE ticket_id = ? AND run_id IS NOT NULL",
+  ).all(link.source_id) as Array<{ source_id: string }>);
+  return [...new Set([...direct, ...viaTicket, ...storeRuns, ...storeTickets].map((row) => row.source_id).filter(Boolean))].sort();
 }
 
 /** The exact accepted closure of a completed Task for exactly this run, or null. */

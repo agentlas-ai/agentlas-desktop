@@ -5,12 +5,16 @@ import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import type Database from "better-sqlite3";
 import { VideoCancelFence } from "./video-cancel-fence";
+import { CHAT_VIDEO_MAX_BYTES } from "./chat-video-limits";
 import { repairMobileBridgeUtf16, sanitizeMobileBridgeText, stripMobileBridgeControlFences, truncateMobileBridgeUtf8 } from "./sanitize";
 import { isHousekeepingHostNotice, parseChatHostNotice } from "../../shared/chat-host-notice";
 import { sameFileIdentity } from "../../shared/file-identity";
 import { CHAT_FILE_MIME, chatFileSourceText, chatFileTokenAt, isChatFileNetworkPath, isChatFileSecretPath } from "./chat-file-links";
 
-const MAX_BYTES = 192 * 1024 * 1024, MAX_MESSAGE_BYTES = 4 * 1024 * 1024, TTL = 10 * 60_000;
+// basis: MAX_BYTES - see chat-video-limits.ts. MAX_MESSAGE_BYTES and TTL - 정한 값 — 근거 없음:
+// MAX_MESSAGE_BYTES (a message's stored text read while listing its videos): a longer message is not read at all (message() finds no row), so none of its videos is listed - silently.
+// TTL (an open video transfer): at the limit the transfer closes (closeOwned) and its later chunk requests are refused; the phone has to open a new transfer.
+const MAX_BYTES = CHAT_VIDEO_MAX_BYTES, MAX_MESSAGE_BYTES = 4 * 1024 * 1024, TTL = 10 * 60_000;
 const CHAT_VIDEO_CHUNK_BYTES = 1024 * 1024;
 type ChatVideoPrincipal = { deviceId:string; connectionId:string };
 const MIME: Record<string,string> = {".mp4":"video/mp4", ".mov":"video/quicktime", ".m4v":"video/x-m4v", ".webm":"video/webm", ".ogv":"video/ogg"};

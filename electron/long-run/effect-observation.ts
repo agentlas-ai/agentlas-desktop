@@ -70,11 +70,6 @@ export function sweepDueGoalEffectObservations(_dispatcher: EffectObservationDis
   return [];
 }
 
-/** Retired: no automation look is launched. */
-export function sweepAutomationEffectObservations(_runtime: AutomationObservationRuntime): EffectObservationDispatchResult[] {
-  return [];
-}
-
 /** No look run exists to settle. */
 export function completeEffectObservation(_input: {
   runId: string;

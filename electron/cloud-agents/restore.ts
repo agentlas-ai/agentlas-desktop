@@ -17,6 +17,7 @@ import type {
   CloudAgentRevisionIdentity,
 } from "../../shared/types";
 import { sameFileIdentity } from "../../shared/file-identity";
+import { isAgentLocalStateAncestor, isAgentLocalStatePath, withoutAgentLocalState } from "../../shared/agent-local-state";
 
 // 상한은 정본 하나에서 생성된다 — 복원 한도가 발행 한도보다 낮으면 방금 받아준
 // 패키지를 다시 설치할 수 없게 된다.
@@ -48,6 +49,12 @@ export interface CloudAgentRestoreMarker {
   /** Per-scope optimistic-concurrency baselines. A local folder may be both
    * owner-private and publicly published, so one scalar revision is unsafe. */
   registrations?: Partial<Record<CloudAgentCloudScope, CloudAgentRevisionIdentity>>;
+  /**
+   * Only when the verified package carried local-state paths (old releases that shipped `.agentlas/ledgers`): the package hash of the files
+   * that were actually written to this computer (state paths removed, same algorithm as `hashPackage`). Lets the local re-scan compare
+   * like with like; absent when nothing was left out.
+   */
+  localPackageHash?: string;
   /** Legacy marker field written by Desktop <=0.7.28. */
   installedAt?: string;
   /**
@@ -140,6 +147,7 @@ export function restoreCloudAgentPackage(input: {
         fileCount: validated.files.length,
         totalBytes: validated.totalBytes,
         executablePaths: expectedExecutablePaths(validated.files, validated.packageHashVersion),
+        localPackageHash: localPackageHashOf(validated.files, validated.packageHashVersion),
         registration,
         savedAt: input.restoredAt,
       });
@@ -171,10 +179,12 @@ export function restoreCloudAgentPackage(input: {
   const backupDir = path.join(parentDir, `.${basename}.backup-${nonce}`);
   let originalMoved = false;
   let stagingMoved = false;
+  liveRestoreStaging.add(path.resolve(stagingDir));
 
   try {
     fs.mkdirSync(stagingDir, { recursive: false, mode: 0o700 });
-    for (const file of validated.files) {
+    // 패키지에 실려 온 로컬 상태 경로는 이 컴퓨터에 깔지 않는다(해시 검증은 위에서 전체 목록으로 끝났다).
+    for (const file of withoutAgentLocalState(validated.files)) {
       const target = resolvePackageFile(stagingDir, file.path);
       fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
       fs.writeFileSync(target, file.content, { flag: "wx", mode: file.executable ? 0o700 : 0o600 });
@@ -192,6 +202,7 @@ export function restoreCloudAgentPackage(input: {
       ...(validated.packageHashVersion === "path-sha256-executable-v2"
         ? { executablePaths: expectedExecutablePaths(validated.files, validated.packageHashVersion) }
         : {}),
+      ...(localPackageHashOf(validated.files, validated.packageHashVersion) ? { localPackageHash: localPackageHashOf(validated.files, validated.packageHashVersion)! } : {}),
       restoredAt,
       // Carried from the package, or preserved from the marker already on disk:
       // a repair or re-restore must not quietly launder a copy into an original.
@@ -237,6 +248,7 @@ export function restoreCloudAgentPackage(input: {
   } finally {
     if (!stagingMoved) removeTreeBestEffort(stagingDir);
     if (stagingMoved && originalMoved) removeTreeBestEffort(backupDir);
+    liveRestoreStaging.delete(path.resolve(stagingDir));
   }
 
   return {
@@ -340,6 +352,7 @@ export function writeCloudAgentRegistrationMarker(input: {
   fileCount: number;
   totalBytes: number;
   executablePaths: string[];
+  localPackageHash?: string;
   registration: CloudAgentRevisionIdentity;
   savedAt?: string;
 }): void {
@@ -373,6 +386,9 @@ export function writeCloudAgentRegistrationMarker(input: {
     totalBytes: input.totalBytes,
     ...(input.packageHashVersion === "path-sha256-executable-v2"
       ? { executablePaths: [...input.executablePaths].sort() }
+      : {}),
+    ...((input.localPackageHash ?? (existing?.packageHash === input.packageHash ? existing?.localPackageHash : undefined))
+      ? { localPackageHash: (input.localPackageHash ?? existing?.localPackageHash)! }
       : {}),
     restoredAt: input.savedAt ?? new Date().toISOString(),
     registrations: {
@@ -717,6 +733,18 @@ function resolvePackageFile(root: string, relPath: string): string {
   return target;
 }
 
+/** `hashPackage` (package.ts) over the files that were written to disk. Duplicated here because package.ts imports this module. */
+function localPackageHashOf(files: ValidatedPackageFile[], version: CloudAgentPackageHashVersion): string | undefined {
+  if (version !== "path-sha256-executable-v2") return undefined;
+  const disk = withoutAgentLocalState(files);
+  if (disk.length === files.length) return undefined;
+  const hash = createHash("sha256");
+  for (const file of [...disk].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    hash.update(file.path); hash.update("\0"); hash.update(file.sha256); hash.update("\0"); hash.update(file.executable ? "x" : "-"); hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
 function isExactRestoredCopy(
   destinationDir: string,
   files: ValidatedPackageFile[],
@@ -730,8 +758,10 @@ function isExactRestoredCopy(
     normalizePackageHashVersion(marker.packageHashVersion) !== packageHashVersion ||
     !samePaths(marker.executablePaths ?? [], expectedExecutablePaths(files, packageHashVersion))
   ) return false;
-  const expectedFiles = new Map(files.map((file) => [file.path, file]));
-  const expectedDirs = expectedDirectorySet(files.map((file) => file.path));
+  // 마커·실행 권한 대조는 전체 목록, 디스크 대조(파일·폴더·개수)는 상태 경로를 뺀 목록 — 상태는 디스크에 쓰지 않으므로.
+  const diskFiles = withoutAgentLocalState(files);
+  const expectedFiles = new Map(diskFiles.map((file) => [file.path, file]));
+  const expectedDirs = expectedDirectorySet(diskFiles.map((file) => file.path));
   const actualFiles = new Set<string>();
   let rootReal: string;
 
@@ -743,7 +773,8 @@ function isExactRestoredCopy(
     return false;
   }
 
-  function walk(dir: string, relativeDir: string): boolean {
+  // stateAncestor: 패키지에는 없지만 로컬 상태의 윗길인 폴더(안에 `ledgers` 만 있는 `.agentlas`). 앱이 만든 폴더라 복원 모드(0o700)를 요구하지 않는다.
+  function walk(dir: string, relativeDir: string, stateAncestor = false): boolean {
     let directoryBefore: fs.Stats;
     let directoryRealBefore: string;
     let entries: fs.Dirent[];
@@ -753,7 +784,7 @@ function isExactRestoredCopy(
       if (
         !directoryBefore.isDirectory() ||
         directoryBefore.isSymbolicLink() ||
-        !restoredDirectoryModeMatches(process.platform, directoryBefore.mode) ||
+        (!stateAncestor && !restoredDirectoryModeMatches(process.platform, directoryBefore.mode)) ||
         !isPathInsideRoot(rootReal, directoryRealBefore)
       ) {
         return false;
@@ -765,9 +796,13 @@ function isExactRestoredCopy(
     for (const entry of entries) {
       const relative = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
       const absolute = path.join(dir, entry.name);
+      // 로컬 상태(`.agentlas-local`, `.agentlas/ledgers`)는 패키지의 일부가 아니므로 있어도 없어도 정확 복사 판정에 들지 않는다.
+      if (isAgentLocalStatePath(relative)) continue;
       if (entry.isSymbolicLink()) return false;
       if (entry.isDirectory()) {
-        if (!expectedDirs.has(relative) || !walk(absolute, relative)) return false;
+        if (expectedDirs.has(relative)) { if (!walk(absolute, relative)) return false; }
+        else if (isAgentLocalStateAncestor(relative)) { if (!walk(absolute, relative, true)) return false; }
+        else return false;
         continue;
       }
       if (!entry.isFile()) return false;
@@ -811,7 +846,7 @@ function isExactRestoredCopy(
       return (
         directoryAfter.isDirectory() &&
         !directoryAfter.isSymbolicLink() &&
-        restoredDirectoryModeMatches(process.platform, directoryAfter.mode) &&
+        (stateAncestor || restoredDirectoryModeMatches(process.platform, directoryAfter.mode)) &&
         directoryRealBefore === directoryRealAfter &&
         directoryBefore.dev === directoryAfter.dev &&
         directoryBefore.ino === directoryAfter.ino &&
@@ -951,6 +986,40 @@ function isCanonicalBase64(value: string): boolean {
     return false;
   }
   return Buffer.from(value, "base64").toString("base64") === value;
+}
+
+/** 이 프로세스에서 지금 쓰고 있는 스테이징 폴더. 청소가 진행 중인 복원을 건드리지 않게 한다. */
+const liveRestoreStaging = new Set<string>();
+const STALE_STAGING_NAME = /^\.(.+)\.restore-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * 강제 종료가 남긴 `.<이름>.restore-<uuid>`(패키지 전체 사본)를 치운다(감사 33-5: 복구는 백업만 되돌리고 스테이징은 안 치웠다). 주인이 없을 때만 — 앱이 쓴 패키지 표식
+ * (`.agentlas-cloud-package.json`)이 안에 있고(없으면 남긴다), 이 프로세스가 쓰는 중이 아니고, 그 목적지의 설치 트랜잭션 저널이 열려 있지 않고(`busyDestinations`), 목적지 폴더가 살아 있을 때(목적지가 없으면 이 사본이 새 버전의 유일한 사본일 수 있다).
+ * `.backup-*`(이전 사본)은 건드리지 않는다. 표식이 없어 남긴 것은 `kept` 에 이유 코드와 함께 적는다. 던지지 않는다.
+ */
+export function sweepStaleRestoreStaging(parentDir: string, busyDestinations: readonly string[], kept?: Array<{ path: string; reason: string }>): number {
+  let names: string[] = [];
+  try { names = fs.readdirSync(parentDir); } catch { return 0; }
+  const busy = new Set(busyDestinations.map((dir) => path.resolve(dir)));
+  let removed = 0;
+  for (const name of names) {
+    const match = STALE_STAGING_NAME.exec(name);
+    if (!match) continue;
+    const staging = path.join(parentDir, name);
+    const destination = path.join(parentDir, match[1]);
+    if (liveRestoreStaging.has(path.resolve(staging)) || busy.has(path.resolve(destination))) continue;
+    try {
+      if (!fs.lstatSync(staging).isDirectory() || !fs.lstatSync(destination).isDirectory()) continue;
+      // 이름만으로는 사용자의 폴더(`.my-repo.restore-<uuid>` 를 손으로 만든 것)와 구별되지 않는다: 이 복원이 쓰는 패키지 표식이 든 스테이징만 앱이 만든 것으로 본다(감사 35-11).
+      // 표식을 쓰기 전에 죽은 스테이징은 남는다(영구 삭제보다 안전하다).
+      let marked = false;
+      try { marked = fs.lstatSync(path.join(staging, MARKER_FILE)).isFile(); } catch { /* no marker */ }
+      if (!marked) { kept?.push({ path: staging, reason: "restore-staging-unmarked" }); continue; }
+    } catch { continue; }
+    removeTreeBestEffort(staging);
+    if (!fs.existsSync(staging)) removed += 1;
+  }
+  return removed;
 }
 
 function removeTreeBestEffort(target: string): void {

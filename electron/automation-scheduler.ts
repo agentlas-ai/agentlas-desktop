@@ -21,7 +21,7 @@ import { nativeGraphSuccessNeedsReflection } from "../shared/automation-graph-de
 // 자동화 스케줄러 — 앱이 켜져 있는 동안 60초마다 due 자동화를 점검해 실행한다.
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
 // This is intentionally app-scoped: fully quitting Desktop stops local work.
-import { app, Notification } from "electron";
+import { isElectronMainProcess } from "./main-process-host";
 import { randomUUID } from "node:crypto";
 import type { Automation, AutomationRunRecord, McpInvocationEvent, RuntimeSelection } from "../shared/types";
 import { quotaRetryAfterAt } from "../shared/runtime-quota";
@@ -64,7 +64,6 @@ import { automationRuntimePermission } from "../shared/graph-node-protocol";
 import { evalExhaustionStrategyPlan, runGraph, type RunGraphResult } from "./workflow/run-graph";
 import { graphExecutionDigest } from "../shared/graph-execution-digest";
 import { AutomationWorkspaceError, automationWorkspaceOwnerText, captureAutomationWorkspace } from "./automation-workspace";
-import { sweepAutomationEffectObservations } from "./long-run/effect-observation";
 import { automationObservationsInFlight, registerAutomationObservationRuntime, type AutomationObservationRuntime } from "./long-run/effect-observation-tickets";
 import { requiresGraphReconciliation, runAutomationStrategyCycle } from "./automation-strategy-cycle";
 import { broadcastLiveRun } from "./workflow/live-run";
@@ -538,6 +537,9 @@ async function acquireDueRunSlot(): Promise<() => void> {
 function notifyDone(a: Automation, status: AutomationResultStatus, error?: string, interrupted = false): void {
   if (status === "skipped") return;
   try {
+    // An OS notification is the window host's job; the background service resumes a login wait without one.
+    if (!isElectronMainProcess()) return;
+    const { app, Notification } = require("electron") as typeof import("electron");
     if (!app.isReady()) return;
     if (!Notification.isSupported()) return;
     const ok = status === "ok";
@@ -2622,11 +2624,6 @@ function tick(): void {
     recoverGraphScheduleCursors();
   } catch (err) {
     console.error("[automation] graph schedule recovery failed:", err);
-  }
-  try {
-    sweepAutomationEffectObservations(automationObservationRuntime);
-  } catch (err) {
-    console.error("[automation] effect observation sweep failed:", err);
   }
   // One-off graphs One saved end with their Goal or after idle days (one/ephemeral-graphs.ts); hourly, never throws.
   maybeSweepEphemeralGraphs();

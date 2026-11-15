@@ -30,6 +30,7 @@ import {
   type AutostartReconciliation,
 } from "./autostart";
 import { isNonProductionInstance } from "./autostart-eligibility";
+import { agentlasHomeEnvForChildren } from "../agents/home";
 import { portableExecutableFile } from "../windows-shell-integration";
 import { entryDigest, readDaemonAutostartFailure, validateDaemonAutostartManifest, type DaemonAutostartManifest } from "./autostart-manifest";
 import {
@@ -262,6 +263,8 @@ async function spawnDaemonForDesktop(
     stdio: opts.nativeEnrollment ? ["ignore", "ignore", "ignore", "pipe"] : "ignore",
     env: {
       ...process.env,
+      // Main 이 정한 홈을 명시적으로(임시 userData 로 격리한 실행에서만 값이 있다): 데몬이 같은 규칙을 다른 `TMPDIR` 로 다시 풀어 홈이 갈리지 않게 한다(감사 35-8).
+      ...agentlasHomeEnvForChildren(),
       ELECTRON_RUN_AS_NODE: "1",
       AGENTLAS_USER_DATA: opts.userDataDir,
       AGENTLAS_STORE_PATH: opts.storePath,
@@ -477,15 +480,38 @@ function ensureAuthorityKey(opts: EnsureDaemonOptions & DaemonServiceIdentity, s
   })).digest("hex");
 }
 
+/**
+ * Main hears of every service this process attached to or started (Science, local models and the protected launch all come through
+ * ensureDaemonRunning): the external-change watcher (store/external-writer-gate.ts) runs only while another process may write the store.
+ */
+let daemonPresenceListener: (() => void) | null = null;
+export function setDaemonPresenceListener(listener: (() => void) | null): void { daemonPresenceListener = listener; }
+function notePresence(status: EnsureDaemonStatus): EnsureDaemonStatus {
+  if (status.status === "already-running" || status.status === "spawned" || status.status === "respawned") {
+    try { daemonPresenceListener?.(); } catch { /* a listener never decides */ }
+  }
+  return status;
+}
+
 export function ensureDaemonRunning(options: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return Promise.resolve({ status: "disabled" });
   const starter = desktopDaemonStarter;
-  if (!starter || options.daemonStarter) return ensureDaemonFlight(options, false);
+  if (!starter || options.daemonStarter) return ensureDaemonFlight(options, false).then(notePresence);
   return ensureDaemonFlight(options, true).then(async (attached) => {
-    if (attached.status !== "failed" || attached.reason !== DAEMON_STARTER_LAUNCH_REQUIRED) return attached;
+    if (attached.status !== "failed" || attached.reason !== DAEMON_STARTER_LAUNCH_REQUIRED) return notePresence(attached);
     await starter().catch(() => undefined);
-    return ensureDaemonFlight(options, true);
+    return ensureDaemonFlight(options, true).then(notePresence);
   });
+}
+
+/** Nothing listens on this service's control socket (no such file, or refused): no service process of this install is running. False when unsure. */
+export async function desktopDaemonAbsent(options: EnsureDaemonOptions): Promise<boolean> {
+  try {
+    const opts = { ...options, ...resolveDaemonServiceIdentity(options) };
+    return await controlSocketIsAbsent(daemonControlSocketPath(opts.userDataDir));
+  } catch {
+    return false;
+  }
 }
 
 function ensureDaemonFlight(options: EnsureDaemonOptions, attachOnly: boolean): Promise<EnsureDaemonStatus> {
@@ -625,6 +651,24 @@ export async function quiesceDaemonBeforeStoreMigration(
       ? { status: "stopped", pid: ping.pid ?? null }
       : { status: "failed", reason: "daemon_migration_quiescence_timeout", pid: ping.pid ?? null };
   } catch { return { status: "failed", reason: "daemon_migration_quiescence_failed", pid: null }; }
+}
+
+/**
+ * Agentlas 2.0 first-run migration (defect 1): the one conductor is the owner-role Main, and a compatible live service makes Main a follower. When the
+ * service is provably idle (a census it answered itself, no other Desktop attached) it is stopped the way an update stops it, so this Desktop opens the store
+ * as owner and the migration can run; the normal start-up then starts the service again. Anything unproven (a busy service, a failed ping, another Desktop) is false:
+ * the service stays, this Desktop stays a follower, and the next start asks again. Never throws.
+ */
+export async function stopIdleDaemonForFirstRunMigration(options: DaemonServiceOptions & { timeoutMs?: number }): Promise<boolean> {
+  try {
+    const identity = resolveDaemonServiceIdentity(options);
+    const socketPath = daemonControlSocketPath(identity.userDataDir);
+    const ping = await pingDaemon(socketPath);
+    if (!ping?.ok || !matchesService(ping, identity) || ping.serviceProtocolVersion !== 2) return false;
+    if (!Array.isArray(ping.activeWork) || !ping.activeWork.every((reason) => typeof reason === "string") || ping.activeWork.length > 0) return false;
+    if (anotherDesktopIsAttached(ping)) return false;
+    return await stopObservedDaemon(socketPath, ping, options.timeoutMs ?? 25_000);
+  } catch { return false; }
 }
 
 /** Explicit service stop for update or user request, independent of GUI PID. */

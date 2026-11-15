@@ -21,6 +21,10 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "transparent", overflow: "hidden" }}>
+      {ownsInnerScroll ? (
+        // Manage agents has its own heads (the roster's "Agents", the profile): the window keeps only a drag strip, not a second title.
+        <header className="titlebar-drag" aria-hidden="true" style={{ minHeight: 28, flex: "none" }} />
+      ) : (
       <header
         className="titlebar-drag glass-thin"
         style={{
@@ -35,6 +39,7 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
           {title}
         </h1>
       </header>
+      )}
       <div
         style={
           ownsInnerScroll

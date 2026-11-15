@@ -14,8 +14,9 @@ import { useT } from "@/lib/i18n";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { mapInlineVisualProse } from "@shared/inline-visual";
 import { InlineUiInstances, useInlineUiInstances, inlineUiForReply } from "@/components/UiInstances";
+import { AnswerCardsForTurns } from "@/components/AnswerCards";
 import { IntellectUiActions } from "@/lib/intellect-ui-actions";
-import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconMoreHorizontal, IconExpand, IconFileUp, IconLayers, IconPanelRight, IconPlus, IconPuzzle, IconSidebar, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
+import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconMoreHorizontal, IconExpand, IconFileUp, IconLayers, IconMail, IconPanelRight, IconPlus, IconPuzzle, IconSidebar, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
 import type { OneSupervisorSnapshot, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation, SupervisorReplyTurn } from "../../../shared/one-supervisor";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor, type OneProfile } from "../../../shared/one-profile";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "../../../shared/agent-control-blocks";
@@ -26,6 +27,8 @@ import { PopupDetails } from "@/components/Popup";
 import { OneMemorySheet } from "./OneMemorySheet";
 import { OneCapabilitiesModal } from "./OneCapabilitiesModal";
 import { OneAgentPortrait } from "./OneAgentPortrait";
+import { OneHomeLockGate, OneHomeMoveCards } from "./OneHomeMove";
+import { OneWaitingLine } from "./OneWaitingLine";
 import type { ChatHistoryEntry, OneMemoryState, RuntimeSelection } from "@/lib/types";
 import { SupervisorOutbox, openSupervisorOutbox, type PendingSupervisorWrite, type SupervisorWrite } from "@/lib/one-supervisor-outbox";
 import { personalOnePendingAsk, personalOneReplyPresentation, personalOneTranscript } from "@/lib/personal-one-transcript";
@@ -45,13 +48,13 @@ import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSh
 import { PersonalOneSupervisedApprovals } from "./PersonalOneSupervisedApprovals";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
-import { AgiDefectChip, AgiIncidentReportButton } from "../agi/AgiBugReport";
+import { DefectReportButton } from "../support/DefectReport";
 import { PersonalOneCapabilities, type PersonalOneCapabilityTab } from "./PersonalOneCapabilities";
 import { OneVoiceInputHelp } from "./OneVoiceInputHelp";
 import { useChatSelectionIntent } from "@/lib/chat-selection-intent";
 import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
 import { OneRuntimeChips } from "./OneRuntimeChips";
-import { OneFrontChip, OneFrontNote, OneFrontNotice, OneFrontSetting, useOneFront } from "./PersonalOneFront";
+import { OneFrontNote, OneFrontNotice, OneFrontSetting, useOneFront } from "./PersonalOneFront";
 import { personalOnePanelMaximum } from "@/lib/personal-one-result";
 import { registerRouter } from "@/lib/navigation";
 import { PersonalOneBudget, usePersonalOneBudgets, personalOneBudgetName } from "./PersonalOneBudget";
@@ -60,6 +63,7 @@ import dynamic from "next/dynamic";
 import styles from "./PersonalOneWorkspace.module.css";
 import { Select } from "@/components/Select";
 import { useComposerEnter } from "@/lib/use-composer-enter";
+import { nextNameInput } from "@shared/one-agent-name";
 
 const OneIdentityEditor=dynamic(()=>import("./OneCreateAgentDialog").then(module=>module.OneCreateAgentDialog),{ssr:false});
 
@@ -641,7 +645,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const handoff=snapshot?.delegations?.find(item=>item.commandId===selectedHandoff);
   const exactResult=task?.result && (!handoff || handoff.runId===task.runId) ? task.result : null;
   const openTask=(taskId:string|null,handoffId:string|null=null)=>{setSelected(taskId);setSelectedHandoff(handoffId);setTaskPreviewOnly(true);showTaskDrawer();};
-  const taskRoute=(item:SupervisorTask)=>item.surface==='science'?'/science':item.surface==='one'?'/one?chat='+encodeURIComponent(item.chatId!):'/workspace/task?id='+encodeURIComponent(item.chatId!);
+  const taskRoute=(item:SupervisorTask)=>item.surface==='science'?'/science':'/workspace?open='+encodeURIComponent(item.chatId!);
   const stateLabel=(state:string)=>({stored:copy("접수됨","Received"),dispatching:copy("시작 중","Starting"),accepted:copy("진행 중","In progress"),running:copy("진행 중","In progress"),queued:copy("대기 중","Queued"),cancelling:copy("정리 중","Stopping"),cancelled:copy("취소됨","Cancelled"),completed:copy("실행 종료","Run settled"),failed:copy("확인 필요","Needs review"),held:copy("실행 확인 필요","Checking execution"),interrupted:copy("중단됨","Interrupted"),paused:copy("일시 정지","Paused")} as Record<string,string>)[state] ?? copy("진행 중","In progress"); // an internal state name (waiting_tool…) is never shown
   const receiptCopy=(value:SupervisorCommandReceipt)=>value.reason==="supervisor_reply_target_stale"
     ?copy("이미 끝난 답변이라 멈출 것이 없습니다.","That reply had already ended, so there was nothing to stop.")
@@ -672,14 +676,13 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     {!detached&&<aside id="personal-one-navigation" className={styles.navigation} data-collapsed={navCollapsed} hidden={navCollapsed||settingsSection!==null} aria-label={copy("One 탐색","One navigation")}>
       <div className="titlebar-drag" style={{height:28}}/><ProductModeMenu current="one" locale={ko?"ko":"en"}/>
       <button className={styles.personalEntry} data-personal-one-entry="true" aria-current="page"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/><span className={styles.personalIdentity}><strong>{name}</strong><small>{copy("개인 에이전트","Personal agent")}</small></span></button>
-      <nav className={styles.tabs}><button onClick={()=>navigateRail("organisation")}>{copy("에이전트","Agents")}</button><button onClick={()=>navigateRail("sessions")}>{copy("세션","Session")}</button><button onClick={()=>navigateRail("mail")}>{copy("메일","Mail")}</button></nav>
-      <div className={styles.navigationLinks}><button onClick={()=>navigateRail("sessions")}>{copy("One으로 돌아가기","Back to One")}</button><button onClick={()=>void appearance()}><IconSettings size={16}/>{copy("이름과 말풍선","Name and bubbles")}</button><button onClick={()=>void openMemory()}><IconBrain size={16}/>{copy("메모리","Memory")}</button><button type="button" data-one-capabilities-entry="true" onClick={openCapabilityCatalog}><IconPuzzle size={16}/>{copy("능력","Capabilities")}</button><button onClick={()=>setHistoryOpen(true)}>{copy("지난 One 대화","Previous One conversations")}</button></div>
-      <p className={styles.localLabel}>{copy("이 컴퓨터에서 실행","Runs on this computer")}</p>
+      <div className={styles.navigationLinks}><button onClick={()=>navigateRail("mail")}><IconMail size={16}/>{copy("메일","Mail")}</button><button onClick={()=>void appearance()}><IconSettings size={16}/>{copy("이름과 말풍선","Name and bubbles")}</button><button onClick={()=>void openMemory()}><IconBrain size={16}/>{copy("메모리","Memory")}</button><button type="button" data-one-capabilities-entry="true" onClick={openCapabilityCatalog}><IconPuzzle size={16}/>{copy("능력","Capabilities")}</button><button onClick={()=>setHistoryOpen(true)}>{copy("개인 에이전트와 지난 대화","Previous conversations with the personal agent")}</button></div>
+      <p className={styles.localLabel}>{copy("이 데스크탑에서 실행","Runs on this computer")}</p>
     </aside>}
     <main className={styles.conversation} hidden={settingsSection!==null}>
       <header ref={contextBar} className={`${styles.header} ${detached?"titlebar-drag":""}`} data-personal-one-header="true">
         <div className={`${styles.headerSide} titlebar-nodrag`}>{!detached&&<button type="button" className={styles.iconButton} data-personal-one-nav-toggle="true" aria-label={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} title={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} aria-expanded={!navCollapsed} aria-controls="personal-one-navigation" onClick={toggleNav}><IconSidebar size={18}/></button>}</div>
-        <div className={styles.headerIdentity}><button ref={identityTrigger} type="button" className={`${styles.headerIdentityButton} titlebar-nodrag`} onClick={()=>void openIdentity()} disabled={identityLoading} aria-label={copy("이름과 사진 편집","Edit name and photo")} aria-busy={identityLoading}><span className={styles.headerAvatar} aria-hidden="true"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/></span><span className={styles.headerIdentityName}>{name}</span></button><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
+        <div className={styles.headerIdentity}><button ref={identityTrigger} type="button" className={`${styles.headerIdentityButton} titlebar-nodrag`} onClick={()=>void openIdentity()} disabled={identityLoading} aria-label={copy("이름과 사진 편집","Edit name and photo")} aria-busy={identityLoading}><span className={styles.headerAvatar} aria-hidden="true"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/></span><span className={styles.headerIdentityName}>{name}</span></button><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 데스크탑에 연결됨","Connected to this computer")}</small></div>
         <div className={`${styles.headerSide} titlebar-nodrag`} data-side="end">
           {detached&&<button className={styles.iconButton} type="button" aria-label={copy("항상 위에 두기","Always on top")} aria-pressed={pinned} title={copy("항상 위에 두기","Always on top")} onClick={()=>void togglePinned()}><span aria-hidden="true">⌖</span></button>}
           <button type="button" className={styles.iconButton} aria-label={copy("결과·작업 보기","Show results and work")} aria-expanded={taskDrawerVisible} title={copy("결과·작업 보기","Show results and work")} onClick={()=>{if(taskDrawerVisible)setTasksOpen(false);else showTaskDrawer();setTaskPreviewOnly(Boolean(selected));}}><IconPanelRight size={17}/></button>
@@ -741,9 +744,11 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             return <Fragment key={displayId}>{stamp&&<div className={styles.stamp}><time dateTime={row.createdAt}><b>{stamp.day}</b> {stamp.time}</time></div>}<div className={styles.turn} data-role={message.role} data-personal-one-message-id={displayId} data-personal-one-source-id={sourceMessageId} data-personal-one-history-id={message.historyGroupId} data-command-id={turn?.commandId} data-optimistic-message={message.pendingCommandId} data-cadence-enter={row.cadence?.enter||undefined} onAnimationEnd={row.cadence?.enter?event=>{if(event.target===event.currentTarget)cadence.registry.seen(row.cadence!.sourceKey,row.cadence!.index);}:undefined}>
             {sender&&<small className={styles.sender}>{sender}</small>}
             {(markdownText||ownedUi.length>0)&&<MessageActions messageId={sourceMessageId} author={message.role==="user"?copy("나","You"):name} text={row.cadence?.sourceText ?? displayedText} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role={message.role} data-run-id={turn?.runId}>
+              <AnswerCardsForTurns chatId={snapshot?.conversationChatId} turnIds={turn?[turn.runId]:[]} disabled={message.role!=="assistant"}>
               {message.role==="assistant"&&turn
-                ?<StreamingMarkdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={prepareUiFollowup} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>
+                ?<StreamingMarkdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={prepareUiFollowup} uiActionsDisabled={Boolean(activeReply||attachmentBusy)} growing={activeReply?.runId===turn.runId}/>
                 :<Markdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={message.role==="assistant"?prepareUiFollowup:undefined} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>}
+              </AnswerCardsForTurns>
               <InlineUiInstances chatId={snapshot?.conversationChatId} instances={ownedUi} turnIds={turn?[turn.runId]:[]} locale={ko?"ko":"en"}/>
             </article></MessageActions>}
             {/* media-carousel pictures and videos as one swipeable strip, other files as cards (components/media). */}
@@ -751,7 +756,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             {delegated.map(delegation)}
             {/* Owner 2026-10-04: while One answers, three dots without an activity log. */}
             {typing&&<div className={styles.typing} role="status" aria-label={copy("답하는 중","Answering")}><span/><span/><span/></div>}
-            {failed&&turn&&<AgiIncidentReportButton key={turn.runId} locale={ko?"ko":"en"} draft={{
+            {failed&&turn&&<DefectReportButton key={turn.runId} locale={ko?"ko":"en"} draft={{
               chatId:snapshot?.conversationChatId,runId:turn.runId,failureCode:"one_supervisor_reply_failed",category:"other",
               title:"[Supervisor] Reply failed",summary:"The Supervisor reply failed before normal completion.",
               steps:["Send a message to Supervisor","The reply state became failed"],
@@ -763,6 +768,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       </div>
       </IntellectUiActions.Provider>
       <div ref={composerDock} className={styles.composerDock}>
+        <OneHomeMoveCards />
         <OneFrontNote view={front.view} locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>
         <div className={styles.decisionStack}>
           {pendingAsk&&pendingAsk.sourceMessageId!==dismissedAskId&&<PersonalOneAskCard key={pendingAsk.sourceMessageId} ask={pendingAsk} locale={ko?"ko":"en"} disabled={Boolean(activeReply)||attachmentBusy} onAnswer={answer=>void send(answer)} onDismiss={()=>setDismissedAskId(pendingAsk.sourceMessageId)} />}
@@ -775,8 +781,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
           <PersonalOneSupervisedApprovals conversationChatId={snapshot?.conversationChatId} locale={ko?"ko":"en"}
             composerWidth={Math.max(300,Math.min(736,viewportWidth-(detached?32:250)))} onOpenRoom={href=>void openMain(href)} />
         </div>
-        <AgiDefectChip chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} />
-        {receipt?.state==="failed"&&receipt.kind!=="reply"&&receipt.reason!=="interrupted_requires_review"&&receipt.reason!=="cancel_raced_terminal_outcome"&&<AgiIncidentReportButton key={receipt.commandId} locale={ko?"ko":"en"} draft={{
+        {receipt?.state==="failed"&&receipt.kind!=="reply"&&receipt.reason!=="interrupted_requires_review"&&receipt.reason!=="cancel_raced_terminal_outcome"&&<DefectReportButton key={receipt.commandId} locale={ko?"ko":"en"} draft={{
           chatId:snapshot?.conversationChatId,runId:receipt.runId ?? receipt.commandId,failureCode:"one_supervisor_command_failed",category:"other",
           title:"[Supervisor] Request failed",summary:receipt.reason || "The Supervisor request state became failed.",
           steps:["Submit a Supervisor request",`Request kind: ${receipt.kind}`],
@@ -785,7 +790,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
         {sendWaiting&&<p role="status" className={styles.feedback}>{copy("모델 선택을 확인하는 중이에요. 확인되면 바로 보냅니다.","Checking the model selection. It sends as soon as that is confirmed.")}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
-        <form className={styles.composer} data-one-composer="true" data-has-files={attachments.length>0} data-ready={Boolean(text.trim())||attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
+        <OneWaitingLine />
+        <OneHomeLockGate><form className={styles.composer} data-one-composer="true" data-has-files={attachments.length>0} data-ready={Boolean(text.trim())||attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
           {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>
             {/* One horizontal strip of thumbnails and file tiles, each with × (media-carousel). */}
             <MediaStrip variant="composer" locale={ko?"ko":"en"} items={attachments.map((item,index):MediaStripItem=>({
@@ -821,11 +827,11 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
           }} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
           <div className={styles.voice}><OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} /></div>
           <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={16}/></button>
-        </form>
-        <div className={styles.composerFoot}>
+        </form></OneHomeLockGate>
+        {!front.view?.effective&&<div className={styles.composerFoot}>
           {front.view&&!front.view.effective&&<p className={styles.feedback} data-one-personal-model-scope="true" title={copy("개인 One과의 대화에 사용할 모델입니다. Work 업무의 실행 모델은 업무별로 선택합니다.","The model for your personal One conversation. Choose the execution model separately for each Work task.")}>{copy("개인 대화 모델","Personal chat model")}</p>}
-          <div className={styles.trail}>{front.view?.effective?<OneFrontChip locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>:<OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} />}</div>
-        </div>
+          <div className={styles.trail}><OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} /></div>
+        </div>}
         {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>{cadence.registry.flush();void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true));}}>{copy("이 답변 중지","Stop this reply")}</button>}
         {waitingReply?.runId&&<div role="status" data-waiting-retry-stop="true" className={styles.feedback}><span>{copy("메시지를 앱이 다시 보내는 중이에요.","The app is sending your message again.")}</span> <button className={styles.stopReply} data-waiting-retry-stop-button="true" onClick={()=>void write("stopReply",{runId:waitingReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("중지","Stop")}</button></div>}
       </div>
@@ -858,7 +864,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       {task&&<section className={styles.detail}><h3>{task.title}</h3><p>{task.surface==='science'?'Science':task.surface==='one'?'One':'Work'} · {stateLabel(task.state)}</p>
         {task.controls.includes("steer")&&<><textarea aria-label={copy("이 작업에 추가 지시","Direction for this task")} value={direction} onChange={event=>setDirection(event.target.value)} maxLength={8000}/><button disabled={controlPending||!direction.trim()} onClick={()=>void control(task,"steer")}>{copy("이 작업에 지시 전달","Send direction to this task")}</button></>}
         {(!terminal(task.state)||task.controls.includes("cancel"))&&<button disabled={stopPending===task.taskId} onClick={()=>void stopTask(task)}>{copy("이 작업 중지 요청","Request task stop")}</button>}
-        <small>{task.owner==='science-daemon'?'Science':'Work'} · {copy('내 컴퓨터','This computer')} · {copy('관측','Observed')} {new Date(task.observedAt).toLocaleTimeString()}</small>
+        <small>{task.owner==='science-daemon'?'Science':'Work'} · {copy('내 데스크탑','This computer')} · {copy('관측','Observed')} {new Date(task.observedAt).toLocaleTimeString()}</small>
         {snapshot&&<PersonalOneTaskResult key={task.taskId} oneId={snapshot.oneId} task={task} requestedRunId={handoff?.runId ?? undefined} locale={ko?"ko":"en"} fallbackText={exactResult} visible={taskDrawerVisible} onOpenLinkedFile={reference=>{if(task.chatId)openFile(reference,task.chatId);}} onRefresh={()=>void sync()}/>}
         {!exactResult&&<p>{handoff&&task.runId!==handoff.runId?copy('이 작업은 새 실행으로 이어졌습니다. 원래 작업에서 확인하세요.','This task has moved to a new attempt. Review its originating work.'):copy('관측된 결과가 나오면 이곳에서 확인할 수 있습니다.','An observed result will appear here.')}</p>}
         {(task.chatId||task.surface==='science')&&<button className={styles.goToTask} onClick={()=>void openMain(taskRoute(task))}>{task.surface==='science'?copy('Science 열기','Open Science'):copy("원래 대화 열기","Go to chat")}</button>}
@@ -881,7 +887,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         <button type="button" aria-current={settingsSection==="security"?"page":undefined} onClick={()=>openSettings("security")}>{copy("보안과 연결 관리","Security and connections")}</button>
       </aside><div className={styles.settingsContent}>
         <div hidden={settingsSection!=="appearance"}>    <OneBottomSheet embedded open={true} onClose={closeSettings} closeLabel={copy("설정 닫기","Close appearance")} ariaLabel={copy("나의 One","Your One")} title={copy("나의 One","Your One")} icon={<IconSettings size={20} />} size="compact" footer={<button className={styles.saveAppearance} disabled={!profile||savingProfile||!profileName.trim()} onClick={()=>void saveAppearance()}>{copy("저장","Save")}</button>}>
-      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")} <button type="button" onClick={()=>void refreshAppearance()}>{copy("최신 설정 불러오기","Load latest settings")}</button></p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(event.target.value)} maxLength={64}/></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:bubbleHex(color as OneBubbleColor)}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:bubbleHex(bubbleColor)}}>{profileName||name}</p>
+      <div className={styles.appearance}>{profileError&&<p role="status">{copy("저장을 확인하지 못했습니다. 최신 설정을 확인하고 다시 저장해 주세요.","The save could not be confirmed. Review the latest settings and save again.")} <button type="button" onClick={()=>void refreshAppearance()}>{copy("최신 설정 불러오기","Load latest settings")}</button></p>}<label>{copy("이름","Name")}<input aria-label={copy("One 이름","One name")} value={profileName} onChange={event=>setProfileName(previous=>nextNameInput(previous,event.target.value))} maxLength={64}/><small data-one-name-limit style={{display:"block",marginTop:4,color:"var(--muted-deep)",fontSize:11}}>{copy("최대 12자","Up to 12 characters")}</small></label><fieldset className={styles.bubbleChoices}><legend>{copy("말풍선 색","Bubble color")}</legend><div role="radiogroup" aria-label={copy("말풍선 색","Bubble color")}>{Object.keys(ONE_BUBBLE_COLORS).map(color=><button type="button" key={color} role="radio" aria-checked={bubbleColor===color} aria-label={({blue:copy("파랑","Blue"),green:copy("초록","Green"),purple:copy("보라","Purple"),rose:copy("장미","Rose"),amber:copy("호박","Amber"),slate:copy("회색","Slate")} as Record<string,string>)[color]} onClick={()=>setBubbleColor(color as OneBubbleColor)} style={{background:bubbleHex(color as OneBubbleColor)}}>{bubbleColor===color&&<IconCheck size={18}/>}</button>)}</div></fieldset><p className={styles.preview} style={{background:bubbleHex(bubbleColor)}}>{profileName||name}</p>
         <CadenceSwitchRow id="one-cadence-enabled" testId="enabled" title={copy("답을 말풍선으로 나눠 보기","Show replies as separate bubbles")} hint={copy("끄면 답을 말풍선으로 나누지 않고, 예전처럼 한 덩어리로 보여 줍니다.","When off, a reply is shown as one block instead of being split into bubbles.")} on={cadence.enabled} onToggle={()=>cadence.setEnabled(!cadence.enabled)}/>
         {cadence.enabled&&<CadenceSwitchRow id="one-cadence-instant" testId="instant" title={copy("답을 바로 보기","Show replies instantly")} hint={copy("켜면 말풍선 사이에 쉬는 시간 없이, 문단이 끝나는 대로 보여 줍니다.","When on, each bubble appears as soon as its paragraph is written, with no pause between them.")} on={cadence.instant} onToggle={()=>cadence.setInstant(!cadence.instant)}/>}
         <OneFrontSetting controller={front} locale={ko?"ko":"en"}/></div>
@@ -898,7 +904,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       </div>
     </section>
     <OneFrontNotice controller={front} locale={ko?"ko":"en"}/>
-    <OneBottomSheet open={historyOpen} onClose={()=>setHistoryOpen(false)} closeLabel={copy('이전 대화 닫기','Close previous conversations')} ariaLabel={copy('지난 One 대화','Previous One conversations')} title={copy('지난 One 대화','Previous One conversations')} icon={<IconLayers size={20} />} size="compact">
+    <OneBottomSheet open={historyOpen} onClose={()=>setHistoryOpen(false)} closeLabel={copy('이전 대화 닫기','Close previous conversations')} ariaLabel={copy('개인 에이전트와 지난 대화','Previous conversations with the personal agent')} title={copy('개인 에이전트와 지난 대화','Previous conversations with the personal agent')} icon={<IconLayers size={20} />} size="compact">
       <div className={styles.appearance}>
         {snapshot?.legacyHistory?.linked.map(source=><button className={styles.historyItem} key={source.chatId} onClick={()=>void openMain('/one?chat='+encodeURIComponent(source.chatId))}><IconLayers size={18}/><span>{source.title}<small>{source.messageCount} {copy('메시지','messages')}</small></span><IconChevronRight size={16}/></button>)}
         {!!snapshot?.legacyHistory?.heldCount&&<PopupDetails label={copy(`이전 대화 ${snapshot.legacyHistory.heldCount}개 보존`,`Preserved ${snapshot.legacyHistory.heldCount} conversations`)}><p>{copy('소유자 정보가 없는 대화는 통합을 보류하며 기존 세션에서 확인할 수 있습니다.','Conversations without ownership records remain in their original sessions while integration is held.')}</p></PopupDetails>}

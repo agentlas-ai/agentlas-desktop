@@ -498,7 +498,7 @@ function SwapSection({ automationId, bindings, ko, onOutcome }: {
           : (ko ? "아직 안 정함" : "not decided");
         // 하는 일과 서비스 이름이 같으면("웹 검색" / "웹 검색") 두 번 말하지 않는다.
         const detail = [using === task ? null : using,
-          row.binding.status === "ready" ? (ko ? "연결됨" : "connected") : null,
+          row.binding.status === "ready" ? (ko ? "준비됨" : "set up") : null,   // VD: "ready" here means the tool and its keys are saved - no call has proved them, so it is not "connected"
           row.nodes.length > 1 ? (ko ? `${row.nodes.length}단계` : `${row.nodes.length} steps`) : null,
         ].filter(Boolean).join(" · ");
         return (

@@ -3,12 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import os from "node:os";
 import { onHostShutdown } from "../host-lifecycle";
+import { narrowFolderToCurrentAccount } from "../runtime/mirror-link";
 import { userDataPath } from "../runtime-paths";
 import { observationCaptureDir } from "../media/capture-artifacts";
 import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
-import { memoryNoteToEvent } from "../memory/events";
-import { recordTurnAsk, recordTurnMemoryNote, turnNotesKey, TURN_ASK_LIMIT, TURN_MEMORY_NOTE_LIMIT } from "./notes";
+import { recordTurnAsk, turnNotesKey, TURN_ASK_LIMIT } from "./notes";
 import { parseAskFenceBody, type AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
 import { completionText, fitWaitNextAction, GOAL_PLAN_LINE_LIMIT, readGoalWaitArgs, recordGoalCompleteSignal, recordGoalPlanLine, recordGoalWaitSignal, resolveKpiSampleId, validateGoalWaitIntent } from "./goal-signals";
 import { explainMalformedGoalMarker, extractGoalPlanMarkers } from "../../shared/goal-shape";
@@ -55,16 +56,25 @@ export interface TurnToolsCapabilityBinding {
   /** Host-only account captured at mint time; never serialized into the child capability file. */
   hostAccountBinding?: { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null;
   capabilityId: string;
+  /**
+   * Connected-app bridge only: a second secret that lives in THIS capability's file alone and dies with it. The loop's one process-wide `serverToken` sits in every
+   * capability file of every run, so a process that read the file of any other run (or of the run's other tool servers) held the token and could name this capability by its
+   * id (the id is in the file's name, which a directory listing shows). A change to an app needs this one too. Same user, same disk: a process that can read THIS file still
+   * has it - that is not closed here (the file is 0600; on Windows the folder's ACL is the only fence).
+   */
+  capabilityToken?: string;
   chatId: string;
   runId: string;
   /** The run's runtime kind: a runtime that keeps the judge writes no installed names. Not written to the file. */
   runtimeKind?: string | null;
   /** Graph dry-run or plan mode: nothing is recorded. */
   dryRun?: boolean;
-  /** Tools this run may call (the child lists only these; the host re-checks). Default: memory_note. */
+  /** Tools this run may call (the child lists only these; the host re-checks). Default: memory_ticket. */
   tools?: readonly string[];
   /** The run's tool permission, handed to harness ports that save (graph.draft.commit). */
   permission?: "read" | "write" | "full";
+  /** Main-only: nobody is there to answer an approval card (an automation, a headless run); the app-operation card is then refused with its cause. */
+  unattended?: boolean;
   /** One Team is attached and the run is neither a Toolchain consumer nor a room member (one_graph_* scope). */
   graphAuthoring?: boolean;
   /** Main-only: the sealed MCP config this capability was minted in. Harness ports dispatch the run's host-channel
@@ -129,6 +139,25 @@ function safeKey(value: string): string {
   return value.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 96) || randomUUID();
 }
 function controlDir(): string { return userDataPath("turn-tools"); }
+
+const narrowedControlDirs = new Set<string>();
+/**
+ * Windows ignores `mode: 0o600/0o700` and the chmod below, so what keeps the other accounts of the PC away from the capability files (they hold the
+ * server token) is the folder's ACL. Inside the account's profile (the default, %APPDATA%) the inherited ACL is already the account, SYSTEM and
+ * Administrators. Outside it (userData moved to another drive) it is that drive's ACL, which on a data drive usually lets every signed-in account
+ * read: the folder is narrowed to the current account first, once per folder and process, and files made in it inherit that. A refusal (no icacls,
+ * FAT/exFAT) leaves the folder as it was and is reported once by its closed word; the turn keeps its tools. Win-repair-1 (D3): VM `icacls` before/after.
+ */
+function narrowControlDirOnWindows(directory: string): void {
+  if (process.platform !== "win32" || narrowedControlDirs.has(directory)) return;
+  narrowedControlDirs.add(directory);
+  try {
+    const relative = path.win32.relative(fs.realpathSync(os.homedir()), fs.realpathSync(directory));
+    if (relative !== "" && !relative.startsWith("..") && !path.win32.isAbsolute(relative)) return;
+  } catch { /* unreadable: narrow it below */ }
+  const refused = narrowFolderToCurrentAccount(directory);
+  if (refused) console.warn(`[turn-tools] capability folder ACL not narrowed: ${refused}`);
+}
 function capabilityPath(configKey: string, capabilityId: string): string {
   return path.join(controlDir(), `capability-${safeKey(configKey)}-${safeKey(capabilityId)}.json`);
 }
@@ -497,14 +526,23 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       if (!recordTurnAsk(turnNotesKey(binding.chatId, binding.runId), asks)) throw new Error(`ask_form_limit: at most ${TURN_ASK_LIMIT} questions per turn; ask the rest after the answer`);
       return { shown: "pending_host", note: "End your turn now; the person's answer arrives as the next message." };
     }
+    case "memory_ticket":
     case "memory_note": {
-      if (binding.tools && !binding.tools.includes("memory_note")) throw turnToolsRefusal("turn-tools-operation-invalid");
-      const parsed = memoryNoteToEvent(request.args);
-      if (!parsed.ok) throw new Error(parsed.error);
-      if (binding.dryRun) return { recorded: false, reason: "dry_run" };
-      const slot = recordTurnMemoryNote(turnNotesKey(binding.chatId, binding.runId), parsed.event);
-      if (slot === null) throw new Error(`memory_note_limit: at most ${TURN_MEMORY_NOTE_LIMIT} notes per turn; merge the rest into one note`);
-      return { recorded: true, note: slot, status: "queued_for_curator" };
+      // `memory_ticket` is the tool; `memory_note` is its old name (a session or an executor that still holds the old tool list): the old one-note arguments are read as one ticket and the SAME receiver answers
+      // them (memory/ticket-call.ts ticketArgsFromOldNote). Nothing is queued for the turn's end any more: a ticket is written at the call and its answer says what happened.
+      if (binding.tools && !binding.tools.includes("memory_ticket") && !binding.tools.includes("memory_note")) throw turnToolsRefusal("turn-tools-operation-invalid");
+      const { receiveMemoryTicketCall } = await import("../memory/ticket-call");
+      const answered = await receiveMemoryTicketCall({ chatId: binding.chatId, runId: binding.runId, args: request.args, dryRun: binding.dryRun === true });
+      // a refusal says in a sentence that the line is NOT stored, and the same refusal twice in a turn is closed (memory/ticket-answer-words.ts).
+      const { wordTicketResult } = await import("../memory/ticket-answer-words");
+      return wordTicketResult(`${binding.chatId}|${binding.runId}`, request.args, answered, binding.dryRun === true);
+    }
+    case "memory_search":
+    case "memory_get": {
+      // K4b: read-only; what the run's own recall could read and nothing wider (memory/recall-tools.ts). A run without the tool in its capability is refused like any other.
+      if (binding.tools && !binding.tools.includes(request.operation)) throw turnToolsRefusal("turn-tools-operation-invalid");
+      const { receiveMemoryGetCall, receiveMemorySearchCall } = await import("../memory/recall-tools");
+      return await (request.operation === "memory_search" ? receiveMemorySearchCall : receiveMemoryGetCall)({ chatId: binding.chatId, runId: binding.runId, args: request.args });
     }
     case "harness_search":
     case "harness_describe":
@@ -522,6 +560,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
         hostAccountBinding: binding.hostAccountBinding ?? null,
         ...(binding.hostVideoCustody ? { hostVideoCustody: binding.hostVideoCustody } : {}),
         ...(binding.permission ? { permission: binding.permission } : {}), ...(binding.graphAuthoring === true ? { graphAuthoring: true } : {}),
+        ...(binding.unattended === true ? { unattended: true } : {}),
         ...(binding.mcpConfigPath ? { mcpConfigPath: binding.mcpConfigPath } : {}) };
       if (operation === "harness_search") {
         const kind = typeof a.kind === "string" ? a.kind as Parameters<typeof harness.searchHarness>[1] : undefined;
@@ -556,9 +595,60 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       try { return await harness.callHarnessPort(harnessId(a, ["operation", "operationId", "id", "name"]), harnessArgs(a), ctx); }
       finally { if (timer) clearInterval(timer); }
     }
+    // The connected apps that live on the server (Agentlas 2.0 DD): the bridge child's three operations. Only a capability minted for them lists these names;
+    // everything else (who is calling now, whether a change may go out, the signed request) is decided in one/server-apps-host.ts on every call.
+    case "server_apps_tools":
+    case "server_apps_call":
+    case "server_apps_status": {
+      if (!binding.tools?.includes(request.operation)) throw turnToolsRefusal("turn-tools-operation-invalid");
+      // The capability's own token (see TurnToolsCapabilityBinding.capabilityToken): absent on the binding = never granted = refused, whoever asks.
+      if (!tokenMatches(request.capabilityToken, binding.capabilityToken ?? "")) throw turnToolsRefusal("turn-tools-capability-invalid");
+      const args = request.args && typeof request.args === "object" && !Array.isArray(request.args) ? request.args as Record<string, unknown> : {};
+      return (await import("../one/server-apps-host")).handleServerAppsOperation({ capabilityId: binding.capabilityId, chatId: binding.chatId, runId: binding.runId,
+        ...(binding.permission ? { permission: binding.permission } : {}), ...(binding.unattended ? { unattended: true } : {}),
+        ...(binding.admissionCurrent ? { admissionCurrent: binding.admissionCurrent } : {}) }, request.operation, args, requestSignal);
+    }
     default:
       throw turnToolsRefusal("turn-tools-operation-invalid");
   }
+}
+
+/** Read-only bridge for another host capability in the same live run. The caller supplies no account authority. */
+export async function bridgeLiveTurnRead(scope: { chatId: string; runId: string; permission: "read" | "write" | "full"; expectedSession?: { userId: string; workspaceId: string; epoch: string; revision: number } },
+  operation: "harness_search" | "harness_describe" | "harness_call", args: Record<string, unknown>): Promise<unknown | null> {
+  const matches = [...capabilities.values()].filter((binding) => binding.chatId === scope.chatId && binding.runId === scope.runId
+    && (binding.permission ?? "read") === scope.permission && binding.tools?.includes(operation));
+  if (matches.length !== 1) return null;
+  const binding = matches[0]!;
+  const current = () => {
+    try {
+      if (capabilities.get(binding.capabilityId) !== binding || capabilityAborters.get(binding.capabilityId)?.signal.aborted !== false
+        || [...capabilities.values()].filter((candidate) => candidate.chatId === scope.chatId && candidate.runId === scope.runId
+          && (candidate.permission ?? "read") === scope.permission && candidate.tools?.includes(operation)).length !== 1
+        || (binding.admissionCurrent && !binding.admissionCurrent())) return false;
+      if (binding.hostAccountBinding) {
+        const auth = require("../auth") as typeof import("../auth"), active = auth.getAuthenticatedSessionBinding();
+        const expected = binding.hostAccountBinding;
+        if (!active || active.userId !== expected.userId || active.workspaceId !== expected.workspaceId || active.sessionId !== expected.sessionId
+          || (!scope.expectedSession && active.expiresAt !== expected.expiresAt)
+          || (active.expiresAt !== null && active.expiresAt <= Date.now())) return false;
+        if (scope.expectedSession) {
+          const proof = auth.nativeReadSessionEpoch();
+          if (!proof || proof.userId !== scope.expectedSession.userId || proof.workspaceId !== scope.expectedSession.workspaceId
+            || proof.epoch !== scope.expectedSession.epoch || proof.revision !== scope.expectedSession.revision) return false;
+        }
+      } else if (scope.expectedSession) {
+        return false;
+      }
+      return true;
+    } catch { return false; }
+  };
+  if (!current()) return null;
+  const harness = await import("../harness/capability-ports");
+  if (operation === "harness_call" && !harness.harnessCallIsEffectFreeRead(args)) return null;
+  if (operation === "harness_describe" && (typeof args.id !== "string" || !harness.HARNESS_EFFECT_FREE_READ_OPERATIONS.has(args.id))) return null;
+  const result = await handleTurnToolsControlRequest({ token: serverToken, capabilityId: binding.capabilityId, operation, args });
+  return current() ? result : null;
 }
 
 function dispose(): void {
@@ -641,6 +731,7 @@ export async function createTurnToolsCapability(
   const directory = controlDir();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(directory, 0o700);
+  else narrowControlDirOnWindows(directory);
   const target = capabilityPath(configKey, binding.capabilityId);
   writeCapabilityFile(target, port, binding);
   capabilityFiles.set(binding.capabilityId, target);
@@ -673,7 +764,7 @@ export function installedConnectorNames(runtimeKind?: string | null): string[] {
 
 function writeCapabilityFile(target: string, port: number, binding: TurnToolsCapabilityBinding): void {
   const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify({ schemaVersion: 1, port, token: serverToken, capabilityId: binding.capabilityId, tools: binding.tools ?? TURN_TOOLS_BASE,
+  fs.writeFileSync(temp, JSON.stringify({ schemaVersion: 1, port, token: serverToken, capabilityId: binding.capabilityId, ...(binding.capabilityToken ? { capabilityToken: binding.capabilityToken } : {}), tools: binding.tools ?? TURN_TOOLS_BASE,
     installed: installedConnectorNames(binding.runtimeKind) }), { flag: "wx", mode: 0o600 });
   if (process.platform !== "win32") fs.chmodSync(temp, 0o600);
   fs.renameSync(temp, target);
@@ -721,6 +812,11 @@ export function withholdTurnAskForRun(runId: string | undefined | null): () => v
       if (binding) setCapabilityTools(binding, tools);
     }
   };
+}
+
+/** The connected apps of the server (one/server-apps-host.ts) mint their own capability here: the same file and token as a turn's, listing only the three bridge operations. (Not a second mint site of the tool gateway: it lists none of its tools.) */
+export function createServerAppsCapability(input: Parameters<typeof createTurnToolsCapability>[0], configKey: string): ReturnType<typeof createTurnToolsCapability> {
+  return createTurnToolsCapability({ ...input, capabilityToken: randomUUID() }, configKey);
 }
 
 export function removeTurnToolsCapability(configKey: string, capabilityId: string): void {

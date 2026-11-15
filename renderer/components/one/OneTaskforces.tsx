@@ -112,11 +112,12 @@ export function OneTaskforceRail({
             */}
             <small>{(() => {
               // 명단 길이가 아니라 **지금 말할 수 있는 사람**을 센다(UX-D-7).
-              const people = speakableCountIncludingOne(taskforce.memberAgentIds, org);
+              // The personal agent is not a member of a group room: only the members who can speak are counted.
+              const people = speakableCountIncludingOne(taskforce.memberAgentIds, org) - 1;
               if (locale === "ko") {
-                return `One 포함 ${people}명${unavailable ? ` · ${unavailable}명 확인 필요` : ""}`;
+                return `${people}명${unavailable ? ` · ${unavailable}명 확인 필요` : ""}`;
               }
-              const who = `${people} ${people === 1 ? "member" : "members"} incl. One`;
+              const who = `${people} ${people === 1 ? "member" : "members"}`;
               const review = unavailable ? ` · ${unavailable} ${unavailable === 1 ? "needs" : "need"} review` : "";
               return `${who}${review}`;
             })()}</small>
@@ -245,18 +246,13 @@ export function OneTaskforceDialog({
     title={taskforce ? (locale === "ko" ? "태스크포스 멤버" : "Taskforce members") : (locale === "ko" ? "태스크포스 만들기" : "Create Taskforce")}
     titleId="one-taskforce-dialog-title"
     ariaLabelledBy="one-taskforce-dialog-title"
-    description={locale === "ko" ? "One은 항상 참여합니다." : "One always participates."}
+    description={locale === "ko" ? "이 방에서 말할 에이전트를 고르세요. 첫 번째가 팀장이에요." : "Pick who talks in this room. The first one is the lead."}
   >
     <div className={styles.dialogBody} aria-busy={busy ? "true" : "false"}>
       <label className={styles.titleField}>{locale === "ko" ? "이름" : "Name"}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} placeholder={locale === "ko" ? "예: Launch Team" : "e.g. Launch Team"} /></label>
       <details className={styles.descriptionDetails} open={Boolean(taskforce?.description)}><summary>{locale === "ko" ? "팀 설명" : "Team description"}</summary><label className={styles.descriptionField}>{locale === "ko" ? "설명" : "Description"}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={600} rows={3} placeholder={locale === "ko" ? "이 팀의 역할, 목적, 협업 방식을 설명하세요." : "Describe this team's purpose, responsibilities, and way of working."} /></label></details>
       {busy && <div className={styles.busyState} role="status" aria-live="polite"><span className={styles.busySpinner} aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
       <section className={styles.memberList} aria-label={locale === "ko" ? "태스크포스 멤버" : "Taskforce members"}>
-        <div className={styles.memberRow} data-fixed="true">
-          <OneAgentPortrait status="quiet" label={onePersonaName} size="small" tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
-          <span><strong>{onePersonaName}</strong><small>{locale === "ko" ? "CEO 오케스트레이터 · 항상 참여" : "CEO orchestrator · Always present"}</small></span>
-          <span className={styles.fixedBadge}><IconCheck size={12} />{locale === "ko" ? "고정" : "Pinned"}</span>
-        </div>
         {rows.map((member) => {
           // A seat the host's join guard would refuse (hidden agent, expired lease, ...) is not offered; one already in the group stays removable.
           const unavailable = memberUnavailable(member);

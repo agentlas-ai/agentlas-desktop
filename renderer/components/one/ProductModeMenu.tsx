@@ -12,12 +12,9 @@ import { AttentionDot } from "@/components/AttentionDot";
 import { attentionLabel, openAttentionEntry, useAttention, type AttentionChatEntry } from "@/lib/attention";
 import styles from "./ProductModeMenu.module.css";
 
-const ONE_RETURN_ROUTE_KEY = "agentlas.one.return-route.v1";
-
-function safeOneReturnRoute(value: string | null): string {
-  if (!value || value.length > 2_048 || !/^\/one(?:\?(?:personal=1|(?:task|chat|conversation)=[A-Za-z0-9._:%-]+))?$/.test(value)) return "/one";
-  return value;
-}
+// Agentlas 2.0: "One" in this menu is the personal agent. Rooms and chats open from Home's tree, so this menu always goes to the
+// personal agent's own screen (the remembered return address of older runs was a room or chat; it is no longer read).
+const PERSONAL_ONE_ROUTE = "/one?personal=1";
 
 export function ProductModeMenu({
   current,
@@ -60,7 +57,7 @@ export function ProductModeMenu({
         ? (activeLocale === "ko" ? "에이전트 빌드" : "Agent build")
         : (activeLocale === "ko" ? "제목 없는 대화" : "Untitled conversation"));
   const [open, setOpen] = useState(false);
-  const [oneHref, setOneHref] = useState("/one");
+  const oneHref = PERSONAL_ONE_ROUTE;
   const scienceSuite = useScienceSuiteStatus();
   const scienceAvailable = current === "science" || scienceCoreReady(scienceSuite);
   const scienceInstalled = current === "science" || scienceCoreInstalled(scienceSuite);
@@ -73,15 +70,6 @@ export function ProductModeMenu({
     onDismiss: () => setOpen(false),
     restoreFocusRef: triggerRef,
   });
-  useEffect(() => {
-    if (current === "one") {
-      const route = safeOneReturnRoute(`${window.location.pathname}${window.location.search}`);
-      window.sessionStorage.setItem(ONE_RETURN_ROUTE_KEY, route);
-      setOneHref(route);
-      return;
-    }
-    setOneHref(safeOneReturnRoute(window.sessionStorage.getItem(ONE_RETURN_ROUTE_KEY)));
-  }, [current]);
   useEffect(() => {
     if (!onMenuExtentChange) return;
     const menu = menuRef.current;
@@ -212,8 +200,8 @@ export function ProductModeMenu({
             aria-label={surfaceLabel("Work", attention.bySurface.work)}
             aria-describedby="agentlas-product-mode-work-help"
             aria-current={current === "work" ? "page" : undefined}
-            onClick={() => navigate("/dashboard")}
-            onKeyDown={(event) => handleOptionKeyDown(event, () => navigate("/dashboard"))}
+            onClick={() => navigate("/workspace")}
+            onKeyDown={(event) => handleOptionKeyDown(event, () => navigate("/workspace"))}
           >
             <span className={styles.optionIcon} aria-hidden="true"><IconApps size={18} /></span>
             <span className={styles.optionCopy}><strong>Work</strong><AttentionDot counts={attention.bySurface.work} locale={activeLocale} className={styles.optionDot} testId="product-mode-attention-work" /><small id="agentlas-product-mode-work-help">{tFor(activeLocale, "one.mode.work_sub")}</small></span>

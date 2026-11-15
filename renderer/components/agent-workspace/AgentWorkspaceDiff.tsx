@@ -16,9 +16,11 @@ function DiffCell({ row, side }: { row: LineDiffRow | null; side: "before" | "af
   </div>;
 }
 
-export function AgentWorkspaceDiff({ files, locale, activePath, onPathChange, beforeLabel, afterLabel }: {
+export function AgentWorkspaceDiff({ files, locale, activePath, onPathChange, beforeLabel, afterLabel, fit = false }: {
   files: WorkspaceDiffFile[]; locale: string; activePath?: string | null; onPathChange?: (path: string) => void;
   beforeLabel?: string; afterLabel?: string;
+  /** The two split columns share the width they are given (a long line is cut at its column; the unified view scrolls it). Used where the panel is narrow (the Sync tab). */
+  fit?: boolean;
 }) {
   const ko = locale === "ko";
   const [localPath, setLocalPath] = useState(files[0]?.path ?? "");
@@ -49,7 +51,7 @@ export function AgentWorkspaceDiff({ files, locale, activePath, onPathChange, be
   const afterTerminated = (file?.afterContent ?? "").endsWith("\n");
   const count = split ? splitRows.length : rows.length;
   const longest = useMemo(() => rows.reduce((max, row) => Math.max(max, Array.from(row.text).reduce((columns, character) => columns + (character === "\t" ? 2 : (character.codePointAt(0) ?? 0) > 127 ? 2 : 1), 0)), 0), [rows]);
-  const canvasWidth = Math.max(viewportWidth, (longest * 7.8 + 110) * (split ? 2 : 1));
+  const canvasWidth = fit && split ? viewportWidth : Math.max(viewportWidth, (longest * 7.8 + 110) * (split ? 2 : 1));
   const start = Math.max(0, Math.floor(scrollTop / 22) - 20);
   const end = Math.min(count, start + Math.ceil(viewportHeight / 22) + 40);
   return <div className={styles.diff} data-testid="agent-workspace-diff">

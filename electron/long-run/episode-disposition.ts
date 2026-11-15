@@ -5,14 +5,13 @@ import { getChat, insertHostNoticeInTransaction, emitHostNoticeCommitted } from 
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId, getLongRunAttemptGoalRevision, getLongRunGoalRevisionBinding, listLongRunTasks,
   longRunOwnerHold, appendLongRunEvent, bindLongRunWorker, startLongRunWorkerAttempt } from "../store/long-runs";
-import { readGoalPlan, withCurrentGoalPlan, goalPlanInvocationReceipts, goalPlanOwnerControlEpoch, recordGoalPlanDecision } from "../store/goal-plans";
+import { readGoalPlan, withCurrentGoalPlan, goalPlanInvocationReceipts, goalPlanOwnerControlEpoch } from "../store/goal-plans";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { currentUiLocale } from "../ui-locale";
 import { formatAutomationNextRun } from "../../shared/automation-next-run";
 import { parseGoalWaitIntent, type GoalWaitIntent } from "./wait-emitter";
 import { desktopStoreTransaction } from "../store/change-bus";
-import { captureEpisodeQuietBaseline, type AgiGoalFactsDeps } from "../agi/goal-facts";
-import { effectiveWaitCheckAt, latestGoalWaitSubscription } from "./wait-subscriptions";
+import { latestGoalWaitSubscription } from "./wait-subscriptions";
 import type { GoalWaitSubscription } from "./wait-subscriptions";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
 import { captureGoalExecutionControlGeneration, assertGoalExecutionControlGeneration, isGoalDispatchRefusal } from "../automation-execution-control";
@@ -216,7 +215,6 @@ export interface GoalEpisodeDisposition {
   requestId: string; captureId: string; goalId: string; status: "decision_recorded" | "wait_registered";
   code: string; waitId: string | null; checkpointId: string | null; requestedUntil: string | null;
   nextCheckAt: string | null; executionAvailability: "app-running" | null;
-  quietBaseline?: string;
   waitState?: GoalWaitSubscription["state"]; successorInvocationId?: string | null; replayed?: boolean;
 }
 type RegisterWait = (input: { goalId: string; invocationRunId: string; intent: GoalWaitIntent; now: number;
@@ -272,7 +270,7 @@ function boundaryDigest(invocationId: string, chatId: string): string {
     effects: boundary.effects, pending: boundary.pendingEffectRefs });
 }
 
-/** AGI calls before facts/model work. Normal output must name its genuine producer;
+/** Called before facts/model work. Normal output must name its genuine producer;
  * its plan/control identity comes exclusively from the pre-dispatch marker ledger. */
 export function captureGoalEpisode(input: { captureId: string; goalId: string; producerInvocationId?: string }): GoalEpisodeCapture {
   if (!validId(input.captureId) || !validId(input.goalId)) throw new Error("goal_episode_capture_invalid");
@@ -346,35 +344,6 @@ function assertCustody(c: EpisodeCustody, applying: boolean, now: number): void 
     || worker.app_instance_id !== c.workerAppInstanceId || getLongRunAttemptGoalRevision(c.runId, c.workerAttemptId) !== c.goalRevision) throw new Error("goal_episode_producer_stale");
   if (boundaryDigest(c.producerInvocationId, c.chatId) !== c.boundaryDigest) throw new Error("goal_episode_effect_boundary_changed");
 }
-/** Reuse the immutable pre-model capsule; never capture current state at apply. */
-export function assertGoalEpisodeCapture(captureId: string, now: number): GoalEpisodeCapture {
-  ensureGoalEpisodeSchema();
-  const capture = readCapture(captureId);
-  if (!capture?.custody) throw new Error(capture?.reason ?? "goal_episode_custody_missing");
-  assertCustody(capture.custody, true, now);
-  return capture;
-}
-/** A synchronous local self-change can derive only plan/version, inside the same owned commit.
- * Authority, producer, owner control and effect evidence are copied from the original capture. */
-export function withGoalEpisodeSelfChange(captureId: string, derivedId: string, now: number, mutate: () => void): GoalEpisodeCapture {
-  if (!getDb().inTransaction || mutate.constructor.name === "AsyncFunction") throw new Error("goal_episode_lineage_transaction_required");
-  const original = assertGoalEpisodeCapture(captureId, now), before = original.custody!;
-  if (!validId(derivedId) || readCapture(derivedId)) throw new Error("goal_episode_capture_conflict");
-  const returned: unknown = mutate();
-  if (returned && typeof (returned as { then?: unknown }).then === "function") throw new Error("goal_episode_async_registration");
-  const run = getLongRunByGoalId(before.goalId), plan = readGoalPlan(before.goalId);
-  if (!run || !plan?.mutationIdentity) throw new Error("goal_episode_custody_stale");
-  const derived = { ...original, captureId: derivedId, custody: { ...before, runVersion: run.version, mutationIdentity: plan.mutationIdentity } };
-  assertCustody(derived.custody, true, now);
-  recordGoalPlanDecision({ goalId: before.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "plan_op",
-    createdAt: new Date(now).toISOString(), payload: { actor: "strategy-episode", sourceCaptureId: captureId, derivedCaptureId: derivedId,
-      beforeMutationIdentity: before.mutationIdentity, afterMutationIdentity: plan.mutationIdentity,
-      beforeRunVersion: before.runVersion, afterRunVersion: run.version, producerInvocationId: before.producerInvocationId } });
-  getDb().prepare("INSERT INTO goal_episode_captures(id,goal_id,value_json) VALUES (?,?,?)")
-    .run(derivedId, before.goalId, JSON.stringify(derived));
-  return derived;
-}
-
 export function readGoalEpisodeDisposition(requestId: string): GoalEpisodeDisposition | null {
   ensureGoalEpisodeSchema();
   const row = getDb().prepare("SELECT value_json FROM goal_episode_dispositions WHERE id=?").get(requestId) as { value_json: string } | undefined;
@@ -382,9 +351,9 @@ export function readGoalEpisodeDisposition(requestId: string): GoalEpisodeDispos
   try { const value = JSON.parse(row.value_json) as GoalEpisodeDisposition; return value.requestId === requestId ? value : null; } catch { return null; }
 }
 /** One synchronous local unit: wait checkpoint + transition + disposition + outbox.
- * The caller may wrap this in the AGI claim/settlement transaction. Never pass an async registration callback. */
+ * The caller may wrap this in its own settlement transaction. Never pass an async registration callback. */
 export function applyGoalEpisodeRest(input: { requestId: string; captureId: string; goalId: string; intent: GoalWaitIntent | null;
-  signal?: AbortSignal; now?: number; projectDir?: string | null; hasTransientAttachments?: boolean; refusal?: string; latestReceipt?: AgiGoalFactsDeps["latestReceipt"] }, register: RegisterWait): GoalEpisodeDisposition {
+  signal?: AbortSignal; now?: number; projectDir?: string | null; hasTransientAttachments?: boolean; refusal?: string }, register: RegisterWait): GoalEpisodeDisposition {
   ensureGoalEpisodeSchema();
   if (!validId(input.requestId) || !validId(input.captureId) || !validId(input.goalId)) throw new Error("goal_episode_request_invalid");
   const intentDigest = digest({ captureId: input.captureId, goalId: input.goalId, intent: input.intent, refusal: input.refusal ?? null });
@@ -420,7 +389,7 @@ export function applyGoalEpisodeRest(input: { requestId: string; captureId: stri
         if (!wait || wait.state !== "pending" || wait.sourceInvocationId !== c.producerInvocationId
           || wait.episodeCaptureId !== input.captureId || wait.episodeRequestId !== input.requestId) throw new Error("goal_episode_registration_invalid");
         Object.assign(result, { status: "wait_registered", code: "goal_episode_wait_registered", waitId: wait.waitId,
-          checkpointId: wait.checkpointId, nextCheckAt: wait.nextCheckAt, waitState: wait.state, executionAvailability: wait.executionAvailability, quietBaseline: captureEpisodeQuietBaseline(c.goalId, now, input.latestReceipt) });
+          checkpointId: wait.checkpointId, nextCheckAt: wait.nextCheckAt, waitState: wait.state, executionAvailability: wait.executionAvailability });
         getDb().prepare("INSERT INTO goal_episode_notice_outbox(disposition_id,chat_id,created_at) VALUES (?,?,?)")
           .run(input.requestId, c.chatId, new Date(now).toISOString());
       });
@@ -506,18 +475,4 @@ export function drainGoalEpisodeNotices(limit = 20): void {
     }).immediate(); } catch { continue; } // No work is repeated to repair a local notice.
     if (chatId) { try { emitHostNoticeCommitted(chatId); } catch { /* durable history survives an unavailable event sink */ } }
   }
-}
-
-/** Only this exact future pending wait owns the next repair (by its effective next check, so a quiet poll keeps it future). Cursor churn is irrelevant. */
-export function readEpisodeQuietBaseline(goalId: string, now: number, db = getDb()): string | null {
-  // The facts API also supports independent SQLite projections. They must not
-  // accidentally read a different Main store or require Main initialization.
-  try { if (db !== getDb()) return null; } catch { return null; }
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='goal_episode_dispositions'").get()) return null;
-  const wait = latestGoalWaitSubscription(goalId);
-  const nextAt = wait ? effectiveWaitCheckAt(wait, now) : null;
-  if (!wait?.episodeRequestId || wait.state !== "pending" || !nextAt || Date.parse(nextAt) <= now
-    || getLongRunByGoalId(goalId)?.status !== "waiting_tool" || episodeWaitFenceReason(wait, now)) return null;
-  const receipt = readGoalEpisodeDisposition(wait.episodeRequestId);
-  return typeof receipt?.quietBaseline === "string" ? receipt.quietBaseline : null;
 }

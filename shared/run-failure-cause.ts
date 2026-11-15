@@ -1,4 +1,4 @@
-import { isTransientSendRefusalCode, startRefusalNeedsOwner } from "./transient-send-refusal";
+import { isOwnerFixableRunFailureCode, isTransientSendRefusalCode, startRefusalNeedsOwner } from "./transient-send-refusal";
 import { HOST_FAILURE_CODE_CLASSES, OWNER_ACTION_FAILURE_CODES, RUN_FAILURE_UNSETTLED_CODE, isTypedProviderRunFailure } from "./run-failure-notice";
 import type { RunFailureNoticeFacts } from "./run-failure-notice";
 import { isNonFailureInvocationStop } from "./invocation-host-stop";
@@ -89,6 +89,8 @@ export function undispatchedInternalFailure(input: { code?: unknown; runtimeFail
   const code = typeof input.code === "string" && CODE_RE.test(input.code) ? input.code : null;
   if (!code) return true;
   if (OWNER_ACTION_FAILURE_CODES.has(code) || HOST_FAILURE_CODE_CLASSES.has(code)) return false;
+  // A state only the owner can clear (an archived agent, a missing working folder): the same call fails the same way, so it is not the app's own state to retry.
+  if (isOwnerFixableRunFailureCode(code)) return false;
   // The start path excludes the same refusals the owner acts on (transient-send-refusal.ts startRefusalNeedsOwner: a cost cap, a stopped Goal,
   // a settings change, an attachment limit), each with a sentence of its own. A run that fails after admission with one of them is that
   // refusal, not the app's own state: it must not be retried 12 times behind "the app will try again".

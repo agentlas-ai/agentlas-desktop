@@ -1,4 +1,5 @@
 import {memoryDatabaseForOriginalSource as memorySource} from '../memory/database';
+import {agentIdsWithRowsInStores} from '../memory/store';
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
@@ -75,9 +76,10 @@ export async function createNativeHistoryWorkOwner(input:{source:HistorySourceOw
   // Apply the result cap after all exclusions: dedicated assets can occupy an entire database page.
   // NOT EXISTS keeps unrelated sources visible when a canonical memory row has no agent ID.
   const sql="SELECT a.id,a.name FROM installed_agents a WHERE a.builtin=0 AND a.visibility='visible' AND typeof(a.id)='text' AND a.id<>'' AND NOT EXISTS(SELECT 1 FROM memory_entries m WHERE m.agent_id=a.id)";
+  const inStores=agentIdsWithRowsInStores(); // layout switch on: an agent whose lines live only in its own or a project store is not memory-less (empty set while the switch is off)
   while(sources.length<100){const page=(cursor===null?memorySource(db()).prepare(sql+" ORDER BY a.id LIMIT 100").all():memorySource(db()).prepare(sql+" AND a.id>? ORDER BY a.id LIMIT 100").all(cursor)) as Array<{id:string;name:string}>;
    if(!page.length)break;
-   for(const a of page){if(!dedicatedSource(a.id))sources.push({agentId:a.id,label:a.name});if(sources.length===100)break}
+   for(const a of page){if(!dedicatedSource(a.id)&&!inStores.has(a.id))sources.push({agentId:a.id,label:a.name});if(sources.length===100)break}
    if(page.length<100)break;cursor=page[page.length-1].id;
   }
   const operations:HistoryWorkStatus['operations']=[];

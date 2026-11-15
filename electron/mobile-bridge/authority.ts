@@ -1,3 +1,11 @@
+import { createMobileBridgeFrontTransfer } from "./front-transfer";
+import { agentUsability, usabilityEnforced } from "../agents/usability";
+import { createMobileBridgeContinuity } from "./continuity";
+import { LongOpJoiner, MobileBridgeOutcomeUnknown, longOpJoinTarget } from "./long-ops";
+import { createPersonalOnePhoneTools, hasPhoneConnection, installPersonalOnePhoneBridge, type PhoneToolBinding } from "./personal-one-phone-tools";
+import { phoneOriginForRun, validPhoneCommandOrigin } from "../one/personal-one-phone-origin";
+import { personalRequestEnds, terminalEventFor, type PersonalRequestEnd } from "../one/personal-request-ends";
+import type { PhoneCommandOrigin } from "../one/personal-one-phone-origin";
 import { answerMobileCanonicalQuestion } from "./canonical-question";
 import { MOBILE_CANONICAL_QUESTION_CONTRACT, type MobileCanonicalQuestionAnswerParams } from "../../shared/mobile-question-decision";
 import { createMobileBuildInterviewWitnessSource } from "../hephaestus/mobile-interview-witness";
@@ -7,14 +15,22 @@ import { listUiInstances } from "../harness/ui-instances";
 import { MOBILE_SNAPSHOT_VISUAL_BYTES, mergeMobileInlineUiTranscript, mobileDomainPorts } from "./finance-ui-transcript";
 import {isOneMobileSecureMethod, type OneMobileSecureAdapter} from "../secrets/one-mobile-secure";
 import { answerOneDispatchQuestion } from "../one/team-dispatch";
+import { oneHome, onOneHomeChanged } from "../one/home";
+import { computerSigningRefusal } from "../one/companion-computer-gate";
 import type { MobilePushService, MobilePushNotice } from "./push";
+import { createGoalPushHold, goalHeldFinal } from "./goal-push";
+import { createReviewPushHold } from "./one-review-push";
+import { onExternalWrite } from "../store/external-writer-presence";
 import { MobileGoalControl, type MobileGoalControlServices } from "./goal-control";
+import { createWorkspaceV2, workspaceV2Capability } from "./workspace-v2";
+import { createBuildV2 } from "./build-v2";
+import { MOBILE_BUILD_V2_WRITE_METHODS, validateMobileBuildContinuation, type MobileBuildV2Method } from "../../shared/mobile-build-v2";
+import { buildWorkbenchAvailable, phoneBuildEnv } from "../hephaestus/build-workbench-ipc";
 import { oneSupervisor as localOneSupervisor, supervisorRunsInDaemon } from "../one/supervisor";
-import { oneSupervisorEndpoint } from "../one/supervisor-native-runtime";
+import { callOneSupervisorRuntime, oneSupervisorEndpoint, supervisorRuntimeMode } from "../one/supervisor-native-runtime";
 const oneSupervisor=()=>supervisorRunsInDaemon()?localOneSupervisor():oneSupervisorEndpoint();
-import { ONE_SUPERVISOR_SCHEMA, type SupervisorSendInput, type SupervisorWorkInput, type SupervisorScienceInput, type SupervisorControlInput, type SupervisorCommandReceipt } from "../../shared/one-supervisor";
+import { ONE_SUPERVISOR_SCHEMA, type SupervisorSendInput, type SupervisorWorkInput, type SupervisorControlInput, type SupervisorCommandReceipt } from "../../shared/one-supervisor";
 import { MOBILE_GOAL_CONTROL_CAPABILITY, isMobileGoalControlMethod } from "../../shared/mobile-goal-control";
-import { onGoalControlChange } from "../goal-control-events";
 import { projectOneDecisionOwnerAnswerV4, validateOneDecisionOwnerAnswerV4, type OneDecisionOwnerAnswerV4Binding } from "./one-decision-owner-answer";
 import { parseHubReleasePin } from "../../shared/hub-release-pin";
 import { withInvocationPreflightAccounting } from "../long-run/accounting-context";
@@ -22,6 +38,7 @@ import { mobileBridgeIsOwnerMessage } from "./orphan-rerun-policy";
 import type { OwnerIntakeOutcome } from "../invocation/owner-intake";
 import { createHash, randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
+import { isHostPluginPreflightRow } from "../../shared/tool-activity";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { ollamaModelListIncludes } from "../../shared/runtime-connect";
 import { runtimeModelUnavailableByInventory } from "../runtime/credential-access";
@@ -33,7 +50,9 @@ import {
 } from "../../shared/build-turn";
 import {
   listPendingToolApprovals,
+  listRecentlyExpiredToolApprovalIds,
   onToolApprovalRequested,
+  noteToolApprovalHandler,
   onToolApprovalResolved,
   resolveToolApproval,
 } from "../runtime/tool-approval";
@@ -59,6 +78,9 @@ import { assertChatRuntimeSelectionTicketCurrent, reserveChatRuntimeSelectionTic
 import { handOffPinnedSelectionToOngoingGoal } from "../long-run/runtime-handoff";
 import { oneDispatchParentForRun } from "../one/dispatch-presentation";
 import { assertOwnerMayWriteRoom, isPersonalAgentRoom, PERSONAL_AGENT_ROOM_READ_ONLY } from "../one/personal-agent-rooms";
+import { routeLeadRoomOwnerMessage } from "../one/room-lead-runtime";
+import { markOwnerSpoke } from "../invocation/owner-spoke";
+import { attachChatToProject } from "../chat/chat-moves";
 import {
   acceptCanonicalTaskResult,
   ensurePairingVerificationTask,
@@ -91,6 +113,7 @@ import { onOwnerAsk } from "../owner-ask-alerts";
 import { nativeGuiActiveRuntimeSelection, nativeGuiActiveChatIds, onNativeGuiActiveChats, onNativeGuiApprovalRequested, onNativeGuiInvocationEvent, onNativeGuiSettled } from "../invocation/native-gui-events";
 import type { InvocationCurrentTurnPort } from "../runtime/invocation-owner-router";
 import { readMobileBridgeHistoryPage } from "./history-page";
+import { requirePersonalOneHistoryAuthority, assertPersonalOneHistoryUnchanged } from "./personal-one-history-access";
 import { projectMobileBridgeContext } from "./context-snapshot";
 import { MobileToolPayloadStore, sanitizeMobileToolBody } from "./tool-payload";
 import {
@@ -138,6 +161,8 @@ import { installPublicHubRelease, listInstalledAgents } from "../mcp/registry";
 import { addOneOrgMember, getOneOrgState, markOneOrgMemberRead, openOneOrgMember } from "../one/org";
 import { readMobileOneAvatar } from "./one-avatar-preview";
 import { setOneSelfAvatarImage } from "../one/avatar";
+import { personalWriteRefusal } from "../one/write-gate";
+import { isAppWorkFolder } from "../runtime/session-cwd";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { installMobileConnector, listMobileConnectors, setMobileConnectorEnabled, testMobileConnector } from "./connectors";
@@ -157,10 +182,12 @@ import {
   clearChatContext,
   createChat,
   createProjectWorkChat,
+  answerStartIn,
   getChat,
   getChatWorkingFolder,
   listRecentChats,
   removeChat,
+  storedAnswerStarts,
   renameChat,
   setChatContinuousMode,
   setChatRuntimeSelection,
@@ -169,6 +196,7 @@ import {
   unarchiveChat,
 } from "../store/chats";
 import { getProject, projectPoolAddsMembers, updateProject } from "../store/projects";
+import { phoneApprovalFolder } from "./approval-folder-label";
 import { getFirm } from "../store/firms";
 import {
   PROJECT_AGENT_POOL_MAX,
@@ -317,7 +345,7 @@ import { ChatFileRefusal, LegacyChatVideoTransfers } from "./legacy-chat-video";
 import { chatFileSourceText } from "./chat-file-links";
 import { ArtifactVideoTransfers } from "./artifact-video-transfers";
 import { ChatVideoTransfers, type ChatVideoPrincipal } from "./chat-video-transfers";
-import { parseMobileBridgeRequest } from "../../shared/mobile-bridge";
+import { parseMobileBridgeRequest, ONE_HOME_POSSESSION_HOST_CAPABILITY } from "../../shared/mobile-bridge";
 import { inferOwnerLocale, isMachineAgentLabel, ownerActivityText, ownerAgentLabelOrNull } from "../../shared/owner-visible-activity-text";
 import { withMobileRequestTiming } from "./request-timing";
 import { MobileBridgeRefusal } from "../../shared/mobile-bridge-refusal";
@@ -339,6 +367,11 @@ const REQUEST_ID_RE = /^[^\u0000-\u001f]{1,128}$/;
 const ROW_SKIP_DECISION_CAPABILITIES: readonly MobileClientCapability[] = ["decision.rowSkip.v1", "text.sanitize.v3"];
 const IDENTIFIER_RE = /^[^\u0000-\u001f]{1,256}$/;
 const RUN_ID_RE = /^[^\u0000-\u001f]{1,160}$/;
+/** The closed key list of each build2 method (the wire check ran the same list; the authority guards the params again). */
+const MOBILE_BUILD_V2_PARAM_KEYS: Readonly<Record<MobileBuildV2Method, readonly string[]>> = Object.freeze({
+  "build2.list": ["cursor", "limit"], "build2.open": ["buildKey"], "build2.files": ["buildKey"], "build2.file.read": ["buildKey", "path", "sinceLine"],
+  "build2.forRun": ["runId"], "build2.preview.send": ["buildKey", "text", "idempotencyKey"], "build2.preview.restart": ["buildKey", "idempotencyKey"], "build2.preview.read": ["buildKey"],
+});
 const MOBILE_ONE_ARTIFACT_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
 /** 도구 승인 id — tool-approval 이 발급하는 `approval:<t>:<rand>` / `denied:<t>:<rand>`. */
 const TOOL_APPROVAL_ID_RE = /^(approval|denied):[a-z0-9]{1,16}:[a-z0-9]{1,16}$/;
@@ -403,6 +436,8 @@ export interface MobileNativeToolApprovalPort {
 export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   nativeToolApprovals?: MobileNativeToolApprovalPort;
   domainAccountAdmission?: (deviceId: string) => Promise<{ assertCurrent(): void }>;
+  /** Original paired-device account binding, never supplied by a request. */
+  companionAccountBinding?: (deviceId: string) => { workspaceId: string | null; accountSubject: string; ownerUserId: string | null; issuedAt?: string } | null;
   /** Main-installed independent sender/original-command service; absent stays unavailable. */
   oneSecure?: () => OneMobileSecureAdapter | null;
   mobilePush?: MobilePushService;
@@ -536,6 +571,7 @@ export type MobileBridgeAuthorityHandle = MobileBridgeAuthority & {
   dispose(): void;
   /** Hands the terminals a (revoked) device still holds back to the Desktop agent; resolves with how many. */
   releaseTerminalLeasesForDevice(deviceId: string): Promise<number>;
+  revokePhoneToolsForDevice(deviceId: string): void;
 };
 
 type AuthorityListener = (event: MobileBridgeAuthorityEvent) => void;
@@ -881,6 +917,8 @@ function projectBorrowableHubAgents() {
     entityKind: bookmark.listing.entityKind === "team" ? "team" : "agent",
     // Mobile's compatibility DTO must not surface pre-closure bookmark prices.
     perCallCredits: 0,
+    // Agentlas 2.0 D6: registered here = usable (agents/usability.ts); only with the 2.0 switch on, an older phone ignores it.
+    ...(usabilityEnforced() ? { registered: agentUsability({ slug: normalizedSlug(bookmark.slug || bookmark.listing.slug), source: "hub" }).usable } : {}),
   }));
 }
 
@@ -978,44 +1016,29 @@ function supervisorReceiptValue(receipt:SupervisorCommandReceipt,label:string):M
 
 /**
  * Hosted AI usage allowance for the phone — same main-process source as Desktop's own
- * CreditBalanceWidget (billing.getCredits → GET /api/billing/credits), cached
- * with the same 60s window the renderer uses (ipc-cache "billing.getCredits").
- * Mobile polls piggyback on snapshot activity, so without this cache every
- * snapshot tick would query the billing endpoint over the network.
+ * CreditBalanceWidget (billing.getCredits → GET /api/billing/credits). The read is shared
+ * with every other Main reader through billing.ts, which keeps it per session cookie: a
+ * read up to 60 s old is reused (the old window of this file), and an account switch or a
+ * sign-out on the desktop is never answered with the previous account's balance. This file
+ * used to keep its own 60 s copy with no account key (defect 4).
  *
  * The projection is deliberately honest about "unknown": when the host is
  * signed in but the billing fetch failed (no numeric allowance), `available` is
  * omitted instead of being zero-filled — the phone keeps its last known value,
  * exactly like the Desktop widget does.
  */
-const MOBILE_BRIDGE_CREDITS_TTL_MS = 60_000;
+const MOBILE_BRIDGE_CREDITS_MAX_AGE_MS = 60_000;
 interface MobileBridgeCreditsProjection {
   authenticated: boolean;
   available?: number;
 }
-let mobileBridgeCreditsCache: { fetchedAt: number; value: MobileBridgeCreditsProjection } | null =
-  null;
-let mobileBridgeCreditsFlight: Promise<MobileBridgeCreditsProjection> | null = null;
 async function getMobileBridgeCredits(): Promise<MobileBridgeCreditsProjection> {
-  const cached = mobileBridgeCreditsCache;
-  if (cached && Date.now() - cached.fetchedAt < MOBILE_BRIDGE_CREDITS_TTL_MS) return cached.value;
-  const inFlight = mobileBridgeCreditsFlight;
-  if (inFlight) return inFlight;
-  const flight = (async (): Promise<MobileBridgeCreditsProjection> => {
-    const balance = await getBillingCredits();
-    const value: MobileBridgeCreditsProjection = { authenticated: balance.authenticated === true };
-    if (typeof balance.remainingCredits === "number" && Number.isFinite(balance.remainingCredits)) {
-      value.available = Math.max(0, Math.floor(balance.remainingCredits));
-    }
-    mobileBridgeCreditsCache = { fetchedAt: Date.now(), value };
-    return value;
-  })();
-  mobileBridgeCreditsFlight = flight;
-  try {
-    return await flight;
-  } finally {
-    if (mobileBridgeCreditsFlight === flight) mobileBridgeCreditsFlight = null;
+  const balance = await getBillingCredits({ maxAgeMs: MOBILE_BRIDGE_CREDITS_MAX_AGE_MS });
+  const value: MobileBridgeCreditsProjection = { authenticated: balance.authenticated === true };
+  if (typeof balance.remainingCredits === "number" && Number.isFinite(balance.remainingCredits)) {
+    value.available = Math.max(0, Math.floor(balance.remainingCredits));
   }
+  return value;
 }
 
 function requireChat(id: string): Chat {
@@ -1431,6 +1454,18 @@ export function enforceMobileInvocationPermissionBoundary(
   };
 }
 
+/**
+ * Desktop repair 11 (P1/6-2): the write gate of the personal agent's home for the phone's doors that start or steer a turn in a One conversation
+ * (`invoke.start`, `invoke.steer`; `one.invoke.start` checks it inline). `one_sealed` / `one_away` as a coded error (server.ts answers a phone that announced
+ * `oneHome.v1` with the code itself and releases the stored word); `home` and `legacy`, and every chat that is not a One conversation: untouched.
+ */
+function assertPersonalAgentHomeWritable(chatId: string): void {
+  const chat = getChat(chatId);
+  if (!chat || !isMobileBridgeOneChat(chat)) return;
+  const homeRefusal = personalWriteRefusal();
+  if (homeRefusal) throw Object.assign(new Error(homeRefusal), { code: homeRefusal });
+}
+
 function assertMobileOneDeviceAuthority(context: MobileBridgeConnectionContext): void {
   const explicitDevelopmentBootstrap =
     context.devBootstrap === true
@@ -1844,6 +1879,19 @@ function forgetRunContext(runId: string): void {
   runContextCache.delete(runId);
 }
 
+/**
+ * E2E-2: the runs this bridge has sent a TERMINAL invoke.event for (a root `final`, or an `error` the phone reads as an error: not one the host worded itself, which the phone reads as a notice).
+ * The phone closes a turn on that event; a request the host ended by itself (the runner refused the call, the start failed, it was cancelled before it began) used to end with none.
+ * Bounded like the context cache; an entry is only ever read by the request-end fallback below.
+ */
+const TERMINAL_SENT_MAX = 256;
+const terminalSentRuns = new Set<string>();
+function noteTerminalSent(runId: string): void {
+  terminalSentRuns.delete(runId);
+  terminalSentRuns.add(runId);
+  if (terminalSentRuns.size > TERMINAL_SENT_MAX) { const oldest = terminalSentRuns.values().next(); if (!oldest.done) terminalSentRuns.delete(oldest.value); }
+}
+
 /** The run is a check-in One started on its own schedule (the request row the supervisor wrote carries its purpose). */
 export function isOneCheckinRun(runId: string, db: { prepare(sql: string): { get(...args: unknown[]): unknown } } = getDb()): boolean {
   try {
@@ -1865,6 +1913,69 @@ function isPersonalOneConversation(chatId: string): boolean {
   }
 }
 
+/** Bind a personal One transcript to the active One, without accepting an id from the phone. */
+function currentPersonalOneConversation(chatId: string): string | null {
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get()) return null;
+  const row = db.prepare("SELECT one_id FROM one_supervisor_conversations WHERE chat_id=?").get(chatId) as {one_id?: string} | undefined;
+  if (!row) return null;
+  const oneId = getOneProfile().oneId;
+  if (!oneId || row?.one_id !== oneId) throw new Error("supervisor_identity_changed");
+  return oneId;
+}
+
+function captureMobileFileOwner(chatId: string): () => void {
+  const {assertProjectDomainOwner}=require('../invocation/project-domain-binding') as typeof import('../invocation/project-domain-binding');
+  const {getAuthenticatedActorIds}=require('../auth') as typeof import('../auth');
+  const actor=getAuthenticatedActorIds(),binding=assertProjectDomainOwner(chatId,actor);
+  const personalOne=currentPersonalOneConversation(chatId);
+  const personalAuthority=personalOne ? requirePersonalOneHistoryAuthority({
+    activeOneId:getOneProfile().oneId,chatOneId:personalOne,actor,paired:true,
+  }) : null;
+  const actorKey=JSON.stringify(actor),bindingKey=JSON.stringify(binding);
+  return ()=>{
+    const currentActor=getAuthenticatedActorIds();
+    if(JSON.stringify(currentActor)!==actorKey || JSON.stringify(assertProjectDomainOwner(chatId,currentActor,binding))!==bindingKey) throw new Error('legacy_video_owner_changed');
+    if(personalAuthority) assertPersonalOneHistoryUnchanged(personalAuthority,requirePersonalOneHistoryAuthority({
+      activeOneId:getOneProfile().oneId,chatOneId:currentPersonalOneConversation(chatId),actor:currentActor,paired:true,
+    }));
+  };
+}
+
+/**
+ * `text` from the answer's start on, for what a phone is sent (its final event, its notification body): the sentences the run wrote
+ * before its last tool call stay on the desktop, which keeps the whole saved text. Where the answer starts is the one number the run
+ * recorded for this saved message (store/chats.ts recordAnswerStart), found again in `text` by a hash of what precedes it. No chat,
+ * no message id, no record, or a text that does not show it: the whole text, as before.
+ */
+function phoneAnswerText(text: string, chatId: string | null | undefined, messageId: string | null | undefined): { text: string; omitted: boolean } {
+  if (!chatId || !messageId || !text) return { text, omitted: false };
+  try {
+    const at = answerStartIn(text, storedAnswerStarts(chatId, [messageId]).get(messageId));
+    return at > 0 ? { text: text.slice(at).replace(/^\s+/, ""), omitted: true } : { text, omitted: false };
+  } catch { return { text, omitted: false }; }
+}
+
+/**
+ * harness.read thread.read as the phone gets it: its assistant rows start at the answer too (the Desktop UI and Terminal read the same
+ * port and keep the whole saved text; only this reply to a phone is cut). Rows with no record, and every other shape, pass unchanged.
+ */
+export function answerOnlyThreadRead<T>(result: T): T {
+  try {
+    const value = result as unknown as { status?: unknown; data?: { threadId?: unknown; items?: unknown } };
+    const items = value?.status === "ok" && typeof value.data?.threadId === "string" && Array.isArray(value.data.items) ? value.data.items as Array<Record<string, unknown>> : null;
+    if (!items) return result;
+    const starts = storedAnswerStarts(value.data!.threadId as string, items.filter((item) => item?.role === "assistant" && typeof item.id === "string").map((item) => item.id as string));
+    if (starts.size === 0) return result;
+    const cut = items.map((item) => {
+      if (item?.role !== "assistant" || typeof item.id !== "string" || typeof item.text !== "string") return item;
+      const at = answerStartIn(item.text, starts.get(item.id));
+      return at > 0 ? { ...item, text: item.text.slice(at).replace(/^\s+/, ""), progressOmitted: true } : item;
+    });
+    return { ...(result as object), data: { ...value.data, items: cut } } as unknown as T;
+  } catch { return result; }
+}
+
 /**
  * What the phone shows in its notification bar when One left the owner a message (owner 2026-10-05: "주인에게 줄
  * 메세지있으면 폰에 알람떠야하는데 알림표시줄에"). Only a saved root answer counts: a quiet check-in or review saves
@@ -1872,9 +1983,12 @@ function isPersonalOneConversation(chatId: string): boolean {
  */
 export function projectOneMessageForPhone(
   event: Pick<McpInvocationEvent, "kind" | "agentId" | "durableMessageId" | "text">,
+  chatId?: string,
 ): { messageId: string; preview: string } | null {
   if (event.kind !== "final" || event.agentId || typeof event.durableMessageId !== "string" || !event.durableMessageId) return null;
-  const text = stripMobileBridgeControlFences(typeof event.text === "string" ? event.text : "")
+  // The notification opens onto the answer, not onto the sentences the model wrote before its last tool call (final-answer-turns.ts).
+  const answered = phoneAnswerText(typeof event.text === "string" ? event.text : "", chatId, event.durableMessageId);
+  const text = stripMobileBridgeControlFences(answered.text)
     .replace(/[*_`#>]+/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -1922,7 +2036,10 @@ export function oneMessagePreviewForPhone(messageId: string, db: { prepare(sql: 
   try {
     const row = db.prepare("SELECT text FROM chat_messages WHERE id=?").get(messageId) as { text?: string } | undefined;
     if (!row) return null;
-    const projected = projectOneMessageForPhone({ kind: "final", agentId: undefined, durableMessageId: messageId, text: typeof row.text === "string" ? row.text : "" });
+    // The chat the answer-start record is read under; a store without the column (a test's reduced table) just sends the whole text.
+    let chatId: string | undefined;
+    try { chatId = (db.prepare("SELECT chat_id AS chatId FROM chat_messages WHERE id=?").get(messageId) as { chatId?: string } | undefined)?.chatId; } catch { /* whole text */ }
+    const projected = projectOneMessageForPhone({ kind: "final", agentId: undefined, durableMessageId: messageId, text: typeof row.text === "string" ? row.text : "" }, chatId);
     return projected?.preview ? { body: projected.preview } : {};
   } catch { return "unknown"; }
 }
@@ -1939,11 +2056,24 @@ function personalAgentRoomPushWithheld(chatId: string): boolean {
   try { return isPersonalAgentRoom(chatId); } catch { return false; }
 }
 
+/** The Goal whose push is held for this final (goal-push.ts goalHeldFinal), asked the same way by the push hold and by the phone's copy of the final. */
+function heldGoalOfFinal(chatId: string, event: McpInvocationEvent): string | null {
+  try {
+    return goalHeldFinal(event, { personalOne: isPersonalOneConversation(chatId), pushable: Boolean(getChat(chatId)) && !personalAgentRoomPushWithheld(chatId) });
+  } catch { return null; }
+}
+
 export function observeMobilePushNotices(hostId: string, listener: (notice: MobilePushNotice, stillCurrent?: () => boolean) => void): () => void {
+  // A Goal's runs each end with a final; the push for one waits until the Goal stops (goal-push.ts), so one Goal rings once per stop.
+  const goalHold = createGoalPushHold({ hostId, emit: (notice) => listener(notice),
+    chatPushable: (chatId) => { try { return Boolean(getChat(chatId)) && !isPersonalOneConversation(chatId) && !personalAgentRoomPushWithheld(chatId); } catch { return false; } } });
+  // The personal agent's review of a settled hand-off does not ring while other hand-offs are open (one-review-push.ts).
+  const reviewHold = createReviewPushHold({ hostId, emit: (notice) => listener(notice),
+    preview: (messageId) => { const preview = oneMessagePreviewForPhone(messageId); return preview === "unknown" ? "" : preview === null ? null : preview.body ?? ""; } });
   // Personal One turns run in the background service since 2026-10-12; its finals arrive through native-gui-events.
   const onMessage = ({ runId, chatId, event }: { runId: string; chatId: string; event: McpInvocationEvent }) => {
     if (event.agentId || event.kind !== "final") return;
-    const message = projectOneMessageForPhone(event);
+    const message = projectOneMessageForPhone(event, chatId);
     if (!message) return; // quiet/check-in/worker answers have no saved root message
     // A final that carries a decision card is a question waiting for the owner, not a finished result (owner 2026-10-20:
     // "묻는건 무조건 카드로 주고 알림 울리게해"). Same category, destination, dedupe key and preference gate as the result
@@ -1951,6 +2081,8 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
     // one turn still rings once.
     const asksOwner = invocationEventRequestsDecision(event);
     if (isPersonalOneConversation(chatId)) {
+      // A review of a settled hand-off that speaks while others are still open keeps its push until none is left.
+      if (reviewHold.consider(runId, chatId, message, asksOwner)) return;
       // The lock screen shows only the text, the same redacted preview the phone gets ("본문만"): no
       // title is sent. An older relay ignores the body and shows its generic notice.
       listener({ category: "oneMessage", destination: "personalOne", hostId,
@@ -1963,13 +2095,41 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
       return;
     }
     if (!getChat(chatId) || personalAgentRoomPushWithheld(chatId)) return;
+    // A run of a Goal (its final carries the Goal's result binding) rings when the Goal stops, not at every run's end. Any other
+    // final of the conversation is newer than a held one and rings as it always did.
+    const heldGoalId = heldGoalOfFinal(chatId, event);
+    if (heldGoalId) { goalHold.hold(heldGoalId, runId, chatId, asksOwner); return; }
+    goalHold.supersede(chatId);
     listener({ category: "resultReady", destination: "thread", hostId,
       entityId: chatId, dedupeKey: `run-result:${hostId}:${runId}`,
       subject: "Agentlas", occurredAt: new Date().toISOString(), ...(asksOwner ? { reason: "ownerAnswer" as const } : {}) });
   };
   const stopMainMessages = invocationService.onEvent(onMessage);
   const stopNativeMessages = onNativeGuiInvocationEvent(onMessage);
-  const stopMessages = () => { stopMainMessages(); stopNativeMessages(); };
+  // What settles a held Goal is the next write to its ledger: this process's (the change bus) or the background service's (the
+  // data_version watch), and a run ending. Read after the writer's own statements finish, never on a timer.
+  let evaluateQueued = false;
+  const evaluateGoalHolds = () => {
+    if (evaluateQueued || (goalHold.size === 0 && reviewHold.size === 0)) return;
+    evaluateQueued = true;
+    queueMicrotask(() => {
+      evaluateQueued = false;
+      try { goalHold.evaluate(); } catch { /* the next write asks again */ }
+      try { reviewHold.evaluate(); } catch { /* the next write asks again */ }
+    });
+  };
+  const stopLedgerChanges = onDesktopStoreChange((change) => { if (change.entity === "long-run" || reviewHold.size > 0) evaluateGoalHolds(); });
+  const stopExternalWrites = onExternalWrite(evaluateGoalHolds);
+  const onRunSettled = (envelope?: { runId?: string; chatId?: string }) => {
+    if (goalHold.size > 0 || reviewHold.size > 0) setImmediate(evaluateGoalHolds);
+    if (envelope?.runId && envelope.chatId && isPersonalOneConversation(envelope.chatId)) setImmediate(() => reviewHold.afterSettle(envelope.runId!));
+  };
+  const stopMainSettled = invocationService.onSettled(onRunSettled);
+  const stopNativeSettled = onNativeGuiSettled(onRunSettled);
+  // A Goal that stopped while no bridge listened (the app was closed or killed) is told once now; the push queue's key keeps one already sent from ringing again.
+  try { goalHold.catchUp(); } catch { /* the next start looks again */ }
+  try { reviewHold.catchUp(); } catch { /* the next start looks again */ }
+  const stopMessages = () => { stopMainMessages(); stopNativeMessages(); stopLedgerChanges(); stopExternalWrites(); stopMainSettled(); stopNativeSettled(); };
   // A raw error can precede a successful provider fallback. Only the durable
   // terminal receipt can establish failure; input/approval/cancel waits cannot.
   // Runs the background service hosts settle on the native stream, not in Main's own service (flow audit
@@ -1983,6 +2143,7 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
     if (hostRecoveryRequested(getDb(), runId)) return;
     // A failure of a supervised room still rings (owner 2026-10-27): the personal agent's own review may end quietly, and
     // a failed hand-off must never be silent. The tap opens the room's read-only notice, which leads to the personal agent.
+    goalHold.noteFailure(chatId); // a Goal that then stops as failed does not ring a second time with its earlier result
     listener({ category: "failure", destination: "thread", hostId,
       entityId: chatId, dedupeKey: `run-failed:${hostId}:${runId}`,
       subject: "Agentlas", occurredAt: new Date().toISOString() });
@@ -2003,7 +2164,7 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
   const stopMainApprovals = onToolApprovalRequested(onApprovalRequested);
   const stopNativeApprovals = onNativeGuiApprovalRequested(onApprovalRequested);
   const stopApprovals = () => { stopMainApprovals(); stopNativeApprovals(); };
-  // A decision card the HOST wrote (the AGI monitor's ask) is not a run's final message, so it reaches the phone through the
+  // A decision card the HOST wrote (askOwnerOnce) is not a run's final message, so it reaches the phone through the
   // owner-ask seam as the same thread push with the question wording. The personal One chat is skipped: its push needs a
   // message id the relay checks, and a host card there has none to give.
   const stopOwnerAsk = onOwnerAsk((ask) => {
@@ -2148,10 +2309,16 @@ export function projectMobileBridgeInvocationEvent(
     if (ownerStatus) projected.status = boundedRedactedText(ownerStatus, 1_000);
   }
   if (typeof event.text === "string") {
+    // A run's own final (not a teammate's, not a replayed tool row) tells the phone only the answer: where it starts was recorded when the
+    // answer was saved (store/chats.ts recordAnswerStart). The live partials above it are unchanged, and the history page reads the same number.
+    const answered = event.kind === "final" && !event.agentId && !context?.historyPreview
+      ? phoneAnswerText(event.text, context?.chatId, typeof event.durableMessageId === "string" ? event.durableMessageId : null)
+      : { text: event.text, omitted: false };
     const text = boundedRedactedText(
-      stripMobileBridgeControlFences(event.text),
+      stripMobileBridgeControlFences(answered.text),
       EVENT_TEXT_MAX_BYTES,
     );
+    if (answered.omitted) projected.progressOmitted = true;
     projected.text = text;
     projected.textLen = text.length;
   } else if (typeof event.delta === "string") {
@@ -2205,6 +2372,12 @@ export function projectMobileBridgeInvocationEvent(
     projected.error = {
       code: boundedRedactedText(event.error.code, 160),
       message: boundedRedactedText(event.error.message, 4_000),
+      // The "register / reconnect / restore" words of a D6 refusal (a Hub slug, an agent id: nothing private); an older phone ignores the field.
+      ...(event.error.register ? { register: {
+        next: event.error.register.next,
+        slugs: event.error.register.slugs.slice(0, 20).map((slug) => boundedRedactedText(slug, 160)),
+        agentIds: event.error.register.agentIds.slice(0, 20).map((id) => boundedRedactedText(id, 160)),
+      } } : {}),
     };
   }
   if (event.tool && typeof event.tool.name === "string") {
@@ -2254,6 +2427,14 @@ export function projectMobileBridgeInvocationEvent(
   }
   if (event.kind === "surface" && event.oneSurface && context?.taskId && event.oneSurface.taskId === context.taskId) {
     projected.surface = event.oneSurface;
+  }
+  // Notification decisions the phone makes for a run's own final (the optional keys of mobile-bridge-2.0.md): the saved answer's id (null:
+  // none saved; the key is on every such final, so an absent key still means an older Desktop) and, for the final of a Goal run whose
+  // push is held (goal-push.ts goalHeldFinal, the same rule the push hold uses), goalResult.status "pending": a phone with push registered
+  // then leaves the alarm to the push, which rings once where the Goal stops. Teammates, the personal agent's messages (their own oneMessage path) and history replays are left as they were.
+  if (event.kind === "final" && !event.agentId && !context?.historyPreview && !(context?.chatId && isPersonalOneConversation(context.chatId))) {
+    projected.durableMessageId = typeof event.durableMessageId === "string" && event.durableMessageId ? boundedRedactedText(event.durableMessageId, 256) : null;
+    if (context?.chatId && heldGoalOfFinal(context.chatId, event)) projected.goalResult = { status: "pending" };
   }
   // DESKTOP_MOBILE_BRIDGE: raw surface manifest, provider/model/session
   // metadata, delegation graph, env, and local filesystem fields are omitted.
@@ -2417,7 +2598,12 @@ export function projectMobileBridgeRecentOneArtifacts(
  * projector before it reaches a phone.
  */
 export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthority {
+  private readonly continuity = createMobileBridgeContinuity();
+  private readonly frontTransfer = createMobileBridgeFrontTransfer();
   private readonly attachmentUploads = new MobileChatAttachmentUploads();
+  private readonly phoneTools = createPersonalOnePhoneTools({ current: (binding) => this.phoneToolCurrent(binding) });
+  private readonly uninstallPhoneBridge: () => void;
+  private readonly uninstallPhoneAuth: () => void;
   private readonly listeners = new Set<AuthorityListener>();
   private readonly onError: (error: Error) => void;
   private readonly cloudAgentActions: MobileBridgeCloudAgentActions;
@@ -2428,9 +2614,23 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly agentMail: MobileBridgeAgentMailService;
   private readonly goalControl: MobileGoalControl | null;
   private readonly scienceChat: MobileScienceChat;
+  /** Redesigned Workspace / Agents / "What I know" reads and commands (workspace2.read, workspace2.command; decision). Built on first use. */
+  private workspaceV2Instance: ReturnType<typeof createWorkspaceV2> | null = null;
+  private workspaceV2(): ReturnType<typeof createWorkspaceV2> {
+    return this.workspaceV2Instance ??= createWorkspaceV2({
+      hostId: this.options.hostIdentity.hostId,
+      attentionByChat: () => this.attentionByChat(),
+      changed: () => this.scheduleSnapshotUpdated(),
+    });
+  }
+  /** Saved Builds read by the phone (build2.list / open / files / file.read; redesign backend C). The window's environment is read when asked. */
+  private readonly buildV2 = createBuildV2({ env: () => phoneBuildEnv() });
   private readonly mailAccountVerdicts = new Map<string, "ok" | "mismatch" | "signed-out" | "unknown">();
   /** What each paired device reported it can decode (device.capabilities); absent means an older phone. */
   private readonly clientCapabilities = new Map<string, ReadonlySet<MobileClientCapability>>();
+  /** L1 C6: one running upload / Hub publish per agent and one Hub install per release; a second request for the same thing joins it. */
+  private readonly longOpJoiner = new LongOpJoiner();
+  private readonly longOpJoinInner = new WeakSet<MobileBridgeRpcRequest>();
 
   clientHasCapability(deviceId: string, capability: MobileClientCapability): boolean {
     return this.clientCapabilities.get(deviceId)?.has(capability) === true;
@@ -2504,9 +2704,48 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.agentMail = options.agentMail ?? createMobileBridgeAgentMailService();
     this.goalControl = options.goalControl ? new MobileGoalControl(options.hostIdentity.hostId, options.goalControl) : null;
     this.scienceChat = new MobileScienceChat(options.hostIdentity.hostId);
+    let removePhoneAuth = () => {};
+    try { removePhoneAuth = (require("../auth") as typeof import("../auth")).onAuthSessionOwnershipChanged(() => this.phoneTools.revoke(() => true)); } catch { /* the live run guard still refuses an unknown session */ }
+    this.uninstallPhoneAuth = removePhoneAuth;
+    this.uninstallPhoneBridge = installPersonalOnePhoneBridge(options.hostIdentity.hostId, {
+      requestForRun: async (oneId, runId, callId, name, input, signal) => {
+        const binding = this.phoneToolOrigin(oneId, runId);
+        return binding ? this.phoneTools.request(binding, callId, name, input, signal) : { status: "unavailable", reason: "phone_no_answer" };
+      },
+    });
     queueMicrotask(() => {
       void resumeMobileOneAutoRecovery(invocationService).catch((error) => this.onError(errorOf(error)));
     });
+  }
+
+  revokePhoneToolsForDevice(deviceId: string): void {
+    this.phoneTools.revoke((binding) => binding.deviceId === deviceId);
+  }
+
+  private phoneToolOrigin(oneId: string, runId: string): PhoneToolBinding | null {
+    try { return phoneOriginForRun(getDb(), oneId, runId); } catch { return null; }
+  }
+
+  private async phoneToolCurrent(binding: PhoneToolBinding): Promise<boolean> {
+    try {
+      if (this.disposed || !hasPhoneConnection(this.deviceConnectionIds, binding.deviceId) || !this.options.domainAccountAdmission || !this.options.companionAccountBinding) return false;
+      const admission = await this.options.domainAccountAdmission(binding.deviceId);
+      const { getAuthenticatedSessionBinding } = require("../auth") as typeof import("../auth");
+      const session = getAuthenticatedSessionBinding(), paired = this.options.companionAccountBinding(binding.deviceId);
+      const saved = this.phoneToolOrigin(binding.oneId, binding.runId);
+      admission.assertCurrent();
+      if (!session || !paired?.issuedAt || !saved || !hasPhoneConnection(this.deviceConnectionIds, binding.deviceId) || getOneProfile().oneId !== binding.oneId ||
+          binding.hostId !== this.options.hostIdentity.hostId || session.userId !== binding.userId || session.workspaceId !== binding.workspaceId ||
+          paired.ownerUserId !== binding.userId || paired.workspaceId !== binding.workspaceId || paired.accountSubject !== binding.accountSubject ||
+          createHash("sha256").update(JSON.stringify([session.sessionId, paired.issuedAt])).digest("hex") !== binding.generation) return false;
+      return Object.keys(binding).every((key) => saved[key as keyof PhoneToolBinding] === binding[key as keyof PhoneToolBinding]);
+    } catch { return false; }
+  }
+
+  private phoneToolBindingForConnection(context: MobileBridgeConnectionContext, runId: string): PhoneToolBinding | null {
+    if (!this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId)) return null;
+    const binding = this.phoneToolOrigin(getOneProfile().oneId, runId);
+    return binding?.deviceId === context.deviceId ? binding : null;
   }
 
   /**
@@ -2599,8 +2838,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       oneDispatchQuestionBankV1: { schemaVersion: 1, maxQuestions: 64 },
       // Additive: the harness operations this phone may call (harness.call); older apps ignore the key.
       harnessThreadV1: { read: [...MOBILE_HARNESS_READ_OPERATIONS], command: [...MOBILE_HARNESS_COMMAND_OPERATIONS] },
+      // Additive: the redesigned phone's Workspace list, Agents list and profile, and "What I know". Older apps ignore the key.
+      workspaceV2: asJsonValue(workspaceV2Capability({ build: buildWorkbenchAvailable() }), "workspaceV2 capability"),
       ...(this.options.mobilePush ? { mobilePush: true } : {}),
       visualSessionV2: this.visualSessions.capability(),
+      // O-M3a: the personal agent's home (contracts/one-home-desktop.md §1). A new key beside the others; a phone that does not know it ignores it.
+      oneHomeV1: { schemaVersion: 1, methods: ["status", "check", "deviceKey", ONE_HOME_POSSESSION_HOST_CAPABILITY] },
       ...(this.goalControl ? { goalControlV1: MOBILE_GOAL_CONTROL_CAPABILITY } : {}),
     };
   }
@@ -3052,11 +3295,33 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     }
   }
 
+  /**
+   * L1 C6 (contracts/phone-long-ops.md): a second press of "upload" / "publish to the Hub" / "install" for the same thing - a different idempotency key,
+   * so the ledger cannot know - joins the one that is running and gets its answer; it does not start a second one (joinLongOp, below). Joined per device
+   * (each request would otherwise skip the device's own authority check).
+   */
+  private joinLongOp(request: MobileBridgeRpcRequest, context: MobileBridgeConnectionContext): Promise<MobileBridgeJsonValue> | null {
+    if (this.longOpJoinInner.has(request)) return null;
+    const join = longOpJoinTarget(request);
+    if (!join) return null;
+    return this.longOpJoiner.run(`${context.deviceId}\0${join.target}`, join.intent, () => {
+      this.longOpJoinInner.add(request);
+      try { return this.request(request, context); } finally { this.longOpJoinInner.delete(request); }
+    }).catch((error: unknown) => {
+      // An upload ended by the Cloud request's own bound is "outcome unknown" (the bridge says so and keeps the ledger unknown); it is not a refusal.
+      if ((error as { code?: unknown } | null)?.code === "register_request_timeout") throw new MobileBridgeOutcomeUnknown();
+      throw error;
+    });
+  }
+
   /** DESKTOP_MOBILE_BRIDGE: Exact compile-time allowlist; there is no dynamic IPC passthrough. */
   async request(
     request: MobileBridgeRpcRequest,
     context: MobileBridgeConnectionContext,
   ): Promise<MobileBridgeJsonValue> {
+    // `?.`: the request-path probe of the retired-projection gate transpiles this method alone, without the class's other members.
+    const joinedRun = this.joinLongOp?.(request, context);
+    if (joinedRun) return joinedRun;
     this.assertAvailable();
     if (
       request.v !== MOBILE_BRIDGE_PROTOCOL_VERSION ||
@@ -3233,12 +3498,259 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         },request.method);
         });
       }
+      case "one.home.status":
+      case "one.home.check":
+      case "one.home.deviceKey": {
+        // Refusals are answers ({ ok:false, code }), not exceptions (contracts/one-home-desktop.md §3). The logic and the account checks live in one/home.ts.
+        const method = request.method;
+        const params = method === "one.home.status" ? (noParams(request), {}) : guardedParams(request, method === "one.home.check" ? ["reason"] : ["pub", "kind", "possession", "possessionTs", "label", "possessionHost"]);
+        return asJsonValue(await oneHome().bridge(method, params, {
+          deviceId: context.deviceId, devBootstrap: context.devBootstrap,
+          verdict: this.options.mailAccountGuard?.(context.deviceId) ?? "unknown",
+        }), method);
+      }
+      case "one.companion.publicKey":
+      case "one.companion.proof": {
+        if (!this.options.domainAccountAdmission || !this.options.companionAccountBinding) throw new Error("companion_authority_unavailable");
+        const params = request.method === "one.companion.publicKey" ? (noParams(request), null) : guardedParams(request, ["purpose", "binding"]);
+        const admission = await this.options.domainAccountAdmission(context.deviceId);
+        const { getAuthenticatedSessionBinding } = require("../auth") as typeof import("../auth");
+        const session = getAuthenticatedSessionBinding();
+        const paired = this.options.companionAccountBinding(context.deviceId);
+        const oneId = getOneProfile().oneId;
+        const guard = () => {
+          admission.assertCurrent();
+          const current = getAuthenticatedSessionBinding(), bound = this.options.companionAccountBinding!(context.deviceId);
+          if (!session || !paired || !current || !bound || !this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId) ||
+              current.sessionId !== session.sessionId || current.userId !== session.userId || current.workspaceId !== session.workspaceId ||
+              bound.accountSubject !== paired.accountSubject || bound.workspaceId !== session.workspaceId ||
+              bound.ownerUserId !== session.userId || getOneProfile().oneId !== oneId) throw new Error("account_mismatch");
+        };
+        guard();
+        // TR-desktop (trust-root.md E1 3): this computer signs the enrollment of a phone only while it is the confirmed home AND that phone's own pairing record may vouch
+        // (made by this screen's QR, or pressed by the owner). Nothing is signed and no key is loaded otherwise; the phone gets the existing error shape, no new key.
+        if (params) {
+          const refusal = computerSigningRefusal(params.purpose === "enroll" ? "enroll" : "sign", context.deviceId, context.devBootstrap, this.options.hostIdentity.hostId);
+          if (refusal) throw new Error(refusal);
+        }
+        const native = await import("../daemon/native-auth-credentials");
+        const credential = await native.loadNativeGuiCredential(native.captureNativeAuthBinding());
+        guard();
+        const publicKey = native.nativeCompanionPublicKey(credential);
+        if (!params) return asJsonValue({ publicKey }, request.method);
+        const binding = params.binding;
+        if (!binding || typeof binding !== "object" || Array.isArray(binding)) throw new Error("companion_proof_input_invalid");
+        const b = binding as Record<string, unknown>;
+        if (b.accountSubject !== paired!.accountSubject || b.workspaceId !== session!.workspaceId || b.deviceId !== context.deviceId ||
+            b.hostId !== this.options.hostIdentity.hostId || b.oneId !== oneId || ((params.purpose === "run" || params.purpose === "handoff") && b.userId !== session!.userId))
+          throw new Error("account_mismatch");
+        const signature = native.signNativeCompanionProof(credential, params.purpose as "enroll" | "run" | "handoff", binding);
+        guard();
+        return asJsonValue({ publicKey, signature }, request.method);
+      }
+      case "one.companion.continuity.request":
+      case "one.companion.continuity.status":
+      case "one.companion.continuity.cancel": {
+        if(process.env.AGENTLAS_COMPANION_CONTINUITY_V1!=="enabled" || process.env.ELECTRON_RUN_AS_NODE==="1" ||
+          !this.options.domainAccountAdmission || !this.options.companionAccountBinding)throw new Error("continuity_unavailable");
+        assertMobileOneDeviceAuthority(context);
+        const params=guardedParams(request,["binding"]),binding=params.binding;
+        const {companionContinuityBytes}=await import("../../shared/companion-continuity-proof");
+        companionContinuityBytes("desktop-consent",binding);
+        const b=binding as import("../../shared/companion-continuity-proof").CompanionContinuityBinding;
+        const admission=await this.options.domainAccountAdmission(context.deviceId);
+        const auth=await import("../auth"),profileModule=await import("../store/one-profile"),session=auth.getAuthenticatedSessionBinding(),
+          paired=this.options.companionAccountBinding(context.deviceId),profile=profileModule.peekOneProfile();
+        if(!session || !paired || profile.state!=="present" || !paired.issuedAt || b.userId!==session.userId || b.workspaceId!==session.workspaceId ||
+          b.accountSubject!==paired.accountSubject || paired.ownerUserId!==session.userId || paired.workspaceId!==session.workspaceId ||
+          b.deviceId!==context.deviceId || b.hostId!==this.options.hostIdentity.hostId || b.oneId!==profile.oneId ||
+          profile.userId!==session.userId || profile.workspaceId!==session.workspaceId)throw new Error("account_mismatch");
+        const guard=()=>{admission.assertCurrent();const now=auth.getAuthenticatedSessionBinding(),device=this.options.companionAccountBinding!(context.deviceId),
+          live=profileModule.peekOneProfile();
+          if(this.disposed || !now || !device || !this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId) ||
+            now.sessionId!==session.sessionId || now.userId!==session.userId || now.workspaceId!==session.workspaceId ||
+            device.issuedAt!==paired.issuedAt || device.accountSubject!==paired.accountSubject || device.ownerUserId!==paired.ownerUserId ||
+            device.workspaceId!==paired.workspaceId || live.state!=="present" || live.userId!==profile.userId || live.workspaceId!==profile.workspaceId ||
+            live.oneId!==profile.oneId || live.revision!==profile.revision || live.name!==profile.name)throw new Error("account_mismatch");};
+        guard();const owner=createHash("sha256").update(JSON.stringify([session.userId,session.workspaceId,session.sessionId,context.deviceId,context.connectionId,paired.issuedAt])).digest("hex");
+        if(request.method==="one.companion.continuity.status")return asJsonValue(this.continuity.status(binding,owner,guard),request.method);
+        if(request.method==="one.companion.continuity.cancel")return asJsonValue(this.continuity.cancel(binding,owner,guard),request.method);
+        { const refusal=computerSigningRefusal("consent",context.deviceId,context.devBootstrap,this.options.hostIdentity.hostId);if(refusal)throw new Error(refusal); }
+        if(this.frontTransfer.hasPending())return asJsonValue({status:"unavailable"},request.method);
+        const started=this.continuity.start(binding,owner,guard,async (fixed,stillCurrent)=>{
+          const native=await import("../daemon/native-auth-credentials"),credential=await native.loadNativeGuiCredential(native.captureNativeAuthBinding());stillCurrent();
+          const publicKey=native.nativeCompanionPublicKey(credential),keyObject=(await import("node:crypto")).createPublicKey({key:Buffer.from(publicKey,"base64url"),format:"der",type:"spki"});
+          const keyFingerprint=createHash("sha256").update(keyObject.export({type:"spki",format:"der"})).digest("hex"),serverKey=await (await import("../one/companion-work-key")).loadCompanionWorkKey();
+          stillCurrent();if(!serverKey)return null;
+          const client=(await import("../one/companion-continuity-client")).createCompanionContinuityClient({webOrigin:auth.webBaseUrl(),cookie:auth.getSessionCookieHeader,
+            assertCurrent:stillCurrent,signRequest:value=>native.signNativeContinuityAttestationRequest(credential,value)});
+          const target=()=>{stillCurrent();return {userId:session.userId,workspaceId:session.workspaceId,authEpoch:fixed.authEpoch,accountSubject:paired.accountSubject,
+            familyId:fixed.familyId,deviceId:context.deviceId,hostId:this.options.hostIdentity.hostId,oneId:profile.oneId,approvalId:fixed.approvalId,
+            challenge:fixed.challenge,scope:fixed.scope,deviceKeyFingerprint:keyFingerprint};};
+          const rawLabel=context.deviceName.trim(),deviceLabel=rawLabel && rawLabel.length<=80 && !/[\p{Cs}\p{Cf}\u0000-\u001f\u007f]/u.test(rawLabel)
+            ? rawLabel : `${context.devicePlatform === "ios" ? "iPhone" : "Android"} · ${context.deviceId.slice(-6)}`;
+          const permit=await (await import("../one/companion-continuity-consent")).requestCompanionContinuityConsent({binding:fixed,publicKey:serverKey,target,
+            assertCurrent:stillCurrent,deviceLabel:()=>deviceLabel,agentName:()=>profile.name,locale:(await import("../ui-locale")).currentUiLocale(),attest:client.attest});
+          stillCurrent();if(!permit)return null;const signature=native.signNativeContinuityConsent(credential,permit);stillCurrent();return {publicKey,signature};
+        });
+        return asJsonValue(started,request.method);
+      }
+      case "one.companion.frontTransfer.request":
+      case "one.companion.frontTransfer.status":
+      case "one.companion.frontTransfer.cancel": {
+        if(process.env.AGENTLAS_COMPANION_FRONT_TRANSFER_V1!=="enabled" || process.env.ELECTRON_RUN_AS_NODE==="1" ||
+          !this.options.domainAccountAdmission || !this.options.companionAccountBinding)throw new Error("front_transfer_unavailable");
+        assertMobileOneDeviceAuthority(context);
+        const params=guardedParams(request,["binding"]),binding=params.binding;
+        const {companionFrontTransferBytes}=await import("../../shared/companion-front-transfer-proof");
+        companionFrontTransferBytes("desktop-consent",binding);
+        const b=binding as import("../../shared/companion-front-transfer-proof").CompanionFrontTransferBinding;
+        const admission=await this.options.domainAccountAdmission(context.deviceId);
+        const auth=await import("../auth"),profileModule=await import("../store/one-profile"),session=auth.getAuthenticatedSessionBinding(),
+          paired=this.options.companionAccountBinding(context.deviceId),profile=profileModule.peekOneProfile();
+        if(!session || !paired || profile.state!=="present" || !paired.issuedAt || b.userId!==session.userId || b.workspaceId!==session.workspaceId ||
+          b.accountSubject!==paired.accountSubject || paired.ownerUserId!==session.userId || paired.workspaceId!==session.workspaceId ||
+          b.deviceId!==context.deviceId || b.hostId!==this.options.hostIdentity.hostId || b.oneId!==profile.oneId ||
+          profile.userId!==session.userId || profile.workspaceId!==session.workspaceId)throw new Error("account_mismatch");
+        const guard=()=>{admission.assertCurrent();const now=auth.getAuthenticatedSessionBinding(),device=this.options.companionAccountBinding!(context.deviceId),
+          live=profileModule.peekOneProfile();
+          if(this.disposed || !now || !device || !this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId) ||
+            now.sessionId!==session.sessionId || now.userId!==session.userId || now.workspaceId!==session.workspaceId ||
+            device.issuedAt!==paired.issuedAt || device.accountSubject!==paired.accountSubject || device.ownerUserId!==paired.ownerUserId ||
+            device.workspaceId!==paired.workspaceId || live.state!=="present" || live.userId!==profile.userId || live.workspaceId!==profile.workspaceId ||
+            live.oneId!==profile.oneId || live.revision!==profile.revision || live.name!==profile.name)throw new Error("account_mismatch");};
+        guard();const owner=createHash("sha256").update(JSON.stringify([session.userId,session.workspaceId,session.sessionId,context.deviceId,context.connectionId,paired.issuedAt])).digest("hex");
+        if(request.method==="one.companion.frontTransfer.status")return asJsonValue(this.frontTransfer.status(binding,owner,guard),request.method);
+        if(request.method==="one.companion.frontTransfer.cancel")return asJsonValue(this.frontTransfer.cancel(binding,owner,guard),request.method);
+        { const refusal=computerSigningRefusal("consent",context.deviceId,context.devBootstrap,this.options.hostIdentity.hostId);if(refusal)throw new Error(refusal); }
+        if(this.continuity.hasPending())return asJsonValue({status:"unavailable"},request.method);
+        const started=this.frontTransfer.start(binding,owner,guard,async (fixed,stillCurrent)=>{
+          const native=await import("../daemon/native-auth-credentials"),credential=await native.loadNativeGuiCredential(native.captureNativeAuthBinding());stillCurrent();
+          const publicKey=native.nativeCompanionPublicKey(credential),keyObject=(await import("node:crypto")).createPublicKey({key:Buffer.from(publicKey,"base64url"),format:"der",type:"spki"});
+          const keyFingerprint=createHash("sha256").update(keyObject.export({type:"spki",format:"der"})).digest("hex"),serverKey=await (await import("../one/companion-work-key")).loadCompanionWorkKey();
+          stillCurrent();if(!serverKey)return null;
+          const client=(await import("../one/companion-front-transfer-client")).createCompanionFrontTransferClient({webOrigin:auth.webBaseUrl(),cookie:auth.getSessionCookieHeader,
+            assertCurrent:stillCurrent,signRequest:value=>native.signNativeFrontTransferAttestationRequest(credential,value)});
+          const target=()=>{stillCurrent();return {userId:session.userId,workspaceId:session.workspaceId,authEpoch:fixed.authEpoch,accountSubject:paired.accountSubject,
+            familyId:fixed.familyId,deviceId:context.deviceId,hostId:this.options.hostIdentity.hostId,oneId:profile.oneId,approvalId:fixed.approvalId,
+            challenge:fixed.challenge,scope:fixed.scope,deviceKeyFingerprint:keyFingerprint};};
+          const rawLabel=context.deviceName.trim(),deviceLabel=rawLabel && rawLabel.length<=80 && !/[\p{Cs}\p{Cf}\u0000-\u001f\u007f]/u.test(rawLabel)
+            ? rawLabel : `${context.devicePlatform === "ios" ? "iPhone" : "Android"} · ${context.deviceId.slice(-6)}`;
+          const permit=await (await import("../one/companion-front-transfer-consent")).requestCompanionFrontTransferConsent({binding:fixed,publicKey:serverKey,target,
+            assertCurrent:stillCurrent,deviceLabel:()=>deviceLabel,agentName:()=>profile.name,locale:(await import("../ui-locale")).currentUiLocale(),attest:client.attest});
+          stillCurrent();if(!permit)return null;const signature=native.signNativeFrontTransferConsent(credential,permit);stillCurrent();return {publicKey,signature};
+        });
+        return asJsonValue(started,request.method);
+      }
+      case "one.companion.work.admit": {
+        if (process.env.AGENTLAS_COMPANION_WORK_V2 !== "enabled" || !this.options.domainAccountAdmission || !this.options.companionAccountBinding) throw new Error("companion_authority_unavailable");
+        assertMobileOneDeviceAuthority(context);
+        const params = guardedParams(request, ["grant", "binding", "payload"]);
+        const admission = await this.options.domainAccountAdmission(context.deviceId);
+        const { getAuthenticatedSessionBinding } = require("../auth") as typeof import("../auth");
+        const session = getAuthenticatedSessionBinding(), paired = this.options.companionAccountBinding(context.deviceId), oneId = getOneProfile().oneId;
+        const b = params.binding as Record<string, unknown>;
+        const guard = () => {
+          admission.assertCurrent();
+          const current = getAuthenticatedSessionBinding(), bound = this.options.companionAccountBinding!(context.deviceId);
+          if (!session || !paired || !current || !bound || !this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId) ||
+              current.sessionId !== session.sessionId || current.userId !== session.userId || current.workspaceId !== session.workspaceId ||
+              bound.accountSubject !== paired.accountSubject || bound.workspaceId !== session.workspaceId || bound.ownerUserId !== session.userId ||
+              getOneProfile().oneId !== oneId) throw new Error("account_mismatch");
+        };
+        guard();
+        if (!b || typeof b !== "object" || b.userId !== session!.userId || b.workspaceId !== session!.workspaceId ||
+            b.accountSubject !== paired!.accountSubject || b.deviceId !== context.deviceId || b.hostId !== this.options.hostIdentity.hostId ||
+            b.oneId !== oneId || !Number.isSafeInteger(b.authEpoch) || Number(b.authEpoch) < 0 || typeof params.grant !== "string" || typeof params.payload !== "string")
+          throw new Error("companion_work_input_invalid");
+        const { loadCompanionWorkKey } = await import("../one/companion-work-key");
+        const publicKey = await loadCompanionWorkKey();
+        guard();
+        if (!publicKey) throw new Error("companion_authority_unavailable");
+        const { createCompanionWorkAdmissionVerifier } = await import("../one/companion-work-admission");
+        const identity = { userId: session!.userId, workspaceId: session!.workspaceId, authEpoch: Number(b.authEpoch), accountSubject: paired!.accountSubject,
+          deviceId: context.deviceId, hostId: this.options.hostIdentity.hostId, oneId };
+        const verify = createCompanionWorkAdmissionVerifier({ publicKey, identity: () => { guard(); return identity; }, assertCurrent: guard });
+        const capability = verify({ grant: params.grant, binding: b, payload: params.payload });
+        if (!capability) throw new Error("companion_work_admission_invalid");
+        if (!supervisorRunsInDaemon() && supervisorRuntimeMode() === "daemon") {
+          // Only signed evidence crosses native RPC. The daemon repeats its
+          // own account, device, host and grant checks before it writes.
+          const receipt = await callOneSupervisorRuntime("companion.work.admit", { grant: params.grant, binding: b, payload: params.payload });
+          guard();
+          return supervisorReceiptValue(receipt, request.method);
+        }
+        if (!supervisorRunsInDaemon() && supervisorRuntimeMode() !== "local") throw new Error("companion_authority_unavailable");
+        return supervisorReceiptValue(await oneSupervisor().receiveCompanionWork(capability), request.method);
+      }
+      case "one.companion.work.receipt":
+      case "one.companion.work.fullPart": {
+        if (process.env.AGENTLAS_COMPANION_WORK_V2 !== "enabled" || !this.options.domainAccountAdmission || !this.options.companionAccountBinding) throw new Error("companion_authority_unavailable");
+        assertMobileOneDeviceAuthority(context);
+        const fullPart = request.method === "one.companion.work.fullPart";
+        const params = guardedParams(request, fullPart ? ["commandId", "index", "limit"] : ["commandId"]), commandId = requiredIdentifier(params, "commandId");
+        if (fullPart && (!Number.isSafeInteger(params.index) || Number(params.index) < 0 || Number(params.index) > 1_000_000 ||
+            (params.limit !== undefined && (!Number.isSafeInteger(params.limit) || Number(params.limit) < 1 || Number(params.limit) > 16)))) throw new Error("companion_work_input_invalid");
+        const admission = await this.options.domainAccountAdmission(context.deviceId);
+        const { getAuthenticatedSessionBinding } = require("../auth") as typeof import("../auth");
+        const session = getAuthenticatedSessionBinding(), paired = this.options.companionAccountBinding(context.deviceId), oneId = getOneProfile().oneId;
+        const guard = () => {
+          admission.assertCurrent();
+          const current = getAuthenticatedSessionBinding(), bound = this.options.companionAccountBinding!(context.deviceId);
+          if (!session || !paired || !current || !bound || !this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId) ||
+              current.sessionId !== session.sessionId || current.userId !== session.userId || current.workspaceId !== session.workspaceId ||
+              bound.accountSubject !== paired.accountSubject || bound.issuedAt !== paired.issuedAt || bound.workspaceId !== session.workspaceId ||
+              bound.ownerUserId !== session.userId || getOneProfile().oneId !== oneId) throw new Error("account_mismatch");
+        };
+        guard();
+        const db = getDb();
+        if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_companion_handoffs'").get()) return fullPart ? { page: null } : { receipt: null };
+        const row = db.prepare("SELECT binding_json FROM one_companion_handoffs WHERE command_id=?").get(commandId) as { binding_json: string } | undefined;
+        if (!row) return fullPart ? { page: null } : { receipt: null };
+        const b: unknown = JSON.parse(row.binding_json);
+        if (!b || typeof b !== "object" || Array.isArray(b)) throw new Error("companion_work_input_invalid");
+        const binding = b as Record<string, unknown>;
+        if (binding.userId !== session!.userId || binding.workspaceId !== session!.workspaceId || binding.accountSubject !== paired!.accountSubject ||
+            (!fullPart && binding.deviceId !== context.deviceId) || typeof binding.deviceId !== "string" || binding.hostId !== this.options.hostIdentity.hostId || binding.oneId !== oneId ||
+            binding.commandId !== commandId || !Number.isSafeInteger(binding.authEpoch) || Number(binding.authEpoch) < 0) throw new Error("account_mismatch");
+        const native = await import("../daemon/native-auth-credentials");
+        const credential = await native.loadNativeGuiCredential(native.captureNativeAuthBinding());
+        const snapshot = await oneSupervisor().snapshot();
+        guard();
+        const { createCompanionWorkReceiptOwner } = await import("../one/companion-work-receipt");
+        const identity = { userId: session!.userId, workspaceId: session!.workspaceId, authEpoch: Number(binding.authEpoch), accountSubject: paired!.accountSubject,
+          deviceId: binding.deviceId as string, hostId: this.options.hostIdentity.hostId, oneId };
+        const owner = createCompanionWorkReceiptOwner({ db, credential, identity: () => { guard(); return identity; }, tasks: () => snapshot.tasks, assertCurrent: guard });
+        if (fullPart && params.limit !== undefined) {
+          const pages = [];
+          for (let index = Number(params.index); index < Number(params.index) + Number(params.limit); index++) {
+            const page = owner.readFullPage(commandId, index);
+            if (!page) break;
+            pages.push(page);
+            if (index + 1 >= page.count) break;
+          }
+          guard();
+          return asJsonValue({ pages }, request.method);
+        }
+        const receipt = fullPart ? owner.readFullPage(commandId, Number(params.index)) : owner.read(commandId);
+        guard();
+        return asJsonValue(fullPart ? { page: receipt } : receipt ?? { receipt: null }, request.method);
+      }
       case "one.supervisor.receipt": {
         const params = guardedParams(request, ["oneId", "commandId"]);
         const receipt = await oneSupervisor().receipt({oneId: requiredIdentifier(params, "oneId"), commandId: requiredIdentifier(params, "commandId")});
         // Absence is not evidence that work never ran: the journal may have
         // been replaced or restored. The caller must retain an unknown outcome.
         return receipt ? supervisorReceiptValue(receipt, request.method) : null;
+      }
+      case "one.phoneTool.pending":
+      case "one.phoneTool.answer": {
+        assertMobileOneDeviceAuthority(context);
+        const params = guardedParams(request, request.method === "one.phoneTool.pending" ? ["runId"] : ["runId", "callId", "result"]);
+        const binding = this.phoneToolBindingForConnection(context, requiredIdentifier(params, "runId"));
+        if (!binding) return request.method === "one.phoneTool.pending" ? { requests: [] } : { accepted: false };
+        if (request.method === "one.phoneTool.pending") return asJsonValue({ requests: await this.phoneTools.list(binding) }, request.method);
+        return { accepted: await this.phoneTools.answer(binding, requiredIdentifier(params, "callId"), params.result) };
       }
       case "one.supervisor.send": {
         const params=guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.send"]);
@@ -3247,14 +3759,32 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           this.attachmentUploads.bind(context.deviceId,requiredIdentifier(params,"fileGroupId"),snapshot.conversationChatId);
         }
         const images=optionalImages(params);
-        return supervisorReceiptValue(await oneSupervisor().send({...params,...(images ? {images} : {})} as unknown as SupervisorSendInput),request.method);
+        // Only Main can derive this source: it is never read from the phone's body.
+        // A failed proof leaves ordinary chat usable, but grants no phone tools.
+        let phoneOrigin: PhoneCommandOrigin | undefined;
+        try {
+          assertMobileOneDeviceAuthority(context);
+          const admission = await this.options.domainAccountAdmission?.(context.deviceId);
+          const { getAuthenticatedSessionBinding } = require("../auth") as typeof import("../auth");
+          const session = getAuthenticatedSessionBinding(), paired = this.options.companionAccountBinding?.(context.deviceId);
+          admission?.assertCurrent();
+          if (admission && session && paired?.issuedAt && paired.ownerUserId === session.userId && paired.workspaceId === session.workspaceId &&
+              this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId)) {
+            const candidate = { userId: session.userId, workspaceId: session.workspaceId, accountSubject: paired.accountSubject,
+              deviceId: context.deviceId, hostId: this.options.hostIdentity.hostId, oneId: getOneProfile().oneId,
+              generation: createHash("sha256").update(JSON.stringify([session.sessionId, paired.issuedAt])).digest("hex") };
+            if (validPhoneCommandOrigin(candidate)) phoneOrigin = candidate;
+          }
+        } catch { phoneOrigin = undefined; }
+        return supervisorReceiptValue(await oneSupervisor().send({...params,...(images ? {images} : {})} as unknown as SupervisorSendInput, {surface:"mobile",...(phoneOrigin ? {phoneOrigin} : {})}),request.method);
       }
       case "one.supervisor.startWork":
-        return supervisorReceiptValue(await oneSupervisor().startWork(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startWork"]) as unknown as SupervisorWorkInput),request.method);
+        return supervisorReceiptValue(await oneSupervisor().startWork(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startWork"]) as unknown as SupervisorWorkInput,{surface:"mobile"}),request.method);
       case "one.supervisor.startScience":
-        return supervisorReceiptValue(await oneSupervisor().startScience(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startScience"]) as unknown as SupervisorScienceInput),request.method);
+        guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startScience"]);
+        throw new Error("science_mobile_disabled");
       case "one.supervisor.control":
-        return supervisorReceiptValue(await oneSupervisor().control(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.control"]) as unknown as SupervisorControlInput),request.method);
+        return supervisorReceiptValue(await oneSupervisor().control(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.control"]) as unknown as SupervisorControlInput, {mobile:true}),request.method);
       case "one.supervisor.stopReply":
         return supervisorReceiptValue(await oneSupervisor().stopReply(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.stopReply"]) as unknown as {commandId:string;runId:string}),request.method);
       case "one.supervisor.appearance":
@@ -3271,6 +3801,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         try { verdict = this.options.mailAccountGuard?.(context.deviceId); } catch { verdict = "mismatch"; }
         if (verdict !== "ok") throw Object.assign(new Error(verdict === "signed-out" ? "sign_in_required" : "account_mismatch"), { code: verdict === "signed-out" ? "sign_in_required" : "account_mismatch" });
         const params = guardedParams(request, ["oneId", "expectedVersion", "dataUrl"]);
+        // Audit 59 desktop C item 4 (F-6 sibling): the personal agent's picture is written only by the computer that is its home; a sealed or away one answers the write gate's own code (`home` and `legacy`: null, as before).
+        { const homeRefusal = personalWriteRefusal(); if (homeRefusal) return { ok: false, code: homeRefusal }; }
         try {
           const profile = setOneSelfAvatarImage({ oneId: String(params.oneId), expectedVersion: Number(params.expectedVersion), dataUrl: String(params.dataUrl) });
           this.scheduleSnapshotUpdated();
@@ -3283,6 +3815,36 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "one.avatar.get": {
         const params = guardedParams(request, ["icon"]);
         return asJsonValue(readMobileOneAvatar(requiredIdentifier(params, "icon", /^one-avatar:(?:self|[a-f0-9-]{16,80})$/i)), request.method);
+      }
+      case "workspace2.read":
+      case "workspace2.command": {
+        // The owner's own phone only (a paired iOS/Android credential issued after account verification), on a live connection, and the
+        // account guard above already refused a Desktop signed in to another account. The answers are the owner's data.
+        assertMobileOneDeviceAuthority(context);
+        if (!this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId)) throw new Error("account_mismatch");
+        const params = guardedParams(request, ["operation", "args"]);
+        const operation = requiredIdentifier(params, "operation", /^[A-Za-z][A-Za-z0-9.]{1,40}$/);
+        return asJsonValue(request.method === "workspace2.read"
+          ? await this.workspaceV2().read(operation, params.args)
+          : await this.workspaceV2().command(operation, params.args), request.method);
+      }
+      case "build2.list":
+      case "build2.open":
+      case "build2.files":
+      case "build2.file.read":
+      case "build2.forRun":
+      case "build2.preview.send":
+      case "build2.preview.restart":
+      case "build2.preview.read": {
+        // The owner's own phone only, on a live connection (as workspace2.*), and only where the capability is advertised: a Desktop without it (older, or the background
+        // service) refuses the method like an unknown one.
+        assertMobileOneDeviceAuthority(context);
+        if (!this.deviceConnectionIds.get(context.deviceId)?.has(context.connectionId)) throw new Error("account_mismatch");
+        if (!buildWorkbenchAvailable()) throw new Error(`${request.method}: not available on this Desktop`);
+        const params = guardedParams(request, MOBILE_BUILD_V2_PARAM_KEYS[request.method as MobileBuildV2Method]);
+        // The two that change something (Preview send / restart) carry the idempotency key the ledger keeps the first answer under.
+        if ((MOBILE_BUILD_V2_WRITE_METHODS as readonly string[]).includes(request.method)) this.consumeWriteIdempotencyKey(request, params);
+        return asJsonValue(await this.buildV2.call(request.method, params), request.method);
       }
       case "one.org.add": {
         const params = guardedParams(request, ["installedAgentId", "displayName"]);
@@ -3937,16 +4499,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           const {readOneDispatchResultPage}=require('../one/dispatch-presentation') as typeof import('../one/dispatch-presentation');
           const result=readOneDispatchResultPage({...scope,chatId,messageId,offset:0});
           if(!result.available || result.messageId!==messageId)throw new Error('legacy_video_unavailable');
-        },chatId=>{
-          const {assertProjectDomainOwner}=require('../invocation/project-domain-binding') as typeof import('../invocation/project-domain-binding');
-          const {getAuthenticatedActorIds}=require('../auth') as typeof import('../auth');
-          const actor=getAuthenticatedActorIds(),binding=assertProjectDomainOwner(chatId,actor);
-          const actorKey=JSON.stringify(actor),bindingKey=JSON.stringify(binding);
-          return ()=>{
-            const currentActor=getAuthenticatedActorIds();
-            if(JSON.stringify(currentActor)!==actorKey || JSON.stringify(assertProjectDomainOwner(chatId,currentActor,binding))!==bindingKey)throw new Error('legacy_video_owner_changed');
-          };
-        },chatId=>(require('../fs/access') as typeof import('../fs/access')).chatAssetRoots(chatId),
+        },captureMobileFileOwner,chatId=>(require('../fs/access') as typeof import('../fs/access')).chatAssetRoots(chatId),
         // chat.file.open admits a path exactly as the desktop chat does for a local file link: fs/access, scope chat-assets.
         (absPath,chatId)=>(require('../fs/access') as typeof import('../fs/access')).resolveFsReadPath(absPath,{kind:'chat-assets',chatId}),
         // The text a phone sees for a stored row: a teammate result row shows its result (the projector numbers tokens in it).
@@ -4091,7 +4644,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const project = getProject(projectId);
         if (!project) throw new MobileBridgeRefusal("project_unavailable", "The selected Desktop project is unavailable");
         if (!project.folderPath) throw new MobileBridgeRefusal("project_folder_missing", "The selected project has no working folder");
-        setChatWorkingFolder(chatId, project.folderPath);
+        // Desktop repair 11 (P1/6-3): the same move the Workspace screen makes (`chats:attachProject`), not a folder-only write.
+        // A folder alone left `project_id` empty, so the session scope, the project memory and the project tree disagreed with the folder.
+        const attached = attachChatToProject({ chatId, projectId });
+        if (!attached.ok) {
+          if (attached.code === "project_not_found") throw new MobileBridgeRefusal("project_unavailable", "The selected Desktop project is unavailable");
+          if (attached.code === "folder_missing") throw new MobileBridgeRefusal("project_folder_missing", "The selected project has no working folder");
+          if (attached.code === "turn_running") throw new MobileBridgeRefusal("chat_still_running", "A turn of this conversation is running; add the environment when it ends");
+          throw Object.assign(new Error(`workspace.setProject refused: ${attached.code}`), { code: attached.code });
+        }
         this.scheduleSnapshotUpdated(chatId);
         return asJsonValue({
           projectId: project.id,
@@ -4208,16 +4769,27 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const limit = optionalInteger(params, "limit", 1, 200) ?? 200;
         return projectInvocationHistory(invocationService.history(chatId), limit, chatId);
       }
+      case "one.supervisor.historyPage":
       case "invoke.historyPage": {
         const params = guardedParams(request, ["chatId", "limit", "cursor"]);
         const chatId = requiredIdentifier(params, "chatId");
         const limit = optionalInteger(params, "limit", 1, 200) ?? 200;
         const cursor = params.cursor === undefined || params.cursor === null
           ? undefined : requiredBoundedString(params, "cursor", 1024);
-        return asJsonValue(await readMobileBridgeHistoryPage(chatId, limit, cursor, {
+        const {getAuthenticatedActorIds}=require('../auth') as typeof import('../auth');
+        const personalHistory = request.method === 'one.supervisor.historyPage';
+        if (personalHistory) assertMobileOneDeviceAuthority(context);
+        const captureAuthority = () => requirePersonalOneHistoryAuthority({
+          activeOneId:getOneProfile().oneId, chatOneId:currentPersonalOneConversation(chatId),
+          actor:getAuthenticatedActorIds(), paired:this.options.mailAccountGuard?.(context.deviceId) === 'ok',
+        });
+        const authority = personalHistory ? captureAuthority() : null;
+        const result = await readMobileBridgeHistoryPage(chatId, limit, cursor, {
           automationReportNotice: this.clientHasCapability(context.deviceId, "thread.composition.v1"),
           chatFileLinks: this.clientHasCapability(context.deviceId, "chat.file.v1"),
-        }), request.method);
+        });
+        if (authority) assertPersonalOneHistoryUnchanged(authority,captureAuthority());
+        return asJsonValue(result, request.method);
       }
       case "context.inspect": {
         // Read-only: reads the model-call ledger rows of one existing chat — never calls a model, logs in, compacts or
@@ -4237,10 +4809,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         if (!allowed.includes(operation)) throw new TypeError(`${request.method} operation is not allowed`);
         const args = params.args && typeof params.args === "object" && !Array.isArray(params.args) ? params.args as Record<string, unknown> : {};
         const { callHarnessPort } = await import("../harness/capability-ports");
-        return asJsonValue(await callHarnessPort(operation, args, { chatId: "ui", runId: `mobile:${context.deviceId}` }), request.method);
+        const harnessResult = await callHarnessPort(operation, args, { chatId: "ui", runId: `mobile:${context.deviceId}` });
+        return asJsonValue(operation === "thread.read" ? answerOnlyThreadRead(harnessResult) : harnessResult, request.method);
       }
       case "one.invoke.start": {
         assertMobileOneDeviceAuthority(context);
+        // Desktop repair 11 (P1/6-2): a computer whose personal agent is moving (`one_sealed`) or has moved (`one_away`) starts no new turn from an old phone screen.
+        { const homeRefusal = personalWriteRefusal(); if (homeRefusal) throw Object.assign(new Error(homeRefusal), { code: homeRefusal }); }
         const input = mobileOneStartParams(request);
         const runtimeSelection = input.runtimeSelection
           ? await resolveMobileRoleSelection(input.runtimeSelection)
@@ -4266,7 +4841,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           input.userPrompt=chatFilePrompt(chat.id,input.userPrompt,input.fileGroupId);
           appendChatMessage(chat.id, "user", input.userPrompt,input.images?.length ? {images:input.images} : undefined);
           if (input.liveMode) setChatContinuousMode(chat.id, true);
-          const invocation = await bindMobileOneTurn({
+          const invocation = markOwnerSpoke(await bindMobileOneTurn({
               chatId: chat.id,
               userPrompt: input.userPrompt,
               taskIntent: "conversation",
@@ -4283,10 +4858,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               ...(!input.fileGroupId && input.images ? { images: input.images } : {}),
               ...(input.fileGroupId ? {fileGroupId:input.fileGroupId} : {}),
               ...(runtimeSelection ? { runtimeSelection } : {}),
-            });
+            }));
           result = invocationService.start(
             invocation,
-            captureMobileOneInvocationBinding(),
+            captureMobileOneInvocationBinding(chat.id),
             { source: "mobile" },
           );
         } catch (error) {
@@ -4320,11 +4895,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           return asJsonValue(result,request.method);
         }
         const { invocation, decisionAnswer } = invocationParams(request, false);
+        // The owner typed this on the paired phone (ownerSpoke). A card answer picks an option; it is not the owner's written message.
+        if (!decisionAnswer) markOwnerSpoke(invocation);
         // A question card's answer still reaches a personal agent's room; an ordinary owner message does not.
         if (!decisionAnswer) assertOwnerMayWriteRoom(invocation.chatId);
+        assertPersonalAgentHomeWritable(invocation.chatId);
         if(invocation.fileGroupId) this.attachmentUploads.bind(context.deviceId,invocation.fileGroupId,invocation.chatId);
         validateChatAttachmentSelection(invocation.chatId,invocation.fileGroupId,invocation.images);
         invocation.userPrompt=chatFilePrompt(invocation.chatId,invocation.userPrompt,invocation.fileGroupId);
+        // A group room under the lead model: the lead (or the member the message names) takes the phone's message; the room chat runs nothing.
+        if (!decisionAnswer) {
+          const leadRouted = routeLeadRoomOwnerMessage(invocation);
+          if (leadRouted) { this.scheduleSnapshotUpdated(invocation.chatId); return asJsonValue({ runId: leadRouted.runId }, request.method); }
+        }
         if (decisionAnswer && decisionAnswer.contractVersion !== ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION) {
           await prejudgePendingDecisionAnswer(
             invocation.chatId,
@@ -4352,7 +4935,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ? await bindMobileOneTurn(invocation)
           : invocation;
         const workspaceBinding = mobileOneTurn
-          ? captureMobileOneInvocationBinding()
+          ? captureMobileOneInvocationBinding(invocation.chatId)
           : captureInvocationWorkspaceBinding(getChatWorkingFolder(invocation.chatId));
         // Request-intent and One-turn binding both await asynchronous work.
         // Re-read the durable Task and pending options immediately before the
@@ -4394,10 +4977,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.steer": {
         const { invocation, expectedRunId, decisionAnswer } = invocationParams(request, true);
+        // The owner typed this direction on the paired phone (invocation/owner-spoke.ts): the turn it starts, or the one it waits to become, is one the owner spoke into.
+        // A card or decision answer picks an option; it is not the owner's written message.
+        if (!decisionAnswer) markOwnerSpoke(invocation);
         if (!decisionAnswer) assertOwnerMayWriteRoom(invocation.chatId);
+        assertPersonalAgentHomeWritable(invocation.chatId);
         if(invocation.fileGroupId) this.attachmentUploads.bind(context.deviceId,invocation.fileGroupId,invocation.chatId);
         validateChatAttachmentSelection(invocation.chatId,invocation.fileGroupId,invocation.images);
         invocation.userPrompt=chatFilePrompt(invocation.chatId,invocation.userPrompt,invocation.fileGroupId);
+        // A group room under the lead model: the lead (or the member the message names) takes the phone's message; the room chat runs nothing.
+        if (!decisionAnswer) {
+          const leadRouted = routeLeadRoomOwnerMessage(invocation);
+          if (leadRouted) { this.scheduleSnapshotUpdated(invocation.chatId); return asJsonValue({ accepted: true as const, chatId: invocation.chatId, queued: false, interruptsCurrent: false, runId: leadRouted.runId }, request.method); }
+        }
         if (decisionAnswer && decisionAnswer.contractVersion !== ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION) {
           await prejudgePendingDecisionAnswer(
             invocation.chatId,
@@ -4424,7 +5016,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const workspaceBinding = activeDesktopRun
           ? undefined
           : mobileOneTurn
-            ? captureMobileOneInvocationBinding()
+            ? captureMobileOneInvocationBinding(invocation.chatId)
             : captureInvocationWorkspaceBinding(getChatWorkingFolder(invocation.chatId));
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(
           effectiveInvocation, decisionAnswer, this.options.hostIdentity.hostId,
@@ -4481,6 +5073,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           {
             runId: attached.runId,
             events: attached.events.filter((event) => event.kind !== "plan" || planChecklist)
+              .filter((event) => !isHostPluginPreflightRow(event))
               .map((event) => projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId: attached.runId, cwd, toolBodies, toolBodyBytes, planChecklist, oneArtifactOutputs })),
           },
           request.method,
@@ -4538,7 +5131,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         let queriedRows = 0;
         if (source === "retained" && retained) {
           const relevant = retained.map((event, index) => ({ event, index: index + 1 }))
-            .filter(item => item.index > after && (item.event.tool || item.event.kind === "reasoning"));
+            .filter(item => item.index > after && (item.event.tool || item.event.kind === "reasoning") && !isHostPluginPreflightRow(item.event));
           hasMore = relevant.length > TOOL_ACTIVITY_PAGE_LIMIT;
           events = relevant.slice(0, TOOL_ACTIVITY_PAGE_LIMIT).map(item => ({ id: `${runId}:${item.index}`, sequence: item.index,
             ...(item.event.observedAt ? { occurredAt: item.event.observedAt } : {}),
@@ -4560,6 +5153,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
                 ...(data.reasoningPhase === "end" && typeof data.reasoningText === "string" ? { text: data.reasoningText } : {}) } };
             } else {
               if (typeof data.toolName !== "string" || !data.toolName.trim()) return [];
+              if (isHostPluginPreflightRow({ kind: "tool-use", tool: { name: data.toolName } })) return [];
               event = { kind: "tool-use", tool: { name: data.toolName,
                 ...(typeof data.toolId === "string" ? { id: data.toolId } : {}), isError: data.toolIsError === true,
                 ...(typeof data.toolArgs === "string" ? { args: data.toolArgs } : {}),
@@ -4706,7 +5300,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           onePermissionMode: "read",
           sessionRouting: false,
         };
-        invocationService.start(invocation, captureMobileOneInvocationBinding(), { source: "mobile" });
+        invocationService.start(invocation, captureMobileOneInvocationBinding(chatId), { source: "mobile" });
         const admitted = getInvocationRunReceipt(runId);
         if (admitted?.chatId !== chatId || admitted.executionPermission !== "read") {
           throw new Error("Decision clarification admission receipt is unavailable");
@@ -4768,8 +5362,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // Once native custody is selected, unknown ACK/source loss never falls back to local.
         const receipt = await resolveToolApprovalWithOwnerNote({
           decision, note, chatId: noteChatId, requestId: id,
-          resolve: () => nativeOwned ? native!.resolve(context, id, decision) : resolveToolApproval(id, decision),
+          // BB-1a: this answer came from the phone: a request this process holds is marked in the same write as its decision, one the background service holds right after it answered.
+          resolve: () => nativeOwned ? native!.resolve(context, id, decision) : resolveToolApproval(id, decision, undefined, "phone"),
         });
+        if (nativeOwned && receipt.ok && receipt.status === "resolved") noteToolApprovalHandler(id, "phone");
         this.scheduleSnapshotUpdated();
         // live 요청이 아니면(이미 지나간 고지) 대기 중인 실행은 없다 — 그 사실을 그대로 돌려준다.
         return asJsonValue({
@@ -5401,11 +5997,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       // reads the bounded in-process registry. Workspace paths, runtime session
       // ids, and raw build results never cross the bridge.
       case "build.start": {
-        const params = guardedParams(request, ["goal", "idempotencyKey"]);
+        const params = guardedParams(request, ["goal", "idempotencyKey", "buildKey", "seenUpdatedAt"]);
         const goal = requiredText(params, "goal", 20_000);
         this.consumeWriteIdempotencyKey(request, params);
+        const continuationProblem = validateMobileBuildContinuation(params);
+        if (continuationProblem) throw new TypeError(`build.start: ${continuationProblem}`);
+        const continuation = params.buildKey !== undefined ? { buildKey: params.buildKey as string, seenUpdatedAt: params.seenUpdatedAt as string } : null;
         const activeBuilds = [...this.buildRuns.values()].filter((run) => run.active).length;
-        if (activeBuilds >= MAX_CONCURRENT_MOBILE_BUILDS) {
+        if (continuation) {
+          // PB-D: continuing a saved Build. A refusal is an answer (a word), never a thrown sentence, and nothing is started or recorded: the checks run before the run is registered.
+          if (!this.buildActions.precheckContinue) throw new Error("build.start buildKey is not available on this Desktop");
+          const word = await this.buildActions.precheckContinue(continuation) ?? (activeBuilds >= MAX_CONCURRENT_MOBILE_BUILDS ? "another_build_active" as const : null);
+          if (word) return asJsonValue({ refusal: this.buildContinueRefusal(word) }, request.method);
+        } else if (activeBuilds >= MAX_CONCURRENT_MOBILE_BUILDS || this.buildActions.anyBuildActive?.()) {
+          // A new Build is also refused while the Build window (or another phone run) has a Build turn running: one Build at a time. The sentence is the one phones already read.
           throw new Error("A Mobile build is already running on this Desktop");
         }
         const runId = randomUUID();
@@ -5429,7 +6034,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           answerInFlight: false,
         });
         this.pruneBuildRuns();
-        const approval = await this.awaitBuildApproval({ runId, goal, locale, controller });
+        // A phone whose pairing this computer vouches for (made at its screen, or confirmed by the owner) needs no approval window: it works on this computer without one already.
+        const approval: MobileBridgeBuildApprovalDecision | { approved: false; code: "desktop_approval_timed_out" } = !context.devBootstrap && this.buildActions.waivesApproval?.(context.deviceId, this.phoneVouchOf(context.deviceId)) === true
+          ? { approved: true }
+          : await this.awaitBuildApproval({ runId, goal, locale, controller });
         const reserved = this.buildRuns.get(runId);
         if (!approval.approved || !reserved || controller.signal.aborted || this.disposed) {
           this.attachmentUploads.releaseBuild(runId);
@@ -5448,6 +6056,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           signal: controller.signal,
           ...(buildFiles.length ? { attachments: buildFiles } : {}),
           ...(media.mode ? { mode: media.mode } : {}),
+          ...(continuation ? { continueBuild: continuation } : {}),
         }));
         void completion.then(
           () => this.finalizeBuildRun(runId, null),
@@ -5465,6 +6074,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_stale") }, request.method);
         }
         if (run.answerInFlight || run.active) {
+          return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_in_progress") }, request.method);
+        }
+        // PB-D: every phone turn is a tracked Build turn now, so while the window's (or another phone run's) Build runs this answer cannot start. It waits - the questions stay open - instead of failing the run.
+        if (this.buildActions.anyBuildActive?.()) {
           return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_in_progress") }, request.method);
         }
         if (
@@ -5582,6 +6195,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // Desired-state idempotency: another authenticated socket for the same
         // device may have won the race, but the credential is revoked either way.
         this.options.revokeDevice(context.deviceId, "device_requested");
+        this.phoneTools.revoke((binding) => binding.deviceId === context.deviceId);
         return { revoked: true };
       }
       case "device.capabilities": {
@@ -5826,7 +6440,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
    * keep serving B's mail. Checked on every mail/profile request, reads too.
    */
   private mailAccountRefusal(method: string, context: MobileBridgeConnectionContext): MobileBridgeJsonValue | null {
-    if (!(method.startsWith("mail.") || method.startsWith("one.profile.") || method === "one.avatar.get")) return null;
+    if (!(method.startsWith("mail.") || method.startsWith("one.profile.") || method.startsWith("workspace2.") || method.startsWith("build2.") || method === "one.avatar.get")) return null;
     const guard = this.options.mailAccountGuard;
     if (!guard || context.devBootstrap) return null;
     let verdict: ReturnType<NonNullable<typeof guard>>;
@@ -5860,6 +6474,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
    * sees it through the next mail status read.
    */
   private updateOneProfileFromMobile(params: Record<string, unknown>): Record<string, unknown> {
+    // Audit 59 desktop C item 4 (F-6 sibling): name, role and principles of the personal agent are written only by its home; a sealed or away computer answers the write gate's own code (`home` and `legacy`: null, as before).
+    { const homeRefusal = personalWriteRefusal(); if (homeRefusal) return { ok: false, code: homeRefusal, message: "The personal agent's home is moving or has moved; nothing was changed.", profile: projectMobileBridgeOneProfile(getOneProfile()) as unknown as Record<string, unknown> }; }   // same shape as `stale_version`
     const expectedVersion = optionalInteger(params, "expectedVersion", 1, Number.MAX_SAFE_INTEGER);
     if (expectedVersion === undefined) throw new TypeError("expectedVersion is required");
     const current = getOneProfile();
@@ -5937,6 +6553,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.continuity.close();
+    this.frontTransfer.close();
+    this.phoneTools.close();
+    this.uninstallPhoneBridge();
+    this.uninstallPhoneAuth();
     this.options.nativeToolApprovals?.dispose();
     for (const run of this.buildRuns.values()) {
       if (!run.active) continue;
@@ -6042,6 +6663,16 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         "Desktop approval timed out. No builder was started; submit a new request to try again.",
     };
     return { code, message: messages[code], retryable: code !== "desktop_approval_denied" };
+  }
+
+  /** The pairing's voucher for this phone (one/home.ts); a record that cannot be read vouches for nothing. */
+  private phoneVouchOf(deviceId: string): string | null {
+    try { return oneHome().phoneVouch(deviceId); } catch { return null; }
+  }
+
+  /** The refusal of a continuation (`build.start { buildKey }`): the word only (no sentence - the phone words it), `retryable` = the same continuation may succeed later. */
+  private buildContinueRefusal(code: MobileBridgeBuildRefusalDto["code"]): MobileBridgeBuildRefusalDto {
+    return { code, message: "", retryable: code !== "build_not_found" && code !== "folder_unavailable" };
   }
 
   private buildAnswerRefusal(
@@ -6310,6 +6941,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     }
   }
 
+  /** Pending approvals and questions per conversation: the same four sources the snapshot's pending lists read, counted per chat. */
+  private async attentionByChat(): Promise<Map<string, number>> {
+    const counts = new Map<string, number>();
+    const add = (chatId: string | null | undefined): void => { if (chatId) counts.set(chatId, (counts.get(chatId) ?? 0) + 1); };
+    try { for (const approval of listPendingBrowserApprovals()) add(approval.owner?.chatId); } catch (error) { this.onError(errorOf(error)); }
+    try {
+      const local = listPendingToolApprovals();
+      const seen = new Set(local.map((approval) => approval.id));
+      for (const approval of [...local, ...(this.options.nativeToolApprovals?.list() ?? []).filter((request) => !seen.has(request.id))]) if (approval.mode === "live") add(approval.chatId);
+    } catch (error) { this.onError(errorOf(error)); }
+    try { for (const request of await listRuntimeAskUserRequests()) if (request.expiresAt > Date.now()) add(request.chatId); } catch (error) { this.onError(errorOf(error)); }
+    return counts;
+  }
+
   private async projectSnapshot(forceUsageRefresh = false): Promise<MobileBridgeSnapshot> {
     return (await this.projectSnapshotVariants(forceUsageRefresh, false)).snapshot;
   }
@@ -6338,7 +6983,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           runtime: approval.runtime,
           tool: approval.tool,
           ...(approval.detail ? { detail: approval.detail.slice(0, 2_000) } : {}),
-          ...(approval.cwd ? { cwd: approval.cwd } : {}),
+          // The project's own name when the folder is the conversation's project folder (approval-folder-label.ts); otherwise the path as before. The name is cut at 256 bytes: a set value, no measurement behind it (names people give are a few dozen characters); past it the end of the name is lost on the phone.
+          // The app's own work folder (agent-cwd, runtime/session-cwd.ts) is not a folder the owner has: it is left out, so every phone build draws no Folder line for it.
+          ...(approval.cwd && !approval.cwdIsAppFolder && !isAppWorkFolder(approval.cwd) ? { cwd: phoneApprovalFolder(approval.cwd, approval.chatId, {
+            projectOfChat: (chatId) => { const projectId = getChat(chatId)?.projectId; const project = projectId ? getProject(projectId) : null; return project ? { name: project.name, folderPath: project.folderPath } : null; },
+          }, (text) => boundedRedactedText(text, 256)) } : {}),
           mode: approval.mode,
           ...(approval.deniedBy ? { deniedBy: approval.deniedBy } : {}),
           requestedAt: approval.requestedAt,
@@ -6387,6 +7036,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       includeMessagesForChatIds: activeChatIds,
       pendingBrowserApprovals,
       pendingToolApprovals,
+      expiredToolApprovalIds: listRecentlyExpiredToolApprovalIds(),
       pendingUserInputs,
       forceUsageRefresh,
       rowSkipVariant,
@@ -6402,8 +7052,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       event = hostedTeammatePartialForPhone(runId, event, (hostedRunId, agentId) => invocationService.liveAgentPartialText(hostedRunId, agentId));
       // Live events arrive per token; the folder and Task lookups are per
       // RUN, not per event. The cache is dropped when the run terminates.
+      // The host's own "Agentlas Plugins · …" receipts are not work the owner asked for: not sent to the phone (the run record keeps them).
+      if (isHostPluginPreflightRow(event)) return;
       const { cwd, taskId, personalOne } = cachedRunContext(runId, chatId);
-      const oneMessage = personalOne ? projectOneMessageForPhone(event) : null;
+      const oneMessage = personalOne ? projectOneMessageForPhone(event, chatId) : null;
       if (event.kind === "plan") {
         // Only a phone that draws checklists receives it (server fan-out gate); an older app would read the
         // unknown kind as an empty assistant row.
@@ -6430,6 +7082,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           "invoke.event envelope",
         ),
       });
+      if (!event.agentId && (event.kind === "final" || (event.kind === "error" && !event.error?.hostWorded))) noteTerminalSent(runId);
       if (event.kind === "final" || event.kind === "error") {
         forgetRunContext(runId);
         this.scheduleSnapshotUpdated();
@@ -6446,15 +7099,17 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       this.scheduleSnapshotUpdated();
     };
     this.upstreamUnsubscribers = [
-      onGoalControlChange((change) => {
-        if (this.goalControl) this.emit({ event: "goalControl.updated", payload: asJsonValue({ schemaVersion: 1, hostId: this.options.hostIdentity.hostId, ...change }, "goal control change") });
-      }),
       invocationService.onEvent(forwardInvocationEvent),
       onNativeGuiInvocationEvent(forwardInvocationEvent),
+      // E2E-2: a reply request of the personal agent that FAILED or was CANCELLED with no terminal event sent for its run (the runner refused the call, the start failed, it was cancelled
+      // before it began): the phone gets the one terminal event the run did not give, read from the supervisor's receipt log in whichever process wrote it.
+      (() => { const ends = personalRequestEnds(); const off = ends.onEnded((list) => this.forwardPersonalRequestEnds(list)); ends.start(); return off; })(),
       invocationService.onActiveChats(() => emitActiveChats()),
       onNativeGuiActiveChats(() => emitActiveChats()),
       onBrowserApprovalLifecycle((event) => this.forwardBrowserApproval(event)),
       ...(this.options.nativeToolApprovals ? [this.options.nativeToolApprovals.subscribe(() => this.scheduleSnapshotUpdated())] : []),
+      // O-M3a: the owner pressed "trust this phone"; the phone re-reads through the existing snapshot.updated (no new event).
+      onOneHomeChanged(() => this.scheduleSnapshotUpdated()),
       onToolApprovalRequested(() => this.scheduleSnapshotUpdated()),
       onToolApprovalResolved(() => this.scheduleSnapshotUpdated()),
       onAskUserLifecycle((event) => {
@@ -6474,6 +7129,27 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.emit({ event: "mail.updated", payload: asJsonValue(event, "mail.updated") });
       }),
     ];
+  }
+
+  /** E2E-2 (see `terminalSentRuns`): the same `invoke.event` shape every run's own terminal has, `personalOne: true`, no new key; the phone reads it as "this turn is over" and re-reads the snapshot. */
+  private forwardPersonalRequestEnds(ends: readonly PersonalRequestEnd[]): void {
+    for (const end of ends) {
+      const owed = terminalEventFor(end);
+      if (!owed || terminalSentRuns.has(owed.runId)) continue;
+      noteTerminalSent(owed.runId);
+      const { cwd, taskId, personalOne } = cachedRunContext(owed.runId, owed.chatId);
+      if (!personalOne) continue;
+      const event: McpInvocationEvent = { kind: "error", error: { code: owed.code, message: "" }, observedAt: new Date().toISOString() };
+      this.emit({
+        event: "invoke.event",
+        payload: asJsonValue(
+          { runId: owed.runId, chatId: owed.chatId, event: projectMobileBridgeInvocationEvent(event, { taskId, chatId: owed.chatId, runId: owed.runId, cwd, toolBodies: false }), personalOne: true },
+          "invoke.event envelope",
+        ),
+      });
+      forgetRunContext(owed.runId);
+      this.scheduleSnapshotUpdated();
+    }
   }
 
   private detachDesktopSubscriptions(): void {

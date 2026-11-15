@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { agentlasHomeDir } from "../agents/home";
 
 /**
  * Keep this adapter byte-for-byte compatible with
@@ -230,7 +231,7 @@ function modelCandidates(): string[] {
     path.join(process.cwd(), "Hephaestus", "models", assetSuffix),
     path.join(process.cwd(), "Hephaestus", "assets", assetSuffix),
     path.join(__dirname, "..", "..", "..", "Hephaestus", "assets", assetSuffix),
-    path.join(os.homedir(), ".agentlas", "runtime", "current", "models", assetSuffix),
+    path.join(agentlasHomeDir(), "runtime", "current", "models", assetSuffix),
   ].filter(Boolean);
 }
 
@@ -678,6 +679,28 @@ export function autoLocalEmbedding(text: string): LocalMemoryEmbedding {
   return descriptor ? model2VecHybridEmbedding(text, descriptor) : localHashingEmbedding(text);
 }
 
+/**
+ * The numbers of a stored vector, from either form of the `embedding_json` column: the JSON list a writer makes, or `q8:<scale>:<base64>` (one signed byte per number times the scale) that the first-run
+ * migration rewrites it to (K5', engine twin: first_run_tidy.expand_vector; 96 or 256 numbers become 96 or 256 bytes instead of about 2.4 KB of text). Null for anything else.
+ */
+export function decodeStoredVector(value: unknown): number[] | null {
+  const text = String(value ?? "");
+  if (text.startsWith("q8:")) {
+    const parts = text.split(":");
+    if (parts.length !== 3) return null;
+    const scale = Number(parts[1]);
+    if (!Number.isFinite(scale) || scale <= 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(parts[2])) return null;
+    const bytes = Buffer.from(parts[2], "base64");
+    const out = new Array<number>(bytes.length);
+    for (let i = 0; i < bytes.length; i += 1) out[i] = ((bytes[i] << 24) >> 24) * scale;
+    return out;
+  }
+  try {
+    const vector = JSON.parse(text || "[]") as unknown;
+    return Array.isArray(vector) ? vector as number[] : null;
+  } catch { return null; }
+}
+
 export function parseLocalEmbedding(
   model: unknown,
   dimensions: unknown,
@@ -709,7 +732,7 @@ export function parseLocalEmbedding(
   if (storedModel && !descriptor && metadata.modelSha256) return null;
   if (typeof metadata.text === "string" && metadata.contentHash !== contentHash) return null;
   try {
-    const vector = JSON.parse(String(vectorJson ?? "[]")) as unknown;
+    const vector = decodeStoredVector(vectorJson);
     if (
       !Array.isArray(vector) ||
       vector.length === 0 ||
@@ -766,6 +789,12 @@ export interface HybridRankable {
    */
   altText?: string;
   altEmbedding?: readonly number[];
+  /**
+   * The recall contract's tie order (ruleset recall.tieOrder, Agentlas 2.0 K4b): when two items score the same, the lower `tier` comes first (user, run_verified, unverified, inferred, none = 0..4), then the newer
+   * `createdAt` (an item without a date is the oldest), then the id in plain text order. An item that gives neither field keeps the order it always had (id by localeCompare).
+   */
+  tier?: number;
+  createdAt?: string | null;
 }
 
 export interface HybridRanked<T extends HybridRankable> {
@@ -847,7 +876,14 @@ export function rankHybridLocal<T extends HybridRankable>(
       ...entry,
       score: lexicalContribution + vectorContribution + Math.max(0, itemPrior(entry.item)) * 0.002,
     };
-  }).sort((left, right) => right.score - left.score || left.item.id.localeCompare(right.item.id));
+  }).sort((left, right) => right.score - left.score || tieOrder(left.item, right.item));
+}
+
+/** Equal scores: the contract's tier, newer date, id in code-unit order when the item gives them; otherwise the id by locale as before. */
+function tieOrder(left: HybridRankable, right: HybridRankable): number {
+  if (left.tier === undefined && right.tier === undefined && left.createdAt === undefined && right.createdAt === undefined) return left.id.localeCompare(right.id);
+  const leftDate = left.createdAt ?? "", rightDate = right.createdAt ?? "";
+  return (left.tier ?? 4) - (right.tier ?? 4) || (leftDate < rightDate ? 1 : leftDate > rightDate ? -1 : 0) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }
 
 function itemPrior(item: HybridRankable): number {

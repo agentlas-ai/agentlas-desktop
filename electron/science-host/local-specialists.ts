@@ -5,6 +5,7 @@ import { scienceStore, specialistDigest, specialistScope, validateSpecialistPin 
 import type { ScienceLocalSpecialistHost, ScienceLocalSpecialistPin, ScienceLocalSpecialistScope, ScienceTurnToolScope } from "agentlas-science";
 import { listInstalledAgentsReadOnly } from "../mcp/registry";
 import { getRoute } from "../agents/routes";
+import { locationBeforeMove } from "../agents/home-relocation";
 import { buildEffectiveAgentSystemPrompt, computeAgentPackageHash } from "../agents/files";
 import { readCanonicalPromptFromDirectory } from "../agents/prompt-authority";
 import { getDb } from "../store/db";
@@ -43,7 +44,10 @@ export function createScienceLocalSpecialistHost(): ScienceLocalSpecialistHost {
       || store.peerReview().refereeRoleForConversation(scope.projectId, scope.conversationId)) fail("author-turn-required");
     return turn;
   }
-  function installedPin(scope: ScienceLocalSpecialistScope, agentId: string): ScienceLocalSpecialistPin {
+  // `beforeMove`: the same pin as it was computed before the agent's folder was moved into the agent root (agents/home-move.ts). The pin's
+  // identity includes where the package is (its location hash, and the skills line of the prompt names the folder), so a rename alone
+  // read as "package changed" and closed an open assignment (-4). Everything else is computed from the files as they are now.
+  function installedPin(scope: ScienceLocalSpecialistScope, agentId: string, beforeMove = false): ScienceLocalSpecialistPin {
     const agent = listInstalledAgentsReadOnly().find(a => a.id === agentId), route = getRoute(agentId);
     if (!agent || agent.kind === "team" || agent.sourceMissingSince || !route || route.kind !== "agent" || route.missingSince
       || !path.isAbsolute(route.path) || !["local-import", "agent-cloud", "hub"].includes(route.source ?? "local-import")) fail("installed-agent-unavailable");
@@ -51,7 +55,10 @@ export function createScienceLocalSpecialistHost(): ScienceLocalSpecialistHost {
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) fail("installed-package-root-invalid");
     const root = fs.realpathSync.native(route.path), canonical = readCanonicalPromptFromDirectory(root);
     if (!canonical || !canonical.content.trim()) fail("canonical-prompt-unavailable");
-    const prompt = buildEffectiveAgentSystemPrompt(agentId, agent.systemPrompt);
+    const earlier = beforeMove ? locationBeforeMove(route.path) : null;
+    if (beforeMove && !earlier) fail("package-changed");
+    const currentPrompt = buildEffectiveAgentSystemPrompt(agentId, agent.systemPrompt);
+    const prompt = earlier ? currentPrompt.split(route.path).join(earlier.path) : currentPrompt;
     if (!prompt.trim()) fail("effective-prompt-unavailable");
     const source = route.source ?? "local-import";
     if (agent.assetSource && agent.assetSource !== source) fail("installed-source-mismatch");
@@ -60,7 +67,7 @@ export function createScienceLocalSpecialistHost(): ScienceLocalSpecialistHost {
       definitionSha256: specialistDigest({ agentId, slug: agent.slug, source,
         definitionHash: route.definitionHash ?? null, packageHash: route.packageHash ?? null,
         portableAssetsSha256: computeAgentPackageHash(agentId, canonical.relativePath) }),
-      packageLocationSha256: sha(root), canonicalPromptSha256: sha(canonical.content), systemPromptSha256: sha(prompt),
+      packageLocationSha256: sha(earlier ? earlier.realPath : root), canonicalPromptSha256: sha(canonical.content), systemPromptSha256: sha(prompt),
       promptAsset: canonical.relativePath, permissionCeiling: "read", toolPolicy: "assigned-helper-only",
     };
     return { ...payload, bindingSha256: specialistDigest(payload) };
@@ -76,7 +83,12 @@ export function createScienceLocalSpecialistHost(): ScienceLocalSpecialistHost {
     assertCustody(pin);
     const assignment = task(pin.scope);
     if (assignment.executionAgent?.bindingSha256 !== pin.bindingSha256) fail("context-pin-mismatch");
-    if (specialistDigest(installedPin(pin.scope, pin.agentId)) !== specialistDigest(pin)) fail("package-changed");
+    if (specialistDigest(installedPin(pin.scope, pin.agentId)) !== specialistDigest(pin)) {
+      // Moving the folder is not a package change: the pin recomputed for the place the folder was moved from must equal the stored pin exactly.
+      let moved = false;
+      try { moved = specialistDigest(installedPin(pin.scope, pin.agentId, true)) === specialistDigest(pin); } catch { moved = false; }
+      if (!moved) fail("package-changed");
+    }
     return assignment;
   }
   function boundTurn(pin: ScienceLocalSpecialistPin, turnId: string, runId: string, chatId: string, completed = false) {
@@ -141,7 +153,7 @@ export function createScienceLocalSpecialistHost(): ScienceLocalSpecialistHost {
             .run(pin.agentId, runtimeChatId, row.agent_id);
           if (changed.changes !== 1) fail("actor-changed");
         }
-      })();
+      }).immediate();
       const authority = Object.freeze({});
       authorities.set(authority, {pin:structuredClone(pin),turnId,runId:invocationRunId,chatId:runtimeChatId,owner:agentContextOwnerBinding().ownerScope});
       return {authority};

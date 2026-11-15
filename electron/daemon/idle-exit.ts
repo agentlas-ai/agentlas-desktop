@@ -29,8 +29,6 @@ export interface DaemonResidencyInput {
   supervisorDomain?: boolean;
   /** Canonical durable Goal reservations retain custody independently of active carriers. */
   hostGoalDomain?: boolean;
-  /** NH21: this service holds the One/Work Alive domain and at least one life is on (its clock lives here). */
-  aliveDomain?: boolean;
 }
 
 /** Work that would be cut if the service stopped now. Attachment/continuity are not work. */
@@ -57,7 +55,6 @@ export function daemonResidencyReasons(input: DaemonResidencyInput): string[] {
   if (input.loginContinuity) reasons.push("login-continuity");
   if (input.supervisorDomain) reasons.push("one-supervisor");
   if (input.hostGoalDomain) reasons.push("host-goals");
-  if (input.aliveDomain) reasons.push("alive-organisms");
   return [...reasons, ...daemonActiveWorkReasons(input)];
 }
 

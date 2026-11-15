@@ -1,6 +1,7 @@
 import type { AgentlasAskQuestion } from "../../shared/ask-fence-flatten";
 import { askResendMessage, composeAskAnswer } from "../../shared/ask-action-bar";
 import { composeQuestionReply } from "../../shared/question-reply";
+import { ownerAskCard } from "../harness/owner-ask-card";
 
 /*
  * The decision card the host posts when a Goal's passes did nothing and the terminal verification did not close it (owner
@@ -15,7 +16,7 @@ import { composeQuestionReply } from "../../shared/question-reply";
  * No word is judged here: the trigger is the host's own count of idle passes (client goal_idle_pass_yield) followed by a
  * verification verdict; the text is fixed host copy. No electron import (gates load this file directly).
  */
-export type HostOwnerCardKind = "goal_idle_stop";
+export type HostOwnerCardKind = "goal_idle_stop" | "owner_stop";
 
 /**
  * The typed decision each option of a host card stands for (owner rule 2026-10-28: a terminal action — close, stop, cancel —
@@ -24,14 +25,17 @@ export type HostOwnerCardKind = "goal_idle_stop";
  * 주세요" and the Goal was not stopped — the choice reached the Goal only as words, the turn reopened the Goal, its
  * summary was verified inconclusive and the same card came back; the owner-answer judge was unavailable the whole time.
  */
-export type HostOwnerCardDecision = "continue_on_own_judgment" | "stop_and_summarize";
+export type HostOwnerCardDecision = "continue_on_own_judgment" | "stop_and_summarize" | "restart_goal" | "keep_stopped";
 export const HOST_OWNER_CARD_DECISIONS: Readonly<Record<HostOwnerCardKind, readonly HostOwnerCardDecision[]>> = {
   goal_idle_stop: ["continue_on_own_judgment", "stop_and_summarize"],
+  // The "Stopped goal" card the sweep posts when a Goal rests for the owner (harness/owner-ask-card.ts owner_stop: a replay barrier,
+  // no recorded owner grant). Its two options are that card's own, in that order: "Restart it", "Keep it stopped".
+  owner_stop: ["restart_goal", "keep_stopped"],
 };
 
 type CardCopy = Record<"ko" | "en", AgentlasAskQuestion>;
 
-const COPY: Record<HostOwnerCardKind, CardCopy> = {
+const COPY: Record<Exclude<HostOwnerCardKind, "owner_stop">, CardCopy> = {
   goal_idle_stop: {
     ko: {
       header: "목표가 멈췄어요",
@@ -56,6 +60,8 @@ const COPY: Record<HostOwnerCardKind, CardCopy> = {
 
 /** The card's questions in the owner's language. */
 export function hostOwnerCardQuestions(kind: HostOwnerCardKind, locale: "ko" | "en"): AgentlasAskQuestion[] {
+  // The owner_stop card is the one askOwnerOnce posts: its words live in owner-ask-card.ts only, so the closed reply set cannot drift from it.
+  if (kind === "owner_stop") return [ownerAskCard("owner_stop", locale === "ko" ? "ko" : "en")];
   const copy = COPY[kind][locale === "ko" ? "ko" : "en"];
   return [{ ...copy, options: copy.options.map((option) => ({ ...option })) }];
 }

@@ -56,7 +56,9 @@ export type DurableQueuedSteerRecoveryReason =
   | "draining-run-id-missing"
   | "one-team-report-owner-unbound"
   /** The owner's Stop could not write its withdrawal of this row through the whole bounded retry (internal; shown as original-run-start-uncertain). */
-  | "run-stopped-withdraw-unconfirmed";
+  | "run-stopped-withdraw-unconfirmed"
+  /** A STARTED peer-message row whose turn a restart cut and the host continued once (harness/peer-turn-resume.ts): the mark that makes it once. */
+  | "peer-turn-resumed";
 const RECOVERY_REASONS: readonly DurableQueuedSteerRecoveryReason[] = [
   "original-run-start-uncertain",
   "original-run-effect-boundary-unconfirmed",
@@ -65,6 +67,7 @@ const RECOVERY_REASONS: readonly DurableQueuedSteerRecoveryReason[] = [
   "draining-run-id-missing",
   "one-team-report-owner-unbound",
   "run-stopped-withdraw-unconfirmed",
+  "peer-turn-resumed",
 ];
 
 /**
@@ -184,7 +187,9 @@ export function canonicalQueuedSteerRequest(request: McpInvocationRequest): stri
       .map(([key, entry]) => [key, canonical(entry)]));
     return value;
   };
-  return JSON.stringify(canonical({ ...request, runId: undefined }));
+  // `ownerSpoke` says who wrote the words (invocation/owner-spoke.ts), not what the direction is: a direction saved before the marker existed and sent again with it
+  // is the same direction (#2).
+  return JSON.stringify(canonical({ ...request, runId: undefined, ownerSpoke: undefined }));
 }
 
 export function persistQueuedSteer(input: {
@@ -259,6 +264,30 @@ export function durableQueuedSteerMatches(input: {
     && row.prompt_hash === createHash("sha256").update(input.request.userPrompt, "utf8").digest("hex")
     && row.request_json === JSON.stringify(input.request)
     && row.workspace_binding_json === null && row.execution_context_json === null);
+}
+
+/**
+ * The started peer-message rows whose turn a restart may have cut (harness/peer-turn-resume.ts): a request that carries a chain mark, opened a run,
+ * is not older than `sinceIso` and was not continued before. Newest first, at most 50. A row that cannot be decoded is skipped (never repaired here).
+ */
+export function listStartedPeerSteers(sinceIso: string, chatId?: string): DurableQueuedSteer[] {
+  const rows = getDb().prepare(
+    "SELECT * FROM invocation_steers WHERE status = 'started' AND drained_run_id IS NOT NULL AND updated_at >= ? " +
+    "AND json_type(request_json, '$.peerChain') = 'object' AND COALESCE(recovery_reason, '') <> 'peer-turn-resumed' " +
+    (chatId !== undefined ? "AND chat_id = ? " : "") + "ORDER BY updated_at DESC LIMIT 50",
+  ).all(sinceIso, ...(chatId !== undefined ? [chatId] : [])) as Row[];
+  const out: DurableQueuedSteer[] = [];
+  for (const row of rows) { try { out.push(decode(row)); } catch { /* an undecodable started row is left as it is */ } }
+  return out;
+}
+/** The one mark of a continued peer turn: true for exactly one caller (Main and the background service may look at the same moment). */
+export function claimPeerTurnResume(id: string): boolean {
+  return getDb().prepare("UPDATE invocation_steers SET recovery_reason = 'peer-turn-resumed', updated_at = ? WHERE id = ? AND status = 'started' AND COALESCE(recovery_reason, '') <> 'peer-turn-resumed'")
+    .run(new Date().toISOString(), id).changes === 1;
+}
+/** A continuation that was refused before anything ran gives its mark back, so the next start may try again. */
+export function releasePeerTurnResume(id: string): void {
+  getDb().prepare("UPDATE invocation_steers SET recovery_reason = NULL WHERE id = ? AND status = 'started' AND recovery_reason = 'peer-turn-resumed'").run(id);
 }
 
 export function listRecoverableQueuedSteers(chatId?: string): DurableQueuedSteer[] {
@@ -402,7 +431,11 @@ export function settleQueuedSteer(id: string, status: "started" | "cancelled" | 
  */
 export function cancelQueuedSteersForChat(chatId: string, preserveTeamReports: boolean, cause: DurableQueuedSteerTerminalCause,
   queuedAtOrBefore?: string): void {
+  // A message another conversation sent (request.peerChain, Agentlas 2.0 N6) is not the owner's direction: the owner stopping THIS conversation's
+  // turn does not withdraw it. It goes only with its chain's Stop (cancelQueuedSteersOfChain), the conversation's deletion, or a goal stop's own cause.
+  const keepPeer = cause === "run-stopped" ? " AND CASE WHEN json_valid(request_json) THEN json_type(request_json,'$.peerChain') IS NULL ELSE 1 END" : "";
   const preserve = (preserveTeamReports ? " AND CASE WHEN json_valid(request_json) THEN COALESCE(json_type(request_json,'$.oneTeamReportTurn'),'')<>'true' ELSE 1 END" : "")
+    + keepPeer
     + (queuedAtOrBefore !== undefined ? " AND queued_at <= ?" : "");
   const bound = queuedAtOrBefore !== undefined ? [queuedAtOrBefore] : [];
   const db = getDb();
@@ -500,4 +533,33 @@ export function releaseQueuedSteerRecoveryHold(id: string, expectedReason?: Dura
       WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'held'
         ${expectedReason ? "AND recovery_reason = ? AND status = 'queued' AND drained_run_id IS NULL" : ""}`,
   ).run(new Date().toISOString(), id, ...(expectedReason ? [expectedReason] : [])).changes === 1;
+}
+
+/**
+ * The Stop of a chain of messages between conversations (harness/peer-chain-stop.ts): every waiting message whose request carries the chain
+ * ends, in whichever conversation it waits. A bundle that joined several messages of the SAME chain carries that chain once. `request_json`
+ * holds the chain id as a plain string, so one LIKE finds them; ids are `chain:<uuid>`, which cannot appear inside another value by accident.
+ * Returns how many rows ended.
+ */
+export function cancelQueuedSteersOfChain(chainId: string): number {
+  const db = getDb();
+  return Number(db.prepare(
+    "UPDATE invocation_steers SET status = 'cancelled', recovery_reason = ?, updated_at = ? WHERE status = 'queued' AND instr(request_json, ?) > 0",
+  ).run(terminalCause("run-stopped"), new Date().toISOString(), JSON.stringify(chainId)).changes);
+}
+/** How many messages of the chain still wait (read after a Stop: it must be 0). */
+export function countQueuedSteersOfChain(chainId: string): number {
+  const row = getDb().prepare("SELECT COUNT(*) AS n FROM invocation_steers WHERE status IN ('queued','draining') AND instr(request_json, ?) > 0").get(JSON.stringify(chainId)) as { n: number };
+  return row.n;
+}
+/**
+ * A second message of the same chain reaches a conversation whose first one still waits: it joins that row (a conversation holds one waiting
+ * bundle of other conversations' messages, so waiting turns never pile up). Only a row still `queued` and not claimed by a drain; false means
+ * the row has left the queue and the caller queues a new one.
+ */
+export function mergeQueuedPeerSteer(id: string, request: McpInvocationRequest): boolean {
+  const text = request.userPrompt;
+  return Number(getDb().prepare(
+    "UPDATE invocation_steers SET request_json = ?, prompt_text = ?, prompt_hash = ?, updated_at = ? WHERE id = ? AND status = 'queued' AND drained_run_id IS NULL",
+  ).run(JSON.stringify(request), text, createHash("sha256").update(text, "utf8").digest("hex"), new Date().toISOString(), id).changes) === 1;
 }

@@ -4,15 +4,10 @@
 // the runtime is signed out, not installed, its credential store cannot be read, or its own authoritative model list says
 // the model is not installed. Every other failure is retried or settles to the saved choice without a notice.
 import type { RuntimeSelection } from "../../shared/types";
-
-const KIND_LABEL: Record<string, string> = {
-  "claude-code": "Claude Code", codex: "Codex", antigravity: "Antigravity", kimi: "Kimi Code", grok: "Grok",
-  cursor: "Cursor Agent", byok: "API", ollama: "Ollama", lmstudio: "LM Studio", mlx: "MLX",
-  "agentlas-local": "Agentlas Local", acp: "ACP", agentlas: "Agentlas",
-};
+import { runtimeProviderLabel } from "./runtime-provider-label";
 
 function runtimeName(selection: Pick<RuntimeSelection, "kind" | "label">): string {
-  return selection.kind === "acp" && selection.label?.trim() ? selection.label.trim() : KIND_LABEL[selection.kind] ?? selection.kind;
+  return runtimeProviderLabel(selection.kind, selection.label) ?? selection.kind;
 }
 
 /** Codes Main raises for a cause outside the app (runtime-handoff.ts goalRuntimeSelectionError). */
@@ -35,7 +30,7 @@ export function goalRuntimeRefusalNotice(
     case "goal_runtime_sign_in_required":
       return (locale === "ko" ? `${name}: 로그인이 필요합니다. 로그인한 뒤 모델을 다시 선택해 주세요.` : `${name} needs sign-in. Sign in, then choose the model again.`) + kept;
     case "goal_runtime_selection_unavailable":
-      return (locale === "ko" ? `${name}: 이 컴퓨터에서 실행할 수 없습니다. 설치와 연결을 확인한 뒤 다시 선택해 주세요.` : `${name} cannot run on this computer. Check that it is installed and connected, then choose again.`) + kept;
+      return (locale === "ko" ? `${name}: 이 데스크탑에서 실행할 수 없어요. 설치와 연결을 확인한 뒤 다시 선택해 주세요.` : `${name} cannot run on this computer. Check that it is installed and connected, then choose again.`) + kept;
     case "goal_runtime_credential_unavailable":
       return (locale === "ko" ? `${name}: 저장된 인증 정보를 읽지 못했습니다. 키체인 접근을 허용한 뒤 다시 선택해 주세요.` : `${name}'s saved credentials could not be read. Allow keychain access, then choose again.`) + kept;
     case "goal_runtime_model_unverified": {

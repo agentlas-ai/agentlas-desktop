@@ -2,6 +2,7 @@ import { invocationService } from "../invocation/service";
 import { abandonWaitingRetries, chatOfRun } from "../invocation/pending-chat-sends";
 import { recordOwnerStop } from "../invocation/earlier-attempt";
 import { getDb } from "../store/db";
+import { emitDesktopStoreChange } from "../store/change-bus";
 import { invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import { existingCurrentTurnSteer, getCurrentTurnSteer, settleCurrentTurnSteer, validateCurrentTurnSteer } from "../store/current-turn-steers";
 import { createInvocationOwnerRouter, invocationOwnerUnavailable } from "./invocation-owner-router";
@@ -97,7 +98,11 @@ export function abandonOwnerWaitingRetries(runId: string): number {
     if (!chatId) return 0;
     // The marker is what a start that fails because of this Stop reads (a Stop of a run still being prepared writes no cancel event).
     recordOwnerStop(db, chatId);
-    return abandonWaitingRetries(db, chatId);
+    const abandoned = abandonWaitingRetries(db, chatId);
+    // The composer's "sending again" bar reads the waiting count on this announcement (WaitingRetryStop); the window's own Stop
+    // announces it too (invoke:stopWaitingRetries). A phone Stop reaches here with no live run to announce anything.
+    if (abandoned > 0) { try { emitDesktopStoreChange({ entity: "chat", id: chatId }); } catch { /* cosmetic */ } }
+    return abandoned;
   } catch { return 0; }
 }
 
@@ -123,6 +128,23 @@ export const invocationCurrentTurnControl = {
  */
 export async function cancelInvocationOwnerRun(runId: string, options: { dispatchBookkeeping?: boolean } = {}): Promise<"requested" | "already-requested" | "not-found"> {
   if (options.dispatchBookkeeping !== false) {
+    // The owner's Stop of a conversation of a chain of messages between conversations stops the whole chain (Agentlas 2.0 N6): started first
+    // and depending on nothing else, run beside the ordinary Stop below, and awaited at the end so the answer is given after the chain's pass.
+    const chainPass = (() => { try { return (require("../harness/peer-chain-runtime") as typeof import("../harness/peer-chain-runtime")).stopPeerChainsOfRun(runId); } catch { return Promise.resolve([]); } })(); // eslint-disable-line @typescript-eslint/no-require-imports
+    try { return await cancelInvocationOwnerRunOrdinary(runId); } finally { await chainPass.catch(() => undefined); }
+  }
+  return cancelRunWhereHeld(runId);
+}
+
+async function cancelInvocationOwnerRunOrdinary(runId: string): Promise<"requested" | "already-requested" | "not-found"> {
+  {
+    // A run of a group room's request (the id the sender was promised counts, even before its turn started): the Stop ends the whole
+    // request - the turns running or waiting for a slot, the ones lined up behind a busy member, the hand-offs still to come.
+    try {
+      if ((require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).stopLeadRoomByRun(runId)) return "requested"; // eslint-disable-line @typescript-eslint/no-require-imports
+    } catch (error) {
+      console.warn("[owner-stop] room stop skipped:", error instanceof Error ? error.message : error);
+    }
     let stopped: Awaited<ReturnType<typeof import("../one/team-dispatch").stopTeamDispatchOfRun>> = null;
     try {
       stopped = await (require("../one/team-dispatch") as typeof import("../one/team-dispatch")).stopTeamDispatchOfRun(runId, (id) => cancelRunWhereHeld(id));
@@ -134,8 +156,17 @@ export async function cancelInvocationOwnerRun(runId: string, options: { dispatc
       if ("pending" in stopped) throw invocationOwnerUnavailable(); // saved; the card says so, and it is asked again by itself
       return stopped.status;
     }
+    // The run the owner stops may be the finished first turn of a request that ANOTHER process is still chaining (between two turns
+    // it holds no run): the Stop is written into the room's open request, which that chain reads before its next turn.
+    try {
+      const outcome = await cancelRunWhereHeld(runId);
+      if (outcome === "not-found" && (require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).markLeadRoomStopByRun(runId)) return "requested"; // eslint-disable-line @typescript-eslint/no-require-imports
+      return outcome;
+    } catch (error) {
+      if ((require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).markLeadRoomStopByRun(runId)) return "requested"; // eslint-disable-line @typescript-eslint/no-require-imports
+      throw error;
+    }
   }
-  return cancelRunWhereHeld(runId);
 }
 
 async function cancelRunWhereHeld(runId: string): Promise<"requested" | "already-requested" | "not-found"> {
@@ -228,6 +259,9 @@ export function handleInvocationOwnerControl(input: InvocationOwnerControlReques
     if (!live || input.ownerId !== invocationProcessOwner().ownerId || input.ownerId !== live.ownerId
       || input.leaseId !== live.leaseId || input.chatId !== live.chatId
       || params?.chatId !== live.chatId || params.runId !== live.runId) throw invocationOwnerUnavailable();
+    // The run may be a turn of a group room's request that THIS process answers (a message the phone sent to the service): the
+    // Stop ends the whole request here, as it does in the window - not just the one run, with the chain going on behind it.
+    try { (require("../one/room-lead-runtime") as typeof import("../one/room-lead-runtime")).stopLeadRoomByRun(live.runId); } catch { /* an ordinary run: cancelled below */ } // eslint-disable-line @typescript-eslint/no-require-imports
     return invocationService.cancel(live.runId);
   }
   const owner = invocationRunOwners.getRunOwner(input.chatId, input.runId);

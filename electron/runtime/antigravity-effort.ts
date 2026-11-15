@@ -10,6 +10,7 @@
 //   - `--model gemini-3.8-flash --effort high` (a base id) runs at that level (72 thinking tokens where flash-low used 0).
 //   - Without `--model`, agy uses its own saved default, which may be a suffixed id; `--effort` could then refuse the
 //     whole turn, so no flag is sent.
+import { StringDecoder } from "node:string_decoder";
 import { spawnCli } from "./exec";
 import type { ModelEffortApplication } from "./model-call-ledger";
 
@@ -90,8 +91,10 @@ export function probeAntigravityEffortLevels(bin: string, generation: string, ti
     try { child = spawnCli(bin, ["--help"], { stdio: ["ignore", "pipe", "pipe"] }); }
     catch { resolve(null); return; }
     const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } finish(null); }, timeoutMs);
-    child.stdout?.on("data", (chunk: Buffer) => { out += chunk.toString("utf8"); });
-    child.stderr?.on("data", (chunk: Buffer) => { out += chunk.toString("utf8"); });
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => { out += stdoutDecoder.write(chunk); });
+    child.stderr?.on("data", (chunk: Buffer) => { out += stderrDecoder.write(chunk); });
     child.once("error", () => finish(null));
     child.once("close", (code) => finish(code === 0 ? parseAntigravityEffortHelp(out) : null));
   });

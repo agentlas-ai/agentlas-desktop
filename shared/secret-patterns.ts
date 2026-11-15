@@ -54,10 +54,15 @@ const SECRET_SHAPES: RegExp[] = [
  *     credential-shaped: 6+ characters holding a digit, or a 16+ character run of key characters. Prose such as
  *     "session: Tuesday" stays. An `Authorization: Bearer …` header is still caught by the Bearer shape at the
  *     boundaries that have it.
+ * The front boundary is a plain `\b`. Audit 48 widened it to "not a letter or digit" to see `DB_PASSWORD=…`; found that this made this single admission rule drop ordinary lines (`max_token=4096`, `has_password=true`),
+ * so the widened form is `MIGRATION_ASSIGNMENT_SOURCE` below, read only by the first-run gate that decides what is sent to a model.
  * Exported as a source string so the mobile bridge sanitizer builds its pattern from it; the phone ports it verbatim.
  */
 const ASSIGNMENT_VALUE_CHAR = String.raw`[^,\s"'}\`\]]`;
-export const SECRET_ASSIGNMENT_SOURCE = String.raw`\b(?:(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\b\s*[:=]\s*["']?${ASSIGNMENT_VALUE_CHAR}{4,}|(?:token|session|cookie|pwd|bearer|authorization)\b(?:=["']?${ASSIGNMENT_VALUE_CHAR}{4,}|\s*[:=]\s*["']?(?:(?=${ASSIGNMENT_VALUE_CHAR}*[0-9])${ASSIGNMENT_VALUE_CHAR}{6,}|[A-Za-z0-9._~+=-]{16,})))`;
+const ASSIGNMENT_BODY = String.raw`(?:(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\b\s*[:=]\s*["']?${ASSIGNMENT_VALUE_CHAR}{4,}|(?:token|session|cookie|pwd|bearer|authorization)\b(?:=["']?${ASSIGNMENT_VALUE_CHAR}{4,}|\s*[:=]\s*["']?(?:(?=${ASSIGNMENT_VALUE_CHAR}*[0-9])${ASSIGNMENT_VALUE_CHAR}{6,}|[A-Za-z0-9._~+=-]{16,})))`;
+export const SECRET_ASSIGNMENT_SOURCE = String.raw`\b${ASSIGNMENT_BODY}`;
+/** The same assignment shape with the widened front boundary of defect 8 (not a letter or digit, so `DB_PASSWORD=…` is seen). MIGRATION-ONLY: only the first-run gate that decides what a model may be sent reads it (`electron/migration/first-run-labels.ts`); the shared rule above keeps the plain word boundary (defect A: `max_token=4096` and `has_password=true` are ordinary lines). */
+export const MIGRATION_ASSIGNMENT_SOURCE = String.raw`(?<![A-Za-z0-9])${ASSIGNMENT_BODY}`;
 const SECRET_ASSIGNMENT_RE = new RegExp(SECRET_ASSIGNMENT_SOURCE, "i");
 
 /** Single source of truth. Case-insensitive: providers are inconsistent about casing. */

@@ -15,6 +15,8 @@ import {
   IconCheck,
 } from "@/components/Icon";
 import { BuildLaunch, BuildResources } from "@/components/build/BuildLaunch";
+import { BuildSavedWindow } from "@/components/build/BuildSavedWindow";
+import { LiveBuildFiles, useLiveBuildKey } from "@/components/build/LiveBuildFiles";
 import styles from "@/components/build/BuildWorkbench.module.css";
 import connectionsStyles from "@/components/build/BuildConnectionsSettings.module.css";
 import { IconArrowLeft } from "@/components/Icon";
@@ -29,7 +31,7 @@ import { McpBuildInterviewCard } from "@/components/build/McpBuildInterviewCard"
 import { McpAttachmentReceiptCard } from "@/components/build/McpAttachmentReceiptCard";
 import { CloudSaveChoiceDialog } from "@/components/build/CloudSaveChoiceDialog";
 import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
-import type { DirListing, FsReadScope, HephaestusStatus, OneSuggestionReviewSeed, RuntimeSelection, RuntimeStatus, UsageSnapshot } from "@/lib/types";
+import type { DirListing, FsPathGrant, FsReadScope, HephaestusStatus, OneSuggestionReviewSeed, RuntimeSelection, RuntimeStatus, UsageSnapshot } from "@/lib/types";
 import {
   subscribe as buildSubscribe,
   getSnapshot as getBuildSnapshot,
@@ -39,6 +41,7 @@ import {
   reauthorizeRestoredBuildWorkspace,
   setRuntime as setBuildRuntime,
   startBuild,
+  prepareBuildHandoff,
   approveBuildMcpPlan,
   describeAllocationRuntime,
   resolveRuntimeEscalation,
@@ -291,12 +294,21 @@ export default function BuildPage() {
   const [reattaching, setReattaching] = useState(() => getBuildSnapshot().phase === "idle" && !getBuildSnapshot().request);
   const [reattachProblem, setReattachProblem] = useState(false);
   const [screen, setScreen] = useState<"home" | "intro" | "editor">(() => getBuildSnapshot().phase === "idle" && !getBuildSnapshot().request ? "home" : "editor");
+  // F-D10: a saved build (opened from the Builds tab) or an agent's Edit (?edit=<agentId>, ?build=<buildKey>) in the Build window.
+  const [saved, setSaved] = useState<{ buildKey?: string; agentId?: string; name?: string } | null>(null);
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    const edit = query.get("edit"), build = query.get("build");
+    if (edit) setSaved({ agentId: edit, name: query.get("name") ?? undefined });
+    else if (build) setSaved({ buildKey: build });
+  }, []);
   const [connectionsOpen, setConnectionsOpen] = useState(false);
   const connectionsBack = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (connectionsOpen) connectionsBack.current?.focus(); }, [connectionsOpen]);
   const [connectionsTarget, setConnectionsTarget] = useState<HTMLDivElement | null>(null);
   const [connectionsCloseRequest, setConnectionsCloseRequest] = useState(0);
   const [inspectorTab, setInspectorTab] = useState<"settings" | "preview">("settings");
+  const [filesView, setFilesView] = useState(true);
   const [status, setStatus] = useState<HephaestusStatus | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatus[]>([]);
   const [usage, setUsage] = useState<UsageSnapshot | null>(null);
@@ -354,7 +366,7 @@ export default function BuildPage() {
     })();
     return () => { alive = false; };
   }, []);
-  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, recoverable, error: buildError, result, registered, registeredEntity, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness } = s;
+  const { request, mode, workspace, workspaceGrant, runtime, phase, log, reached, errored, recoverable, error: buildError, result, registered, registeredEntity, pendingQuestions, pendingAllocation, awaitingReply, turn, attachments, mcpPlan, mcpReceipt, cloudSaveChoice, liveness, runId } = s;
   // Source disclosure belongs to one completed Build, not the next package.
   useEffect(() => { setPublicSourceConsent(false); }, [result]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -690,7 +702,7 @@ export default function BuildPage() {
         setActionMsg(
           res.registration.localSyncStored === false
             ? ko
-              ? "Agent Cloud에는 저장됐지만, 이 컴퓨터에 동기화 기록을 남기지 못했습니다. 수정하기 전에 Cloud 최신본을 복원하세요."
+              ? "Agent Cloud에는 저장됐지만, 이 데스크탑에 동기화 기록을 남기지 못했어요. 수정하기 전에 Cloud 최신본을 복원해 주세요."
               : "Saved to Agent Cloud, but this computer could not store the sync receipt. Restore the latest Cloud copy before editing."
             : ko
               ? "내 Agent Cloud에 비공개 저장했습니다."
@@ -717,7 +729,7 @@ export default function BuildPage() {
     const choice = cloudSaveChoice;
     if (!choice || !chooseBuildLocalOnly(choice.id)) return;
     setCloudChoiceError(null);
-    setActionMsg(ko ? "이 컴퓨터에만 저장했습니다. 네트워크 요청은 보내지 않았습니다." : "Kept on this computer only. No network request was sent.");
+    setActionMsg(ko ? "이 데스크탑에만 저장했어요. 네트워크 요청은 보내지 않았어요." : "Kept on this computer only. No network request was sent.");
   };
 
   const engineMissing = status ? !status.available : false;
@@ -754,6 +766,24 @@ export default function BuildPage() {
     setScreen("editor");
     setInspectorTab("settings");
   };
+  // F-D10: the saved Edit window hands its request to THIS screen's store (session, approvals, runtime stay here): same folder, mode "package", request filled in;
+  // the person then starts the build with the usual button. A build that is running, interviewing or waiting for an approval is never overwritten.
+  const continueEdit = (input: { request: string; workspaceGrant: unknown }): string => {
+    const grant = input.workspaceGrant as FsPathGrant | null;
+    if (!grant || typeof grant.path !== "string" || !grant.scope) return "workspace_missing";
+    if (getUiStartPending()) return "running";
+    const handed = prepareBuildHandoff({ workspace: grant, request: input.request, mode: "package" });
+    if (!handed.ok) return handed.phase;
+    uiStartRevision += 1;
+    setSaved(null);
+    setScreen("editor");
+    setInspectorTab("settings");
+    return "started";
+  };
+  // F-D10: while a build runs (and after it ends) its files are shown in two columns beside the conversation, as in the picture; the settings column returns for the
+  // other phases (interview, MCP plan, model choice) and with the "Files" button off.
+  const liveKey = useLiveBuildKey(phase, runId);
+  const showLiveFiles = filesView && Boolean(liveKey.key) && (phase === "running" || phase === "done");
   // 파이프라인은 항상 표시 — idle 에선 딤된 프리뷰로 무엇을 할지 보여준다.
   const showPipeline = true;
   useEffect(() => { if (phase === "done") setInspectorTab("preview"); }, [phase]);
@@ -768,20 +798,22 @@ export default function BuildPage() {
             <OneSuggestionReviewHandoffBanner surface="build" locale={locale} onReviewSeed={applyOneReviewSeed} />
           </Suspense>
 
-        {reattaching ? <div className={styles.empty} role="status"><strong>{reattachProblem ? (ko ? "제작 상태를 확인하지 못했습니다" : "Build status could not be confirmed") : (ko ? "진행 중인 제작을 확인하고 있습니다…" : "Checking for an ongoing build…")}</strong><p>{ko ? "이전 빌드와 겹치지 않도록 확인이 끝날 때까지 새 제작을 기다립니다. 응답이 지연되면 작업공간으로 돌아갈 수 있습니다." : "New builds wait until this check finishes to avoid overlapping an earlier build. You can return to the workspace while the response is delayed."}</p><Link className={styles.quietButton} href="/workspace">{ko ? "작업공간으로 돌아가기" : "Return to workspace"}</Link></div> : screen !== "editor" ? <BuildLaunch ko={ko} screen={screen} request={request} onRequest={(text) => { if (canEditBuildDraft()) setBuildRequest(text); else setScreen("editor"); }}
+        {saved ? <BuildSavedWindow key={saved.buildKey ?? saved.agentId} ko={ko} buildKey={saved.buildKey} agentId={saved.agentId} agentName={saved.name} onBack={() => setSaved(null)} onContinueEdit={continueEdit} /> : reattaching ? <div className={styles.empty} role="status"><strong>{reattachProblem ? (ko ? "제작 상태를 확인하지 못했습니다" : "Build status could not be confirmed") : (ko ? "진행 중인 제작을 확인하고 있습니다…" : "Checking for an ongoing build…")}</strong><p>{ko ? "이전 빌드와 겹치지 않도록 확인이 끝날 때까지 새 제작을 기다립니다. 응답이 지연되면 작업공간으로 돌아갈 수 있습니다." : "New builds wait until this check finishes to avoid overlapping an earlier build. You can return to the workspace while the response is delayed."}</p><Link className={styles.quietButton} href="/workspace">{ko ? "작업공간으로 돌아가기" : "Return to workspace"}</Link></div> : screen !== "editor" ? <BuildLaunch ko={ko} screen={screen} request={request} onRequest={(text) => { if (canEditBuildDraft()) setBuildRequest(text); else setScreen("editor"); }}
           hasBuild={phase !== "idle" || Boolean(request)} onResume={() => setScreen("editor")}
           onHome={() => { if (!getUiStartPending()) setScreen("home"); }} onNew={() => { if (getUiStartPending()) { setScreen("editor"); return; } if (startFreshBuild()) setScreen("intro"); else setScreen("editor"); }}
           onBlank={() => openBuildDraft("")}
-          onCompose={openBuildDraft} onAttachFiles={(files) => void addDroppedFiles(files)} attachmentCount={attachments.length} /> : <div className={`build-shell ${styles.workbench}`}>
+          onCompose={openBuildDraft} onAttachFiles={(files) => void addDroppedFiles(files)} attachmentCount={attachments.length}
+          onOpenBuild={(item) => { if ((item.state === "building" || item.state === "question") && getBuildSnapshot().phase !== "idle") setScreen("editor"); else setSaved({ buildKey: item.id }); }} /> : <div className={`build-shell ${styles.workbench}`}>
           <header className={styles.toolbar}>
             <button type="button" className={styles.quietButton} disabled={startPending} onClick={() => { if (!getUiStartPending()) setScreen("home"); }}><IconArrowLeft size={16} />{ko ? "에이전트" : "Agents"}</button>
             <div className={styles.toolbarActions}>
               <span className={styles.phase}>{startPending && !busy ? (ko ? "생성 폴더 확인 중" : "Checking output folder") : busy ? (ko ? "제작 중" : "Building") : phase === "done" ? (ko ? "생성 완료" : "Created") : phase === "error" ? (ko ? "확인 필요" : "Needs attention") : (ko ? "초안" : "Draft")}</span>
               {busy && <button type="button" className={styles.stopButton} onClick={cancelBuild}>{ko ? "중지" : "Stop"}</button>}
+              {liveKey.key && (phase === "running" || phase === "done") && <button type="button" className={styles.quietButton} aria-pressed={filesView} onClick={() => setFilesView(!filesView)}>{ko ? "파일" : "Files"}</button>}
               <button type="button" className={styles.quietButton} onClick={() => setInspectorTab(inspectorTab === "preview" ? "settings" : "preview")} aria-pressed={inspectorTab === "preview"}>{ko ? "미리보기" : "Preview"}</button>
             </div>
           </header>
-          <div className={styles.editorLayout}>
+          <div className={`${styles.editorLayout} ${showLiveFiles ? styles.editorLayout3 : ""}`}>
             <section className={styles.conversation} aria-label={ko ? "에이전트 제작 대화" : "Agent build conversation"}>
               <div className={styles.conversationHeading}><img src="/brand/agentlas-mark.png" alt="" /><span>Agentlas</span></div>
               {phase !== "idle" && request ? <div className={styles.requestBubble}>{request}</div> : <div className={styles.conversationEmpty}>
@@ -1093,7 +1125,8 @@ export default function BuildPage() {
                 <div><span>{ko ? "제작 요청을 설정에서 검토한 뒤 시작하세요." : "Review this brief in Configure, then start building."}</span><button type="button" className={styles.primary} disabled={startPending} onClick={() => { setInspectorTab("settings"); requestAnimationFrame(() => requestInputRef.current?.focus()); }}>{ko ? "설정에서 계속" : "Continue in Configure"}</button></div>
               </div>}
             </section>
-            <aside className={styles.inspector} aria-label={ko ? "에이전트 설정과 미리보기" : "Agent settings and preview"}>
+            {showLiveFiles && liveKey.key && <LiveBuildFiles ko={ko} buildKey={liveKey.key} title={liveKey.title} runId={runId} running={phase === "running"} />}
+            <aside className={styles.inspector} hidden={showLiveFiles} aria-label={ko ? "에이전트 설정과 미리보기" : "Agent settings and preview"}>
               <div className={styles.inspectorTabs} role="tablist" aria-label={ko ? "제작 패널" : "Build panel"} onKeyDown={(event) => {
                 if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
                 event.preventDefault();
@@ -1328,7 +1361,7 @@ export default function BuildPage() {
               )}
               <p className="build-autoadd-hint">
                 {ko
-                  ? "데스크톱 Build와 공개 Hub 에이전트 사용은 무료입니다. 모델 실행은 이 컴퓨터의 Claude Code/Codex/Antigravity/BYOK/Agentlas Local을 사용합니다."
+                  ? "데스크톱 Build와 공개 Hub 에이전트 사용은 무료예요. 모델 실행은 이 데스크탑의 Claude Code/Codex/Antigravity/BYOK/Agentlas Local을 사용해요."
                   : "Desktop Build and public Hub agent use are free. Model execution uses Claude Code/Codex/Antigravity/BYOK/Agentlas Local on this computer."}
               </p>
             </div>

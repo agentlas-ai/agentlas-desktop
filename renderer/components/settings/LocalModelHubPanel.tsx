@@ -162,7 +162,7 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
     <div className={styles.toolbar}>
       <label className={styles.search}><IconSearch size={16} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={ko ? "내 모델 찾기" : "Find a model"} aria-label={ko ? "로컬 모델 검색" : "Search local models"} /></label>
       <div ref={menuRoot} className={styles.menus}>
-        <button type="button" className={styles.icon} aria-label={ko ? "컴퓨터와 실행 엔진" : "Computer and engine"} aria-expanded={panel === "computer"} onClick={event => toggleMenu("computer",event.currentTarget)}><IconCpu size={17} /></button>
+        <button type="button" className={styles.icon} aria-label={ko ? "데스크탑과 실행 엔진" : "Computer and engine"} aria-expanded={panel === "computer"} onClick={event => toggleMenu("computer",event.currentTarget)}><IconCpu size={17} /></button>
         <button type="button" className={styles.icon} aria-label={ko ? "모델 메뉴" : "Model menu"} aria-expanded={panel === "model"} disabled={!model} onClick={event => toggleMenu("model",event.currentTarget)}><IconMoreHorizontal size={18} /></button>
         <button type="button" className={styles.icon} aria-label={ko ? "모델 상태 새로고침" : "Refresh model state"} onClick={() => void refresh()}><IconRefresh size={16} /></button>
         {panel && <div role="menu" className={`${menu.panelPopover} ${styles.popover}`}>
@@ -188,7 +188,7 @@ export function LocalModelHubPanel({ locale, standalone = false, selectedPackage
     </div>
     {residentModel && <div className={styles.resident} data-resident-installation={resident?.installationId}><span>{ko ? "로드됨" : "Loaded"} · {residentModel.fileName}</span><AccelerationChip evidence={resident?.acceleration} ko={ko} /><button type="button" onClick={() => void unload()}>{ko ? "내리기" : "Unload"}</button></div>}
     {!snapshot ? <p role="status" className={styles.empty}>{notice ?? (ko ? "모델 상태 확인 중…" : "Checking model state…")}</p> : <>
-      {unavailable && <p role="status" className={styles.notice}>{!engine ? ko ? "이 컴퓨터에서 사용할 실행 엔진이 아직 없습니다." : "A compatible engine is not available for this computer." : ko ? "로컬 모델 상태를 사용할 수 없습니다. 앱을 다시 열어 확인해 주세요." : "Local model state is unavailable. Reopen the app and check again."}</p>}
+      {unavailable && <p role="status" className={styles.notice}>{!engine ? ko ? "이 데스크탑에서 사용할 실행 엔진이 아직 없습니다." : "A compatible engine is not available for this computer." : ko ? "로컬 모델 상태를 사용할 수 없습니다. 앱을 다시 열어 확인해 주세요." : "Local model state is unavailable. Reopen the app and check again."}</p>}
       <div className={styles.layout}>
         <div role="listbox" aria-label={ko ? "모델 목록" : "Model catalog"} className={styles.models}>
           {filtered.map(item => {

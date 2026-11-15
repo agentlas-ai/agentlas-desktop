@@ -23,7 +23,6 @@ import { getLongRunByGoalId } from "../store/long-runs";
 import {
   goalPlanTacticPayload,
   insertGoalPlanNode,
-  listGoalPlanDecisions,
   readGoalPlan,
   recordGoalPlanDecision,
   updateGoalPlanNode,
@@ -32,10 +31,8 @@ import { GOAL_SHAPE_LIMITS, type LiveGoalPlan, type LiveTactic } from "../../sha
 import {
   buildGoalPanelView,
   parseGoalPanelEdit,
-  type GoalPanelAgiAction,
   type GoalPanelEdit,
   type GoalPanelEditResult,
-  type GoalPanelSuggestion,
   type GoalPanelView,
 } from "../../shared/goal-panel";
 import type { RuntimeSelection } from "../../shared/types";
@@ -43,80 +40,9 @@ import { goalDeadlineAt } from "./goal-deadline";
 import { applyPendingOwnerGoalAmendments, pendingOwnerGoalAmendmentCount, recordPendingOwnerGoalAmendment } from "./goal-owner-amendment";
 import { ensureGoalShapeBeforeTurn } from "./goal-shaping";
 import { ownsHostGoalLoop } from "./host-goal-surface";
-import { noticeLine } from "../agi/actions";
-import type { AgiActionKind } from "../agi/blocker";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "cancelling"]);
-const PURPOSE_CHANGE_CODE = "agi.plan.purpose-change-boundary";
 const shaping = new Map<string, { failed: boolean; running: boolean }>();
-
-function tableExists(name: string): boolean {
-  return Boolean(getDb().prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
-}
-
-function parseJson(value: string | null): Record<string, unknown> {
-  if (!value) return {};
-  try { const parsed = JSON.parse(value); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}; } catch { return {}; }
-}
-
-/** The AGI's latest real actions on this goal (settled ok receipts), as the same plain lines the chat notices use. */
-function agiActions(goalId: string): GoalPanelAgiAction[] {
-  if (!tableExists("agi_action_receipts")) return [];
-  const rows = getDb().prepare(`SELECT action, result_json, settled_at_ms FROM agi_action_receipts
-    WHERE goal_id = ? AND status = 'settled' AND ok = 1 AND action NOT IN ('rest','file_defect')
-    ORDER BY settled_at_ms DESC LIMIT 40`).all(goalId) as Array<{ action: string; result_json: string | null; settled_at_ms: number | null }>;
-  const out: GoalPanelAgiAction[] = [];
-  for (const row of rows) {
-    const receipt = parseJson(row.result_json);
-    const detail = receipt.detail && typeof receipt.detail === "object" ? receipt.detail as Record<string, unknown> : {};
-    const line = noticeLine(row.action as AgiActionKind, { actionId: String(receipt.actionId ?? ""), action: row.action, ok: true,
-      code: String(receipt.code ?? ""), detail });
-    if (!line) continue;
-    const strip = (text: string) => text.replace(/^AGI:\s*/, "");
-    out.push({ nodeId: typeof detail.nodeId === "string" ? detail.nodeId : null, at: new Date(row.settled_at_ms ?? 0).toISOString(),
-      text: { ko: strip(line.ko), en: strip(line.en) } });
-  }
-  return out;
-}
-
-function settledSuggestionIds(goalId: string): Set<string> {
-  return new Set(listGoalPlanDecisions(goalId, { kind: "owner_edit", limit: 500 })
-    .map((row) => row.payload.suggestionId).filter((id): id is string => typeof id === "string"));
-}
-
-/** AGI intent edits refused as purpose_change, kept as suggestions until the owner accepts or dismisses them. */
-function agiSuggestions(goalId: string): GoalPanelSuggestion[] {
-  if (!tableExists("agi_action_receipts")) return [];
-  const settled = settledSuggestionIds(goalId);
-  const rows = getDb().prepare(`SELECT action_id, result_json, settled_at_ms FROM agi_action_receipts
-    WHERE goal_id = ? AND status = 'settled' AND code = ? ORDER BY settled_at_ms DESC LIMIT 20`)
-    .all(goalId, PURPOSE_CHANGE_CODE) as Array<{ action_id: string; result_json: string | null; settled_at_ms: number | null }>;
-  const out: GoalPanelSuggestion[] = [];
-  for (const row of rows) {
-    const detail = parseJson(row.result_json).detail;
-    const proposals = detail && typeof detail === "object" && Array.isArray((detail as Record<string, unknown>).proposals)
-      ? (detail as { proposals: unknown[] }).proposals : [];
-    proposals.forEach((raw, index) => {
-      const p = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-      const id = `${row.action_id}:${index}`;
-      const field = p.field === "objective" || p.field === "intent" || p.field === "done_when" ? p.field : null;
-      const text = typeof p.text === "string" ? p.text.replace(/\s+/g, " ").trim().slice(0, 600) : "";
-      if (!field || !text || settled.has(id)) return;
-      out.push({ id, nodeId: field === "objective" ? null : typeof p.nodeId === "string" ? p.nodeId : null, field, text,
-        at: new Date(row.settled_at_ms ?? 0).toISOString() });
-    });
-  }
-  return out;
-}
-
-function openIncident(goalId: string): { attempts: number } | null {
-  if (!tableExists("agi_incidents")) return null;
-  // A held incident (the Goal's own work or the host scheduler has the next step, electron/agi/monitor.ts) is not AGI working now.
-  const held = (getDb().prepare("PRAGMA table_info(agi_incidents)").all() as Array<{ name: string }>).some((column) => column.name === "held_reason");
-  const row = getDb().prepare(`SELECT attempts FROM agi_incidents WHERE goal_id = ? AND status = 'open' ${held ? "AND held_reason IS NULL" : ""}
-    ORDER BY updated_at_ms DESC LIMIT 1`).get(goalId) as { attempts: number } | undefined;
-  return row ? { attempts: row.attempts } : null;
-}
 
 export function readGoalPanel(chatId: string, nowMs = Date.now()): GoalPanelView | null {
   const chat = getChat(chatId);
@@ -138,9 +64,6 @@ export function readGoalPanel(chatId: string, nowMs = Date.now()): GoalPanelView
     plan,
     deadlineAt: (() => { try { return goalDeadlineAt(goalId); } catch { return null; } })(),
     pendingAmendments: (() => { try { return pendingOwnerGoalAmendmentCount(goalId); } catch { return 0; } })(),
-    agiActions: (() => { try { return agiActions(goalId); } catch { return []; } })(),
-    agiIncident: (() => { try { return openIncident(goalId); } catch { return null; } })(),
-    suggestions: (() => { try { return agiSuggestions(goalId); } catch { return []; } })(),
     shaping: shape?.running === true,
     shapeFailed: shape?.failed === true && shape.running === false,
     // "Divide" is offered only where this app's goal loop runs the Goal (Science and another room's Goal answer goal_panel_shape_unavailable).
@@ -304,7 +227,7 @@ function applyPlanEdit(plan: LiveGoalPlan, edit: Exclude<GoalPanelEdit, { op: "a
 }
 
 /** Owner intent edit of the final goal: an owner message + the owner-amendment path → a goal revision. */
-function amendObjective(chatId: string, goalId: string, text: string, liveTurn: boolean, suggestionId?: string): "revised" | "amendment_pending" {
+function amendObjective(chatId: string, goalId: string, text: string, liveTurn: boolean): "revised" | "amendment_pending" {
   let revision = getChatGoalRevision(goalId);
   if (!revision) {
     // A Goal defined before it had a contract (chats:defineGoal during an ordinary turn) has a ledger row and no revision. The owner
@@ -327,7 +250,7 @@ function amendObjective(chatId: string, goalId: string, text: string, liveTurn: 
   const plan = readGoalPlan(goalId);
   if (plan) {
     recordGoalPlanDecision({ goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "owner_edit", payload: {
-      actor: "owner", op: suggestionId ? "accept_suggestion" : "amend_objective", ...(suggestionId ? { suggestionId, field: "objective" } : {}),
+      actor: "owner", op: "amend_objective",
       sourceMessageId: message.id, fromRevision: revision!.revision, toRevision: current?.revision ?? revision!.revision,
       outcome: applied.applied ? "revised" : `pending:${applied.reason}` } });
   }
@@ -354,26 +277,8 @@ export function editGoalPanel(rawRequest: unknown, deps: { activeChatIds: () => 
       notify(chatId, run!.id);
       return { ok: true, outcome, view: view() };
     }
-    if (edit!.op === "accept_suggestion" || edit!.op === "dismiss_suggestion") {
-      const suggestion = agiSuggestions(goalId).find((s) => s.id === (edit as { suggestionId: string }).suggestionId);
-      if (!suggestion) refuse("goal_panel_suggestion_not_found");
-      if (edit!.op === "accept_suggestion" && suggestion!.field === "objective") {
-        const outcome = amendObjective(chatId, goalId, suggestion!.text, liveTurn, suggestion!.id);
-        notify(chatId, run!.id);
-        return { ok: true, outcome, view: view() };
-      }
-      const plan = readGoalPlan(goalId);
-      if (!plan) refuse("goal_panel_no_plan");
-      getDb().transaction(() => {
-        const detail = edit!.op === "accept_suggestion"
-          ? applyPlanEdit(plan!, { op: "edit_node", nodeId: suggestion!.nodeId ?? "", ...(suggestion!.field === "intent" ? { intent: suggestion!.text } : { doneWhen: suggestion!.text }) }, at)
-          : {};
-        recordGoalPlanDecision({ goalId, revision: plan!.revision, planSeq: plan!.planSeq, kind: "owner_edit", createdAt: at,
-          payload: { actor: "owner", op: edit!.op, suggestionId: suggestion!.id, field: suggestion!.field, ...detail } });
-      })();
-      notify(chatId, run!.id);
-      return { ok: true, outcome: "applied", view: view() };
-    }
+    // Suggestions came from the removed AGI unblocker and are never listed now; a phone that still shows an old one gets a plain refusal.
+    if (edit!.op === "accept_suggestion" || edit!.op === "dismiss_suggestion") refuse("goal_panel_suggestion_not_found");
     const plan = readGoalPlan(goalId);
     if (!plan) refuse("goal_panel_no_plan");
     const revision = getChatGoalRevision(goalId);
@@ -381,8 +286,10 @@ export function editGoalPanel(rawRequest: unknown, deps: { activeChatIds: () => 
       // The plan still belongs to the goal as it was before its last revision; the planner divides the revised goal before the
       // next run. Do not leave that to the next run alone: start it now (the panel, the phone and an agent all see the plan
       // being re-divided, and edits resume on the new plan as soon as it lands).
-      healGoalPanelPlan(chatId, deps.shape ? { shape: deps.shape } : {});
-      refuse("goal_panel_plan_behind_revision");
+      const started = healGoalPanelPlan(chatId, deps.shape ? { shape: deps.shape } : {});
+      // Nothing was started and nothing is dividing (a goal the owner paused, one another screen runs, a revision the planner already tried): no re-division will come by itself.
+      // The refusal then names the way out - "Divide" (requestGoalPanelShape) - instead of "wait" (desktop 3, Workspace B-8).
+      refuse(!started && !shaping.get(goalId)?.running ? "goal_panel_plan_behind_revision_shape_needed" : "goal_panel_plan_behind_revision");
     }
     // A caller that names no plan (an agent calling the panel without a view) edits the latest plan by node id; a caller that
     // names one (the panel, the phone) is held to it, because node ids of an older plan can mean other nodes in a newer one.
@@ -426,16 +333,24 @@ function startGoalShape(chatId: string, goalId: string, run: NonNullable<ReturnT
 }): Promise<void> {
   const before = readGoalPlan(goalId);
   shaping.set(goalId, { running: true, failed: false });
-  notify(chatId, run.id);
-  const objective = getChatGoalRevision(goalId)?.objective ?? run.objective;
-  const runtimeSelection = (() => { try { return goalRuntimeSelection(run.id); } catch { return undefined; } })();
-  return (opts.shape ?? ensureGoalShapeBeforeTurn)({ goalId, objective, ...(opts.ownerRequested ? { ownerRequested: true } : {}),
-    ...(runtimeSelection ? { runtimeSelection } : {}) })
-    .then((plan) => {
-      const shaped = Boolean(plan && !plan.fallback && (!before || plan.planSeq !== before.planSeq || plan.revision !== before.revision));
-      shaping.set(goalId, { running: false, failed: !shaped });
-    }, () => { shaping.set(goalId, { running: false, failed: true }); })
-    .finally(() => notify(chatId, run.id));
+  // Everything after the mark is inside one guard: a read that throws here (the revision table, the notice) must not leave `running` set for ever,
+  // which locked the Divide button and turned every later request into a silent "ok" until the app restarted (desktop 3, B-9).
+  try {
+    notify(chatId, run.id);
+    const objective = getChatGoalRevision(goalId)?.objective ?? run.objective;
+    const runtimeSelection = (() => { try { return goalRuntimeSelection(run.id); } catch { return undefined; } })();
+    return (opts.shape ?? ensureGoalShapeBeforeTurn)({ goalId, objective, ...(opts.ownerRequested ? { ownerRequested: true } : {}),
+      ...(runtimeSelection ? { runtimeSelection } : {}) })
+      .then((plan) => {
+        const shaped = Boolean(plan && !plan.fallback && (!before || plan.planSeq !== before.planSeq || plan.revision !== before.revision));
+        shaping.set(goalId, { running: false, failed: !shaped });
+      }, () => { shaping.set(goalId, { running: false, failed: true }); })
+      .finally(() => notify(chatId, run.id));
+  } catch {
+    shaping.set(goalId, { running: false, failed: true });
+    try { notify(chatId, run.id); } catch { /* display only */ }
+    return Promise.resolve();
+  }
 }
 
 /** "나누기": ask the planner to shape this goal into a tree. Returns at once; the view refreshes when it lands. */

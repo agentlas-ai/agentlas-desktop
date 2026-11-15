@@ -3,8 +3,9 @@ import { assertAssignedTargetMemoryBoundary, type AssignedTargetMemoryBoundary }
 // selector. They never curate, grant an audience, read project files or call a brain.
 import { createHash } from "node:crypto";
 import { getMemoryDb, getMemoryStoreInfo } from "./database";
-import { listMemoryForContext } from "./store";
+import { listMemoryForContext, listSubStoreSurfaceCandidates } from "./store";
 import { nativeTextsFor } from "./native-text";
+import { withoutNullK1 } from "./store-columns";
 import { selectCanonicalMemoryForSurface } from "./context";
 import { looksSecret } from "../../shared/secret-patterns";
 import { memoryActorIds, sameMemoryActor } from "../../shared/memory-actor-family";
@@ -119,6 +120,8 @@ export function readSurfaceMemory(input:{receiver:SurfaceMemoryReceiver;visibili
     FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id
     WHERE m.content<>'' AND m.superseded_at IS NULL AND (m.scope='agent_repo' AND COALESCE(NULLIF(b.actor_id,''),m.agent_id) IN (${actors.map(()=>"?").join(",")})
       ${receiver.kind==="agent-app"?"OR m.scope='project' AND m.project_id=?":""})`).all(...actors,...(receiver.kind==="agent-app"?[receiver.projectId]:[])) as SourcePolicy[];
+  // Layout switch on: the agent's and the project's lines that live in their own stores are candidates too (empty while the switch is off).
+  candidates.push(...listSubStoreSurfaceCandidates(receiver.actorId,receiver.kind==="agent-app"?receiver.projectId:null).filter(row=>!candidates.some(known=>known.id===row.id)));
   const ids=candidates.filter(row=>allows(row,receiver,domain,owner)).map(row=>row.id);
   assert();
   const entries=listMemoryForContext({agentId:receiver.actorId,projectId:receiver.kind==="agent-app"?receiver.projectId:null,projectPath:null,chatId:null,visibilityDomain:domain},-1,ids)
@@ -129,8 +132,8 @@ export function readSurfaceMemory(input:{receiver:SurfaceMemoryReceiver;visibili
   // selected App payload DTOs in that same order; retain original audit rows.
   const selected=receiver.kind==="agent-app"?selectCanonicalMemoryForSurface(ranked.sourceIds.map(id=>({
     ...entries.find(entry=>entry.id===id)!,requestContext:null})),{chatId:input.chatId,maxApproxTokens:input.maxApproxTokens}):ranked;
-  const hash=()=>createHash("sha256").update(JSON.stringify([selected.sourceIds.map(id=>db.prepare(`SELECT m.*,b.owner_namespace,b.actor_id,b.applicability_json,b.origin_refs_json,b.revision AS binding_revision
-    FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE m.id=?`).get(id)),[...nativeTextsFor("memory_entry",selected.sourceIds)]])).digest("hex");
+  const hash=()=>createHash("sha256").update(JSON.stringify([selected.sourceIds.map(id=>{const row=db.prepare(`SELECT m.*,b.owner_namespace,b.actor_id,b.applicability_json,b.origin_refs_json,b.revision AS binding_revision
+    FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id WHERE m.id=?`).get(id);return row ? withoutNullK1(row) : row;}),[...nativeTextsFor("memory_entry",selected.sourceIds)]])).digest("hex");
   assert();const digest=hash();assert();
   return held({text:selected.text,sourceIds:Object.freeze([...selected.sourceIds]),sourceKey:key(digest),assertCurrent(){assert();if(hash()!==digest)fail();assert();}});
 }

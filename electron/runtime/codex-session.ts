@@ -247,8 +247,8 @@ export async function openCodexResidentSession(opts: {
         },
         { timeoutMs },
       );
-      // The protocol's handshake is initialize → response → `initialized` (JSON-RPC notification, no reply). The Alive
-      // session already sends it (codex-alive-session.ts); a server that waits for it must not see this session skip it.
+      // The protocol's handshake is initialize → response → `initialized` (JSON-RPC notification, no reply). The removed Alive
+      // session sent it too; a server that waits for it must not see this session skip it.
       session.conn.notify(CODEX_CLIENT_NOTIFICATIONS[0], {});
     } catch (err) {
       /*
@@ -1041,7 +1041,27 @@ export interface CodexApprovalContext {
   agentId?: string;
   permission: RuntimeToolPermissionAsk["permission"];
   unattended?: boolean;
+  /** Ids of this turn's fileChange items whose structured `changes` hold a delete (noteCodexFileChangeDeletes): the patch approval carries no list of its own. */
+  fileChangeDeletes?: ReadonlySet<string>;
 }
+
+const CODEX_FILE_CHANGE_ITEM_TYPES = ["fileChange", "FileChange", "file_change"];
+
+/**
+ * `item/started` for a patch carries `changes: [{ path, kind: { type: "add" | "update" | "delete" } }]`, but its approval request (`item/fileChange/requestApproval`) only names the item.
+ * The delete mark is the executor's own, so it is remembered by item id (bounded) and read when the approval arrives.
+ */
+export function noteCodexFileChangeDeletes(into: Set<string>, item: any): void {
+  if (!item || typeof item.id !== "string" || !CODEX_FILE_CHANGE_ITEM_TYPES.includes(String(item.type ?? ""))) return;
+  const changes = Array.isArray(item.changes) ? item.changes : [];
+  if (!changes.some((change: any) => (change?.kind?.type ?? change?.kind) === "delete")) return;
+  into.add(item.id);
+  while (into.size > 256) { const oldest = into.values().next(); if (oldest.done) break; into.delete(oldest.value); }
+}
+
+/** A legacy exec command arrives as argv; a shell reads one line, so a word with a space or a quote is quoted the way a shell would need. */
+const shellLineOfArgv = (argv: unknown[]): string =>
+  argv.map((word) => { const w = String(word); return /^[A-Za-z0-9_@%+=:,./-]+$/.test(w) ? w : `'${w.replace(/'/g, `'\\''`)}'`; }).join(" ");
 
 /** 이 요청이 승인 대상인가(우리가 답을 아는 6종). */
 export function isCodexApprovalRequest(method: string): boolean {
@@ -1075,6 +1095,8 @@ export function codexApprovalAsk(
   let kind = "other";
   let tool = method;
   let detail: string | undefined;
+  /** The whole command line a shell approval stands for (the approval rule reads what it runs; `detail` is a 500-character display). */
+  let command: string | undefined;
   /**
    * 이 요청이 **바깥을 바꾸거나 경계를 넓히는가**. 대개는 kind 로 정해지지만 두 곳은 다르다:
    *  · 권한 확대(permissions)는 읽기만 넓혀도 샌드박스 경계를 넓히는 일이라 항상 mutating 이다
@@ -1089,15 +1111,18 @@ export function codexApprovalAsk(
       kind = "execute";
       tool = "bash";
       detail = text(params?.command) ?? text(params?.reason);
+      if (typeof params?.command === "string") command = params.command.slice(0, 20_000);
       break;
     case "execCommandApproval":
       // 레거시 표면 — `command` 가 토큰 배열이다(실측 스키마: items:string).
       kind = "execute";
       tool = "bash";
       detail = text(params?.command) ?? text(params?.reason);
+      if (Array.isArray(params?.command)) command = shellLineOfArgv(params.command).slice(0, 20_000);
       break;
     case "item/fileChange/requestApproval":
-      kind = "edit";
+      // A patch that deletes a file is a delete (the executor's own mark, remembered from the item): the same kind an ACP delete carries.
+      kind = typeof params?.itemId === "string" && ctx.fileChangeDeletes?.has(params.itemId) ? "delete" : "edit";
       tool = "apply_patch";
       detail = text(params?.grantRoot) ?? text(params?.reason);
       break;
@@ -1105,6 +1130,7 @@ export function codexApprovalAsk(
       kind = "edit";
       tool = "apply_patch";
       const changes = params?.fileChanges;
+      if (changes && typeof changes === "object" && Object.values(changes as Record<string, any>).some((change) => change?.type === "delete")) kind = "delete";
       const paths = changes && typeof changes === "object" && !Array.isArray(changes)
         ? Object.keys(changes as Record<string, unknown>)
         : Array.isArray(changes)
@@ -1145,6 +1171,7 @@ export function codexApprovalAsk(
     tool,
     kind,
     ...(detail ? { detail } : {}),
+    ...(command ? { command } : {}),
     ...(ctx.cwd ? { cwd: ctx.cwd } : {}),
     permission: ctx.permission,
     ...(ctx.planMode ? { planMode: true as const } : {}),

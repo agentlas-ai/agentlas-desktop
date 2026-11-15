@@ -1,3 +1,5 @@
+import { defaultRoleForChat } from "../runtime/agent-default-role";
+import { noteTurnRuntime } from "../runtime/turn-runtime-note";
 import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
 import { browserSignInNeeded, ownerAnswersSignIn } from "../../shared/browser-sign-in-needed";
 import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
@@ -10,7 +12,7 @@ import { toolApprovalSessionKey } from "../runtime/tool-approval";
 import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { fixedPurposePrompt, purposePrompt } from "../runtime/purpose-prompts";
 import { captureNativeOsCuratorRun } from "../runtime/os-memory-curator-binding";
-import { placeTurnContextForRuntime } from "../runtime/serving-prefix";
+import { placeTurnContextForRuntime, splitSystemChannelParts } from "../runtime/serving-prefix";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { withOneHistoryNativeInvocation } from "../one/personal-integrations-runtime";
 import { invocationProvesNoOutsideEffect, withAdapterEffectObserver } from "../invocation/adapter-effect-context";
@@ -68,6 +70,8 @@ import { contextCapacityFailureReason, exhaustedPassFailureVerdict, modelContext
 import type { GoalPassStop } from "../long-run/goal-pass-stop";
 import { parseHubReleasePin, assertHubReleasePin } from "../../shared/hub-release-pin";
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
+import { agentUsability, gateInvocationTargets, usabilityEnforced, usabilityRefusalOf, usabilityRegisterField } from "../agents/usability";
+import { passesGate, usabilitySentence, type AgentUsability } from "../../shared/agent-usability";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { createToolObservationNovelty } from "./tool-observation-novelty";
@@ -83,8 +87,6 @@ import { agentContextHostBinding, agentContextUnsettledTurn, markAgentContextCon
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
 import { detectRuntimes } from "../runtime/detect";
 import { ONE_AGENT_ID } from "../runtime/agent-residency";
-// Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
-import { superviseStormbreaker, type StormbreakerHandle } from "../hephaestus/stormbreaker-supervisor";
 import { isStormbreakerAutoEnabled } from "../hephaestus/supervisor";
 import { careerGraphIngest, hepCall, routeOnly, stormbreakerHarness } from "../hephaestus/commands";
 import { normalizeRecommendation } from "../hephaestus/recommendation";
@@ -97,6 +99,8 @@ import {
   CONTINUOUS_MODE_MAX_PASSES,
   STORMBREAKER_MAX_IDENTICAL_PASSES,
   idleGoalPassStep,
+  ledgerDrivenPassStep,
+  GOAL_LEDGER_DRIVEN_PASS_LIMIT,
   finiteGoalContinuationIsParked,
   STORMBREAKER_LOOP_PROTOCOL,
   STORMBREAKER_MAX_EXECUTION_PASSES,
@@ -121,7 +125,7 @@ import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
 import { goalPassBudgetStep, GOAL_PASS_WALL_CLOCK_BUDGET_MS } from "../long-run/goal-pass-budget";
 import { captureNativeGoalEpisode, type NativeGoalEpisodeBinding } from "../long-run/native-goal-pass";
-import { agentPromptFolder, buildEffectiveAgentSystemPrompt } from "../agents/files";
+import { agentFolderUnavailable, agentPromptFolder, buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { acquireAgentWorkspaceRunLease, releaseAgentWorkspaceRunLease, getAgentWorkspace, readAgentWorkspaceFile, waitForAgentWorkspaceLock } from "../agents/workspace-service";
 import {
   autoRouteStatus,
@@ -135,8 +139,8 @@ import { ROUTER_AGENT_ID, ROUTER_SYSTEM_AGENT } from "../system-agents/router";
 import {
   appendChatMessage,
   appendInvocationAssistantResult,
+  recordAnswerStart,
   autoTitleFromFirstMessage,
-  clearChatGoalBindingByGoalId,
   getChat,
   getChatGoalId,
   getChatWorkingFolder,
@@ -149,6 +153,7 @@ import {
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
 import { getChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot } from "../store/chat-goals";
+import { closeGoal } from "../store/goal-close";
 import { goalDeadlineAt } from "../long-run/goal-deadline";
 import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
 import { getDb } from "../store/db";
@@ -239,31 +244,35 @@ import {
   recordDesktopWorkforceTurn,
   type DesktopWorkforceRuntimePlan,
 } from "./workforce-goal-continuity";
-import { runSwarmInvocation } from "./swarm-run";
 import { canReadActivatedFolderMemory, recordFolderVisit } from "../architecture/activation";
 import { ensureDesktopProjectBootstrap } from "../architecture/project-bootstrap";
-import { buildMemoryContext } from "../memory/context";
+import { forgetTurnMemoryExclusion, ownerGroundedEvents, turnRoomContent } from "../one/turn-memory-exclusion";
+import { isRoomMemberCwd } from "../runtime/room-member-cwd";
+import { buildMemoryContext, ownerProfilePiece } from "../memory/context";
+import { ownerSpokeOfTurn, ownerWordsOfTurn } from "../invocation/owner-spoke";
 import { orderPromptParts, registerDeclaredPromptModule, type DeclaredPromptPart, type PromptChangeTrigger, type PromptOrderingMetadata, type PromptStability } from "../runtime/prompt-order";
 import { renderControllerSurfaceMemory, bindSurfaceMemoryRequest, bindAssignedTargetMemoryRequest } from "../memory/surface-recall";
 import { scienceAliveMemory, scienceAliveMemoryGuard } from "../memory/science-alive-memory";
 import { bindAppMemoryRequest, appRunMemory, appMemoryRunGuard } from "../memory/agent-app-memory";
 import { invocationMemoryScope, captureAssignedTargetMemoryBoundary } from "../memory/invocation-scope";
+import { findAgentHome, readsUnion, storeAgentId } from "../memory/stores";
+import { getMemoryDb, getMemoryStoreInfo } from "../memory/database";
+import { bindMemoryEnv } from "../runtime/memory-env";
+import { memoryClassificationRules, workspaceRulesOn } from "../memory/classification";
+import { isPersonalAgentConversation, loadsWorkspaceRules, readsPersonal, type WorkspaceTurnFacts } from "../workspace-rules/scope";
+import { buildWorkspaceRulesPiece } from "../workspace-rules/piece";
 import { queryWorkingFolderOntologyContext } from "../ontology/project-runtime";
 import {
   curateReply,
   recordTerminalMemoryTurn,
   stripReplyMemoryEventsReadOnly,
+  type CurationContext,
 } from "../memory/curator";
 import { stripAllMemoryEventBlocks } from "../memory/events";
-import {
-  runSemanticMemoryReview,
-} from "../memory/semantic-curator";
-import { isAutomationLedgerChat } from "../memory/automation-surface";
 import { harvestCompactionSummaries } from "../memory/compaction-harvest";
 import { parseMemoryEvents, type RawMemoryEvent } from "../memory/events";
 import { hasQueuedOwnerSteer } from "../store/invocation-steers";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
-import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { roomMemberContext } from "../one/room-chat";
 import { automationProtocolFor, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, SURFACE_PROTOCOL, parseSurfaces } from "../surface-emitter";
@@ -311,7 +320,8 @@ import { surfacePackScreen } from "../store/surface-conversation-schema";
 import { AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID } from "../workspace-preview/mcp-server";
 import { AGENTLAS_UI_CATALOG_ID } from "../ui-schema/mcp-server";
 import { AGENTLAS_TURN_CATALOG_ID } from "../turn-tools/mcp-server";
-import { takeTurnAsks, takeTurnMemoryNotes, turnNotesKey } from "../turn-tools/notes";
+import { takeTurnAsks, turnNotesKey } from "../turn-tools/notes";
+import { endTurnMemoryFacts, registerTurnMemoryFacts, toolWritesOf, turnMemoryCalls } from "../turn-tools/memory-facts";
 import { applyGoalSignalsToText, takeGoalSignals, typedGoalDeadlineClause, typedGoalLifecycleProtocol } from "../turn-tools/goal-signals";
 import { turnToolReplacesText } from "../turn-tools/attach";
 import { appendTurnAsks } from "../turn-tools/ask";
@@ -360,6 +370,7 @@ import {
   UNATTENDED_NO_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
+import { createAnswerTracker, locateAnswerStart } from "../runtime/final-answer-turns";
 import { markRefusedBeforeDispatch, outwardFailureCode, refusalCode, unsettledTurnCauseFailure, unsettledTurnError, validatedRunnerNativeControlState } from "../runtime/runner";
 import {
   createToolOutcomeTally, decideTurnSettlement, EMPTY_AFTER_UNUSABLE_TOOLS_CODE, EMPTY_REPLY_MAX_RETRIES, endedWithoutAnswerAfterUnusableTools,
@@ -374,6 +385,7 @@ import {
   goalRuntimePinDrift,
   nextRunnableRuntime,
   rolePriorityRuntimes,
+  ownOrderFallbackRuntimes,
   routeReadStepRuntime,
   runtimeFailureBlocksReplay,
   runtimeDisplayName,
@@ -382,6 +394,7 @@ import {
 } from "../runtime/selection";
 import { ONE_FRONT_OWN_LANE_NAMES, isOneFrontSelection, oneFrontFallbackCause, oneFrontFallbackCopy } from "../../shared/one-front";
 import { clearOneFrontFallback, noteOneFrontFallback } from "../one/front";
+import { isCompanionFrontOwnLane } from "../one/companion-front-inbox";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import { extractBuildInterviewQuestions } from "../../shared/build-turn";
@@ -1699,6 +1712,46 @@ function emitHostNotice(
 }
 
 /**
+ * Agentlas 2.0 D6: may this member of a project's agent pool be staffed and listed to the model. A Hub/Cloud member is usable only when the same agent is registered
+ * here (a local one always is); the pool line the model reads and the staffing both ask this, so the model is never offered a "call handle" for an agent that was not registered.
+ * Off the 2.0 switch every member is usable and the pool is exactly as it was.
+ */
+function projectPoolMemberUsable(member: ProjectAgentPoolMember): boolean {
+  if (!usabilityEnforced() || member.source === "local") return true;
+  if (member.agentId !== null && passesGate(agentUsability({ agentId: member.agentId }, { enforce: true }))) return true;
+  return passesGate(agentUsability({ slug: member.targetId, source: member.source === "hub" ? "hub" : "cloud" }, { enforce: true }));
+}
+
+/** The unregistered Hub/Cloud specs of an automatic staffing, dropped (switch on only). Throws `needs_registration` when that leaves nothing to run. */
+function dropUnregisteredRemoteSpecs(specs: BorrowedAgentSpec[], locale: "ko" | "en", sink: (event: McpInvocationEvent) => void): BorrowedAgentSpec[] {
+  if (!usabilityEnforced()) return specs;
+  const remote = (spec: BorrowedAgentSpec): "hub" | "cloud" | null => {
+    const source = preparedWorkforceSpecSource(spec) ?? spec.source;
+    return source === "hub" || source === "cloud" ? source : null;
+  };
+  const kept: BorrowedAgentSpec[] = [];
+  const refused: Array<Extract<AgentUsability, { usable: false }>> = [];
+  for (const spec of specs) {
+    const source = remote(spec);
+    if (!source) { kept.push(spec); continue; }
+    const result = agentUsability({ slug: spec.slug, source }, { enforce: true });
+    if (passesGate(result)) kept.push(spec); else refused.push(result as Extract<AgentUsability, { usable: false }>);
+  }
+  if (!refused.length) return specs;
+  const refusal = usabilityRefusalOf(refused, locale);
+  const names = refusal.slugs.join(", ");
+  emitHostNotice(sink, {
+    level: "info",
+    code: refusal.code,
+    message: `${refusal.message} (${names})`,
+    i18n: { ko: `${usabilitySentence(refused[0], "ko")} (${names})`, en: `${usabilitySentence(refused[0], "en")} (${names})` },
+    details: JSON.stringify({ register: usabilityRegisterField(refusal) }),
+  });
+  if (!kept.length) throw Object.assign(new Error(`${refusal.message} (${names})`), { code: refusal.code, register: usabilityRegisterField(refusal) });
+  return kept;
+}
+
+/**
  * 프로젝트의 공개 Hub 에이전트 자동 사용 동의 게이트(모델의 자발적 협조에
  * 기대는 계약은 배선이 아니다). 프롬프트에 주입되는 정책 문장과 별개로, **자동**
  * 편성 경로가 실행 직전에 통과해야 하는 기계 관문이다 — 사용자가 명시적으로 고른
@@ -1714,7 +1767,10 @@ async function gateHubSpecsByProjectRentPolicy(input: {
   locale: "ko" | "en";
   sink: (event: McpInvocationEvent) => void;
 }): Promise<BorrowedAgentSpec[]> {
-  const { specs, projectId, userPrompt, locale, sink } = input;
+  const { projectId, userPrompt, locale, sink } = input;
+  // Agentlas 2.0 D6: the automatic staffing may SHOW a Hub/Cloud candidate but only runs an agent that is registered here. An unregistered candidate is left out
+  // and named in a notice that leads to "register"; when nothing registered is left the turn ends with the closed code `needs_registration` (never a run on a borrowed bundle).
+  const specs = dropUnregisteredRemoteSpecs(input.specs, locale, sink);
   const needsHubConsent = (spec: BorrowedAgentSpec): boolean => {
     const preparedSource = preparedWorkforceSpecSource(spec);
     return preparedSource ? preparedSource === "hub" : spec.source === "hub";
@@ -1851,6 +1907,8 @@ export interface McpInvocationResult {
   browserLoginWait?: BrowserLoginWait;
   finalText?: string;
   tokens?: number;
+  /** Codex: the last pass's agentMessages by stated phase (RunnerResult.agentMessages), copied to the run's invoke_result row. */
+  agentMessages?: { commentary: number; partialAnswer: number; finalAnswer: number; unmarked: number };
   /** Sum of measured invocation attempts, including planning and workers; absent if any attempt is unknown. */
   observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
   /** Host-created structured quota marker; never inferred from error prose. */
@@ -2042,7 +2100,6 @@ async function resolveOneTaskSurfaceRecipe(
       labels: ONE_TASK_SURFACE_RECIPE_LABELS,
       input: prompt,
       guidance: ONE_TASK_SURFACE_RECIPE_GUIDANCE,
-      timeoutMs: 8_000,
       signal,
     });
     if (verdict.source !== "llm" || verdict.verdict === null) return null;
@@ -2260,6 +2317,20 @@ async function runMcpInvocationInContext(
   const workspacePins = new Map<string, { revisionId: string; treeDigest: string }>();
   // The agent's files are taken without waiting (a file lock): while the owner's editor or a learning change holds them for a moment, a run
   // that starts on the agent waits for them here, asynchronously and for a bounded time, instead of failing with update_busy.
+  // The agent's folder cannot be read now (a drive that left, a folder moved or deleted;): the turn runs from the canonical prompt kept in the database - the
+  // text the folder held when it was last saved - and takes no lease, there being no files to pin (taking it would end the turn with source_missing). Memory and chats
+  // are untouched; one status line says why. Every other agent goes through `pinWorkspace` exactly as before.
+  const pinWorkspaceOrSavedPrompt = (candidate: InstalledAgent): void => {
+    if (!workspaceLeases.has(candidate.id) && !isCallOnlyHubAgent(candidate) && agentFolderUnavailable(candidate.id)) {
+      const saved = getDb().prepare("SELECT builtin, system_prompt FROM installed_agents WHERE id = ?").get(candidate.id) as { builtin: number; system_prompt: string } | undefined;
+      if (saved && !saved.builtin) {
+        candidate.systemPrompt = saved.system_prompt;
+        sink({ kind: "tool-use", status: pickLocale(req) === "ko" ? "에이전트 폴더를 찾을 수 없어 저장된 프롬프트로 실행해요. 폴더를 다시 연결하면 파일 수정도 돌아와요" : "The agent folder is not available; running from the saved prompt. Reconnect the folder to edit its files again" });
+        return;
+      }
+    }
+    pinWorkspace(candidate);
+  };
   const pinWorkspaceWaiting = async (candidate: InstalledAgent): Promise<void> => {
     try {
       const row = getDb().prepare("SELECT builtin FROM installed_agents WHERE id = ?").get(candidate.id) as { builtin: number } | undefined;
@@ -2268,7 +2339,7 @@ async function runMcpInvocationInContext(
         sink({ kind: "tool-use", status: pickLocale(req) === "ko" ? "에이전트 파일을 다른 작업이 쓰고 있어 잠시 기다리는 중이에요" : "Another change is using this agent's files; waiting a moment" });
       });
     } catch { /* the pin below reports whatever is really wrong */ }
-    pinWorkspace(candidate);
+    pinWorkspaceOrSavedPrompt(candidate);
   };
   const pinWorkspace = (candidate: InstalledAgent) => {
     const row = getDb().prepare("SELECT builtin, system_prompt FROM installed_agents WHERE id = ?").get(candidate.id) as { builtin: number; system_prompt: string } | undefined;
@@ -2714,6 +2785,11 @@ async function runMcpInvocationInContext(
   const ownHostPrompt = req.promptOrigin === "system" && req.runId && hostNoticePurpose
     ? hostPromptMessageForRun(chat.id, req.runId, hostNoticePurpose) : null;
   if (ownHostPrompt) excludedSupervisorInputs.add(ownHostPrompt);
+  // A host-written prompt sent again after a restart (a peer message's turn, a teammate's brief: the earlier-attempt line is on the request) is
+  // already in the conversation's last rows as the system row the cut turn wrote: that row is the prompt, not history, and it is not written twice.
+  const repeatedHostPrompt = !ownHostPrompt && req.promptOrigin === "system" && hasEarlierAttempt(req) && typeof req.userPrompt === "string"
+    ? listChatMessages(chat.id, 20).filter((message) => message.role === "system" && message.text === req.userPrompt).at(-1)?.id ?? null : null;
+  if (repeatedHostPrompt) excludedSupervisorInputs.add(repeatedHostPrompt);
   // An ingress that opens a new conversation commits the person's first words itself before the run (the phone's first One turn,
   // mobile-bridge one.invoke.start): it is this run's message, not history, and it is not written a second time. Before, the owner's
   // words showed twice and the model read its own prompt as history (a real installation 8 such conversations since August).
@@ -2736,6 +2812,7 @@ async function runMcpInvocationInContext(
     // A host recovery turn answers the owner's message that is already in the transcript (invocation/host-recovery.ts): no second copy.
     ?? hostRecoveryOf(req)?.userMessageId ?? ingressFirstMessage;
   let userMessagePersisted = persistedUserMessageId !== null || ownHostPrompt !== null;
+  if (repeatedHostPrompt !== null) userMessagePersisted = true;
   // A product-authored continuation is not the person's turn. It stays durable
   // so the next turn keeps the context, but it is written as a system turn:
   // replaying the conversation must never attribute our wording to the user,
@@ -2840,6 +2917,18 @@ async function runMcpInvocationInContext(
     sink({ kind: "error", error: { code: "agent_archived", message: tStatus(locale, "errAgentArchived"), turnDelivery: "not-dispatched" } }); // before any provider send: a graph step reads "did not run", not an unknown effect
     return earlyResult();
   }
+  // Agentlas 2.0 D6: an agent is used only once it is registered here with its folder. Every agent this turn names - the chat's own, an explicit target,
+  // a Hub/Cloud target, a borrowed slug - is asked once (agents/usability.ts); a refusal names the way forward (register, reconnect, restore) and nothing is sent.
+  // Off the 2.0 switch this is a no-op. A Hub/Cloud target whose slug is registered here and usable runs as that local agent.
+  {
+    const usabilityGate = gateInvocationTargets({ chatAgentId: chat.agentId, taskForceTargets: req.taskForceTargets, borrowAgents: req.borrowAgents }, locale === "ko" ? "ko" : "en");
+    if (usabilityGate.refusal) {
+      const { refusal } = usabilityGate;
+      sink({ kind: "error", error: { code: refusal.code, message: refusal.slugs.length && refusal.next === "register" ? `${refusal.message} (${refusal.slugs.join(", ")})` : refusal.message, turnDelivery: "not-dispatched", register: usabilityRegisterField(refusal) } });
+      return earlyResult();
+    }
+    if (usabilityGate.taskForceTargets !== req.taskForceTargets) req = { ...req, taskForceTargets: usabilityGate.taskForceTargets ? [...usabilityGate.taskForceTargets] : undefined };
+  }
   let agent = getAgentById(chat.agentId);
   if (!agent) {
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
@@ -2915,7 +3004,7 @@ async function runMcpInvocationInContext(
     }
   }
   const effectivePromptFor = (candidate: InstalledAgent): string => {
-    pinWorkspace(candidate);
+    pinWorkspaceOrSavedPrompt(candidate);
     if (!oneParticipantEffectivePrompts) {
       return buildEffectiveAgentSystemPrompt(candidate.id, candidate.systemPrompt);
     }
@@ -3143,7 +3232,7 @@ async function runMcpInvocationInContext(
   // Credit fallback is admitted only from a current authenticated wallet.
   // Warm it on actual subscription exhaustion, before role-pool selection.
   if (runtimes.some((runtime) => peekProviderQuotaExhausted(runtime.kind, Date.now(), runtime.model ?? undefined))) {
-    await getBillingCredits();
+    await getBillingCredits({ force: true });
     throwIfInvocationAborted(signal, locale);
   }
   // An authoritative pin may name a backend, source or ACP seat missing from a cached inventory that still has other
@@ -3276,7 +3365,13 @@ async function runMcpInvocationInContext(
       if (targets.length === 0) {
         throw new Error("Hephaestus Network returned no executable exact targets.");
       }
-      req = { ...req, taskForceTargets: targets, borrowAgents: undefined };
+      // Agentlas 2.0 D6: the network's picks are shown, but only registered agents run (the same gate as the turn's own targets; a registered slug becomes the local agent).
+      const networkGate = gateInvocationTargets({ chatAgentId: null, taskForceTargets: targets }, locale === "ko" ? "ko" : "en");
+      if (networkGate.refusal) {
+        sink({ kind: "error", error: { code: networkGate.refusal.code, message: `${networkGate.refusal.message} (${networkGate.refusal.slugs.join(", ")})`, turnDelivery: "not-dispatched", register: usabilityRegisterField(networkGate.refusal) } });
+        return earlyResult();
+      }
+      req = { ...req, taskForceTargets: networkGate.taskForceTargets ? [...networkGate.taskForceTargets] : targets, borrowAgents: undefined };
       sink({
         kind: "tool-use",
         status: locale === "ko"
@@ -3355,12 +3450,21 @@ async function runMcpInvocationInContext(
     runtimes = await detectRuntimes(true);
     throwIfInvocationAborted(signal, locale);
   }
+  // Only a locally verified, currently executing Companion front command can
+  // select this lane. The exhausted serving runtime must not reappear in any
+  // of this invocation's normal orchestrator fallback candidates.
+  const companionFrontTurn = req.oneMode === true && isCompanionFrontOwnLane(getDb(),req.runId,req.chatId);
+  if (companionFrontTurn) {
+    runtimes = runtimes.filter(runtime => runtime.kind !== "agentlas");
+  }
   const runtimeResolution = selectInvocationRuntime(runtimes, runtimeTargets, {
     pin: req.runtimeSelection,
     // The room chip has the authority the owner's own turn gives it.
     pinIsAuthoritative:
       directUserRuntimePinRequested || Boolean(roomChipSelection) || isUnattendedExecution(executionContext) || req.oneMode === true || automationRuntimePinned || scienceRuntimePinned || aliveRuntimePinned || continuationRuntimePinned,
     agentAppMode: req.agentAppMode === true,
+    // An ordinary agent's one-to-one chat with nothing chosen for the agent follows the Worker order; every other chat keeps the Orchestrator's.
+    unsetRole: defaultRoleForChat(req.chatId),
   });
   /*
    * The light front's own lane (shared/one-front.ts). A personal-agent turn that carries the front selection and cannot
@@ -3602,6 +3706,8 @@ async function runMcpInvocationInContext(
     }
   }
   bindInvocationJudgmentRuntime(confirmedRuntime);
+  // The session's own runtime, for the follow-up that titles the session after its first answer (chat/session-title.ts); read and dropped at settle.
+  noteTurnRuntime(req.runId, confirmedRuntime);
   const runtimeLabel = `${runtimeDisplayName(confirmedRuntime.kind)}${confirmedRuntime.model ? ` · ${confirmedRuntime.model}` : ""}`;
   console.info(
     `[runtime-selection] run=${req.runId ?? "-"} node=${executionContext?.nodeId ?? "root"} `
@@ -3771,7 +3877,9 @@ async function runMcpInvocationInContext(
   const roomMemberTurn = Boolean(req.oneMode && !req.agentAppMode && chat.id && roomMemberContext(chat.id));
   const stormbreakerEngaged = !workSessionMain && !workSessionChild && oneTeamAllowsStorm && !roomMemberTurn && !req.agentAppMode && !restrictedReadBoundary && !effectObservationRun && (
     chat.kind === "division" ||
-    chat.continuousMode === true ||
+    // The Goal chip (chats:setGoalMode) stores continuous_mode=1 beside the Goal it binds. Those turns keep the harness
+    // they always had until a real-model comparison decides whether it can go; the stored flag without a bound Goal turns nothing on.
+    (chat.continuousMode === true && Boolean(chat.goalId)) ||
     explicitStormbreakerRequest ||
     structuredStormbreakerRequest ||
     isStormbreakerAutoEnabled()
@@ -3787,20 +3895,11 @@ async function runMcpInvocationInContext(
     previousTurn,
     explicitTeamRequest: explicitStormbreakerRequest || structuredStormbreakerRequest,
   });
+  // Agentlas 2.0 D6: a Hub/Cloud member of the project's pool that is not registered here is shown in the project but never staffed or listed to the model as usable;
+  // a registered one is kept. Off the 2.0 switch the pool is exactly as it was.
   const projectRosterForTurn = invocationProjectId
-    ? (getProject(invocationProjectId)?.agentPool ?? [])
+    ? (getProject(invocationProjectId)?.agentPool ?? []).filter(projectPoolMemberUsable)
     : [];
-  const stormbreakerSwarm =
-    !workSessionMain &&
-    oneTeamAllowsStorm &&
-    !req.agentAppMode &&
-    !restrictedReadBoundary &&
-    chat.kind !== "division" &&
-    !chat.continuousMode &&
-    // 토글이 켜져 있어도 직전 턴이 가벼웠으면 올리지 않고, 사용자가 직접 요청했으면
-    // 언제나 올린다. "매번"이 아니라 "관측이 그렇게 말할 때"다.
-    (explicitStormbreakerRequest || structuredStormbreakerRequest || isStormbreakerAutoEnabled()) &&
-    turnEscalation.level === "team";
 
   // ── MCP 툴 브리지 ──────────────────────────────────────────
   // Claude Code/Codex 러너에는 요청/에이전트 문맥으로 필요한 MCP 플러그인을 자동 선택한 뒤
@@ -4027,6 +4126,11 @@ async function runMcpInvocationInContext(
       }
       let oneMemberToolPolicy: { autoSelectTools: boolean; fixedServerIds: string[] } | null = null;
       const oneRoomMemberRun = Boolean(req.oneMode && !req.agentAppMode && chat.id && roomMemberContext(chat.id));
+      // N7 carry-over (a): a plain conversation of a project that has another conversation carries the one tool message_send (anyone
+      // may write to anyone in the project). Read here, from the store; a conversation outside a project, alone in its project, a screen
+      // pack's, the personal agent's or a Hub-called agent's is offered nothing and its request is what it always was.
+      const peerMessageOffered = !req.agentAppMode && chat.kind === "user"
+        ? (await import("../harness/deliver-runtime")).peerMessageToolNames(chat.id).length > 0 : false;
       if (req.oneMode && !req.agentAppMode) {
         try {
           const row = getDb().prepare(
@@ -4045,7 +4149,12 @@ async function runMcpInvocationInContext(
       }
       // A plugin workflow the owner asked this conversation's next turn to carry from a button or menu (typed, Main-stored).
       const ownerRequestedWorkflows = await (await import("../plugins/owner-capability-request")).takeOwnerCapabilityRequests(chat.id, req.runId);
+      // DD: the connected apps of the server, one line each, for the personal agent's own conversation only (one/server-apps-host.ts prepareServerAppsTurn).
+      const serverAppsTurn = runtimeCanUseMcp && !req.agentAppMode && !planReadOnly && req.simulation !== true && req.runId
+        ? await (await import("../one/server-apps-host")).prepareServerAppsTurn({ chatId: chat.id, runId: req.runId, phoneOrigin: executionContext?.source === "mobile" }).catch(() => ({ candidates: [] }))
+        : { candidates: [] };
       const autoSelectInput = {
+        ...(serverAppsTurn.candidates.length ? { extraCandidates: serverAppsTurn.candidates } : {}),
         userPrompt: [effectiveUserPrompt, req.attachmentCapabilitySummary].filter(Boolean).join("\n\n"),
         systemPrompt: buildEffectiveAgentSystemPrompt(agent.id, agent.systemPrompt),
         runtimeKind: active.kind,
@@ -4108,6 +4217,7 @@ async function runMcpInvocationInContext(
         },
         ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
         ...(oneRoomMemberRun ? { roomMember: true as const } : {}),
+        ...(peerMessageOffered ? { peerMessage: true as const } : {}),
         // A One group room is a team by definition: One Team rides every turn (goal passes too).
         ...(chat.originSurface === "one" && chat.seatKind === "group" && !oneMemberToolPolicy ? { groupRoom: true as const } : {}),
         // One's own conversation (and a goal it owns) carries One Team the same way: it is the only place work is handed to a teammate
@@ -4123,6 +4233,15 @@ async function runMcpInvocationInContext(
         // conversation's previous run is attached now (never a Hub install).
         requestedPluginSlugs: readMidTurnPluginRequests(chat.id, req.runId),
         ...(ownerRequestedWorkflows.length ? { ownerRequestedWorkflows } : {}),
+        // A follow-up turn starts with the previous turn's tool verdict (auto-select.ts previousTurnNeeds). When its own judgment,
+        // settled behind it, names a host-channel tool the turn did not carry, that is counted here: ids only, no row for the owner
+        // and no model call. Read by ledger queries that measure the miss rate (about 1 in 464 follow-up turns, one ~150-byte row); kept as the
+        // run's other selection receipts are (plugin_route_selection, mcp_selection_undecided), which no retention sweep trims.
+        onLateHostChannelNeed: (toolIds: string[]): void => tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id,
+          kind: "mcp_selection_late_need", payload: { schemaVersion: 1, toolIds } }),
+        // An unattended run (an automation step, Site Studio, T-Rex, Alive, agent mail) always waits for its own tool judgment: the
+        // runs that share its chat are separate jobs (graph steps run in one chat), not follow-up turns of a conversation.
+        ...(isUnattendedExecution(executionContext) ? { unattendedRun: true as const } : {}),
       };
       mcpPrepStage = "tool-selection";
       // The run's own prompt name lists (plugins:, connectors:) follow the same menu as its tool selection (mcp-tools/chat-tool-menu.ts).
@@ -4242,7 +4361,7 @@ async function runMcpInvocationInContext(
       mcpAutoSelectionPrompt = buildMcpAutoSelectionPrompt(selectedContext, {
         toolMode: selectedContext.effectiveToolMode,
         hubMode: req.hubMode,
-        userPrompt: effectiveUserPrompt,
+        userPrompt: typeof req.oneUserAuthoredPrompt === "string" ? req.oneUserAuthoredPrompt : req.userPrompt,
       });
       if (selectedContext.routedPlugins?.length || selectedContext.selectionSource) {
         // The routing decision is a ledger fact for every turn, Work and One alike.
@@ -4476,6 +4595,18 @@ async function runMcpInvocationInContext(
       // Captured once: an opaque handle for this run, not something a second build should mint again.
       const osMemoryCuratorRun = captureNativeOsCuratorRun({ runId: req.runId!, model: confirmedRuntime.model ?? "",
         current: isMcpConfigCurrent, signal });
+      // DD (Agentlas 2.0): the personal agent's connected apps that live on the server join this turn's config as ONE host tool server beside Science's. Minted once
+      // for the turn (a build made again reuses it; the config's cleanup ends it, and so does every path below that ends without a config). The mint reads who is
+      // calling and gives nothing to any other conversation.
+      let serverAppsServer: import("../one/server-apps-host").ServerAppsHostToolServer | null = null;
+      if (runtimeCanUseMcp && !req.agentAppMode && !planReadOnly && req.simulation !== true && req.runId) {
+        try {
+          serverAppsServer = await (await import("../one/server-apps-host")).mintServerAppsHostToolServer({
+            chatId: chat.id, runId: req.runId, runtimeKind: active.kind, permission: normalizedPermission, unattended: isUnattendedExecution(executionContext),
+            firstListConnectorIds: new Set(selectedContext.serverAppIds ?? []), admissionCurrent: isMcpConfigCurrent });
+        } catch { serverAppsServer = null; }
+      }
+      const hostToolServers = [...(scienceToolServer ? [scienceToolServer] : []), ...(serverAppsServer ? [serverAppsServer] : [])];
       // A function, so a build that failed because the app's own host was not ready yet can be made again with a fresh sealed config
       // (retryMcpConfigBuild below); everything it reads is already decided.
       const buildConfig = () => buildMcpConfigFile({
@@ -4491,6 +4622,8 @@ async function runMcpInvocationInContext(
         ...(turnGoalToolsOffered ? { turnGoalTools: true as const } : {}),
         ...(turnAskToolOffered ? { turnAskTool: true as const } : {}),
         ...(scienceToolServer ? { hostToolServers: [scienceToolServer] } : {}),
+        // DD: the same key again when the personal agent also has connected apps of the server (a later key wins; Science and the server apps ride together).
+        ...(serverAppsServer ? { hostToolServers } : {}),
         // A Science formal loop's canonical wait reaches agentlas-turn goal_wait here, as it did through the old bridge.
         ...(scienceGoalWaitResolver ? { turnGoalWaitOnly: { resolveGoalWait: scienceGoalWaitResolver, alongside: true as const } } : {}),
         admissionCurrent: isMcpConfigCurrent,
@@ -4515,7 +4648,7 @@ async function runMcpInvocationInContext(
           // The model reads the UI schema through this read-only tool instead of a keyword-gated
           // prompt section. Every ordinary turn gets it; Site/Agent App runs keep their own closed set.
           ...(!req.agentAppMode ? [AGENTLAS_UI_CATALOG_ID] : []),
-          // Typed replacement of the Memory Events text block (memory_note); same turns that used to get the block.
+          // Typed replacement of the Memory Events text block (memory_ticket, K2b'); same turns that used to get the block.
           ...(!req.agentAppMode && !isAliveControllerRun ? [AGENTLAS_TURN_CATALOG_ID] : []),
         ])],
         ...(req.requiredToolCatalogIds?.length
@@ -4561,6 +4694,7 @@ async function runMcpInvocationInContext(
         code: mcpConfigFailureCode, signal, current: isMcpConfigCurrent,
         onRetry: ({ attempt, delayMs, code }) => console.info("[mcp] tool table not ready, building again", { runId: req.runId, attempt, delayMs, code }),
       }).catch((buildError: unknown): undefined => {
+        serverAppsServer?.release();
         const buildCode = mcpConfigFailureCode(buildError);
         if (!mayRunWithoutToolTable({ aborted: signal?.aborted === true, current: isMcpConfigCurrent(), code: buildCode,
           requiredToolCatalogIds: req.requiredToolCatalogIds?.length ?? 0, scienceToolServer: Boolean(scienceToolServer), workSessionMain,
@@ -4577,6 +4711,7 @@ async function runMcpInvocationInContext(
         return undefined;
       });
       mcpConfigCleanup = cfg?.cleanup;
+      if (!cfg) serverAppsServer?.release();
       if (!isMcpConfigCurrent()) {
         mcpConfigCleanup?.();
         throw new Error("mcp_invocation_scope_ended");
@@ -5830,8 +5965,6 @@ async function runMcpInvocationInContext(
   // 추천 시트에서 Hub 에이전트 2개 이상을 고른 경우: 단일 프롬프트에 "여러 전문가를 적용"이라고
   // 뭉개지 않고, 로컬 오케스트레이터가 에이전트별 입력 패킷을 설계한 뒤 각 borrowed agent를
   // 별도 세션으로 병렬 실행하고 최종 종합한다.
-  // 명시적 Hub borrow는 swarm보다 먼저 실행한다. 그렇지 않으면 swarm이 req.borrowAgents를
-  // 소비하지 않은 채 로컬 워커만 실행해 Hub 권한/번들 검증을 우회할 수 있다.
   const directBorrowedTeam = explicitBorrowSpecs.length === 1
     && explicitBorrowSpecs[0].entityKind === "team"
     ? explicitBorrowSpecs[0]
@@ -5910,68 +6043,24 @@ async function runMcpInvocationInContext(
     return earlyResult();
   }
 
-  // ── 스웜 모드 ──
-  // 켜져 있으면 목표를 작업 그래프로 분해해 여러 워커가 병렬 협업(emergent A2A). 동시성=사용자 슬라이더.
-  // Explicit single borrow also bypasses swarm: its verified Hub user preamble
-  // must reach the selected primary runtime unchanged instead of being discarded.
+  // The swarm (a goal decomposed into a blackboard task graph for parallel workers) is removed: a chat whose stored swarm_mode is 1
+  // and a Stormbreaker turn after a heavy one are this chat's ordinary turn below. An explicit Stormbreaker request (`stormbreaker …`,
+  // `hep-storm …`) handed the swarm its request without the route slug; the ordinary turn gets that same text. The conversation
+  // keeps the exact command (persisted above), and every turn that reached the ordinary path before keeps its request as written.
   if (
+    explicitStormbreakerRequest &&
     !workSessionMain &&
     oneTeamAllowsStorm &&
     !req.agentAppMode &&
-    (chat.swarmMode || stormbreakerSwarm) &&
+    !restrictedReadBoundary &&
     borrowedAgentSlugs.length === 0 &&
     chat.kind !== "division"
   ) {
-    try {
-      persistUserMessage();
-      const coreHarness = stormbreakerSwarm
-        ? await loadCoreStormbreakerHarness()
-        : undefined;
-      if (stormbreakerSwarm && !chat.swarmMode) {
-        sink({
-          kind: "tool-use",
-          status: locale === "ko"
-            ? "Stormbreaker · Goal/UltraCode 병렬 작업 분해와 런타임 자동 배정을 시작합니다."
-            : "Stormbreaker · starting Goal/UltraCode parallel decomposition with automatic runtime allocation.",
-        });
-      }
-      assertMcpGoalSelectionCurrent();
-      preparationDispatched = true;
-      await runSwarmInvocation({
-        // Persist the exact user command above, but give workers the actual
-        // goal rather than a route slug that could be mistaken for work.
-        req: stormbreakerSwarm ? { ...req, userPrompt: explicitStormbreakerGoal } : req,
-        chat,
-        orchestratorAgent: agent,
-        priorHistory,
-        active,
-        runtimes,
-        picked,
-        runtimeOverride: runtimeChoice.override,
-      // 사람이 방에서 고른 런타임이 실제로 존중됐는가. 단톡 오케스트레이터는
-      // 이것이 참이면 역할 정책보다 그 선택을 앞세운다 — 안 그러면 화면에 적힌
-      // 모델과 실제로 부르는 모델이 갈린다(실측 2026-08-26: 방은 gemini 인데
-      // Claude 를 불러 주간 한도에 걸렸고, 그 실패가 멀쩡한 팀원 답변에
-      // '전달 실패' 배지를 붙였다).
-      runtimePinHonored: runtimeResolution.pinHonored,
-        workingFolder,
-        ...(workspaceBinding ? { workspaceBinding } : {}),
-        ...(restrictedOrchestrationBoundary ? { restrictedReadBoundary: true as const } : {}),
-        mcpConfigPath,
-        mcpAllowedTools,
-        mcpCodexConfigArgs,
-        bindOneRuntimeToolArtifacts: bindInvocationOneArtifacts,
-        runnerEnv: orchestrationRunnerEnv,
-        locale,
-        sink,
-        signal,
-        stormbreakerMode: stormbreakerSwarm,
-        stormbreakerHarness: coreHarness,
-      });
-    } catch (err) {
-      sink({ kind: "error", error: invocationFailure(req, "swarm-failed", err, executionContext) });
-    }
-    return earlyResult();
+    const command = req.userPrompt;
+    effectiveUserPromptParts = effectiveUserPromptParts.map(part => part.id === "user.current.request" && typeof part.text === "string" && part.text.endsWith(command)
+      ? { ...part, text: `${part.text.slice(0, part.text.length - command.length)}${explicitStormbreakerGoal}` }
+      : part);
+    effectiveUserPrompt = composeCurrentUserPrompt(effectiveUserPromptParts);
   }
 
   // ── 멀티 에이전트 firm 오케스트레이션 ──
@@ -6110,6 +6199,21 @@ async function runMcpInvocationInContext(
     if (persistentAgentContext) {
       turnContextParts.push(policy); keepLastTurnContext("work.session.main", "fixed-policy", ["release"]);
     } else systemContextParts.push(mainHostSystemPart("work-session-main", "fixed-policy", ["release"], policy));
+  }
+  // The owner's rules: with the workspace-rules switch on, a Workspace conversation (work session, one-to-one, group room) is shown the owner's rules file as the piece
+  // `workspace.rules`, right before the project instructions. The switch is asked once per turn and `loadsWorkspaceRules` (workspace-rules/scope.ts) decides who gets the piece; a file that is
+  // missing, empty, binary or unreadable never stops the turn (workspace-rules/file.ts). Switch off: nothing in this block runs a read and the turn is what it was before.
+  // A ruleset copy this build cannot read leaves the switch off (the rules are then off, as before 1.7.0).
+  const workspaceRulesSwitch = workspaceRulesOn() && memoryClassificationRules() !== null;
+  const workspaceTurnFacts: WorkspaceTurnFacts = workspaceRulesSwitch ? { chatId: chat.id, agentAppMode: req.agentAppMode === true, companionFrontTurn, checkIn: Boolean(checkinTurn),
+    effectObservation: effectObservationRun, executionSource: executionContext?.source ?? null, surfacePack: chat.surfacePack ?? null, projectDomain: projectDomainBinding?.domain ?? null } : { chatId: chat.id };
+  if (workspaceRulesSwitch) {
+    try {
+      if (loadsWorkspaceRules(getDb(), workspaceTurnFacts, true)) {
+        const rulesPiece = buildWorkspaceRulesPiece(getMemoryStoreInfo().path, active.kind, memoryClassificationRules());
+        if (rulesPiece.text) { turnContextParts.push(rulesPiece.text); keepLastTurnContext("workspace.rules", "versioned-content", ["workspace-rules"]); }
+      }
+    } catch (error) { console.warn("[workspace-rules] the rules piece was left out of this turn:", error instanceof Error ? error.message : error); }
   }
   // One immutable project snapshot per execution boundary. All supported runner
   // adapters consume the same block through their existing context transport.
@@ -6265,6 +6369,7 @@ async function runMcpInvocationInContext(
     }
     if (!workSessionMain && project?.agentPool.length) {
       const userFacingPool = project.agentPool.filter((member) => {
+        if (!projectPoolMemberUsable(member)) return false; // D6: an unregistered Hub/Cloud member is not offered with a call handle
         if (member.entityKind === "team" || !member.agentId) return true;
         const installed = getAgentById(member.agentId);
         // Background HQ cells are implementation details of their controller,
@@ -6341,7 +6446,8 @@ async function runMcpInvocationInContext(
   // project-memory injection, so it stays gated on write permission: a read run
   // gets a map, never someone else's memory.
   let activePath: string | null = null;
-  if (!req.agentAppMode && workingFolder && executionContext?.source !== "science") {
+  // A group room's own scratch folder (agent-cwd/<room id>) is not a project: it gets no `.agentlas` map and no project memory.
+  if (!req.agentAppMode && workingFolder && executionContext?.source !== "science" && !isRoomMemberCwd(workingFolder)) {
     try {
       if (canWrite) {
         const visit = await recordFolderVisit(workingFolder, undefined, {
@@ -6383,19 +6489,41 @@ async function runMcpInvocationInContext(
     } } } : {}) });
   const memoryScope = invocationMemoryScope(executionContext, agent.id, invocationProjectId,
     scienceReview ? { projectId: scienceReview.projectId } : undefined, assignedTargetMemory);
-  const memoryReadOnlyBoundary = projectReadOnlyBoundary || Boolean(memoryScope.boundary);
+  // Where this turn's memory lives, for every CLI runner it spawns (read by the engine's hook/search: project ref + the agent's folder).
+  // Only while the split switch is on: the engine's hook reads project rows from the project ref even in the central layout, so passing it with the
+  // switch off changed the hook's memory lines. Switch off = the environment the runners had before this package.
+  try { if (readsUnion(getMemoryDb())) bindMemoryEnv({ projectRef: memoryScope.projectId ?? null, agentFolder: findAgentHome(storeAgentId(memoryScope.agentId), false) }); } catch { /* a runner without these still runs, from the central store */ }
+  // Agentlas 2.0 P3a: with the workspace-rules switch on, the engine reads Personal lines for a hook only when the host says this executor serves the personal agent's own conversation
+  // (AGENTLAS_MEMORY_PERSONAL_READ=1). Set for this turn's flow either way, so a value an enclosing flow bound is replaced; the switch off binds nothing (the environment the runners had before).
+  if (workspaceRulesSwitch) { try { bindMemoryEnv({ personalRead: isPersonalAgentConversation(getDb(), chat.id) }); } catch { /* unbound: the engine reads no Personal line */ } }
+  let memoryReadOnlyBoundary = companionFrontTurn || projectReadOnlyBoundary || Boolean(memoryScope.boundary);
+  if(companionFrontTurn) {
+    const front=(require("../one/companion-front-context") as typeof import("../one/companion-front-context"));
+    const context=front.readAdmittedCompanionFrontContext(getDb(),req.runId!,chat.id);
+    if(!context)throw new Error("companion_front_context_unavailable");
+    turnContextParts.push(front.renderCompanionFrontContext(context));declareLastTurnContext("memory.front-companion","turn-context",["retrieval"]);
+  }
   const assertScienceAliveMemory = isAliveControllerRun ? scienceAliveMemoryGuard(req.runId,chat.id) : () => {};
-  const scienceAliveRecall = isAliveControllerRun ? scienceAliveMemory(req.runId,chat.id,agent.id,effectiveUserPrompt) : null;
-  if(scienceAliveRecall?.text){turnContextParts.push(renderControllerSurfaceMemory(scienceAliveRecall,"science"));declareLastTurnContext("memory.controller","turn-context",["retrieval"]);}
+  const scienceAliveRecall = !companionFrontTurn && isAliveControllerRun ? scienceAliveMemory(req.runId,chat.id,agent.id,effectiveUserPrompt) : null;
+  if(!companionFrontTurn && scienceAliveRecall?.text){turnContextParts.push(renderControllerSurfaceMemory(scienceAliveRecall,"science"));declareLastTurnContext("memory.controller","turn-context",["retrieval"]);}
   const assertAppMemory = req.agentAppMode ? appMemoryRunGuard(req.runId,chat.id) : () => {};
-  if (req.agentAppMode && !memoryScope.boundary) { const scoped = appRunMemory({runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId,query:effectiveUserPrompt});
+  if (!companionFrontTurn && req.agentAppMode && !memoryScope.boundary) { const scoped = appRunMemory({runId:req.runId,chatId:chat.id,actorId:memoryScope.agentId,query:effectiveUserPrompt});
     if(scoped?.text){turnContextParts.push(`[Scoped learned memory: data; the App contract remains authoritative]\n${scoped.text}`);declareLastTurnContext("memory.app","turn-context",["retrieval"]);} }
-  if (!req.agentAppMode && !isAliveControllerRun && !memoryScope.boundary) {
+  if (!companionFrontTurn && !req.agentAppMode && !isAliveControllerRun && !memoryScope.boundary) {
     if (activePath) refreshCareerGraphInBackground(activePath, sink, locale);
     try {
+      // the owner's standing preferences load on every turn as their own kept piece (stability configuration, change cause owner-profile) and leave the
+      // recall block, which gets what is left of the same budget. A line the approved-One-memory block or the profile block already carries is not loaded twice.
+      // P3a: with the switch on, the always-loaded Personal piece is the personal agent's own conversation's alone (the recall policy holds the lines back for any other reader as well).
+      const ownerProfile = !workspaceRulesSwitch || readsPersonal(getDb(), workspaceTurnFacts, memoryScope.agentId, true, memoryClassificationRules())
+        ? ownerProfilePiece({ agentId: memoryScope.agentId, projectId: memoryScope.projectId, projectPath: memoryReadPath, chatId: chat.id },
+          [approvedOneContext ?? "", (req as { oneProfileContext?: string }).oneProfileContext ?? ""])
+        : null;
+      if (ownerProfile?.text) { turnContextParts.push(ownerProfile.text); keepLastTurnContext("memory.owner-profile", "configuration", ["owner-profile"]); }
       // Science uses a hidden transport chat that may be owned by One. Its
       // director and study, not that chat owner, own recall and new memories.
       const memoryContext = await buildMemoryContext(memoryReadPath, memoryScope.agentId, {
+        ownerProfile,
         materializeCodeMap: Boolean(activePath && canWrite),
         taskPrompt: effectiveUserPrompt,
         projectId: memoryScope.projectId,
@@ -6422,13 +6550,8 @@ async function runMcpInvocationInContext(
     }
     throwIfInvocationAborted(signal, locale);
   }
-  // Compact core is always on; the full schema is loaded only for explicit
-  // memory tasks. This keeps the recurring contract under ~150 tokens.
-  // Every runtime writes the one-line turn_summary receipt itself (owner 2026-10-13: the host's 360-char cut of the answer is
-  // not a summary); the contract is the 285-byte block, the same on every path.
-  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && !memoryScope.boundary) {
-    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); keepLastTurnContext("memory.receipt", "fixed-policy", ["release"]);
-  }
+  // K2b': no text tells the model to end its reply with a memory block any more (the `memory.receipt` module is gone from every path). A model writes memory through the memory_ticket tool, whose own
+  // description is the contract; the turn's summary is the host's excerpt of the answer (curator.ts fallbackTurnObservation). A reply that still ends with the old block (an older session) is cut by the parser as before.
   if (mcpAutoSelectionPrompt) { turnContextParts.push(mcpAutoSelectionPrompt); declareLastTurnContext("tools.selection", "turn-context", ["tool-grant", "capability-inventory"]); }
   if (!workSessionChild && !req.agentAppMode && !isAliveControllerRun && chat.kind === "division" && (req.toolMode || req.hubMode)) {
     const supervisor = assembleSystemPrompt(
@@ -6447,7 +6570,7 @@ async function runMcpInvocationInContext(
     });
   }
   // Stormbreaker Loop — 이제 무조건 주입이 아니라 명시적 개입 조건에서만 켠다(대시보드 토글 기본 OFF).
-  // 항상 켜지는 경로: division(백그라운드 자동화 인프라), continuousMode(계속 라이브), 명시 프리픽스
+  // 항상 켜지는 경로: division(백그라운드 자동화 인프라), 명시 프리픽스
   // (`stormbreaker …` / `hep-network --stormbreaker …` = 컴포저 칩·추천 pipeline 선택).
   if (stormbreakerEngaged) {
     let coreHarness: Awaited<ReturnType<typeof stormbreakerHarness>>;
@@ -6528,21 +6651,57 @@ async function runMcpInvocationInContext(
   persistUserMessage();
 
   sink({ kind: "thinking", status: tStatus(locale, "thinking", { agent: agent.name }) });
-  // Stormbreaker 슈퍼바이저 — 활성·가용하면 이 실행을 scope→route→gate 로 감독한다(비차단).
-  // division(백그라운드 firm 하위) 세션은 제외(재귀/노이즈 방지). 실패/부재 시 null → no-op.
-  let stormbreaker: StormbreakerHandle | null = null;
-  if (chat.kind !== "division" && stormbreakerEngaged) {
-    stormbreaker = superviseStormbreaker({
-      query: req.userPrompt,
-      cwd: resolvedResultFolder,
-      emit: (tool) => sink({ kind: "tool-use", tool }),
-      signal,
-    });
-  }
-
   // Main-authored before model execution. The renderer/model never controls
   // Memory Ticket identity, so success/error/cancel handling converges.
   const memoryTurnId = `chat:${chat.id}:run:${req.runId ?? randomUUID()}:node:${executionContext?.nodeId ?? "root"}`;
+  // K2b': the curation context of this turn as of now (the memory_ticket tool writes at the call, so the facts the turn's end used to read are read then: who wrote the turn, the project, whether a tool ran).
+  // The turn's end builds the same object (curationContextNow below), so a line written at a call and a line written at the end are written under one set of facts.
+  const ownerWordsNow = (): string | null => ownerWordsOfTurn(req, { ownerSpoke: ownerSpokeOfTurn(req, { hostRecovery: hostRecoveryOf(req) !== null, hostNoticePurpose }), hostNoticePurpose });
+  const curationContextNow = (roomContentSeen: unknown): CurationContext => ({
+    turnId: memoryTurnId,
+    // Activated read identity scopes the DB episode even when this turn
+    // cannot write project files. The read-only curator path records only
+    // a one-way hash and never appends project artifacts.
+    projectPath: memoryReadPath,
+    projectId: memoryScope.projectId,
+    agentId: memoryScope.agentId,
+    chatId: chat.id,
+    runId: req.runId,
+    cwdAtRequest: workingFolder,
+    // the owner wrote the message that started this turn — the positive marker minted at the composer / phone / Telegram entry, still true of this turn.
+    ownerSpoke: ownerSpokeOfTurn(req, { hostRecovery: hostRecoveryOf(req) !== null, hostNoticePurpose }),
+    // the owner's own words, also on the personal agent's reply turn (system-origin by design; `req.promptOrigin` alone said "no words").
+    ownerWords: ownerWordsNow(),
+    // what the host saw besides the owner's message. It decides the two origin columns of a line (memory/origin-class.ts), never whether the line is written; no verification receipt is minted on this path yet.
+    turnFacts: { toolsRan: completedToolCalls > 0, inputsRead: Boolean(req.images?.length || approvedOneAttachmentContext || approvedWorkAttachmentContext || roomContentSeen) },
+    // P3a: with the switch on, a Personal line is written only from the personal agent's own conversation (curator.ts classifyProposal); absent = not that conversation. Switch off: no new field.
+    // P5: asked again here as well - a turn that began before the switch was turned on and ends after it is still the personal agent's own turn, and its Personal line must not be dropped for that.
+    ...(workspaceRulesSwitch || (workspaceRulesOn() && memoryClassificationRules() !== null) ? { personalConversation: isPersonalAgentConversation(getDb(), chat.id) } : {}),
+    experienceIntake: {
+      platform: process.platform,
+      arch: process.arch,
+      runtimeKind: active.kind,
+      basePackageHash: agent.packageHash ?? null,
+      taskHint: hostWrotePrompt() ? null : effectiveUserPrompt,
+    },
+    // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
+    borrowedAgentSlugs:
+      activeBorrowedOwnerScopeKey() === explicitBorrowOwnerScopeKey
+        ? explicitBorrowMemoryKeys
+        : [],
+  });
+  const ticketFactsKey = req.chatId && req.runId ? turnNotesKey(req.chatId, req.runId) : null;
+  if (ticketFactsKey && !req.agentAppMode) {
+    registerTurnMemoryFacts(ticketFactsKey, {
+      curation: () => curationContextNow(memoryReadOnlyBoundary ? null : turnRoomContent(chat.id, req.runId)),
+      ownerText: () => ownerWordsNow(),
+      // memory_ticket's own earlier calls complete too; they are not other tools (a turn that only remembered is still the owner's words alone).
+      otherToolsRan: () => completedToolCalls - turnMemoryCalls(ticketFactsKey) > 0,
+      inputsRead: () => Boolean(req.images?.length || approvedOneAttachmentContext || approvedWorkAttachmentContext || (memoryReadOnlyBoundary ? null : turnRoomContent(chat.id, req.runId))),
+      readOnly: () => memoryReadOnlyBoundary,
+      roomContent: () => !memoryReadOnlyBoundary && Boolean(turnRoomContent(chat.id, req.runId)),
+    });
+  }
   try {
     const runtimeUserPrompt = explicitBorrowUserPreamble
       ? borrowedCurrentUserPrompt(effectiveUserPromptParts, explicitBorrowUserParts)
@@ -6949,6 +7108,11 @@ async function runMcpInvocationInContext(
           return text ? [{ id: "progress.advisory", stability: "turn-context", changeTriggers: ["task"], text }] : []; })(),
       ]);
       const runtimeTurnContext = renderRunnerTurnContext(runtimeTurnContextParts);
+      // A stateless host loop (serving, BYOK, local) re-reads the whole request every turn: its conversation-constant fixed lines
+      // go in the system text, ahead of the history a prefix cache reuses, and only the rest is framed before the owner's
+      // message (one rule, serving-prefix.ts splitSystemChannelParts). Every other runtime keeps all parts as its turn context.
+      const channelParts = splitSystemChannelParts(runtime.kind, runtimeTurnContextParts);
+      const placedTurnContextText = channelParts.system.length ? renderRunnerTurnContext(channelParts.turn) : runtimeTurnContext;
       // Every runtime gets the minimal observation request; runners that support the mode (claude-code, codex, serving,
       // BYOK/local host loop) also shed their own headers, user setup and extra tool servers.
       if (effectObservationRun) {
@@ -6975,12 +7139,17 @@ async function runMcpInvocationInContext(
           effort: runtime.effort ?? undefined,
         };
       }
+      // The same main-host system composition a sessionless request already uses; a retained context has only the agent definition in it.
+      const runtimeSystemComposition = channelParts.system.length
+        ? composeMainHostSystemPrompt([...systemContextParts, ...channelParts.system]) : hostSystemComposition;
+      const runtimeSystemPrompt = runtimeSystemComposition?.text ?? systemPrompt;
+      const systemChannelBlocks = new Set(channelParts.system.map((part) => part.text));
       const placedTurnContext = placeTurnContextForRuntime({ runtimeKind: runtime.kind, sessionCapable,
-        systemPrompt, turnContext: runtimeTurnContext, userPrompt, locale });
-      const hostSystemProjection = hostSystemComposition
-        ? placedTurnContext.placement === "system-tail" && runtimeTurnContext.trim()
+        systemPrompt: runtimeSystemPrompt, turnContext: placedTurnContextText, userPrompt, locale });
+      const hostSystemProjection = runtimeSystemComposition
+        ? placedTurnContext.placement === "system-tail" && placedTurnContextText.trim()
           ? composeMainHostSystemPrompt([...systemContextParts, ...runtimeTurnContextParts])
-          : hostSystemComposition
+          : runtimeSystemComposition
         : null;
       const composedRequest: RunnerRequest = {
         ...runnerReq,
@@ -6991,10 +7160,11 @@ async function runMcpInvocationInContext(
         // context rides in front of the current user message, not on the system tail.
         systemPrompt: hostSystemProjection?.text ?? placedTurnContext.systemPrompt,
         ...(hostSystemProjection ? { systemPromptComposition: hostSystemProjection.composition } : {}),
-        ...(sessionCapable && runtimeTurnContext ? { turnContext: runtimeTurnContext } : { turnContext: undefined }),
-        ...(sessionCapable && runtimeTurnContext ? { turnContextStable: stableTurnContextParts } : {}),
+        ...(sessionCapable && placedTurnContextText ? { turnContext: placedTurnContextText } : { turnContext: undefined }),
+        ...(sessionCapable && placedTurnContextText ? { turnContextStable: systemChannelBlocks.size
+          ? stableTurnContextParts.filter((block) => !systemChannelBlocks.has(block)) : stableTurnContextParts } : {}),
         userPrompt: placedTurnContext.userPrompt,
-        ledgerHints: { hostContextTokens: estimateTextTokens(runtimeTurnContext ?? ""), hostContextText: runtimeTurnContext,
+        ledgerHints: { hostContextTokens: estimateTextTokens(placedTurnContextText ?? ""), hostContextText: placedTurnContextText,
           hostContextPlacement: placedTurnContext.placement, ownerTextTokens: estimateTextTokens(userPrompt) },
         backendLabel: runtimePicked.label,
         runtimeSource: runtime.source ?? undefined,
@@ -7004,8 +7174,8 @@ async function runMcpInvocationInContext(
           ? effortForSelectedModel(runtime, runtime.model, "minimal") ?? undefined
           : runtime.effort ?? undefined,
       };
-      return bindRunnerTurnContext(composedRequest, { parts: runtimeTurnContextParts, runtimeKind: runtime.kind,
-        sessionCapable, systemPrompt, ...(hostSystemComposition ? { systemPromptComposition: hostSystemComposition.composition } : {}), userPrompt, locale });
+      return bindRunnerTurnContext(composedRequest, { parts: channelParts.turn, runtimeKind: runtime.kind,
+        sessionCapable, systemPrompt: runtimeSystemPrompt, ...(runtimeSystemComposition ? { systemPromptComposition: runtimeSystemComposition.composition } : {}), userPrompt, locale });
     };
     // ★관문이 "설치됨"인지는 런타임이 실제로 받은 것으로 판정한다. settingsPath 하나만
     // 보면 grok 실행은 관문을 받고도 영원히 미설치로 기록된다.
@@ -7117,6 +7287,10 @@ async function runMcpInvocationInContext(
     collectDurableToolImages = collectToolImages;
     // Tool events of the LAST runtime dispatch (invokeCurrentRuntime resets it): the context-overflow retry runs only when none came.
     let dispatchToolEvents = 0;
+    // Where the answer starts (runtime/final-answer-turns.ts): the live text when the LAST tool call began, in the coordinates of the
+    // sink's partials (the desktop's anchorTextLen). Held as a 32-character hash, never as text; it is proven against the saved text at
+    // the end, so a restarted text (a retry, a continuation) can only make it fall back to "the whole text".
+    const answerTracker = createAnswerTracker();
     /** Tool events of every dispatch of this invocation (the unsettled-turn move reads it beside the effect boundary). */
     let invocationToolEvents = 0;
     const runnerEvents = {
@@ -7130,7 +7304,9 @@ async function runMcpInvocationInContext(
       onPartial: (text: string) => {
         if (!memoryReadOnlyBoundary) {
           const visible = activeGoalId && !executionContext ? stripGoalWaitDisplayText(text) : text;
-          sink({ kind: "partial", text: partialFloor ? `${partialFloor}\n${visible}` : visible });
+          const sinkText = partialFloor ? `${partialFloor}\n${visible}` : visible;
+          answerTracker.onPartial(sinkText);
+          sink({ kind: "partial", text: sinkText });
         }
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
@@ -7138,6 +7314,7 @@ async function runMcpInvocationInContext(
       onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, dispatchedOrigin?: ToolInvocationOrigin, _toolKind?: RuntimeToolKind) => {
         dispatchToolEvents += 1;
         invocationToolEvents += 1;
+        answerTracker.onTool(id);
         let sourceUrls: string[] | undefined;
         if (!isError && req.runId && !req.agentAppMode) {
           try {
@@ -7858,7 +8035,7 @@ async function runMcpInvocationInContext(
           && !result.text.trim() && (!result.observedUsage
             || (Number.isFinite(result.observedUsage.outputTokens) && result.observedUsage.outputTokens === 0));
         if (allowCreditFallback) {
-          await getBillingCredits();
+          await getBillingCredits({ force: true });
           throwIfInvocationAborted(signal, locale);
         }
         /*
@@ -7872,6 +8049,8 @@ async function runMcpInvocationInContext(
           allowCreditFallback,
           allowLegacyActive: !frontRecovery,
         });
+        // The rest of the agent's own order goes first (desktop 3, Workspace B-2: line 2 was never tried after line 1 failed), under the same replay guards.
+        poolFallbacks.unshift(...ownOrderFallbackRuntimes(runtimes, runtimeChoice?.override, { failedRuntime: active, failure: failed }));
         // The pool has already applied the replay guards. The front recovers
         // in configured orchestrator order and never into another serving lane.
         const fallback = poolFallbacks.find((candidate) => {
@@ -7932,13 +8111,12 @@ async function runMcpInvocationInContext(
     const advanceUsageFloor = () => {
       liveUsageFloor = liveUsageHigh;
     };
-    // "계속 라이브로" 모드: 채팅에 켜져 있으면 짧은 상한(3턴)에서 멈춰 30분 간격 백그라운드로
-    // 넘기지 않고, 같은 채팅에서 라이브 스트리밍을 계속 이어간다(사실상 무제한, 안전 상한만).
-    // persistent goal이 바인딩된 채팅은 goal이 미달인 동안 같은 라이브 루프를 기본으로 쓴다 —
+    // persistent goal이 바인딩된 채팅은 goal이 미달인 동안 같은 채팅에서 라이브 루프를 이어간다(사실상 무제한, 안전 상한만) —
     // "goal 명령은 완성될 때까지 계속 도는 루프가 기본"(오너 요구). 정지 판단은 모델이 아니라
-    // goal 원장(예산·무진전·명시 종료)이 내린다.
+    // goal 원장(예산·무진전·명시 종료)이 내린다. 저장된 chat.continuousMode 값은 읽지 않는다: Goal 없이 그 값만으로는
+    // 아무것도 켜지지 않는다(오너 "계속 라이브로" 단독 기능 제거).
     const continuousMode = !scienceRecovery && !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" && !effectObservationRun &&
-      (chat.continuousMode === true || activeGoalId != null);
+      activeGoalId != null;
     const maxPasses = effectObservationRun || req.agentAppMode || (req.oneMode && req.fastMode === true) || scienceRecovery
       ? 1
       : continuousMode
@@ -8038,8 +8216,10 @@ async function runMcpInvocationInContext(
         candidate: (endedWith) => {
           const failure = runnerFailureFromError(endedWith, active.kind);
           const activeKey = runtimeAttemptKey(active);
-          const fallback = rolePriorityRuntimes(runtimes, "orchestrator", { failedRuntime: active, failure, allowCreditFallback: false,
-            unsettledNoEffectProven: true }).find((candidate) => {
+          const unsettledPool = rolePriorityRuntimes(runtimes, "orchestrator", { failedRuntime: active, failure, allowCreditFallback: false,
+            unsettledNoEffectProven: true });
+          unsettledPool.unshift(...ownOrderFallbackRuntimes(runtimes, runtimeChoice?.override, { failedRuntime: active, failure, unsettledNoEffectProven: true }));
+          const fallback = unsettledPool.find((candidate) => {
             const key = runtimeAttemptKey(candidate);
             return key !== activeKey && !attemptedRuntimeKeys.has(key);
           });
@@ -8133,6 +8313,7 @@ async function runMcpInvocationInContext(
     let lastPassToolCalls: number | null = null;
     let lastPassNovelObservations: number | null = null;
     let idleGoalPasses = 0;
+    let ledgerDrivenPasses = 0;
     let goalIdleYield: { goalId: string } | null = null;
     let passRecoveryNote: string | null = null;
     /**
@@ -8240,6 +8421,15 @@ async function runMcpInvocationInContext(
           goalIdleYield = { goalId: activeGoalId };
         }
       }
+      // Count bound (hephaestus/loop-engineering.ts ledgerDrivenPassStep): passes only the Goal ledger kept alive are limited per
+      // invocation whatever they did. Same boundary, same own event kind (not an idle yield: the follow-up is not backed off).
+      const ledgerStep = ledgerDrivenPassStep({ continuousMode, goalDrivenPass, passShouldContinue, ledgerDrivenPasses });
+      ledgerDrivenPasses = ledgerStep.ledgerDrivenPasses;
+      if (ledgerStep.yieldNow && !signal?.aborted) {
+        passShouldContinue = false;
+        tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
+          kind: "goal_pass_budget_yield", payload: { pass, ledgerDrivenPasses, limit: GOAL_LEDGER_DRIVEN_PASS_LIMIT } });
+      }
       // Wall-clock bound (long-run/goal-pass-budget.ts): at this pass boundary no runtime turn or tool is in
       // flight. End the invocation instead of starting another pass; Main continues the open Goal from its ledger
       // and drains the owner steers queued meanwhile. The event is not goal_idle_pass_yield: that one backs the
@@ -8334,12 +8524,6 @@ async function runMcpInvocationInContext(
             : locale === "ko" ? `계속 진행 중 · ${pass}턴째 (안 끊기고 이어짐)` : `Continuing · pass ${pass} (uninterrupted)`,
         });
       }
-      stormbreaker?.continuePass({
-        pass,
-        reason: goalDrivenPass
-          ? "goal ledger reports the goal is not achieved yet"
-          : "runner reported more safe Stormbreaker work remains",
-      });
       const nextRunnerReq = runnerRequestForRuntime(active, picked!);
       // Journal-backed and native-session runs already hold the previous pass and receive the turn context (Goal contract) each pass.
       const passCarriesContext = persistentAgentContext || sessionCapableRuntime;
@@ -8649,7 +8833,8 @@ async function runMcpInvocationInContext(
           // 목표 칩을 내린다 — 끝난 goal이 계속 켜져 있으면 다음 메시지가
           // 죽은 캠페인에 붙는다.
           try {
-            clearChatGoalBindingByGoalId(activeGoalId);
+            // The ledger completion already closed it through the one close; this repeats it for a Goal another path had completed (idempotent).
+            closeGoal(activeGoalId, "completed", "verifier", { reason: "model-declared-verified-no-open-tasks" });
           } catch {
             /* 바인딩 정리 실패가 완료 자체를 되돌리지는 않는다. */
           }
@@ -9216,57 +9401,35 @@ async function runMcpInvocationInContext(
       displayText = "";
       console.error("[surface] parseSurfaces failed");
     }
-    if (!req.agentAppMode || memoryReadOnlyBoundary) {
+    // The personal agent read what a group room said during this turn: that text is not the secretary's memory (N-F12). The host
+    // recorded it when the tool returned; below, only the candidates that rest on the owner's own words in this turn are kept (a fact
+    // the owner stated about something else in the same turn). Turns with no room content are untouched.
+    const roomContentSeen = memoryReadOnlyBoundary ? null : turnRoomContent(chat.id, req.runId);
+    forgetTurnMemoryExclusion(chat.id, req.runId);
+    // K2b': what the model's memory_ticket calls already did (the lines were written at the call): the turn's own record counts and links them; none is written again. Read once on every path, so the run's entry never outlives the turn.
+    const toolTickets = endTurnMemoryFacts(ticketFactsKey);
+    if (companionFrontTurn) {
+      // Portable front context is not permission to record Desktop memories or
+      // enqueue the Desktop curator, even through its read-only ticket path.
+      displayText = stripAllMemoryEventBlocks(displayText).cleanedText;
+    } else if (!req.agentAppMode || memoryReadOnlyBoundary) {
       try {
-        const curationContext = {
-          turnId: memoryTurnId,
-          // Activated read identity scopes the DB episode even when this turn
-          // cannot write project files. The read-only curator path records only
-          // a one-way hash and never appends project artifacts.
-          projectPath: memoryReadPath,
-          projectId: memoryScope.projectId,
-          agentId: memoryScope.agentId,
-          chatId: chat.id,
-          runId: req.runId,
-          cwdAtRequest: workingFolder,
-          experienceIntake: {
-            platform: process.platform,
-            arch: process.arch,
-            runtimeKind: active.kind,
-            basePackageHash: agent.packageHash ?? null,
-            taskHint: hostWrotePrompt() ? null : effectiveUserPrompt,
-          },
-          // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
-          borrowedAgentSlugs:
-            activeBorrowedOwnerScopeKey() === explicitBorrowOwnerScopeKey
-              ? explicitBorrowMemoryKeys
-              : [],
-        };
-        // Notes the model recorded through the agentlas-turn memory_note tool join the parsed envelope's events.
-        const toolMemoryNotes = takeTurnMemoryNotes(req.chatId && req.runId ? turnNotesKey(req.chatId, req.runId) : null);
-        const semanticOptions = memoryReadOnlyBoundary
-          ? {}
-          : await runSemanticMemoryReview({
-              extraEvents: toolMemoryNotes,
-              replyText: displayText,
-              runner: picked.runner,
-              backendLabel: picked.label,
-              model: active.model ?? undefined,
-              effort: active.effort ?? undefined,
-              env: runnerEnv.env,
-              locale,
-              signal,
-              hasProject: Boolean(memoryReadPath),
-              hasAgent: Boolean(agent.id),
-              ...(isAutomationLedgerChat(curationContext.chatId) ? { sourceSurface: "automation-run" as const } : {}),
-            });
+        const curationContext = curationContextNow(roomContentSeen);
+        // A turn that read room content: only the candidates that rest on what the owner said in this turn stay, and the rest are taken
+        // out BEFORE the semantic review and the curation (a rephrased or translated room fact used to pass a text comparison:).
+        // A host-written prompt is not the owner's words: such a turn keeps none.
+        const roomFiltered = !memoryReadOnlyBoundary && roomContentSeen
+          ? ownerGroundedEvents(displayText, [...carriedPassMemoryEvents], roomContentSeen, ownerWordsNow() ?? "")
+          : null;
         const { cleanedText } = memoryReadOnlyBoundary
           ? stripReplyMemoryEventsReadOnly(
               displayText,
               curationContext,
-              restrictedDiscardedMemoryEvents + toolMemoryNotes.length,
+              restrictedDiscardedMemoryEvents + toolTickets.tickets,
             )
-          : curateReply(displayText, curationContext, { ...semanticOptions, carriedEvents: [...toolMemoryNotes, ...carriedPassMemoryEvents] });
+          : roomFiltered
+            ? curateReply(roomFiltered.replyText, curationContext, { carriedEvents: roomFiltered.events, toolWrites: toolWritesOf(toolTickets) })
+            : curateReply(displayText, curationContext, { carriedEvents: [...carriedPassMemoryEvents], toolWrites: toolWritesOf(toolTickets) });
         // Restricted cleanup may intentionally remove the entire response. Never
         // restore the raw control block through the ordinary empty-text fallback.
 
@@ -9367,11 +9530,6 @@ async function runMcpInvocationInContext(
     // App generation from chat is disabled: do not append Apps CTAs or route
     // ordinary chat output into installed/generated App surfaces.
 
-    // Stormbreaker 최종 게이트 — 답변 표출 직전 리뷰/증거 게이트(비차단·실패-무해).
-    if (stormbreaker) {
-      await stormbreaker.finish({ workspace: workingFolder ?? undefined, permission: req.permissions });
-    }
-
     // 다중 패스(비-continuousMode)면 이전 패스 전문을 접두 — 라이브에서 보이던 본문/도구
     // 앵커 좌표계가 final에서도 유지된다. 단일 패스는 floor가 비어 그대로.
     const displayWithFloor = stripDanglingLanguageFence(redactWorkAttachmentText(req, redactOneAttachmentText(
@@ -9470,6 +9628,20 @@ async function runMcpInvocationInContext(
     }
     };
     await runWithStoreBusyPatience(saveFinalAnswer);
+    // Where the answer starts in the saved text. The text stays whole (the desktop timeline anchors its tool rows to it); the phone and the
+    // notification body read this one number. Codex states it by phase (result.answerStart, counted in its own text: shifted by the
+    // earlier passes' text); every other runner: the text accumulated when the last tool call began. Proven against the saved text,
+    // never guessed: 0 (the whole text) whenever it is not.
+    if (durableAssistantEntry && req.runId) {
+      try {
+        const runnerMark = result.answerStart ?? null;
+        const answerAt = locateAnswerStart(durableAssistantEntry.text, runnerMark ?? answerTracker.mark(),
+          runnerMark ? runnerMark.at + (partialFloor ? partialFloor.length + 1 : 0) : undefined);
+        if (answerAt > 0) recordAnswerStart({ chatId: chat.id, runId: req.runId, messageId: durableAssistantEntry.id, text: durableAssistantEntry.text, from: answerAt });
+      } catch (error) {
+        console.warn("[answer-start] not recorded:", error instanceof Error ? error.message : error);
+      }
+    }
     /*
      * ★어느 세대가 실제로 돌았는지 기록한다 (오너 2026-09-07: "버전 바뀌어도 알아서
      * 읽게 해라"). claude-code 는 모델 목록 명령이 없어 우리가 보낼 수 있는 것이 벤더
@@ -9592,6 +9764,7 @@ async function runMcpInvocationInContext(
     return {
       finalText: boundImageDisplayWithFloor,
       tokens: result.tokens,
+      ...(result.agentMessages ? { agentMessages: result.agentMessages } : {}),
       observedUsage: invocationObservedUsage,
       stormbreakerContinueRequested,
       ...(goalHostWakeRequested ? { goalHostWakeRequested } : {}),
@@ -9622,7 +9795,7 @@ async function runMcpInvocationInContext(
   } catch (err) {
     unbindRunKeyChallenge();
     if (login?.waiting) return earlyResult();
-    if (modelTurnStarted) {
+    if (modelTurnStarted && !companionFrontTurn) {
       try {
         recordTerminalMemoryTurn({
           turnId: memoryTurnId,

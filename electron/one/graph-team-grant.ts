@@ -17,14 +17,15 @@ import { currentOneGraphAuthority } from "./graph-ownership";
  *     group room; re-checked when the step starts (mint), when its MCP config is built, and on every One Team call;
  *   - the room-owned capability (chatId = the room), permission = the step's (mutation -> write, else read) capped at the
  *     automation's executionPermission;
- *   - tools: the room's list minus the graph/Toolchain control surface (ONE_GRAPH_TOOL_NAMES), i.e. the seven below; a
+ *   - tools: the room's list minus the graph/Toolchain control surface (ONE_GRAPH_TOOL_NAMES), i.e. the five below (the group-room tools one_team_invite and
+ *     one_team_compose_group were retired in Agentlas 2.0 D5; a step never opens a chat, adds to one or joins a project: those are the personal agent's); a
  *     read step gets one_team_list and one_team_session_status only;
  *   - never for a dry run, never for an mcp_call step (it already has its own authority path), revoked when the step ends.
  */
 
 export const GRAPH_STEP_TEAM_TOOLS = Object.freeze([
   "one_team_list", "one_team_start_session", "one_team_steer", "one_team_session_status",
-  "one_team_create_member", "one_team_invite", "one_team_compose_group",
+  "one_team_create_member",
 ] as const);
 export const GRAPH_STEP_TEAM_READ_TOOLS = Object.freeze(["one_team_list", "one_team_session_status"] as const);
 /**
@@ -38,7 +39,7 @@ export const GRAPH_STEP_EFFECT_ITEM_READ_TOOLS = Object.freeze(["effect_item_che
 /** One Team control operation -> the tool name a graph-step capability must hold for it (team-control-server). */
 export const GRAPH_STEP_TEAM_OPERATION_TOOL: Readonly<Record<string, string>> = Object.freeze({
   list: "one_team_list", start: "one_team_start_session", steer: "one_team_steer", status: "one_team_session_status",
-  create: "one_team_create_member", invite: "one_team_invite", compose_group: "one_team_compose_group",
+  create: "one_team_create_member",
 });
 
 export interface GraphTeamGrant {

@@ -159,6 +159,8 @@ if (appFlag !== -1) {
   assert.ok(appPath, "--app 뒤에 .app 경로가 필요하다");
   const asarPath = path.join(appPath, "Contents", "Resources", "app.asar");
   assert.ok(existsSync(asarPath), `패키징된 앱에 app.asar 이 없다: ${asarPath}`);
+  const { verifyPackagedTurnMcp } = await import("../build-resources/verify-turn-mcp-archive.cjs");
+  console.log(`packaged turn MCP PASS: ${JSON.stringify(verifyPackagedTurnMcp(asarPath))}`);
   const signingPolicyPath = path.join(appPath, "Contents", "Resources", "product-extension-signing-policy.json");
   assert.ok(existsSync(signingPolicyPath), `패키징된 앱에 product-extension-signing-policy.json 이 없다: ${signingPolicyPath}`);
   const { verifyProductExtensionSigningPolicyFile } = await import("../build-resources/product-extension-signing-policy.cjs");
