@@ -68,6 +68,14 @@ export interface ApprovalLineContext {
   agentName?: (agentId: string) => string | undefined;
 }
 
+/** The words of a question of a hand-off Work (WORK-1117.md E): no clock, so a closed one is "request cancelled", never "expired". */
+const REMOTE_RESULT_WORDS: Record<ApprovalLineOutcome, [string, string]> = {
+  approved: ["허용됨", "Allowed"],
+  declined: ["거절됨", "Denied"],
+  expired: ["확인 요청 취소", "Request cancelled"],
+  auto: ["자동 승인", "Auto-approved"],
+};
+const REMOTE_KIND_WORDS: Record<string, [string, string]> = { send: ["전송", "Send"] };
 const RESULT_WORDS: Record<ApprovalLineOutcome, [string, string]> = {
   approved: ["승인됨", "Approved"],
   declined: ["거절됨", "Declined"],
@@ -150,8 +158,8 @@ export function approvalLineOf(record: ApprovalLineRecord, ctx: ApprovalLineCont
   return {
     id: record.id,
     icon: outcome,
-    result: pick(RESULT_WORDS[outcome], ctx.lang),
-    kind: approvalKindWord(record.capability, ctx.lang),
+    result: pick((record.remote ? REMOTE_RESULT_WORDS : RESULT_WORDS)[outcome], ctx.lang),
+    kind: record.remote && record.capability && REMOTE_KIND_WORDS[record.capability] ? pick(REMOTE_KIND_WORDS[record.capability]!, ctx.lang) : approvalKindWord(record.capability, ctx.lang),
     target: target.short,
     side: outcome === "auto" ? pick(DEVICE_WORDS[BASIS_KEY[basisOf(record)]], ctx.lang) : device ? pick(DEVICE_WORDS[device], ctx.lang) : null,
     device,

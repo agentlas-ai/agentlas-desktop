@@ -32,6 +32,8 @@ export interface RawMemoryEvent {
   explicit_replace?: boolean;
   /** K2b' (host-only): the kind a Personal ticket carried before the computer folded it into fact/preference (ruleset ticket.fold). */
   ticket_kind?: "identity" | "boundary";
+  /** the structure of a `boundary` ticket line, validated by the ticket receiver. */
+  boundary?: { type: "no_proactive" | "quiet_hours"; from?: string; to?: string };
   /** K2b' (host-only): the two columns the ticket receiver decided; written as they are. */
   ticket_origin?: { originClass: OriginClass; certainty: Certainty };
 }

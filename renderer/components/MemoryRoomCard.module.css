@@ -1,0 +1,8 @@
+.card { max-width: 520px; margin: 10px 0 4px; padding: 12px 14px; border: 1px solid var(--line, #e6e6e4); border-radius: 12px; background: var(--surface, #fff); color: var(--text, #1c1c1c); }
+.head { display: flex; align-items: center; gap: 8px; }
+.icon { flex: none; color: var(--muted, #6b6b68); }
+.title { flex: 1; font-size: 14px; font-weight: 600; }
+.close { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 6px; background: transparent; color: var(--muted, #6b6b68); cursor: pointer; }
+.close:hover { background: var(--hover, rgba(0, 0, 0, 0.06)); }
+.line { margin: 8px 0 6px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2, #f3f3f1); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reason { margin: 0; font-size: 12px; color: var(--muted, #6b6b68); }

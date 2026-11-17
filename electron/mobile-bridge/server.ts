@@ -146,7 +146,7 @@ const DEFAULT_READ_NOT_READY_WAIT_MS = 20_000;
 // A refused-because-signed-out upgrade is retried by every open phone; log it at most this often.
 const SIGNED_OUT_REFUSAL_LOG_INTERVAL_MS = 60_000;
 /*
- * 분당 요청 한도 (Agentlas 2.0 desktop values S3, audit 가-11).
+ * 분당 요청 한도.
  * 전에는 301번째 요청에서 소켓을 1008 "request rate exceeded"로 닫았다 — 폰 이후 빌드는 그 낱말을 백오프 재연결로 읽지만
  * (web_socket_desktop_transport.dart:226-230, 1905-1921) 그 이전 빌드는 1008을 영구 거절로 읽어 오너가 다시 누를 때까지 연결을 포기한다.
  * 지금은 한도를 넘은 요청에 **그 요청 하나**를 "재시도 가능한 거절"(`too_many_requests`, retryable — 폰이 이미 아는 모양: 동시 32개 초과·영상 청크 예산이 쓰는

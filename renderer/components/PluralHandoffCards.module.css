@@ -1,0 +1,23 @@
+/* Hand-off cards (pictures desktop-plural-4 BM..BQ): one card per piece of work, existing tokens only. The status line is the only red; the card's own colour never changes. */
+.card { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 640px; box-sizing: border-box; margin: 8px 0; padding: 14px 16px; border: 1px solid var(--paper-edge); border-radius: 14px; background: var(--paper, transparent); color: var(--ink); font-size: 14px; line-height: 1.45; }
+.head { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted-deep, var(--ink-soft)); font-size: 13px; }
+.headText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.brief { font-weight: 700; font-size: 15px; overflow-wrap: anywhere; }
+.statusRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 30px; }
+.status { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--ink-soft); }
+.status[data-tone="error"] { color: #b3402f; }
+.statusText { min-width: 0; overflow-wrap: anywhere; }
+.actions { display: inline-flex; gap: 8px; flex: none; }
+.action { padding: 4px 12px; border: 1px solid var(--paper-edge); border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.action:hover, .action:focus-visible { background: var(--fill-1); outline: none; }
+.action:disabled { opacity: 0.5; cursor: default; }
+.result { margin: 2px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.result[data-clamped="true"] { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.more { align-self: flex-start; padding: 0; border: 0; background: transparent; color: var(--ink); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+.note { display: flex; align-items: center; gap: 6px; color: var(--muted-deep, var(--ink-soft)); font-size: 12.5px; }
+.spin { animation: handoff-spin 1s linear infinite; }
+@keyframes handoff-spin { to { transform: rotate(360deg); } }
+.box { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 6px 0 2px; padding: 8px 10px; border-radius: 10px; background: var(--fill-1); font-size: 13.5px; }
+.boxLabel { color: var(--muted-deep, var(--ink-soft)); white-space: nowrap; }
+.boxValue { min-width: 0; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.asks { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }

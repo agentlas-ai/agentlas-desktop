@@ -1,3 +1,4 @@
+import { noteHumanForget } from "./shared-ids";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { notifyMemoryRowsChanged } from "./memory-written-signal";
@@ -143,6 +144,8 @@ export function editOwnedMemory(input: DesktopMemoryTarget & { content: string }
     const replacement = insertMemoryEntry({ scope:old.scope,kind:old.kind,content:text,
       projectId:old.project_id,projectPath:old.project_path,agentId:old.agent_id,chatId:old.chat_id,
       confidence:old.confidence,sensitivity:old.sensitivity,intakeEpoch:epoch,
+      // an edit of a shared line keeps what the line IS (identity, or a boundary with its structure): the column alone cannot say it (the replacement would become a plain fact or a preference).
+      ...(keptKindContext(old) ? { requestContext: keptKindContext(old) as never } : {}),
       evidence:[`owner-edit:${old.id}`,`supersedes:${old.id}`,...originMarksOf(old)],curationActor:"host_admitted",policyVersion:"agentlas.owner-memory-edit.v1",
       originRefs:[...origins,{kind:"source",id:old.id,revision:input.expectedRevision}],
       recallChannel:applicability.recallChannel,compatibilityScope:applicability.compatibilityScope });
@@ -170,6 +173,17 @@ export function editOwnedMemory(input: DesktopMemoryTarget & { content: string }
   if(receipt.replacementId) notifyMemoryRowsChanged();   // TG: the personal agent's mirror finds the replaced line and the new one by comparing the store
   return receipt;
 }
+/** The `ticket_kind` and the boundary structure of a Personal line (the two things the columns cannot hold), or null when it has neither. */
+function keptKindContext(old: OwnerMemoryRecord): Record<string, unknown> | null {
+  if (old.scope !== "user_identity") return null;
+  try {
+    const c = JSON.parse(old.context_json || "{}") as { ticket_kind?: unknown; boundary?: unknown };
+    const out: Record<string, unknown> = {};
+    if (c.ticket_kind === "identity" || c.ticket_kind === "boundary") out.ticket_kind = c.ticket_kind;
+    if (c.boundary && typeof c.boundary === "object" && !Array.isArray(c.boundary)) out.boundary = c.boundary;
+    return Object.keys(out).length ? out : null;
+  } catch { return null; }
+}
 /** The origin marks (`origin:instruction`, `origin:owner-spoke`) the edited line carries: the line that replaces it keeps them (none exists with the workspace-rules switch off). */
 function originMarksOf(row: OwnerMemoryRecord): string[] {
   try { const parsed: unknown = JSON.parse(row.evidence_json); return Array.isArray(parsed) ? originEvidenceRefs(parsed.filter((item): item is string => typeof item === "string")) : []; } catch { return []; }
@@ -183,12 +197,14 @@ function originMarksOf(row: OwnerMemoryRecord): string[] {
  *   3. then the files that quoted the line (the project's files, the agent nest) and the skills made from it are reported, and the mirror is told (`notifyMemoryRowsChanged`: a forgotten Personal line goes up as `gone`).
  * A kill anywhere is finished by the next open of a store (the stamp is the first thing written); until then the words are hidden by the forget epoch, never visible.
  */
-export function forgetOwnedMemory(input: DesktopMemoryTarget, options?: { ownerOnly?: boolean }): DesktopMemoryMutationResult {
+export function forgetOwnedMemory(input: DesktopMemoryTarget, options?: { ownerOnly?: boolean; remote?: boolean }): DesktopMemoryMutationResult {
   validateInput(input,false);
   const db = getMemoryDb();
   const forgotten = db.transaction(() => {
     assertTarget(input);
-    const receipt = revokeOneMemoryEntry(input.memoryId,input.actorId!,{bindingActor:true,...(options?.ownerOnly===true?{ownerOnly:true}:{})});
+    // the PERSON's forget of a shared-kind line is told to the server (an `F` row, written before the words are blanked, in this same transaction); a forget that came from another place is not told back.
+    if (options?.remote !== true) { try { noteHumanForget(db, input.memoryId); } catch { /* the forget goes on; a line the table could not note is found again by the sync (a blanked line whose stamp says forgotten) */ } }
+    const receipt = revokeOneMemoryEntry(input.memoryId,input.actorId!,{bindingActor:true,...(options?.ownerOnly===true?{ownerOnly:true}:{}),...(options?.remote===true?{remote:true}:{})});
     if (!receipt) throw new Error("memory_owner_target_unavailable");
     return receipt;
   }).immediate();

@@ -48,6 +48,11 @@ export interface MemoryAuthorityInput {
   chatId?: string | null;
   intakeRunId?: string | null;
   intakeEpoch?: number | null;
+  /**
+   * the owner said these words again in a turn of their own, and the line's words rest on their own words (a quote found in what they typed). Only a
+   * Personal line is let through a forget stamp, and only when the run started AFTER the stamp was made; the stamp is then lifted. A model writing the same words alone never sets it.
+   */
+  restatedByOwner?: boolean;
 }
 
 interface ForgettableMemoryRow {
@@ -471,7 +476,7 @@ function latestOwnerRevocation(ownerKeys: string[]): { epoch: number; revokedAt:
   return getDb().prepare(
     `SELECT revoked_epoch AS epoch, revoked_at AS revokedAt
        FROM memory_revocations
-      WHERE owner_key IN (${ownerKeys.map(()=>"?").join(",")})
+      WHERE owner_key IN (${ownerKeys.map(()=>"?").join(",")}) AND revocation_id NOT LIKE 'mrv\\_remote\\_%' ESCAPE '\\'
       ORDER BY revoked_epoch DESC LIMIT 1`,
   ).get(...ownerKeys) as { epoch: number; revokedAt: string } | undefined ?? null;
 }
@@ -496,7 +501,7 @@ export function forgetStampHashes(content: string): string[] {
   return [...spellings].map(text => createHash("sha256").update(text, "utf8").digest("hex"));
 }
 
-function exactContentRevoked(ownerKeys: string[], kind: MemoryKind, content: string, scope?: string): boolean {
+function matchingStamps(ownerKeys: string[], kind: MemoryKind, content: string, scope?: string): Array<{ revocationId: string; revokedAt: string }> {
   // / #4: with the kind-blind stamp (`stores.forget.kindBlind`) a text the owner forgot (as a decision, a fact, a procedure) does not come back as the preference, the fact or
   // the decision the same words are stored as after the kind correction, nor from a team run that files it under another kind. It looks at the OWNER (scope and subject: the owner key) and at the
   // words (their usual spellings). A ruleset without the block (or a write with no scope) keeps the exact kind, the way an older build did: the stamp then matches every kind that remaps to this one.
@@ -504,14 +509,34 @@ function exactContentRevoked(ownerKeys: string[], kind: MemoryKind, content: str
   const kinds = scope && forgetStampRules().kindBlind ? null : scope ? equivalentMemoryKinds(scope, kind) : [kind];
   const kindClause = kinds ? `memory_kind IN (${kinds.map(() => "?").join(",")}) AND ` : "";
   const kindArgs = kinds ?? [];
+  // a stamp that came from another place's forget (`mrv_remote_`) holds the words for the person's facts, never for a `preference` - how THIS agent answers is not changed by what another place forgot.
+  const remoteBlind = scope === "user_identity" && kind === "preference" ? " AND revocation_id NOT LIKE 'mrv\\_remote\\_%' ESCAPE '\\'" : "";
   // K7': a stamp holds for the OWNER it was made for (the agent, the project, Personal; `memoryOwnerKey`) in every layout. It used to hold for the whole account once memory lived in several stores
   // (engine N-B09): the same words offered by another agent, another project or Personal were refused because someone else had forgotten them - a person's statement refused for another subject's forget.
   // The owner's own words come back to that owner never (`exact-content-revoked`); the other subjects' lines and writes are theirs.
-  return Boolean(getDb().prepare(
-    `SELECT 1 FROM memory_revocations
-      WHERE owner_key IN (${ownerKeys.map(()=>"?").join(",")}) AND ${kindClause}content_hash IN (${hashSql})
-      LIMIT 1`,
-  ).get(...ownerKeys, ...kindArgs, ...hashes));
+  return getDb().prepare(
+    `SELECT revocation_id AS revocationId, revoked_at AS revokedAt FROM memory_revocations
+      WHERE owner_key IN (${ownerKeys.map(()=>"?").join(",")}) AND ${kindClause}content_hash IN (${hashSql})${remoteBlind}
+    `,
+  ).all(...ownerKeys, ...kindArgs, ...hashes) as Array<{ revocationId: string; revokedAt: string }>;
+}
+function exactContentRevoked(ownerKeys: string[], kind: MemoryKind, content: string, scope?: string): boolean { return matchingStamps(ownerKeys, kind, content, scope).length > 0; }
+
+
+
+/** The run started after every stamp that matched (its first run event, or now when no run is named: a write the owner's own typing makes at once). */
+function runStartedAfter(runId: string | null | undefined, stamps: Array<{ revokedAt: string }>): boolean {
+  const id = String(runId ?? "").trim();
+  let startedAt: string | null = null;
+  if (id) {
+    try { startedAt = (getDb().prepare("SELECT MIN(ts) AS startedAt FROM run_events WHERE run_id = ?").get(id) as { startedAt: string | null } | undefined)?.startedAt ?? null; } catch { startedAt = null; }
+  }
+  const started = startedAt ?? new Date().toISOString();
+  return stamps.every((stamp) => started > stamp.revokedAt);
+}
+/** A stamp is lifted by the owner saying the words again (nothing else lifts one). Its source link goes with it (the table cascades). */
+function liftStamp(revocationId: string): void {
+  getDb().prepare("DELETE FROM memory_revocations WHERE revocation_id = ?").run(revocationId);
 }
 
 /**
@@ -525,7 +550,12 @@ export function isMemoryContentRevoked(input: Pick<MemoryAuthorityInput, "scope"
 /** Must run inside the caller's IMMEDIATE insert transaction. */
 export function assertMemoryWriteAllowed(input: MemoryAuthorityInput): void {
   const ownerKeys = memoryAuthorityOwnerKeys(input);
-  if (exactContentRevoked(ownerKeys, input.kind, input.content, input.scope)) throw new MemoryRevokedError("exact-content-revoked");
+  const stamps = matchingStamps(ownerKeys, input.kind, input.content, input.scope);
+  if (stamps.length > 0) {
+    // "forget wins" - a stamped text is written again only when the owner said it again after the stamp (a quote of their own words, a run that started after the stamp). The stamp is lifted with it.
+    if (!(input.scope === "user_identity" && input.restatedByOwner === true && runStartedAfter(input.intakeRunId, stamps))) throw new MemoryRevokedError("exact-content-revoked");
+    for (const stamp of stamps) liftStamp(stamp.revocationId);
+  }
 
   const latest = latestOwnerRevocation(ownerKeys);
   if (!latest) return;
@@ -621,7 +651,7 @@ export function continuationReach(row: { scope: string; kind?: string | null; ag
   return readers.some(actor => isOneMemoryActor(actor)) ? [...new Set([...readers, ...ONE_MEMORY_ACTOR_IDS, "product:One"])] : readers;
 }
 
-function purgePreForgetContinuation(epoch: number, now: string, reach: readonly string[] | null = null): void {
+function purgePreForgetContinuation(epoch: number, now: string, reach: readonly string[] | null = null, restamp = true): void {
   purgeGeneratedMemoryViews();
   const actorMarks = reach ? reach.map(() => "?").join(",") : "";
   if (!reach) {
@@ -635,7 +665,7 @@ function purgePreForgetContinuation(epoch: number, now: string, reach: readonly 
       if (tableExists("memory_session_checkpoint_heads")) getDb().prepare("DELETE FROM memory_session_checkpoint_heads WHERE namespace=?").run(namespace);
       getDb().prepare("DELETE FROM memory_session_checkpoints WHERE namespace=?").run(namespace);
     }
-    getDb().prepare("UPDATE memory_session_checkpoints SET payload_json=json_set(payload_json,'$.forgetEpoch',?) WHERE json_valid(payload_json) AND json_extract(payload_json,'$.forgetEpoch')=?").run(epoch, epoch - 1);
+    if (restamp) getDb().prepare("UPDATE memory_session_checkpoints SET payload_json=json_set(payload_json,'$.forgetEpoch',?) WHERE json_valid(payload_json) AND json_extract(payload_json,'$.forgetEpoch')=?").run(epoch, epoch - 1);
   }
   // The session store holds the same rows in its own file: forgetting empties it physically too. A file that cannot be opened right now
   // stays hidden by the forget epoch (read() refuses a line from an older epoch) and the retention pass removes it.
@@ -949,6 +979,8 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string, 
    * Personal - the stamp and the matching stay inside the line's own owner (the One actor's `agent_repo`). The owner's own doors (the memory screen, the phone, the memory map) and the personal agent's own conversation do not set it: the family is one subject for them.
    */
   ownerOnly?: boolean;
+  /** the forget was made by the person at another place and is applied here by the shared-memory sync: the forget clock is not stepped. */
+  remote?: boolean;
 }): ForgottenMemoryProjection | null {
   const activeNestOwnerScopeKey = activeBorrowedOwnerScopeKey();
   const accountWide = layoutOf(getDb()) !== "central";
@@ -1024,12 +1056,15 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string, 
       epoch = options.ancestorStamp!.epoch;
       canonicalRevocation = { revocationId: options.ancestorStamp!.revocationId };
     } else {
-      getDb().prepare("UPDATE memory_forget_clock SET epoch = epoch + 1 WHERE id = 1").run();
-      epoch = Number((getDb().prepare(
+      // a forget that came from ANOTHER place does not step the clock and is not a fence. Its stamp keeps the words out (the exact-content refusal does not read the clock) and the continuation
+      // points of the lines it could have been read into are emptied, but a turn already running here is not refused every other write for it: the stamp's id carries `mrv_remote_` and `latestOwnerRevocation` does not count it.
+      // (A stamp's epoch must be above 0: a clock still at 0 gives it 1 without stepping the clock.)
+      if (options?.remote !== true) getDb().prepare("UPDATE memory_forget_clock SET epoch = epoch + 1 WHERE id = 1").run();
+      epoch = Math.max(options?.remote === true ? 1 : 0, Number((getDb().prepare(
         "SELECT epoch FROM memory_forget_clock WHERE id = 1",
-      ).get() as { epoch: number }).epoch);
-      purgePreForgetContinuation(epoch, now, continuationReach(selected));
-      const revocationId = `mrv_${randomUUID()}`;
+      ).get() as { epoch: number }).epoch));
+      purgePreForgetContinuation(epoch, now, continuationReach(selected), options?.remote !== true);
+      const revocationId = `${options?.remote === true ? "mrv_remote_" : "mrv_"}${randomUUID()}`;
       for (const authorityKey of ownerKeys) getDb().prepare(
         `INSERT INTO memory_revocations (
            revocation_id, owner_key, memory_kind, content_hash, source_memory_id,
@@ -1060,7 +1095,9 @@ export function revokeOneMemoryEntry(memoryId: string, expectedAgentId: string, 
       `SELECT m.id,m.scope,m.kind,m.content,m.project_id,m.project_path,m.agent_id,m.chat_id,m.superseded_at,b.actor_id,b.owner_namespace
          FROM memory_entries m LEFT JOIN memory_identity_bindings b ON b.memory_id=m.id
         WHERE m.scope = ?${kindFilter}`,
-    ).all(selected.scope, ...kindArgs)) as ForgettableMemoryRow[]).filter((row) => options?.ancestor ? row.id === selected.id : (row.id === selected.id || sameOwner(row)));
+    ).all(selected.scope, ...kindArgs)) as ForgettableMemoryRow[]).filter((row) => options?.ancestor ? row.id === selected.id : (row.id === selected.id || sameOwner(row)))
+      // a forget from another place takes the person's facts of those words, never this agent's own `preference` of the same words (the sync names every shared-kind line itself, one by one).
+      .filter((row) => !(options?.remote === true && row.scope === "user_identity" && row.kind === "preference" && row.id !== selected.id));
     // English migration: a translated row's original wording lives in the side
     // table. The same original under the same owner is the same memory, and it
     // must be forgotten everywhere it was projected in that wording.

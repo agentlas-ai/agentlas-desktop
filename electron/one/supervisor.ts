@@ -28,6 +28,7 @@ import { OneSupervisorService, SupervisorStartDeferred, type SupervisorRuntime }
 import { createCompanionWorkDeliveryRuntime } from "./companion-work-delivery-runtime";
 import { retireCompanionUnstarted } from "./companion-work-receipt";
 import { createCompanionDirectIntakeRuntime } from "./companion-direct-intake-runtime";
+import { startPluralWorkHost, realRequestDeps, realApprovalHooks } from "./plural-work-real";
 import { guiLeaseRoadOn } from "./companion-take-roads";
 import { unservedStartEnd } from "./companion-computer-gate";
 import { narrowStartPermission } from "./companion-permission-cap";
@@ -60,6 +61,7 @@ let hostOwner:OneSupervisorOwner|null=null;
 let stopProactiveHost:(()=>void)|undefined;
 let stopBudgetHost:(()=>void)|undefined;
 let stopWorkDeliveryHost:(()=>void)|undefined;
+let stopPluralHost:(()=>void)|undefined;
 let supervisor:OneSupervisorService|null=null;
 /** Set once this process handed the One domain to the daemon; Desktop keeps no personal-domain owner afterwards. */
 let domainHandedToDaemon=false;
@@ -456,13 +458,15 @@ export function oneSupervisor():OneSupervisorService {
   // A graph that answers this conversation (or a Work session One delegated) is queued for review by the scheduler's
   // delivery; in this process the review starts now (native-harness notyet NH16). Elsewhere the tick above picks it up.
   const stopGraphResults=registerOneGraphResultWake(()=>{try{supervisor?.reviewQueuedResults();}catch(error){console.warn("[one-supervisor] graph result review deferred",error instanceof Error ? error.message : "unknown");}});
-  const stopProactive=()=>{if(checkinHandle)clearTimeout(checkinHandle);checkinHandle=null;for(const stop of stopCheckinAims.splice(0))stop();stopQuestions();stopHostAlerts();stopTeamResults();stopGraphResults();stopWorkDeliveryHost?.();};stopProactiveHost=stopProactive;
+  const stopProactive=()=>{if(checkinHandle)clearTimeout(checkinHandle);checkinHandle=null;for(const stop of stopCheckinAims.splice(0))stop();stopQuestions();stopHostAlerts();stopTeamResults();stopGraphResults();stopWorkDeliveryHost?.();stopPluralHost?.();stopPluralHost=undefined;};stopProactiveHost=stopProactive;
   registerAppRuntimeParticipant("one-supervisor-work-queue", {
     closeAdmission:()=>{owner.closeAdmission();workExecutor?.close();stopProactive();},
     interrupt:()=>{owner.closeAdmission();workExecutor?.close();stopProactive();},
     isSettled:()=>{if(invocationService.activeChatIds().length)return false;stopBudgetHost?.();owner.release();supervisor?.close();nativeRuntime?.close();return true;},
   });
   workExecutor.start();
+  // a Work another agent handed over ends its server row from here (the process that ran it), and an approval question nobody answered ends it as approval_unavailable.
+  { const plural=startPluralWorkHost({...realRequestDeps(line=>console.info(line)),...realApprovalHooks(),db:getDb(),onActivity:l=>store.onActivity(l),onSettled:l=>onSettled(()=>l()),cancelRun:runId=>cancelNative(runId)});stopPluralHost=()=>plural.stop(); }
   // Phone-to-Desktop Work (intake every 5 s, delivery every 30 s, a delivery-origin GET per paired device) only runs with
   // the same switch as its phone bridge handlers (mobile-bridge/authority.ts). Ungated it polled the live server, which
   // has no such route yet, every 5 seconds on every Desktop.

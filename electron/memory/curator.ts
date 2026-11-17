@@ -6,10 +6,12 @@ import {
   appendMemoryLog,
   appendSoulMemory,
 } from "./project-files";
-import { appendMemoryOrigins, findEquivalentMemoryId, insertMemoryEntry, MemoryStoreFullError, type RequestContext } from "./store";
+import { appendMemoryOrigins, findEquivalentMemoryId, insertMemoryEntry, MemoryStoreFullError, personalCeilingClassOf, type RequestContext } from "./store";
 import { peekExplicitSupersedeTarget, supersedeExplicitMemory, supersedeRestatedMemories } from "./graph";
 import { notifyMemoryWritten } from "./memory-written-signal";
-import { getMemoryStoreInfo } from "./database";
+import { releaseOldestOwnPreference } from "./share-ceiling";
+import { SHARED_KIND_SQL, noteSaidAgain, sharedOpenHere } from "./shared-ids";
+import { getMemoryDb, getMemoryStoreInfo } from "./database";
 import { isAutomationLedgerChat } from "./automation-surface";
 import {
   beginMemoryProjectionWrite,
@@ -177,6 +179,8 @@ export interface CurationReport {
   /** K2b': the store ids of the lines this batch wrote and of the existing lines a duplicate was merged into, in event order (absent when none). In memory only: never stored, never sent. */
   writtenIds?: string[];
   dedupedIds?: string[];
+  /** the ids of own `preference` lines a full personal place let go of to make room for a new line (absent when none). */
+  releasedForRoom?: string[];
 }
 
 export interface CurateReplyOptions {
@@ -342,6 +346,33 @@ function resolveScope(ev: RawMemoryEvent, ctx: CurationContext): MemoryScope {
   return ev.suggested_scope;
 }
 
+/** Has shared memory had its first merge in this store? */
+function sharedIsOpen(): boolean { try { return sharedOpenHere(getMemoryDb()); } catch { return false; } }
+/** Is the event a line of a shared kind? fact (the column), identity, or a boundary that carries its structure. A `preference` is this place's own. */
+function eventIsSharedKind(ev: RawMemoryEvent): boolean {
+  if (ev.ticket_kind === "identity") return true;
+  if (ev.ticket_kind === "boundary") return ev.boundary !== undefined || ev.memory_kind === "fact";
+  return ev.memory_kind === "fact";
+}
+/** Is the stored Personal line a shared kind (the table of `shared-ids.ts`, in SQL)? */
+function isSharedKindLine(memoryId: string): boolean {
+  try { return Boolean(getMemoryDb().prepare(`SELECT 1 FROM memory_entries WHERE id=? AND scope='user_identity' AND content<>'' AND ${SHARED_KIND_SQL}`).get(memoryId)); } catch { return false; }
+}
+
+/** Is there a conversation to put the "oldest memory deleted" card in? (a chat the desktop knows). */
+function canShowRoomCard(chatId: string | null | undefined): boolean {
+  if (!chatId) return false;
+  try { return Boolean((require("../store/chats") as typeof import("../store/chats")).getChat(chatId)); } catch { return false; }
+}
+/** The card for an own preference let go (scope "own": it applies to this agent only). Never throws: the new line is already written. */
+function showRoomCard(newLineId: string, text: string, agentId: string | null | undefined): void {
+  try {
+    let agentName: string | undefined;
+    try { agentName = agentId ? (require("../mcp/registry") as typeof import("../mcp/registry")).getAgentById(agentId)?.name : undefined; } catch { agentName = undefined; }
+    (require("../one/memory-room-notice") as typeof import("../one/memory-room-notice")).recordMemoryRoomNotice({ lineId: newLineId, scope: "own", count: 1, text, saidAt: null, ...(agentName ? { agentName } : {}) });
+  } catch { /* the card is a display row; the memory is already settled */ }
+}
+
 function compactContext(ctx: RequestContext): RequestContext | null {
   const next: RequestContext = {};
   if (ctx.userIntent) next.userIntent = ctx.userIntent.slice(0, 240);
@@ -356,6 +387,8 @@ function compactContext(ctx: RequestContext): RequestContext | null {
   if (ctx.crossContext !== undefined) next.crossContext = ctx.crossContext;
   if (ctx.outcome !== undefined) next.outcome = ctx.outcome ? ctx.outcome.slice(0, 240) : ctx.outcome;
   if (ctx.ticket_kind === "identity" || ctx.ticket_kind === "boundary") next.ticket_kind = ctx.ticket_kind;
+  if (ctx.boundary) next.boundary = ctx.boundary;
+  if (typeof ctx.grounded === "boolean") next.grounded = ctx.grounded;
   if (looksSecret(JSON.stringify(next))) return null;
   return Object.keys(next).length > 0 ? next : null;
 }
@@ -364,6 +397,8 @@ function buildRequestContext(
   ev: RawMemoryEvent,
   ctx: CurationContext,
   projectPath: string | null,
+  grounded?: boolean,
+  withBoundary = false,
 ): RequestContext | null {
   const provided = ev.request_context ?? {};
   const targetProject = provided.targetProject ?? ctx.projectId ?? null;
@@ -380,6 +415,9 @@ function buildRequestContext(
     crossContext,
     // K2b': the kind a Personal ticket was given before the computer folded it (host-set on the event; a model cannot send it).
     ...(ev.ticket_kind ? { ticket_kind: ev.ticket_kind } : {}),
+    // the structure of a boundary line travels with it, the same way the kind does.
+    ...(withBoundary && ev.ticket_kind === "boundary" && ev.boundary ? { boundary: ev.boundary } : {}),
+    ...(grounded !== undefined ? { grounded } : {}),
   });
 }
 
@@ -747,6 +785,11 @@ export function curateEvents(
     // a file, a photo or room text (`turnFacts`) writes a line as the owner's own only when it rests on the owner's own words; otherwise it is `observed`.
     const personTurn = ctx.ownerSpoke === true && !unattended && !ctx.sourceProvenance;
     const mixedTurn = ctx.turnFacts?.toolsRan === true || ctx.turnFacts?.inputsRead === true;
+    // for a Personal line the owner's own typing is checked against the words every time (not only on a mixed turn). The answer rides on the line (`grounded`, sent up as its mark) and lets
+    // words the owner forgot be written again only when they said them again (a model writing the same words alone is not that).
+    // (Only once shared memory is open here: before the first merge the stamp holds as it always did and no new key is stored on the line.)
+    const groundedNow = effectiveScope === "user_identity" && personTurn && sharedIsOpen()
+      ? groundedInOwnerWords(ev, options.ownerText ?? ctx.ownerWords ?? ctx.experienceIntake?.taskHint ?? "", "") : false;
     // K2b': a memory_ticket line comes with the two columns the ticket receiver already decided from the same host facts (ticket-receiver.ts); that verdict stands (one authority), nothing is derived a second time.
     const origin = ev.ticket_origin ?? deriveOrigin({
       ownerSpoke: ctx.ownerSpoke === true, notAPersonTurn: !personTurn, hostMinted: hostObserved, kind: ev.memory_kind,
@@ -764,7 +807,7 @@ export function curateEvents(
     }
 
     const projectPath = effectiveScope === "project" ? ctx.projectPath : null;
-    const requestContext = buildRequestContext(ev, ctx, projectPath);
+    const requestContext = buildRequestContext(ev, ctx, projectPath, effectiveScope === "user_identity" && sharedIsOpen() ? groundedNow : undefined, effectiveScope === "user_identity" && sharedIsOpen());
     // stage 2 (the engine's classify stage2): a model that points at an older line replaces it only when the two are similar enough (the ruleset's
     // `limits.mergeTokenOverlapMin`) and the older line is in the same scope and reads as the same corrected kind; otherwise the text is a NEW line and the old one
     // stays (never a guess). At a store's ceiling only a replacing line is written. Rules off: the explicit link is followed as before.
@@ -780,15 +823,19 @@ export function curateEvents(
         continue;
       }
       replaces = true;
+      // a line that is shared (fact, identity, boundary) is not turned into a place-only `preference` by a rewrite: the shared line stays, the new line is added. Both stay until a person removes one.
+      if (effectiveScope === "user_identity" && sharedIsOpen() && !eventIsSharedKind(ev) && isSharedKindLine(target.id)) { replaces = false; supersedes = undefined; }
     } else if (rules && supersedes) {
       const target = peekExplicitSupersedeTarget({ scope: effectiveScope, projectId: ctx.projectId, projectPath, agentId: effectiveAgentId, chatId: ctx.chatId }, supersedes);
       if (target) {
         const verdict = classifyStage2(rules, { scope: effectiveScope, kind: ev.memory_kind, similarity: tokenOverlap(rules, ev.content, target.content),
           named: true, containment: tokenContainment(rules, ev.content, target.content), target: { scope: target.scope, kind: target.kind }, storeRows: 0 });
         replaces = "replace" in verdict && verdict.replace === true;
+        if (replaces && effectiveScope === "user_identity" && sharedIsOpen() && !eventIsSharedKind(ev) && isSharedKindLine(target.id)) replaces = false;   // see above
         if (!replaces) supersedes = undefined;
       }
     }
+    const personalClassOf = personalCeilingClassOf(ev.memory_kind, ev.ticket_kind, ev.boundary !== undefined && sharedIsOpen());
     const ceiling = rules && (effectiveScope === "user_identity" || effectiveScope === "agent_repo" || effectiveScope === "project") ? memoryStoreCeiling(effectiveScope, memoryActorKind(effectiveAgentId)) : null;
     const equivalentMemoryId = findEquivalentMemoryId(
       effectiveScope,
@@ -811,6 +858,8 @@ export function curateEvents(
       } catch (error) {
         console.warn(`[memory] duplicate source not added: ${typeof (error as { code?: unknown } | null)?.code === "string" ? (error as { code: string }).code : error instanceof Error ? error.message.slice(0, 80) : "unknown"}`);
       }
+      // the person said the same words again in a turn of their own: a line the shared set holds gets its "said at" moved up (the next run tells the server).
+      if (effectiveScope === "user_identity" && personTurn && origin.originClass === "user") { try { noteSaidAgain(getMemoryDb(), equivalentMemoryId); } catch { /* the words are still there; the next saying marks it */ } }
       report.deduped += 1;
       (report.dedupedIds ??= []).push(equivalentMemoryId);
       recordCandidateDecision({
@@ -840,7 +889,7 @@ export function curateEvents(
     }
     let entry: ReturnType<typeof insertMemoryEntry>;
     try {
-      entry = insertMemoryEntry({
+      const entryInput: Parameters<typeof insertMemoryEntry>[0] = {
         scope: effectiveScope,
         kind: ev.memory_kind,
         content: ev.content,
@@ -857,17 +906,32 @@ export function curateEvents(
         evidence: evidenceWithSourceProvenance(ev, ctx, { instruction: resolved.instruction === true && effectiveScope !== "user_identity" }),
         requestContext,
         intakeRunId: ctx.runId,
+        ...(effectiveScope === "user_identity" && groundedNow ? { restatedByOwner: true } : {}),
         curationActor: options.curatorMode === "semantic" ? "model_curated" : "host_admitted",
         policyVersion: options.policyVersion ?? "agentlas.memory-admission.v1",
         recallChannel: ctx.memoryChannel,
         compatibilityScope: ctx.memoryCompatibilityScope,
-        ...(ceiling ? { ceiling: { rows: ceiling.rows, reason: ceiling.reason, replace: replaces, countsFrom: ceiling.countsFrom } } : {}),
+        // Personal: the ceiling is counted per class: this place's own `preference` lines against the ceiling, the shared set's lines on their own (the server keeps that ceiling)
+        ...(ceiling ? { ceiling: { rows: ceiling.rows, reason: ceiling.reason, replace: replaces, countsFrom: ceiling.countsFrom, ...(effectiveScope === "user_identity" ? { klass: personalClassOf } : {}) } } : {}),
         originRefs: [
           ...(options.originTicketIds ?? (options.ticketId ? [options.ticketId] : [])).map(id => ({ kind: "ticket" as const, id })),
           ...(ctx.runId ? [{ kind: "run" as const, id: ctx.runId }] : []),
           ...(ctx.projectId ? [{ kind: "project" as const, id: ctx.projectId }] : []),
         ],
-      });
+      };
+      try { entry = insertMemoryEntry(entryInput); }
+      catch (full) {
+        // a full PERSONAL place lets go of its oldest OWN `preference` (never shared) and writes the new line. A shared line is never let go of by the desktop (the server does that, as a tombstone); no tombstone, nothing is told to the server
+        // or to another desktop. The screen's wording needs a mock-up: until then one log line and the id in the report. No such line = the old behaviour below (the new line is not written).
+        // a place full of its own preferences lets go of its oldest one WITH a card in the conversation the new line was said in. No conversation to put the card in = the old behaviour
+        // (the new line is not written, nothing is let go): a line must never disappear without the person being told.
+        const released = full instanceof MemoryStoreFullError && effectiveScope === "user_identity" && personalClassOf === "own" && canShowRoomCard(ctx.chatId) ? releaseOldestOwnPreference() : null;
+        if (released === null) throw full;
+        console.info("[memory] the personal place was full: its oldest own preference was let go for the new line");
+        (report.releasedForRoom ??= []).push(released.id);
+        entry = insertMemoryEntry(entryInput);
+        showRoomCard(entry.id, released.text, effectiveAgentId);
+      }
     } catch (error) {
       if (error instanceof MemoryStoreFullError) {
         // The store holds its ceiling of lines and this one replaces none: not written, not tried again, one line in the decision ledger. Code never retires an older line.

@@ -7308,6 +7308,8 @@ export interface AgentlasIpc {
   listToolApprovals: () => Promise<ToolApprovalRequestEvent[]>;
   /** The answered or closed cards of these conversations (oldest first), for the conversation's one quiet line where the card was. Read only. */
   listSettledToolApprovals: (chatIds: string[]) => Promise<SettledToolApproval[]>;
+  /** A button of a hand-off card (cancel, retry, or the answer to a confirmation of work this desktop handed over). Main reads the card row; the card carries only ids. */
+  pluralHandoffAct: (input: { op: "cancel" | "retry"; id: string } | { op: "answer"; id: string; qid: string; answer: "allow" | "allow_task" | "deny" }) => Promise<{ ok: boolean; state?: string }>;
   /** 데몬 자동 시작(로그인 기동) — 기본 off. 켜면 부팅 항목까지 같은 턴에 정합된다. */
   getDaemonAutostart: () => Promise<{ enabled: boolean; installed?: boolean; loaded?: boolean; reconciled?: boolean; reason?: string }>;
   setDaemonAutostart: (enabled: boolean) => Promise<{ enabled: boolean; installed?: boolean; loaded?: boolean; reconciled?: boolean; reason?: string }>;
@@ -9337,6 +9339,8 @@ export interface SettledToolApproval {
    * Such a row is a record, not an answer: `choice` is "allow_once" and `device` is absent.
    */
   auto?: "always_allow" | "full_access" | "unattended";
+  /** The card was a question of a Work another agent handed over (a hand-off row): it has no clock, so an `expired` row here means the question was withdrawn ("확인 요청 취소"), never that time ran out. */
+  remote?: true;
 }
 
 /**
@@ -9385,6 +9389,15 @@ export interface ToolApprovalRequestEvent {
    * requester, exact credential/resource, and exact permission level.
    */
   consentBinding?: ToolApprovalConsentBinding;
+  /**
+   * A question of a Work another agent handed over (a hand-off row; electron/one/plural-remote-ask.ts). The sender is asked first, on its own screen; this card is the same question on this desktop.
+   * No `expiresAt`: the question has no clock. `fromName` = the agent that handed the work over; `askVia` is always "row" on a card (an older phone's row keeps the ordinary five-minute card and carries no such field).
+   */
+  remoteAsk?: { rowId: string; fromName: string; askVia: "row" };
+  /** A delete / send card of a remote Work also offers "allow for this task" (a payment never does). */
+  taskAllowOffered?: true;
+  /** A sending card: the beginning of what is sent (the approval detail, cut to 2,000 characters). Only on a remote Work's card. */
+  preview?: string;
 }
 
 /**

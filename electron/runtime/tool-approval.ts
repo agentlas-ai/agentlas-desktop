@@ -43,6 +43,9 @@ import {
 import { askUser } from "../confirm/ask-user";
 import { APPROVAL_REFUSAL_RESULT_MODULE, approvalRefusalResultText, type ApprovalRefusal, type ApprovalToolAnnotations } from "./approval-rule";
 import { registerDeclaredPromptModule } from "./prompt-order";
+import type { AskAnswer, AskKind, CloseWhy, RemoteAsk } from "../one/plural-handoff-wire";
+import { pluralRowAsker } from "../one/plural-remote-ask";
+import { redactSecrets } from "../../shared/secret-patterns";
 
 /** 승인 요청 하나 — 화면과 같은 정의를 쓴다(shared/types.ts). */
 export type ToolApprovalRequest = ToolApprovalRequestEvent;
@@ -67,6 +70,8 @@ export function toolApprovalSessionKey(runtime: string, primaryIdentity?: string
 export interface RuntimeToolPermissionAsk {
   /** Main-only lifetime; never serialized into the approval card or consent identity. */
   signal?: AbortSignal;
+  /** The wire this ask came in on (a CLI hook's or the MCP proxy's connection): it aborts when the hook's time ran out or the CLI let go. Read only by a remote question (requestRemoteToolApproval), which closes as `timeout`. */
+  closed?: AbortSignal;
   /** Main-authored hard read boundary, independent of existing capability grants. */
   planMode?: true;
   runtime: string;
@@ -353,7 +358,7 @@ export interface ToolApprovalOutcome {
   decision: ToolApprovalDecision;
   decidedAt: string;
   /** "expired": nobody answered the card before it closed. A deny for the run, never the owner's answer. */
-  reason?: "expired";
+  reason?: "expired" | "row_refused";
   durableConsent?: ToolApprovalDurableConsentReceipt;
 }
 
@@ -365,7 +370,10 @@ type ApprovalWaiter = {
 };
 type Pending = {
   request: ToolApprovalRequest;
-  timer: NodeJS.Timeout;
+  /** Absent for a remote question (it has no clock). */
+  timer?: NodeJS.Timeout;
+  /** A question of a Work handed over by a hand-off row (requestRemoteToolApproval). */
+  remote?: { row: RemoteAsk; kind: AskKind; /** a local click is being taken to the row first */ answering?: true; /** the row's answer (or the fallback) is settling this card: do not go to the row again */ settling?: true; closeWhy?: CloseWhy };
   waiters: Set<ApprovalWaiter>;
   dedupeKey: string;
   /** The Main ledger holds this request, so its decision is committed there before any waiter hears it. */
@@ -577,6 +585,8 @@ export function setApprovalClosureRecorder(fn: typeof closureRecorder): void { c
 function expirePending(entry: Pending, byTimeout = false): void {
   if (pending.get(entry.request.id) !== entry) return;
   detachPending(entry);
+  // A remote question that ends with no person's answer is closed on the row, so the other screens read "request cancelled" (the row keeps no clock of its own).
+  if (entry.remote && !entry.remote.settling) closeRemoteQuestion(entry, entry.remote.closeWhy ?? (byTimeout ? "timeout" : "work_stopped"));
   try { closureRecorder?.({ requestId: entry.request.id, chatId: entry.request.chatId, reason: byTimeout ? "timed_out" : "cancelled", at: new Date().toISOString() }); } catch { /* the record is a courtesy */ }
   if (byTimeout) {
     recentlyExpired.push({ id: entry.request.id, at: Date.now() });
@@ -598,6 +608,7 @@ function joinApproval(entry: Pending, sessionKey: string, signal?: AbortSignal):
     const aborted = () => {
       if (!entry.waiters.delete(waiter)) return;
       waiter.cleanup();
+      if (entry.remote) entry.remote.closeWhy = closeWhyOfAbort(signal?.reason);
       // Cancellation is not a user denial and cannot create a session/durable grant.
       reject(signal?.reason ?? new Error("tool_approval_cancelled"));
       if (!entry.waiters.size) expirePending(entry);
@@ -636,7 +647,7 @@ export function requestToolApproval(
   };
   const entry: Pending = { request, dedupeKey, waiters: new Set(),
     timer: setTimeout(() => expirePending(entry, true), timeoutMs) };
-  entry.timer.unref?.();
+  entry.timer?.unref?.();
   if (toolApprovalLedger && request.chatId) {
     try { toolApprovalLedger.persist(request); entry.durable = true; } catch { /* in-process only, as before */ }
   }
@@ -648,6 +659,116 @@ export function requestToolApproval(
   // N0b: the card is shown and a person decides - this turn's run slot is let go meanwhile and taken again with the answer.
   const waiting = waitingForPerson(promise, signal && nativeApprovalSignalChain(signal));
   if (pending.get(request.id) === entry) {
+    for (const fn of listeners) { try { fn(request); } catch { /* UI cannot block settlement. */ } }
+  }
+  return waiting;
+}
+
+
+/*
+ * ── 원격 물음 ───────────────────────────────────────────────────────────────
+ * 다른 기기에서 맡긴 일(행)의 돈·삭제·전송 물음. 물음 = 이 요청 id(qid) 하나. 행이 정본이다:
+ *   - 먼저 행에 올린다(`ask`): `allowed`(그 업무 동안 허용한 종류)면 카드 없이 지나가고, `refused`(행이 끝남)면 거절, `asked`면 이 데스크탑에도 같은 카드를 띄운다.
+ *   - 시계 없음: 타이머를 걸지 않는다(Infinity 는 Node 에서 1ms 가 되므로 값을 넘기지 않고 가지를 따로 둔다). 끝내는 것은 답, 실행이 멈춤(abort), 훅·MCP 선이 끊김(`closed`)뿐이다.
+ *   - 저장된 "항상 허용"·세션 허용은 읽지도 쓰지도 않는다. "이 업무 동안"은 행의 taskAllow 하나뿐이다(allow_task 는 삭제·전송만).
+ *   - 이 화면의 클릭도 행에 먼저 쓰고, 행이 돌려준 첫 답으로 카드를 닫는다. 행에 못 닿으면 이 화면의 답으로 닫고 `close{answered_here}`.
+ * 장부(SQLite)에는 만료를 7일로 적는다 - 사용자 시계가 아니라 낡은 행을 치우는 상한이다(HARD-LIMITS-20261117.md).
+ */
+const REMOTE_LEDGER_CEILING_MS = 7 * 24 * 3_600_000;
+const REMOTE_TARGET_CHARS = 200;
+const REMOTE_PREVIEW_CHARS = 2000;
+/** The reason of an abort that comes from the wire a CLI's hook or MCP proxy asked on (its time ran out, or the CLI let go): the question closes as `timeout`. Any other abort is the run being stopped. */
+export function approvalWireClosedReason(): Error { return new DOMException("approval_wire_closed", "AbortError"); }   // still an AbortError for every reader of the reason; only its message names the wire
+function closeWhyOfAbort(reason: unknown): CloseWhy { return reason instanceof Error && reason.message === "approval_wire_closed" ? "timeout" : "work_stopped"; }
+const decisionOfAnswer = (answer: AskAnswer): ToolApprovalDecision => (answer === "deny" ? "deny" : "allow_once");
+const answerOfDecision = (decision: ToolApprovalDecision, kind: AskKind): AskAnswer =>
+  decision === "deny" ? "deny" : decision === "allow_session" && kind !== "money" ? "allow_task" : "allow";
+
+function closeRemoteQuestion(entry: Pending, why: CloseWhy, answer?: AskAnswer): void {
+  if (!entry.remote) return;
+  try { pluralRowAsker()?.close(entry.remote.row, entry.request.id, why, answer); } catch { /* the receiver repeats a close it could not send */ }
+}
+
+function remoteLocalAnswer(entry: Pending, decision: ToolApprovalDecision, via?: ToolApprovalVia): ToolApprovalResolutionReceipt {
+  const id = entry.request.id, remote = entry.remote!;
+  if (remote.answering) return unresolvedReceipt(id, decision, "pending");
+  const mine = answerOfDecision(decision, remote.kind);
+  remote.answering = true;
+  const settle = (answer: AskAnswer, unreachable: boolean): void => {
+    if (pending.get(id) !== entry) return;
+    if (unreachable) closeRemoteQuestion(entry, "answered_here", answer);
+    remote.settling = true;
+    try { resolveToolApproval(id, decisionOfAnswer(answer), undefined, via); } finally {
+      // a decision the ledger could not commit leaves the card open: it may be answered again
+      if (pending.get(id) === entry) { delete remote.settling; delete remote.answering; }
+    }
+  };
+  const asker = pluralRowAsker();
+  if (!asker) queueMicrotask(() => settle(mine, true));
+  else void asker.answer(remote.row, id, mine).then((first) => settle(first ?? mine, first === null), () => settle(mine, true));
+  return unresolvedReceipt(id, decision, "pending");
+}
+
+/** The row's answer reached this process (the receiver reads it from `held[].approvals`): close the card with it, without asking the row again. null = no such open remote question here. */
+export function resolveRemoteApprovalFromRow(id: string, answer: AskAnswer): ToolApprovalResolutionReceipt | null {
+  const entry = pending.get(id);
+  if (!entry?.remote) return null;
+  entry.remote.settling = true;
+  try { return resolveToolApproval(id, decisionOfAnswer(answer), undefined, "desktop"); } finally { if (pending.get(id) === entry) { delete entry.remote.settling; delete entry.remote.answering; } }
+}
+
+/** The row closed the question without an answer (ended, gone, answered elsewhere and over) or the runtime refused after the card opened: the card closes, the run gets a refusal. */
+export function closeRemoteApproval(id: string, why: CloseWhy): boolean {
+  const entry = pending.get(id);
+  if (!entry?.remote) return false;
+  entry.remote.closeWhy = why;
+  expirePending(entry);
+  return true;
+}
+
+/** Is this request a remote question still open here? (D's card and the bridge read the request's own `remoteAsk`; this is for the receiver.) */
+export function isRemoteApprovalOpen(id: string): boolean { return pending.get(id)?.remote !== undefined; }
+
+export type RemoteApprovalInput = Omit<ToolApprovalRequest, "id" | "requestedAt" | "expiresAt" | "mode" | "remoteAsk" | "taskAllowOffered" | "preview" | "capability">
+  & { sessionKey: string; signal?: AbortSignal; closed?: AbortSignal; kind: AskKind; remote: RemoteAsk; target: string; preview?: string };
+
+export async function requestRemoteToolApproval(input: RemoteApprovalInput): Promise<ToolApprovalOutcome> {
+  const { sessionKey, signal, closed, kind, remote, target, preview, ...rest } = input;
+  if (signal?.aborted) throw (signal.reason ?? new Error("tool_approval_cancelled"));
+  const asker = pluralRowAsker();
+  const refused = (): ToolApprovalOutcome => ({ decision: "deny", decidedAt: new Date().toISOString(), reason: "row_refused" });
+  if (!asker) return refused();   // nobody can be asked from this process: the Work does not wait on a card the sender never sees
+  const requestedAt = new Date();
+  const id = `approval:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
+  const question = { qid: id, kind, target: redactSecrets(target).slice(0, REMOTE_TARGET_CHARS), ...(kind === "send" && preview ? { preview: redactSecrets(preview).slice(0, REMOTE_PREVIEW_CHARS) } : {}) };
+  let verdict: "asked" | "allowed" | "refused";
+  try { verdict = await asker.ask(remote, question); } catch { verdict = "refused"; }
+  if (verdict === "allowed") return { decision: "allow_once", decidedAt: new Date().toISOString() };
+  if (verdict === "refused") { try { asker.close(remote, id, "work_stopped"); } catch { /* nothing was kept */ } return refused(); }
+  const request: ToolApprovalRequest = {
+    ...rest, id, capability: kind, mode: "live", requestedAt: requestedAt.toISOString(),
+    ...(isAppWorkFolder(rest.cwd) ? { cwdIsAppFolder: true as const } : {}),
+    remoteAsk: { rowId: remote.rowId, fromName: remote.fromName, askVia: "row" },
+    ...(kind !== "money" ? { taskAllowOffered: true as const } : {}),
+    ...(question.preview ? { preview: question.preview } : {}),
+  };
+  const entry: Pending = { request, dedupeKey: `remote\u0000${id}`, waiters: new Set(), remote: { row: remote, kind } };
+  if (toolApprovalLedger && request.chatId) {
+    try { toolApprovalLedger.persist({ ...request, expiresAt: new Date(requestedAt.getTime() + REMOTE_LEDGER_CEILING_MS).toISOString() }); entry.durable = true; } catch { /* in-process only */ }
+  }
+  try { stampNativeToolApproval(request, signal, toolApprovalLedger); }
+  catch (error) {
+    if (entry.durable) { try { toolApprovalLedger?.cancel(id); } catch { /* the ledger's own ceiling closes it */ } }
+    try { asker.close(remote, id, "work_stopped"); } catch { /* nothing more to do */ }
+    throw error;
+  }
+  pending.set(id, entry);
+  pendingByKey.set(entry.dedupeKey, id);
+  const promise = joinApproval(entry, sessionKey, signal);
+  const waiting = waitingForPerson(promise, signal && nativeApprovalSignalChain(signal));
+  const onClosed = (): void => { if (pending.get(id) === entry) { entry.remote!.closeWhy = "timeout"; expirePending(entry); } };
+  if (closed) { if (closed.aborted) queueMicrotask(onClosed); else closed.addEventListener("abort", onClosed, { once: true }); }
+  if (pending.get(id) === entry) {
     for (const fn of listeners) { try { fn(request); } catch { /* UI cannot block settlement. */ } }
   }
   return waiting;
@@ -784,6 +905,8 @@ export function resolveToolApproval(
   }
 
   const entry = pending.get(id);
+  // A remote question goes to the row first: the row's first answer is the answer, wherever the click was (plural-remote-ask.ts).
+  if (entry?.remote && !entry.remote.settling) return remoteLocalAnswer(entry, decision, via);
   let outcome: ToolApprovalOutcome = { decision, decidedAt: new Date().toISOString() };
   if (entry) {
     if (entry.durable && toolApprovalLedger) {

@@ -1,7 +1,7 @@
 /**
  * The largest chat video the phone bridge serves, for BOTH sources: a video stored with a chat message (chat-video-transfers.ts, read from the
  * chat store) and a video found in a folder the chat shows (legacy-chat-video.ts, read from disk). They carried 64 MiB and 192 MiB, so the same
- * video played on one phone build and was refused on another (set-values audit 다-5). 192 MiB is the number the other video paths
+ * video played on one phone build and was refused on another. 192 MiB is the number the other video paths
  * already use (one/artifact-preview.ts MAX_VIDEO_BYTES, daemon/science-video.ts LIMIT, the `science-video-large-v1` capability).
  * basis: 측정 + 계산. A 192 MiB video is 192 chunks of 1 MiB: one transfer fits a phone's request window beside other traffic (test-mobile-video-chunk-budget: 192 chunks
  * pass beside 30 other requests; the cap is now 300 per minute, relay refusal instead of a closed socket). Cost measured on this Mac

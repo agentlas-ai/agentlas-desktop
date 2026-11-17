@@ -192,6 +192,7 @@ export class OneSupervisorApprovalStore {
         decidedAt: row.decided_at ?? String(request.requestedAt ?? ""),
         // The device only for a human answer, the basis only for an automatic one; a value this build does not know is not drawn.
         ...(outcome !== "expired" && (row.handled_by === "desktop" || row.handled_by === "phone") ? { device: row.handled_by } : {}),
+        ...(request.remoteAsk ? { remote: true as const } : {}),
         ...(outcome === "approved" && (row.handled_by === "always_allow" || row.handled_by === "full_access" || row.handled_by === "unattended") ? { auto: row.handled_by } : {}),
       });
     }

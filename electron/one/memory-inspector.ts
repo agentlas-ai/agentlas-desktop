@@ -14,11 +14,12 @@ import { nativeTextsFor } from "../memory/native-text";
 import { derivedSkillsForRecords } from "../memory/derived-skills";
 import { projectMemoryEmbeddings } from "./memory-map";
 import { getAgentById } from "../mcp/registry";
+import { readSharedIdRows, sharedOpenHere } from "../memory/shared-ids";
 import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 import { isOneMemoryActor, memoryActorIds } from "../../shared/memory-actor-family";
 import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { ONE_MEMORY_MAP_CONTRACT_VERSION, type OneMemoryMapKind, type OneMemoryMapScope } from "../../shared/one-memory-map";
-import { DESKTOP_MEMORY_INSPECTOR_VERSION, type DesktopMemoryQuery, type DesktopMemoryQueryResult,
+import { DESKTOP_MEMORY_INSPECTOR_VERSION, type DesktopMemorySharing, type DesktopMemoryQuery, type DesktopMemoryQueryResult,
   type DesktopMemoryDetail, type DesktopMemoryEntry, type DesktopMemoryStatus } from "../../shared/desktop-memory-inspector";
 const scopes = ["user_identity","team_memory","agent_repo","agent_team","project","session"];
 const kinds = ["fact","decision","preference","risk","procedure","hypothesis","evidence","deprecation","conflict"];
@@ -67,6 +68,23 @@ export function inspectMemoryDetail(input: { memoryId: string; ownerRef: string 
     audience:{declaration:app.audience && typeof app.audience === "object" ? "existing_scope" : "unknown",scope:row.scope,sensitivity:row.sensitivity,recallChannel:channel},
     curationActor:row.curation_actor ?? "legacy",policyVersion:row.policy_version,authorityRevision:store.revision,bindingRevision:row.binding_revision,
     supersededAt:row.superseded_at,editable:base.status === "active" && !recordStore(row) && memoryAudienceKey(row.id)!==null && Boolean(base.actorId) && row.sensitivity !== "secret" && !looksSecret(base.content) };
+}
+/**
+ * the mark of a Personal line on the memory screen. One read of the account's table per query, and only when shared memory was opened here (the first-merge mark): before that nothing is added and the screen is what it was.
+ * "from" = a card another place said (its source tag, or a table row whose `by` names another place); "local" = a table row in state L; a shared kind (fact, identity, boundary with its structure) with any other state is `shared`; the rest is the agent's own.
+ */
+function sharingReader(db: ReturnType<typeof getMemoryDb>): (row: OwnerMemoryRecord) => DesktopMemorySharing | undefined {
+  let rows: ReturnType<typeof readSharedIdRows> | null = null, open = false;
+  try { open = sharedOpenHere(db); if (open) rows = readSharedIdRows(db); } catch { open = false; }
+  return (row) => {
+    if (!open || !rows || row.scope !== "user_identity") return undefined;
+    const kindShared = row.kind === "fact" || (() => { try { const c = JSON.parse(row.context_json || "{}") as { ticket_kind?: unknown; boundary?: unknown }; return c.ticket_kind === "identity" || (c.ticket_kind === "boundary" && c.boundary !== undefined); } catch { return false; } })();
+    if (!kindShared) return { kind: "own" };
+    const r = rows.get(row.id);
+    if (r?.state === "L") return { kind: "local" };
+    const taken = /"hope-server-fact:/.test(row.evidence_json ?? "") || (r?.state === "S" && r.by !== null);
+    return taken ? { kind: "from", name: null } : { kind: "shared" };
+  };
 }
 let pickerCache: { key: string; actors: Array<[string|null,string]>; projects: Array<[string,string]> } | null = null;
 export function queryOwnedMemory(input: DesktopMemoryQuery = {}): DesktopMemoryQueryResult {
@@ -140,7 +158,8 @@ export function queryOwnedMemory(input: DesktopMemoryQuery = {}): DesktopMemoryQ
   if (fromStores) for (const item of fromStores.results) for (const [entryId,text] of item.value.nativeText) natives.set(entryId,text);
   // Redesign backend C: the skills made from each line, one pass over the agents' skill promotions for the whole list (memory/derived-skills.ts); absent = not known.
   const derived=derivedSkillsForRecords(bounded);
-  const entries=bounded.map(row=>{const line=entry(row,natives.get(row.id)),skills=derived.get(row.id);return skills===undefined?line:{...line,derivedSkills:skills};}), ids=new Set(bounded.map(row=>row.id));
+  const sharingOf=sharingReader(db);
+  const entries=bounded.map(row=>{const line=entry(row,natives.get(row.id)),skills=derived.get(row.id),sharing=row.scope==="user_identity"?sharingOf(row):undefined;return {...(skills===undefined?line:{...line,derivedSkills:skills}),...(sharing?{sharing}:{})};}), ids=new Set(bounded.map(row=>row.id));
   const positions=projectMemoryEmbeddings(bounded.map(row=>{const embedding:number[]|null=decodeStoredVector(row.embedding_json);return{id:row.id,embedding};}));
   const edges=(bounded.length ? db.prepare(`SELECT from_memory_id,to_memory_id,relation_type,score FROM memory_relation_edges WHERE from_memory_id IN (${bounded.map(()=>"?").join(",")}) LIMIT 4000`).all(...bounded.map(row=>row.id)) : []) as Array<{from_memory_id:string;to_memory_id:string;relation_type:"similar_to"|"supersedes"|"contradicts";score:number|null}>;
   const allEdges=fromStores ? [...edges,...fromStores.results.flatMap(item=>item.value.edgeRows)] : edges;

@@ -21,6 +21,9 @@ import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { IconShield, IconFolder } from "./Icon";
 import { ApprovalPrompt, type ApprovalPromptDeck, type ApprovalPromptOption } from "./ApprovalPrompt";
 import { useT } from "@/lib/i18n";
+import { useOnePersonaName } from "@/lib/one-persona-name";
+import { RemoteAskPrompt } from "@/components/PluralHandoffCards";
+import { remoteAskCopy, type RemoteAskKind } from "@shared/plural-handoff-card";
 import type { ToolApprovalRequestEvent } from "@/lib/types";
 import {
   approvalUnitOfChat,
@@ -71,6 +74,7 @@ export function ToolApprovalCard({
   deck?: ApprovalPromptDeck;
 }) {
   const { locale } = useT();
+  const personaName = useOnePersonaName();
   const { actions } = useToolApprovals();
   const ko = locale === "ko";
   const action = actions.get(request.id);
@@ -311,6 +315,24 @@ export function ToolApprovalCard({
     </div>
   ) : null;
 
+  /*
+   * A question of a Work another agent handed over (hand-off row; BP): the sender was asked first on its own screen and this is the same question here. Numbered choices, no clock, the same card in full access
+   * (a delete / send question of a remote Work is asked there, which is the owner's rule for work that came from elsewhere). The click is the ordinary decision: Main puts it on the row first.
+   */
+  if (request.remoteAsk && request.mode === "live" && (request.capability === "money" || request.capability === "delete" || request.capability === "send")) {
+    const placeName = (request.remoteAsk as { placeName?: string }).placeName || (ko ? "이 데스크탑" : "This desktop");
+    const copy = remoteAskCopy({ kind: request.capability as RemoteAskKind, tool: request.tool, target: request.detail?.trim() ? redactSecrets(request.detail.trim()) : "", ...(request.preview ? { preview: redactSecrets(request.preview) } : {}), fromName: personaName, placeName }, ko);
+    return (
+      <RemoteAskPrompt
+        copy={copy}
+        locked={Boolean(action && action.phase !== "retryable")}
+        onChoose={(id) => { void decideToolApproval(request.id, id); }}
+        {...(deck ? { deck } : {})}
+        testId="tool-approval-card"
+      />
+    );
+  }
+
   if (expired) {
     return (
       <section
@@ -450,8 +472,8 @@ export function ToolApprovalInline({
   // included, and draws nothing for them. A payment / transfer card is never settled for the owner (shared/approval-card.ts): it is
   // drawn in full access too. Before, full access answered every card "allow" and drew nothing, so a new install (full access by
   // default) ran a teammate's transfer with no card (real app rows 14-15).
-  const mine = permission === "full" ? all.filter((item) => approvalIsMoney(item)) : all;
-  const stale = permission === "full" ? all.filter((item) => !approvalIsMoney(item)) : [];
+  const mine = permission === "full" ? all.filter((item) => approvalIsMoney(item) || item.remoteAsk) : all;
+  const stale = permission === "full" ? all.filter((item) => !approvalIsMoney(item) && !item.remoteAsk) : [];
   const deck = useApprovalDeck(mine);
   const shown = deck.current;
   const staleKey = stale.map((item) => item.id).join(",");

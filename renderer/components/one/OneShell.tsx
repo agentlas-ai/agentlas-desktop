@@ -112,7 +112,7 @@ import { confirmPopup, alertPopup } from "@/lib/popup";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
-import { tFor, useT } from "@/lib/i18n";
+import { currentLocale, tFor, useT } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { onHubBookmarkChange } from "@/lib/hub-bookmark-events";
@@ -197,6 +197,11 @@ import { alwaysApprovedChatIds, grantAlwaysApproval, readChatAlwaysApproval, sub
 import { useChatAlwaysApproval } from "@/lib/use-chat-always-approval";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { seatEventLine } from "@shared/one-seat-events";
+import { decodeHandoffCard, handoffPlainLine } from "@shared/plural-handoff-card";
+import { HandoffCard } from "@/components/PluralHandoffCards";
+import { decodeMemoryRoomCard, memoryRoomPlainLine } from "@shared/memory-room-card";
+import { MemoryRoomCard } from "@/components/MemoryRoomCard";
+import { currentLocale as memoryRoomLocale } from "@/lib/i18n";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
 import {
   isOneTeamPreflightExpired,
@@ -1267,6 +1272,12 @@ function projectVisibleOneMessageText(message: UiMessage): string {
   if (message.role === "system") {
     const seatLine = seatEventLine(message.text);
     if (seatLine) return seatLine;
+    // A hand-off card (shared/plural-handoff-card.ts): the row is drawn as the card; the line is only what lets it pass the visible-row checks.
+    const handoff = decodeHandoffCard(message.text);
+    if (handoff) return handoffPlainLine(handoff, { ko: currentLocale() === "ko", now: Date.now() });
+    // The card "oldest memory deleted" (shared/memory-room-card.ts): drawn as the card; the line only lets it pass the visible-row checks.
+    const memoryRoom = decodeMemoryRoomCard(message.text);
+    if (memoryRoom) return memoryRoomPlainLine(memoryRoom, memoryRoomLocale() === "ko");
   }
   // Recovery/preflight prompts are durable model context, not conversation
   // authored by the person. Only the explicitly translated labels above may
@@ -10900,6 +10911,8 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                     // 첨부만 있는 턴도 대화다 — 텍스트가 없다고 버리면 사진을 보낸 사실 자체가 사라진다.
                     const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
                     if ((foldedIntoWork || (!hasVisibleContent && !hasAttachments)) && !liveBefore && blocksAfter.length === 0) return null;
+                    const memoryRoomCard = message.role === "system" ? decodeMemoryRoomCard(message.text) : null;
+                    const handoffCard = message.role === "system" ? decodeHandoffCard(message.text) : null;
                     const systemLabel = message.role === "system"
                       ? null
                       : message.role === "assistant" && !message.streaming && isInterruptedPartial(message.text)
@@ -10949,6 +10962,10 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                             ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={appLocale === "ko" ? "ko" : "en"}
                                 fallback={<HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} chatId={activeThreadChatId} />} />
                             : <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} chatId={activeThreadChatId} />)
+                          : memoryRoomCard
+                          ? <MemoryRoomCard rowId={message.id} value={memoryRoomCard} locale={appLocale === "ko" ? "ko" : "en"} />
+                          : handoffCard
+                          ? <HandoffCard value={handoffCard} />
                           : systemLabel
                           ? (
                             // A prompt One sent on the person's behalf ("One

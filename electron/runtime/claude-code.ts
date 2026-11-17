@@ -48,6 +48,7 @@ import { detectApprovalRequired } from "./runtime-refusal";
 import { detectSandboxDeath, detectSandboxLaunchDenial, sandboxDeathNotice, sandboxLaunchDenialNotice } from "./sandbox-death";
 import { shellDeleteGateHook, writeSandboxLaunchGuardHook } from "./write-sandbox-launch-guard";
 import { SHELL_GATE_CONTROL_ENV, SHELL_GATE_HANDLE_ENV, openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
+import { remoteRowShellGateWanted } from "../one/plural-remote-ask";
 import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
 import { mcpProxyControlInfoPath } from "../mcp-tools/proxy-channel";
 import { detectMcpServerDisconnected, mcpOutageNotice, toolOutageGuidance } from "./mcp-outage";
@@ -494,7 +495,9 @@ export function claudePermissionArgs(
  * only the latter object.
  */
 export async function claudeExecutionSettings(req: RunnerRequest): Promise<string | null> {
-  if (req.permission !== "write") return req.toolBrokerSettingsPath ?? null;
+  // A full-access run of a Work handed over by a hand-off row keeps its full access but gets the shell delete gate alone (no sandbox, no launch guard): its deletes are asked on the row.
+  const remoteRowShell = remoteRowShellGateWanted(req);
+  if (req.permission !== "write" && !remoteRowShell) return req.toolBrokerSettingsPath ?? null;
 
   let hooks: unknown;
   if (req.toolBrokerSettingsPath) {
@@ -524,6 +527,13 @@ export async function claudeExecutionSettings(req: RunnerRequest): Promise<strin
     hooks = parsed.hooks;
   }
 
+  if (remoteRowShell) {
+    const remoteDeleteGate = shellDeleteGateHook();
+    if (!remoteDeleteGate) throw new Error("claude_write_shell_delete_gate_missing");
+    const remoteBrokerHooks = hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks as Record<string, unknown> : {};
+    const remotePreToolUse = Array.isArray(remoteBrokerHooks.PreToolUse) ? remoteBrokerHooks.PreToolUse as unknown[] : [];
+    return JSON.stringify({ hooks: { ...remoteBrokerHooks, PreToolUse: [...remotePreToolUse, remoteDeleteGate] } });
+  }
   /*
    * 런처 관문(2026-09-14, 페르소나 라운드 2 재시험): seatbelt 는 `open`·osascript·launchctl 같은 OS 런처가
    * 샌드박스 밖에 프로세스를 만드는 것을 막지 못한다(실측: .command 를 open → 터미널 앱이 에뮬레이터를 띄움,
@@ -1743,7 +1753,7 @@ const runClaudeTurn = async (
   // A write run's shell asks the owner's card before it deletes (shell-delete-gate.ts): the CLI's hook finds Main's approval wire and this run's handle in its
   // environment. The handle is stable for the run key, so a resident process keeps one environment across turns; the gate is opened per turn below.
   const shellGateKey = `${KIND}\0${contextChatId ?? ""}\0${runCwd}\0${runtimeSessionOwnerId ?? ""}`;
-  if (req.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools) {
+  if ((req.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools) || remoteRowShellGateWanted(runReq)) {
     // The wire must exist before the CLI starts; without it the hook refuses every delete (it never lets one through unasked).
     try { await ensureMcpProxyApprovalServer(); } catch { /* the hook refuses a delete it cannot ask about */ }
     runEnv[SHELL_GATE_CONTROL_ENV] = mcpProxyControlInfoPath();
@@ -2010,7 +2020,7 @@ const runClaudeTurn = async (
   let lingeringChild: ChildProcess | null = null;
   /** Background tasks this turn's process still runs (AD-3): visible at the root result, ended with the process. */
   const backgroundTasks = new ClaudeBackgroundTasks();
-  const shellGate = req.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools
+  const shellGate = (req.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools) || remoteRowShellGateWanted(runReq)
     ? openShellDeleteGate(shellGateKey, {
       runtime: KIND, sessionKey: toolApprovalSessionKey(KIND, runReq.chatId, runCwd),
       ...((req.approvalChatId ?? runReq.chatId) ? { chatId: (req.approvalChatId ?? runReq.chatId)! } : {}),

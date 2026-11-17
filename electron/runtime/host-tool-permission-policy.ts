@@ -22,6 +22,7 @@ import {
   markToolApprovalExpired,
   markToolApprovalRefusal,
   recordAutoApprovedToolCall,
+  requestRemoteToolApproval,
   requestToolApproval,
   setAlwaysAllowedReader,
   setApprovalClosureRecorder,
@@ -31,6 +32,8 @@ import {
   type RuntimeToolPermissionArbiter,
 } from "./tool-approval";
 import type { ToolApprovalConsentBinding } from "../../shared/types";
+import { remoteAskOfChat } from "../one/plural-remote-ask";
+import type { AskKind, RemoteAsk } from "../one/plural-handoff-wire";
 
 /** Native host identity only. These callbacks never come from an invocation payload. */
 export interface HostToolPermissionIdentityPorts {
@@ -45,6 +48,9 @@ export interface HostToolPermissionPolicyPorts extends HostToolPermissionIdentit
   recordCapabilityGrant: typeof recordCapabilityGrant;
   requestToolApproval: typeof requestToolApproval;
   announceToolDenied: typeof announceToolDenied;
+  /** A Work handed over by a hand-off row asks money / delete / send on the row (plural-remote-ask.ts); both default to the real ones. */
+  requestRemoteToolApproval?: typeof requestRemoteToolApproval;
+  remoteAskOfChat?: (chatId: string | undefined) => RemoteAsk | null;
   now?: () => number;
   /** The binding one "always allow" is kept under (approval-scope.ts: the project, else the conversation). Default: the store. */
   scopedAlwaysAllowBinding?: typeof scopedAlwaysAllowBinding;
@@ -228,6 +234,33 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
      */
     const action = classifyApprovalAction(ask);
     const gated = action !== "other";
+    /*
+     * A Work another agent handed over through a hand-off row (askVia "row", found by the Work's chat - one lookup for every runner of every host) asks ALL THREE kinds on the row, whatever its permission mode:
+     * full access stays what it is for a person at this desktop, but nobody is here to have given it. No stored "always allow", no session grant, no clock (tool-approval.ts requestRemoteToolApproval);
+     * an unattended flag does not mean "nobody to ask" - the sender is the one asked. An older phone's row (askVia "local") falls through to the ordinary flow below, unchanged.
+     */
+    if (gated && ask.chatId) {
+      const remote = (ports.remoteAskOfChat ?? remoteAskOfChat)(ask.chatId);
+      if (remote && remote.askVia === "row") {
+        if (!ask.mutating) ask.mutating = true;
+        let binding: ToolApprovalConsentBinding;
+        try { binding = consentBindingForAsk(ask); } catch { return "deny"; }
+        const kind = action as AskKind;
+        let outcome;
+        try {
+          outcome = await (ports.requestRemoteToolApproval ?? requestRemoteToolApproval)({
+            ...(ask.signal ? { signal: ask.signal } : {}), ...(ask.closed ? { closed: ask.closed } : {}),
+            sessionKey: ask.sessionKey, runtime: ask.runtime, tool: ask.tool, detail: ask.detail, cwd: ask.cwd, chatId: ask.chatId,
+            agentId: ask.agentId, consentBinding: binding, kind, remote, target: ask.detail || ask.tool, ...(ask.detail ? { preview: ask.detail } : {}),
+          });
+        } catch { return "deny"; }
+        if (outcome.decision === "deny") {
+          markToolApprovalRefusal(ask, { action, cause: outcome.reason === "row_refused" ? "nobody_to_ask" : outcome.reason === "expired" ? "no_answer" : "owner_denied" });
+          return "deny";
+        }
+        return "allow_once";   // never "allow_session" / "allow_always": nothing is remembered on this side
+      }
+    }
     // A call the rule asks about is a call that changes something, whatever its runtime wrote: a payment whose runtime left
     // "mutating" out (a JS relay) was let through below before its card. Set in place: the ask's identity is a key.
     if (gated && !ask.mutating) ask.mutating = true;

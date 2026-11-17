@@ -33,7 +33,9 @@ import { AgentlasMobileBridgeServer } from "./server";
 import { MobileBridgeAccountPairingClient } from "./account-pairing";
 import { MobileBridgeCloudRelay, type MobileBridgeRelayAuthentication } from "./relay";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
-import { getAuthSession, getSessionCookieHeader, getAuthenticatedSessionBinding } from "../auth";
+import { getAuthSession, getSessionCookieHeader, getAuthenticatedSessionBinding, fetchWithHubSession, webBaseUrl } from "../auth";
+import { createPlacesLink, applyRemoval, PLACES_PROTOCOL_V, PLACES_REQUEST_TIMEOUT_MS, type PlacesLink } from "./places-link";
+import { faceIsDefault, placePresetOf, placeValuesOf, DEFAULT_PLACE_PRESET } from "../../shared/place-values";
 import { toolApprovalConsentActorBinding } from "../runtime/host-tool-permission-policy";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
 import type { ToolApprovalRequestEvent } from "../../shared/types";
@@ -46,6 +48,8 @@ import {
 } from "./terminal-control";
 import type { MobileVisualSessionControl } from "./visual-session";
 import { setOneHomePairingProvider } from "../one/home";
+import { getOneProfile, updateOneProfile } from "../store/one-profile";
+import { onDesktopStoreChange } from "../store/change-bus";
 import type { MobileBridgePairingOrigin } from "./pairing";
 
 export interface MobileBridgeRuntimeOptions {
@@ -269,6 +273,16 @@ export function createLazyDomainAccountAdmission(load: () => Promise<(deviceId: 
   };
 }
 
+/** The server offers a face the account has not used; only a desktop whose face is still the default takes it (the desktop's own profile stays the truth). */
+function applySuggestedPreset(preset: string): void {
+  try {
+    if (preset === DEFAULT_PLACE_PRESET || placePresetOf(`character:${preset}`) !== preset) return;
+    const profile = getOneProfile();
+    if (!faceIsDefault(profile.avatarIcon)) return;
+    updateOneProfile({ expectedVersion: profile.version, patch: { avatarIcon: `character:${preset}` } });
+  } catch { /* a face that cannot be applied stays as it is */ }
+}
+
 async function startBridgeInternal(
   options: MobileBridgeRuntimeOptions,
   overrides: { host?: string; port?: number } = {},
@@ -284,7 +298,9 @@ async function startBridgeInternal(
   const accountPairing = new MobileBridgeAccountPairingClient();
   let push: MobilePushService | null = null;
   let relay: MobileBridgeCloudRelay | null = null;
+  let places: PlacesLink | null = null;
   let stopPushObserver = () => {};
+  let stopPlaces = () => {};
   const pairing = new MobileBridgePairingManager(options.userDataPath, {
     consumePairingAssertion: (input) => accountPairing.consumePairingAssertion(input),
     desktopSessionActive: () => Boolean(getSessionCookieHeader()),
@@ -446,13 +462,55 @@ async function startBridgeInternal(
         void push?.flushPending().catch(() => console.warn("[mobile-push] queue flush unavailable"));
       },
       onPairFrame: (frameText) => server!.handleRelayPairFrame(frameText),
+      // the relay's `relay.wake` frame and its `relay.ready` are the only things that make this desktop read its place (one GET each); no timer.
+      onWake: (id) => { void places?.wake(id); },
+      onControlReady: () => { void places?.connect(); },
     });
+    let sharedMemoryHandle: { sync: { removed(): void } } | null = null;   // the place link's removal reaches the shared memory started below
+    if (!options.hostAuthority) {
+      const link = createPlacesLink({
+        userDataPath: options.userDataPath, hostId: identity.hostId,
+        origin: () => webBaseUrl(),
+        request: (url, init) => { const cookie = getSessionCookieHeader(); return cookie ? fetchWithHubSession(cookie, url, init, PLACES_REQUEST_TIMEOUT_MS) : null; },
+        userId: () => getAuthenticatedSessionBinding()?.userId ?? null,
+        values: () => { try { return placeValuesOf(getOneProfile(), displayName, PLACES_PROTOCOL_V); } catch { return null; } },
+        // the phone disconnected this desktop: only this account's pairings made before the server's `removedAt` are forgotten, once per `removedAt` (the server keeps the mark until the phone clears it)
+        onRemoved: (removedAt) => { try { sharedMemoryHandle?.sync.removed(); } catch { /* the next plural answer says it again */ } const meta = require("../store/meta") as typeof import("../store/meta"); applyRemoval(pairing, removedAt, getAuthenticatedSessionBinding()?.userId ?? null, { get: meta.getMeta, set: meta.setMeta }); },
+        onSuggestedPreset: (preset) => applySuggestedPreset(preset),
+        log: (line) => console.info(`[mobile-bridge-places] ${line}`),
+      });
+      places = link;
+      // A changed profile (name, face) reports once; the digest keeps an unchanged value from being sent. In-process signal: the profile is written by the process that holds the bridge or is read again at the next connect.
+      const stopProfile = onDesktopStoreChange((change) => { if (change.entity === "one-profile") void link.valuesChanged(); });
+      // the person's shared memory (fact / identity / boundary lines) is pushed and pulled by this process too, in one run (push first, pull after). Triggers: a Personal line written here or by the other process,
+      // and the plural answer above. No timer; a server whose shared-memory switch is closed (404) is asked once and then left alone.
+      // loaded here, not at the top of the file: a process that only reads this module never loads the memory store
+      const sharedReal = require("../one/shared-memory-real") as typeof import("../one/shared-memory-real");
+      const sharedMemory = sharedReal.startSharedMemorySync({
+        origin: () => webBaseUrl(),
+        request: (url, init) => { const cookie = getSessionCookieHeader(); return cookie ? fetchWithHubSession(cookie, url, init, sharedReal.SHARED_REQUEST_TIMEOUT_MS) : null; },
+        userId: () => getAuthenticatedSessionBinding()?.userId ?? null,
+        hostId: () => identity.hostId,
+        log: (line) => console.info(`[shared-memory] ${line}`),
+      });
+      sharedMemoryHandle = sharedMemory;
+      // the hand-off rows of the same answer (work another agent sent, words left for this one). Same process, same lease, no timer of its own.
+      const pluralReal = require("../one/plural-work-real") as typeof import("../one/plural-work-real");
+      const pluralWork = pluralReal.startPluralWorkIntake({
+        ...pluralReal.realRequestDeps((line) => console.info(`[mobile-bridge-places] ${line}`)),
+        hostId: () => identity.hostId, readAgain: () => { void link.read(); },
+      });
+      // the rows this desktop SENT come back in the same answer (still going, ended, waiting questions); the sender folds them into cards and takes an ended row once its card is kept.
+      const pluralSend = (require("../one/plural-handoff-cards") as typeof import("../one/plural-handoff-cards")).startSentCardsIntake();
+      stopPlaces = () => { stopProfile(); link.stop(); sharedMemory.stop(); pluralWork.stop(); pluralSend.stop(); places = null; };
+    }
     if (push) {
       const service = push;
       stopPushObserver = observeMobilePushNotices(identity.hostId, (notice, stillCurrent) => {
         void service.dispatch(notice, stillCurrent).catch(() => console.warn("[mobile-push] dispatch unavailable"));
       });
     }
+    { const stopPush = stopPushObserver; stopPushObserver = () => { stopPush(); stopPlaces(); }; }   // one stop for both observers (the place link ends with the bridge)
     running = { authority, pairing, accountPairing, server, relay, push, stopPushObserver, manifest, terminalControl };
     relay.start();
     void push?.flushPending().catch(() => console.warn("[mobile-push] queue flush unavailable")); // a queue that survived a restart

@@ -56,7 +56,7 @@ export interface TicketLine {
   contradicts: string[];
   why: "changed" | "corrected" | null;
   marks: string[];
-  context: { ticket_kind: string } | null;
+  context: { ticket_kind: string; boundary?: { type: "no_proactive" | "quiet_hours"; from?: string; to?: string } } | null;
   carry_evidence_from: string[];
   moved_from?: TicketScope;
 }
@@ -164,7 +164,7 @@ const WRAPPERS = ["result", "output", "ticket", "response", "answer", "data", "a
 const TICKETS_KEYS = ["tickets", "items", "memories", "entries", "lines", "results"];
 const KEYS: Record<string, string[]> = { action: ["op", "operation"], targets: ["target", "target_ids", "ids", "replaces"], why: ["reason"], scope: ["about", "store", "memory"], kind: ["category"],
   text: ["memory", "content", "note", "summary", "statement", "line"], en: ["english", "text_en", "content_en"], source: ["origin", "from"], quote: ["evidence", "owner_quote"],
-  permission: ["approval", "without_asking"] };
+  permission: ["approval", "without_asking"], boundary: [] };
 const EDGE = " \t\r\n.,;:!?\"'`()[]{}*";
 const isObj = (x: unknown): x is Record<string, unknown> => x !== null && typeof x === "object" && !Array.isArray(x);
 const cps = (s: string): string[] => [...s];
@@ -231,6 +231,15 @@ function ticketsOf(raw: unknown): [unknown[], string | null] {
   }
   if (["scope", "text", "en", "action", "kind"].some(k => k in n) || [...KEYS.text, ...KEYS.scope].some(k => k in n)) return [[v], null];
   return [[], Object.keys(v as object).length ? "unrecognized_shape" : null];
+}
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** The structure of a boundary ticket: `no_proactive`, or `quiet_hours` with `from` and `to` (HH:MM). Anything else is not a structure (null). Same shapes as the server's `parseBoundary`. */
+export function boundaryOf(raw: unknown): { type: "no_proactive" | "quiet_hours"; from?: string; to?: string } | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const b = raw as Record<string, unknown>;
+  if (b.type === "no_proactive") return { type: "no_proactive" };
+  if (b.type === "quiet_hours" && typeof b.from === "string" && typeof b.to === "string" && HHMM.test(b.from) && HHMM.test(b.to)) return { type: "quiet_hours", from: b.from, to: b.to };
+  return null;
 }
 const field = (n: Record<string, unknown>, name: string): unknown => { if (name in n) return n[name]; for (const a of KEYS[name]) if (a in n) return n[a]; return null; };
 const enumOf = (v: unknown, aliases: Record<string, string>, allowed: readonly string[]): string | null => {
@@ -394,8 +403,12 @@ function one(r: Rules, raw: unknown, h: HostView, batch: Map<string, number>): T
   }
   if (action === "condense" && final === "user_identity" && new Set(lines.map(effKind)).size !== 1) throw new Stop("invalid", "targets_mixed_kind");
   if (action === "condense" && final === "user_identity" && kind !== effKind(lines[0])) { kind = effKind(lines[0]); fixes.push("kind_from_targets"); }
-  let storeKind = kind, context: { ticket_kind: string } | null = null;
-  if (kind !== null && store === "personal" && kind in r.tk.fold.map) { storeKind = r.tk.fold.map[kind]; context = { ticket_kind: kind }; fixes.push("folded"); }
+  let storeKind = kind, context: TicketLine["context"] = null;
+  if (kind !== null && store === "personal" && kind in r.tk.fold.map) {
+    storeKind = r.tk.fold.map[kind]; context = { ticket_kind: kind }; fixes.push("folded");
+    // a boundary comes with its structure (the ticket tool's `boundary`); without a readable one it stays a boundary by its kind, as before, and no first-word gate reads it.
+    if (kind === "boundary") { const structure = boundaryOf(field(n, "boundary")); if (structure) context = { ticket_kind: kind, boundary: structure }; }
+  }
   const res: TicketItem = { status: "ok", result: null, why: null, ask_owner: null, scope: final, kind, store, line: null, targets: ids, merge_into: null, same_as_ticket: null, fixes, index: 0 };
   if (action === "remove") { res.result = "removed"; res.kind = null; return res; }
   const line: TicketLine = { scope: final, kind: kind!, store_kind: storeKind!, text: lineText!, native, origin_class: org, certainty: cert, replaces: [], contradicts: [], why: null, marks, context, carry_evidence_from: [] };

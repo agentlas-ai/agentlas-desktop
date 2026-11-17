@@ -2210,7 +2210,7 @@ button[data-dashboard-import="true"]:disabled {
   position: relative;
   z-index: 1;
   pointer-events: auto;
-  /* ★"작성창과 같은 폭"은 상수로 두면 반드시 어긋난다 (실측 QA, 창 1450px:
+  /* ★"작성창과 같은 폭"은 상수로 두면 반드시 어긋난다 (실측 QA 창 1450px:
      작성창 495px / 칩 432px = 63px 어긋남). 어긋난 자리가 셋이었다:
        ① 여기 기본값 920px — One 의 .composer 는 나중 규칙에서 min(720px,100%) 로
           바뀌었는데 이 숫자만 옛 값(920)에 멈춰 있었다.

@@ -4413,6 +4413,7 @@ export function registerIpcHandlers(): void {
     return listAlwaysApprovedChatIds();
   });
   registerAppControlDomainIpc(ipcMain, "runtime:listToolApprovals", async () => [...new Map([...listPendingToolApprovals(), ...(configuredNativeGuiControls()?.listAvailableApprovals() ?? [])].map(request => [request.id, request])).values()]);
+  registerAppControlDomainIpc(ipcMain, "pluralHandoff:act", (input: unknown) => import("./one/plural-handoff-cards").then((m) => m.actOnHandoffCard(input)));
   ipcMain.handle("runtime:listSettledToolApprovals", (_e, chatIds: unknown) => listSettledToolApprovals(
     Array.isArray(chatIds) ? chatIds.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 256).slice(0, 128) : []));
   ipcMain.handle("runtime:getToolApprovalResolution", (_e, id: string) => {

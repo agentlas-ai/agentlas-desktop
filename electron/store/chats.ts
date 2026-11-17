@@ -2007,11 +2007,40 @@ export function recordViewNoticeRow(input: { id: string; chatId: string; text: s
   return changed > 0 ? "written" : "exists";
 }
 
+/**
+ * A display row whose words change while the thing it shows goes on (a hand-off card: sent, waiting, in progress, ended): the same id keeps ONE row, its text replaced when it differs. Same rules as recordViewNoticeRow
+ * (a 'view' system row, never the runtime's input, never the last message). `created_at` is the first write's, so the card keeps its place in the conversation.
+ */
+export function upsertViewNoticeRow(input: { id: string; chatId: string; text: string; createdAt: string }): "written" | "updated" | "same" | "refused" {
+  if (!input.id || input.id.length > 300 || !input.text.trim() || !Number.isFinite(Date.parse(input.createdAt))) return "refused";
+  const db = getDb();
+  const existing = db.prepare("SELECT chat_id, text FROM chat_messages WHERE id = ?").get(input.id) as { chat_id: string; text: string } | undefined;
+  if (existing) {
+    if (existing.text === input.text) return "same";
+    const changed = runWithStoreBusyRetry(() => db.prepare("UPDATE chat_messages SET text = ? WHERE id = ? AND role = 'system' AND row_scope = 'view'").run(input.text, input.id).changes);
+    if (changed) emitDesktopStoreChange({ entity: "chat", id: existing.chat_id });
+    return changed ? "updated" : "refused";
+  }
+  return recordViewNoticeRow(input) === "written" ? "written" : "refused";
+}
+
+/** The text of a view row (by id), or null. */
+export function getViewRowText(id: string): string | null {
+  const row = getDb().prepare("SELECT text FROM chat_messages WHERE id = ? AND row_scope = 'view'").get(id) as { text: string } | undefined;
+  return row?.text ?? null;
+}
+
+/** The chat a view row (by id) lives in, or null. */
+export function chatOfViewRow(id: string): string | null {
+  const row = getDb().prepare("SELECT chat_id FROM chat_messages WHERE id = ? AND row_scope = 'view'").get(id) as { chat_id: string } | undefined;
+  return row?.chat_id ?? null;
+}
+
 export function getLastChatMessage(chatId: string): ChatHistoryEntry | null {
   // The closed-request line is a record beside the conversation, never its last message (a pending question card is judged by the last row).
   const row = getDb()
     .prepare(
-      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND id NOT LIKE 'approval-closed:%' AND id NOT LIKE 'server-app-done:%' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND id NOT LIKE 'approval-closed:%' AND id NOT LIKE 'server-app-done:%' AND id NOT LIKE 'handoff-card:%' AND id NOT LIKE 'handoff-recv:%' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .get(chatId) as MessageRow | undefined;
   return row

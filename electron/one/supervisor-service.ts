@@ -42,6 +42,7 @@ import {admitPeerDelivery, peerChainIdForRun} from "../harness/peer-chain";
 import {markOwnerSpoke} from "../invocation/owner-spoke";
 import type {SupervisorDispatchFrame} from "./supervisor-dispatch-retry";
 import {oneWriteRefusal,oneHomeTurnStart} from "./home";
+import {remoteAskInput} from "./plural-remote-ask";
 import {retainSupervisorStartVerdict, resumeLegacySupervisorHeld, supervisorInternalStartRefusal, supervisorDispatchFrame, supervisorDispatchRetry, supervisorRetryExhausted, reserveSupervisorDispatch, supervisorRefusalDelay, wakeSupervisorLongWait} from "./supervisor-dispatch-retry";
 import {ONE_BUDGET_REJECTION_CODES,type OneBudgetConfigureInput,type OneBudgetConfigureResult,type OneBudgetListInput,type OneBudgetRejectionCode} from "../../shared/one-budget";
 
@@ -2053,7 +2054,8 @@ export class OneSupervisorService {
     if (source && typeof source !== "string" && (Object.keys(source).length !== 1 || !["desktop","mobile"].includes(source.surface))) throw supervisorError('science_run_origin_invalid',true);
     const originReplyRunId=typeof source === "string" ? source : undefined;
     this.assertAutomaticWriteAllowed(originReplyRunId);
-    const value=supervisorObject(raw,["commandId","text","projectId","permissions","runtimeSelection","oneId","budgetId","doneWhen"]);
+    const value=supervisorObject(raw,["commandId","text","projectId","permissions","runtimeSelection","oneId","budgetId","doneWhen","remoteAsk"]);
+    const remoteAsk=remoteAskInput(value.remoteAsk,()=>supervisorError("supervisor_remote_ask_invalid",true));
     if (value.permissions!==undefined && !["read","write","full"].includes(String(value.permissions))) throw supervisorError('supervisor_permission_invalid', true);
     // One's own hand-offs pass "full" (owner 2026-10-04). A brief the owner starts keeps a permission they chose; with none
     // given (the personal One panel no longer asks) it runs with full access too (owner 2026-10-05).
@@ -2062,7 +2064,8 @@ export class OneSupervisorService {
     const input: SupervisorWorkInput={commandId:supervisorIdentifier(value.commandId),text:supervisorText(value.text),permissions:permissions as SupervisorWorkInput["permissions"],
       ...(value.projectId ? {projectId:supervisorIdentifier(value.projectId)} : {}),
       ...(value.budgetId!==undefined ? {budgetId:supervisorIdentifier(value.budgetId)} : {}),
-      ...(runtimeSelection ? {runtimeSelection} : {})};
+      ...(runtimeSelection ? {runtimeSelection} : {}),
+      ...(remoteAsk ? {remoteAsk} : {})};
     const doneWhen=supervisorDoneWhen(value.doneWhen);
     if (doneWhen) input.doneWhen=doneWhen;
     const {oneId,chatId}=this.binding(value.oneId);

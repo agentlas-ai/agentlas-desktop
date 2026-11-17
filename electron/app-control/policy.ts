@@ -48,6 +48,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^onePersonalData\./, "personal sources and Page changes require their current native grant", "write"],
   // The owner's consent boundary. One granting itself (or a worker) permission would be self-escalation.
   [/^(resolveToolApproval|grantChatAlwaysApproval|revokeChatAlwaysApproval|revokeCapabilityGrant)$/, "approvals and grants are the owner's decision", "consent"],
+  [/^pluralHandoffAct$/, "the buttons of a hand-off card (cancel, retry, the answer to a confirmation) are the owner's decision", "consent"],
   [/^confirm\./, "the owner answers questions agents ask", "consent"],
   // The owner's standing permission to apply learning changes without reading the diff. An agent switching it on for itself would
   // be self-escalation (the review grant exists so no tool can approve a diff), so it is the owner's own switch only.

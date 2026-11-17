@@ -30,6 +30,7 @@ import { ACP_PREFERRED_KINDS, acpDisabledFor } from "./acp-kinds";
 // never asks) — read-only runs still refuse mutating tools when asked, but the
 // real gate lives elsewhere.
 import type { ChildProcess } from "node:child_process";
+import { remoteRowShellGateWanted } from "../one/plural-remote-ask";
 import fs from "node:fs/promises";
 import { preparedMcpBindings, preparedMcpTransport } from "../mcp-tools/prepared-transport";
 import { createHash, randomUUID } from "node:crypto";
@@ -990,14 +991,19 @@ const MODE_PREFERENCE: Record<"read" | "write" | "full", RegExp[]> = {
   full: [/bypass/i, /yolo/i, /full[-_ ]?access/i, /danger/i, /^(code|edit|build|write|agent|default)$/i],
 };
 
+/** Modes in which the agent still asks before a shell command or a tool call (never a bypass / yolo / auto mode). No match = the agent's own default, which asks. */
+const ASK_FIRST_MODE_PREFERENCE: RegExp[] = [/^(code|edit|build|write|agent|default)$/i, /accept[-_ ]?edits/i];
+
 /** Which advertised mode does this run's permission ask for? undefined = leave the agent's default. */
 export function chooseAcpModeId(
   permission: RunnerRequest["permission"],
   modes: Array<{ id: string; name?: string }>,
+  /** A full-access run of a Work handed over by a hand-off row: its delete / send / payment must be asked on the row, so the agent must ask - never a bypass / yolo mode (plural-remote-ask.ts). */
+  askFirst = false,
 ): string | undefined {
   if (modes.length === 0) return undefined;
   const key: "read" | "write" | "full" = permission === "write" || permission === "full" ? permission : "read";
-  for (const rule of MODE_PREFERENCE[key]) {
+  for (const rule of askFirst && key === "full" ? ASK_FIRST_MODE_PREFERENCE : MODE_PREFERENCE[key]) {
     const hit = modes.find((m) => rule.test(m.id) || (m.name ? rule.test(m.name) : false));
     if (hit) return hit.id;
   }
@@ -1694,7 +1700,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
        * 상주 세션을 그대로 이어 쓰는 턴에서는 세션이 이미 그 모드를 갖고 있다(권한이 바뀌면
        * 풀 키가 달라져 새 프로세스가 같은 대화를 session/load 로 불러온다).
        */
-      const modeId = created || loaded ? chooseAcpModeId(req.permission, modeOptionsFromNewSession(created ?? loaded)) : undefined;
+      const modeId = created || loaded ? chooseAcpModeId(req.permission, modeOptionsFromNewSession(created ?? loaded), remoteRowShellGateWanted(req)) : undefined;
       if (modeId) {
         try {
           await session.conn.request("session/set_mode", { sessionId, modeId }, { timeoutMs: 10_000 });

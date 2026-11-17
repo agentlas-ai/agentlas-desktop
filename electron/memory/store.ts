@@ -34,6 +34,10 @@ export interface RequestContext {
   outcome?: string | null;
   /** K2b': the kind the model gave a Personal ticket (`identity` or `boundary`) before the computer folded it into `fact`/`preference` (ruleset ticket.fold). Written only when folded; read for display and for condensing within one kind. */
   ticket_kind?: string;
+  /** the structure of a `boundary` line - `no_proactive` (never message first) or `quiet_hours` (no first message from `from` to `to`, HH:MM). Every place's first-word gate reads it. */
+  boundary?: { type: "no_proactive" | "quiet_hours"; from?: string; to?: string };
+  /** the line's words rest on the owner's own words (a quote found in what they typed). The sync sends it as the line's `grounded` mark; a line without it is `grounded` when its origin is the owner's. */
+  grounded?: boolean;
 }
 
 export interface MemoryEntry {
@@ -119,6 +123,8 @@ function parseRequestContext(json?: string | null): RequestContext | null {
       crossContext: raw.crossContext ?? (raw.cross_context as boolean | undefined),
       outcome: raw.outcome as string | null | undefined,
       ...(typeof raw.ticket_kind === "string" ? { ticket_kind: raw.ticket_kind } : {}),
+      ...(raw.boundary && typeof raw.boundary === "object" ? { boundary: raw.boundary as RequestContext["boundary"] } : {}),
+      ...(typeof raw.grounded === "boolean" ? { grounded: raw.grounded } : {}),
     };
   } catch {
     return null;
@@ -226,6 +232,8 @@ export function forgetMemoryNative(entryId: string, db = getDb()): void {
 }
 
 export interface NewMemoryEntry {
+  /** the owner said these words again (a quote of their own words, a run after the stamp) - lets a Personal line past a forget stamp of the same words. Set by the curator only. */
+  restatedByOwner?: boolean;
   scope: MemoryScope;
   kind: MemoryKind;
   content: string;
@@ -259,7 +267,22 @@ export interface NewMemoryEntry {
    * written (never per turn). At the ceiling only a line that replaces an older one (`replace`) is written; any other new line is refused with
    * `MemoryStoreFullError` (not tried again). Code never retires a line to make room. Absent = no ceiling (imports, tests, every other writer).
    */
-  ceiling?: { rows: number; reason?: string; replace?: boolean; countsFrom?: string | null };
+  ceiling?: { rows: number; reason?: string; replace?: boolean; countsFrom?: string | null; klass?: PersonalCeilingClass };
+}
+
+export type PersonalCeilingClass = "own" | "shared";
+/** Which Personal ceiling a new line is counted against: `own` = a `preference` the place keeps for itself, `shared` = a `fact`, or an `identity` / `boundary` the model gave (the sync shares those: shared-memory-sync.ts `sharedKindOf`). */
+export function personalCeilingClassOf(kind: string, ticketKind: string | null | undefined, hasBoundary: boolean): PersonalCeilingClass {
+  if (ticketKind === "identity") return "shared";
+  if (ticketKind === "boundary" && hasBoundary) return "shared";
+  return kind === "fact" ? "shared" : "own";
+}
+const CEIL_TICKET = "COALESCE(CASE WHEN json_valid(context_json) THEN json_extract(context_json,'$.ticket_kind') END,'')";
+const CEIL_HAS_BOUNDARY = "COALESCE(CASE WHEN json_valid(context_json) THEN json_extract(context_json,'$.boundary') END IS NOT NULL,0)";
+const CEIL_SHARED_KIND = `(kind='fact' OR ${CEIL_TICKET}='identity' OR (${CEIL_TICKET}='boundary' AND ${CEIL_HAS_BOUNDARY}))`;
+function personalClassSql(klass: PersonalCeilingClass): string {
+  const fromServer = "COALESCE(evidence_json,'') LIKE '%hope-server-fact%'";
+  return klass === "own" ? `NOT ${CEIL_SHARED_KIND} AND NOT ${fromServer}` : `${CEIL_SHARED_KIND} AND NOT ${fromServer}`;
 }
 
 /** A new line was refused because its store holds its ceiling of live lines (`stores.ceiling.reason`, normally `store_full`). Not retried. */
@@ -270,15 +293,20 @@ export class MemoryStoreFullError extends Error {
   }
 }
 
+/** ` AND <a line somebody can read>`: not a line of the old One overlay channel, not one the owner switched off. The ceiling counts these lines and the shared-memory sync sends only these (`memory_entries` unaliased). */
+export function readableLinesClause(db: BetterDatabase.Database): string {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_identity_bindings'").get()
+    ? ` AND NOT EXISTS(SELECT 1 FROM memory_identity_bindings b WHERE b.memory_id=memory_entries.id
+        AND (json_extract(b.applicability_json,'$.recallChannel')='legacy_one_overlay' OR json_extract(b.applicability_json,'$.enabled')=0))` : "";
+}
+
 /**
  * Live lines of the store `e` is written into, counted in the caller's transaction. A line is live until it is superseded, and it counts only if somebody can read it: a line of the
  * old One overlay channel or one the owner switched off is not a line of this store (#1: 2,460 counted lines held the personal agent's store "full" for ever).
  */
 function liveLinesFor(db: BetterDatabase.Database, e: NewMemoryEntry): number {
   const countsFrom = e.ceiling?.countsFrom ?? null;
-  const readable = (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_identity_bindings'").get()
-    ? ` AND NOT EXISTS(SELECT 1 FROM memory_identity_bindings b WHERE b.memory_id=memory_entries.id
-        AND (json_extract(b.applicability_json,'$.recallChannel')='legacy_one_overlay' OR json_extract(b.applicability_json,'$.enabled')=0))` : "")
+  const readable = readableLinesClause(db)
     + (countsFrom ? ` AND created_at >= '${countsFrom}'` : "")
     // (the engine's memory_runtime does the same): a line the first-run migration moved (origin link `reclassified` / `from`) is not counted towards the store it moved into.
     + (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_origin_links'").get()
@@ -292,7 +320,10 @@ function liveLinesFor(db: BetterDatabase.Database, e: NewMemoryEntry): number {
     return (db.prepare(`SELECT COUNT(*) AS n FROM memory_entries WHERE scope='project' AND superseded_at IS NULL
       AND ((project_id IS NOT NULL AND project_id = ?) OR (project_path IS NOT NULL AND project_path = ?))${readable}`).get(e.projectId ?? null, e.projectPath ?? null) as { n: number }).n;
   }
-  return (db.prepare(`SELECT COUNT(*) AS n FROM memory_entries WHERE scope = ? AND superseded_at IS NULL${readable}`).get(e.scope) as { n: number }).n;
+  // the Personal ceiling is counted twice, never together - this place's own `preference` lines on one side, the lines that are (or will be) the person's SHARED set on the other.
+  // A line the server gave (source tag) is the shared set's and is counted there by the server, never here.
+  const klass = e.scope === "user_identity" && e.ceiling?.klass ? ` AND ${personalClassSql(e.ceiling.klass)}` : "";
+  return (db.prepare(`SELECT COUNT(*) AS n FROM memory_entries WHERE scope = ? AND superseded_at IS NULL${readable}${klass}`).get(e.scope) as { n: number }).n;
 }
 
 function enforceCeiling(db: BetterDatabase.Database, e: NewMemoryEntry): void {
@@ -354,6 +385,7 @@ function insertMemoryEntryInternal(e: NewMemoryEntry, source?: { key: string; di
       chatId: e.chatId,
       intakeRunId: e.intakeRunId,
       intakeEpoch: e.intakeEpoch,
+      ...(e.restatedByOwner === true ? { restatedByOwner: true } : {}),
     };
     assertMemoryWriteAllowed(authority);
     const native = e.contentNative?.trim().slice(0, 4_000);

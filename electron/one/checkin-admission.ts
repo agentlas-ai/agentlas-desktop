@@ -46,10 +46,20 @@ export async function heldCheckinIds(): Promise<string[]> {
   return held;
 }
 
+/** Has shared memory had its first merge in this account's memory store? An unreadable store answers no. */
+function sharedOpenHere(): boolean {
+  try { return (require("../memory/shared-ids") as typeof import("../memory/shared-ids")).sharedOpenHere((require("../memory/database") as typeof import("../memory/database")).getMemoryDb()); } catch { return false; }
+}
+
 export async function admitCheckinReview(runId: string): Promise<void> {
   // The personal agent's write gate (Agentlas 2.0 O-M3b): a sealed computer waits (the move may be cancelled), an away computer is not the home any more.
   const refused = (await import("./home")).oneWriteRefusal();
   if (refused === "one_sealed") throw new CheckinAdmissionDeferred(refused);
   if (refused === "one_away") throw new CheckinAdmissionDenied(refused);
+  // the person's shared boundary - said at ANY place, this desktop included - holds a check-in before a model is called for it. `no_proactive` = the agent does not start a conversation
+  // (the request is settled, nothing runs); `quiet_hours` = it waits for the window's end (the scheduler asks again at its next sweep). No boundary line with a structure = nothing changes.
+  const boundary = sharedOpenHere() ? (await import("./shared-boundary")).readSharedBoundary() : null;   // only once shared memory is open here (I11): before that a check-in is held by what it was held by
+  if (boundary?.noProactive) throw new CheckinAdmissionDenied("shared_boundary_no_proactive");
+  if (boundary && (await import("./shared-boundary")).quietWindowEnd(boundary, new Date()) !== null) throw new CheckinAdmissionDeferred("shared_boundary_quiet_hours");
   for (const load of CHECKIN_ADMISSION_GATES) await (await load()).admitReview(runId);
 }

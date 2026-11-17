@@ -18,11 +18,12 @@ import {
   type OneProfileUpdateInput,
 } from "../../shared/one-profile";
 import { emitDesktopStoreChange } from "./change-bus";
+import { isPlaceStyle } from "../../shared/place-values";
 import { getDb } from "./db";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 
 const META_KEY = "agentlas.one.profile.v1";
-const PROFILE_PATCH_KEYS = ["displayName", "role", "profileContext", "preferredLocale", "timeZone", "avatarIcon", "bubbleColor"] as const;
+const PROFILE_PATCH_KEYS = ["displayName", "role", "profileContext", "preferredLocale", "timeZone", "avatarIcon", "bubbleColor", "style"] as const;
 const PROFILE_LOCALES = new Set<OneProfileLocale>(["system", "ko", "en"]);
 const PRINCIPLE_SCOPES = new Set<OneOperatingPrincipleScope>([
   "personal",
@@ -485,6 +486,10 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
       if(typeof input.patch.bubbleColor!=='string' || !Object.hasOwn(ONE_BUBBLE_COLORS,input.patch.bubbleColor)) throw new TypeError('Invalid One bubble color');
       next.bubbleColor=input.patch.bubbleColor;
     }
+    if ("style" in input.patch) {
+      if (!isPlaceStyle(input.patch.style)) throw new TypeError("Invalid One style");   // the server's closed four (shared/place-values.ts)
+      next.style = input.patch.style;
+    }
     if ("role" in input.patch) next.role = cleanText(input.patch.role, "role", 1, 120);
     if ("profileContext" in input.patch) next.profileContext = cleanText(input.patch.profileContext, "profileContext", 0, 4_000);
     if ("preferredLocale" in input.patch) {
@@ -525,7 +530,7 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
       next.profileContext === current.profileContext &&
       next.preferredLocale === current.preferredLocale &&
       next.timeZone === current.timeZone &&
-      next.avatarIcon === current.avatarIcon && next.bubbleColor===current.bubbleColor
+      next.avatarIcon === current.avatarIcon && next.bubbleColor===current.bubbleColor && next.style === current.style
     ) return current;
     return { ...next, version: timestamp.version, updatedAt: timestamp.iso };
   });

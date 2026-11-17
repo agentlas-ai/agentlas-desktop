@@ -50,6 +50,7 @@ import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, 
 import { announceToolDenied, toolApprovalSessionKey } from "./tool-approval";
 import { SHELL_GATE_CONTROL_ENV, SHELL_GATE_HANDLE_ENV, openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
 import { installAgyDeleteGatePlugin } from "./antigravity-delete-gate";
+import { remoteRowShellGateWanted } from "../one/plural-remote-ask";
 import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
 import { mcpProxyControlInfoPath } from "../mcp-tools/proxy-channel";
 import {
@@ -2570,7 +2571,8 @@ async function runPreparedAntigravityAttempt(
     catch { return env; }
   };
   // A write run's shell asks the owner's card before it deletes (shell-delete-gate.ts): a plugin hook in the product mirror (antigravity-delete-gate.ts), the wire and handle in the environment.
-  const agyShellGateWanted = req.permission === "write" && !req.browserOnly && !req.untrustedNoTools;
+  const agyRemoteRowShell = remoteRowShellGateWanted(req);   // a full-access run of a Work handed over by a hand-off row: its shell deletes are asked on the row
+  const agyShellGateWanted = (req.permission === "write" && !req.browserOnly && !req.untrustedNoTools) || agyRemoteRowShell;
   const agyShellGateKey = `${ANTIGRAVITY_KIND}\0${req.chatId ?? ""}\0${req.cwd ?? agentRunCwd()}\0${req.runtimeSessionOwnerId ?? req.agentId ?? ""}`;
   if (agyShellGateWanted) { try { await ensureMcpProxyApprovalServer(); } catch { /* the hook refuses a delete it cannot ask about */ } }
   const agyGatedEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
@@ -2580,6 +2582,9 @@ async function runPreparedAntigravityAttempt(
       out[SHELL_GATE_CONTROL_ENV] = mcpProxyControlInfoPath();
       out[SHELL_GATE_HANDLE_ENV] = shellDeleteGateHandle(agyShellGateKey);
       out.AGENTLAS_SHELL_GATE_REQUIRED = "1";
+    } else if (agyRemoteRowShell) {
+      // A remote Work whose shell deletes cannot be asked about does not run (the sender was promised the question): the end is `no_runner`.
+      throw new Error("remote_ask_shell_gate_unavailable");
     } else events.onStatus("[shell-delete-gate] runtime=antigravity unavailable (no product mirror or script): shell deletes are not asked about");
     return out;
   };

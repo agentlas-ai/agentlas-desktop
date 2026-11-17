@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.2 — 2026-11-17
+
+- Personal agents: this desktop registers itself with your account as one of your agents when it connects, so your phone can show it next to the phone's own agent. How your desktop agent talks to you is a setting of its profile.
+- Shared memory: the desktop now takes part in the memory all your agents share. What you tell it about your life, your tastes and your wishes about your own time goes up to the shared memory, and what you told your other agents comes down to this one. A line you forget on one of them is forgotten here too. If you disconnect this computer from your phone, the memories it received from your other agents are removed from this computer; what you told this computer itself stays. The memory screen marks which agent a shared line came from and which lines stay on this desktop only, and before deleting it says how far the delete reaches. When the shared memory is full, the oldest line is let go and the conversation shows a card saying so.
+- Hand-off: your agents can pass work and messages to each other. Work another agent leaves for this desktop runs as an ordinary Work and its result goes back to the sender; this desktop's agent can hand work to another of your agents. Sending something and deleting files still ask you first, and a card shows where handed-over work stands.
+- Memory rules 1.17.0: a person's life, tastes and wishes are kept as facts every agent uses; a preference is only how one agent answers.
+- Engine: the app ships Agentlas OS 1.2.99.
+- These features use the Agentlas service and a signed-in account; without them the desktop works as before.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.1 — 2026-11-16
 
 - Memory: memory is kept in four places (personal, agent, project and session). A one-time step on first launch sorts what earlier versions stored, using the engine that ships inside the app, so it also goes ahead without an internet connection. If you quit in the middle it carries on at the next start and it never runs again once finished. It removes only empty turn records, memory that no screen could read, and tables nothing uses any more.

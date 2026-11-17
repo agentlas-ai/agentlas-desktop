@@ -34,7 +34,7 @@ import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
 import type { AgentAppMemorySharing } from "@shared/agent-app-memory";
-import type { DesktopMemoryQueryResult, DesktopMemoryDetail, DesktopMemoryStatus } from "@shared/desktop-memory-inspector";
+import type { DesktopMemoryQueryResult, DesktopMemoryDetail, DesktopMemorySharing, DesktopMemoryStatus } from "@shared/desktop-memory-inspector";
 import type { OneDurableMemoryEntryUi } from "@shared/types";
 import type { OneMemoryMapSnapshot } from "@shared/one-memory-map";
 import { OneMemoryMap, ONE_MEMORY_KIND_COLORS } from "./OneMemoryMap";
@@ -114,6 +114,21 @@ function kindLabel(kind: string, locale: Locale): string {
   const en: Record<string, string> = { procedure: "How-to", decision: "Decision", preference: "Preference", risk: "Risk", fact: "Fact",
     hypothesis: "Hypothesis", evidence: "Evidence", deprecation: "Retired", conflict: "Conflict" };
   return (locale === "ko" ? ko : en)[kind] ?? kind;
+}
+/** The small gray mark at the right of a line (pictures BJ): "{agent} sent it" for a line another agent was told, "not shared" for a line that could not go up. A shared line said here and this agent's own line have no mark. */
+function sharingMark(sharing: DesktopMemorySharing | undefined, locale: Locale): string {
+  if (!sharing) return "";
+  if (sharing.kind === "from") return locale === "ko" ? `${sharing.name ?? "다른 에이전트"}에게서` : `From ${sharing.name ?? "another agent"}`;
+  if (sharing.kind === "local") return locale === "ko" ? "공유 안 됨" : "Not shared";
+  return "";
+}
+/** The words of the delete confirmation (BK): the line, then how far the delete reaches. */
+function deleteConfirmText(line: string, sharing: DesktopMemorySharing, agentName: string, locale: Locale): string {
+  const ko = locale === "ko";
+  const reach = sharing.kind === "local" ? (ko ? "이 데스크탑에서만 삭제돼요." : "Deleted from this desktop only.")
+    : sharing.kind === "own" ? (ko ? `${agentName}에서만 삭제돼요.` : `Deleted from ${agentName} only.`)
+    : (ko ? "모든 에이전트에서 삭제돼요." : "Deleted from all agents.");
+  return `${line.replace(/\s+/g, " ").trim().slice(0, 200)}\n\n${reach}`;
 }
 function KindIcon({ kind, size = 14 }: { kind: string; size?: number }) {
   const Icon = KIND_ICON[kind] ?? IconLayers;
@@ -379,6 +394,9 @@ export function DesktopMemoryInspector({open,active,locale,revisionHint,fixed}:{
   const describe=useCallback((id:string)=>{const row=result?.entries.find(value=>value.memoryId===id);return row?{label:`${row.actorName} · ${kindLabel(row.kind,locale)}`,text:row.content}:null;},[result,locale]);
   const mutate=async(action:"edit"|"forget")=>{
     if(!detail)return;const api=ipc()?.oneMemory.inspector;if(!api)return;
+    // once shared memory is open here a delete says how far it reaches before anything is deleted. Before that (no `sharing` on the line) the screen asks nothing, as it never did.
+    if(action==="forget"){const sharing=result?.entries.find(row=>row.memoryId===detail.memoryId)?.sharing;
+      if(sharing&&!(await confirmPopup(deleteConfirmText(detail.content,sharing,detail.actorName,locale),{title:locale==="ko"?"이 기억을 삭제할까요?":"Delete this memory?",tone:"danger",confirmLabel:locale==="ko"?"삭제":"Delete",cancelLabel:locale==="ko"?"취소":"Cancel"})))return;}
     const current=generation.current;setBusy(true);setError(null);setNotice(null);
     try {
       const target={memoryId:detail.memoryId,ownerRef:detail.ownerRef,actorId:detail.actorId,expectedRevision:detail.expectedRevision,expectedEpoch:detail.expectedEpoch};
@@ -410,7 +428,7 @@ export function DesktopMemoryInspector({open,active,locale,revisionHint,fixed}:{
     {result?.truncated&&<p className={styles.memoryHint}>{locale==="ko"?`최근 ${result.entries.length}개를 표시합니다. 필터로 범위를 좁혀 주세요.`:`Showing the latest ${result.entries.length}. Narrow the filters to see a smaller range.`}</p>}
     {result&&result.map.nodes.length>0&&<div className={styles.memoryMap}><OneMemoryMap snapshot={result.map} locale={locale} height={232} colorByKind selectedId={selected} onSelect={setSelected} describe={describe} unassignedProjectLabel={locale==="ko"?"프로젝트 없음":"No project"} ownerLabel={fixed?.name}/></div>}
     <div className={styles.memoryList}>{result?.entries.map(row=><button key={row.memoryId} type="button" className={styles.memoryEntryButton} data-selected={selected===row.memoryId?"true":undefined} onClick={()=>setSelected(value=>value===row.memoryId?null:row.memoryId)}>
-      <KindIcon kind={row.kind}/><span>{row.title||statusLabel(row.status)}</span><small>{row.actorName} · {statusLabel(row.status)}</small></button>)}</div>
+      <KindIcon kind={row.kind}/><span>{row.title||statusLabel(row.status)}</span><small>{row.actorName} · {statusLabel(row.status)}{sharingMark(row.sharing,locale)?` · ${sharingMark(row.sharing,locale)}`:""}</small></button>)}</div>
     {result&&result.entries.length===0&&<p className={styles.empty}>{locale==="ko"?"선택한 범위에 기억이 없습니다.":"No memories in this selection."}</p>}
     {detail&&<section className={styles.memoryInspectorDetail} aria-label={locale==="ko"?"기억 상세":"Memory details"}>
       <h4>{detail.actorName} · {kindLabel(detail.kind,locale)}</h4><p className={styles.memoryBody}>{detail.content}</p>
@@ -428,7 +446,7 @@ export function DesktopMemoryInspector({open,active,locale,revisionHint,fixed}:{
         {(appSharing.choices.length>0||appSharing.current)&&<p className={styles.memoryHint}>{locale==="ko"?"선택한 App 멤버에게 이 기억만 적용됩니다. 프로젝트 출처와 기존 Agent 회상 범위는 유지됩니다.":"Only this memory is shared with the selected App member. Its project origins and existing agent scope stay unchanged."}</p>}
       </div>}
       {editing?<form className={styles.editForm} onSubmit={event=>{event.preventDefault();void mutate("edit");}}><label className={styles.wideField}><span>{locale==="ko"?"기억 수정":"Edit memory"}</span><textarea value={text} rows={4} maxLength={4000} required disabled={busy} onChange={event=>setText(event.target.value)}/></label><div className={styles.cardActions}><button type="submit" className={styles.primaryButton} disabled={busy||!text.trim()}>{locale==="ko"?"수정 적용":"Apply correction"}</button><button type="button" className={styles.secondaryButton} disabled={busy} onClick={()=>setEditing(false)}>{locale==="ko"?"취소":"Cancel"}</button></div></form>
-        :<div className={styles.cardActions}>{detail.editable&&<button type="button" className={styles.secondaryButton} disabled={busy} onClick={()=>{setText(detail.content);setEditing(true);}}>{locale==="ko"?"수정":"Edit"}</button>}{detail.status==="active"&&detail.actorId&&<button type="button" className={styles.dangerButton} disabled={busy} onClick={()=>void mutate("forget")}>{locale==="ko"?"잊기":"Forget"}</button>}</div>}
+        :<div className={styles.cardActions}>{detail.editable&&<button type="button" className={styles.secondaryButton} disabled={busy} onClick={()=>{setText(detail.content);setEditing(true);}}>{locale==="ko"?"수정":"Edit"}</button>}{detail.status==="active"&&detail.actorId&&<button type="button" className={styles.dangerButton} disabled={busy} onClick={()=>void mutate("forget")}>{result?.entries.find(row=>row.memoryId===detail.memoryId)?.sharing?(locale==="ko"?"삭제":"Delete"):(locale==="ko"?"잊기":"Forget")}</button>}</div>}
       <p className={styles.memoryHint}>{locale==="ko"?"잊기는 같은 저장 범위의 동일한 기억과 그 보기를 함께 처리합니다.":"Forgetting also removes identical memories in the same storage scope and their views."}</p>
     </section>}
   </section>;

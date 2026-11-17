@@ -350,6 +350,11 @@ export const MOBILE_CLIENT_CAPABILITIES = [
    * Only such a phone receives `request.accepted` and the late answer; every other phone gets the same answers as before.
    */
   "longOps.v1",
+  /**
+   * The phone draws a hand-off card (shared/plural-handoff-card.ts): the system row of a hand-off arrives as the closed card value (marker + JSON) instead of one plain line "[전달] <work> · <state>".
+   * A phone that does not say it (172) is given the line, as a quiet notice, and never a state it cannot update.
+   */
+  "handoff.card.v1",
 ] as const;
 export type MobileClientCapability = (typeof MOBILE_CLIENT_CAPABILITIES)[number];
 

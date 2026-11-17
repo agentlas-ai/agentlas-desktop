@@ -1,4 +1,5 @@
 import { redactSecrets } from "./secret-patterns";
+import { isPlaceStyle, type PlaceStyle } from "./place-values";
 
 export const ONE_PROFILE_CONTRACT_VERSION = "1.0.0" as const;
 
@@ -42,6 +43,11 @@ export interface OneProfile {
    */
   avatarIcon?: string;
   bubbleColor?: OneBubbleColor;
+  /**
+   * How this personal agent talks: one of the server's closed four (shared/place-values.ts). Always optional (a stored profile from before has none = the default).
+   * It goes to the places registry (`POST /api/desktop/place`) and nowhere else: the phone's device projection below does not carry it, so a phone build that does not know the field sees nothing new.
+   */
+  style?: PlaceStyle;
   operatingPrinciples: OneOperatingPrinciple[];
   createdAt: string;
   updatedAt: string;
@@ -51,7 +57,7 @@ export interface OneProfileUpdateInput {
   /** Bind an edit opened for a specific One; omitted by older clients. */
   oneId?: string;
   expectedVersion: number;
-  patch: Partial<Pick<OneProfile, "displayName" | "role" | "profileContext" | "preferredLocale" | "timeZone" | "avatarIcon" | "bubbleColor">>;
+  patch: Partial<Pick<OneProfile, "displayName" | "role" | "profileContext" | "preferredLocale" | "timeZone" | "avatarIcon" | "bubbleColor" | "style">>;
 }
 
 export interface OneOperatingPrincipleCreateInput {
@@ -178,6 +184,7 @@ export function isOneProfile(value: unknown): value is OneProfile {
     "timeZone",
     "avatarIcon",
     "bubbleColor",
+    "style",
     "operatingPrinciples",
     "createdAt",
     "updatedAt",
@@ -194,6 +201,7 @@ export function isOneProfile(value: unknown): value is OneProfile {
     // 예전 저장본에는 이 칸이 아예 없다. 없는 것과 잘못된 것은 다르다.
     !(value.avatarIcon === undefined || isBoundedString(value.avatarIcon, 1, 160)) ||
     !(value.bubbleColor === undefined || typeof value.bubbleColor==='string' && Object.hasOwn(ONE_BUBBLE_COLORS,value.bubbleColor)) ||
+    !(value.style === undefined || isPlaceStyle(value.style)) ||
     !Array.isArray(value.operatingPrinciples) || value.operatingPrinciples.length > 128 ||
     !value.operatingPrinciples.every(isPrinciple) ||
     !isIsoTimestamp(value.createdAt) ||

@@ -116,6 +116,7 @@ function eventOf(item: TicketItem, extraEvidence: readonly string[] = [], sensit
     ...(line.native ? { content_native: line.native } : {}),
     ...(line.replaces.length ? { supersedes: line.replaces[0], explicit_replace: true } : {}),
     ...(line.context?.ticket_kind === "identity" || line.context?.ticket_kind === "boundary" ? { ticket_kind: line.context.ticket_kind } : {}),
+    ...(line.context?.boundary ? { boundary: line.context.boundary } : {}),
     origin_class: line.origin_class,
     ticket_origin: { originClass: line.origin_class, certainty: line.certainty },
   };

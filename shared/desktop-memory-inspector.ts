@@ -12,8 +12,15 @@ export interface DesktopMemoryEntry extends DesktopMemoryTarget {
   kind: string; scope: string; content: string; title: string; status: DesktopMemoryStatus; createdAt: string;
   actorName: string; projectSlug: string | null;
 }
+/**
+ * what a Personal line is in the shared memory, read from the account's `memory_shared_ids` table. Absent = shared memory is not open here (the screen is what it was).
+ *   shared  a line every agent of the person shares (no mark)          from  a line another agent was told (mark "{agent} sent it"; `name` null = the sender is not known: "another agent")
+ *   local   a line that could not go up and stays on this desktop (mark "not shared")        own  this agent's own preference (answer style, form of address): kept in the "this agent only" group
+ */
+export type DesktopMemorySharing = { kind: "shared" } | { kind: "from"; name: string | null } | { kind: "local" } | { kind: "own" };
 /** A line of the memory LIST (the query's entries). */
 export interface DesktopMemoryListEntry extends DesktopMemoryEntry {
+  sharing?: DesktopMemorySharing;
   /**
    * Redesign backend C: the skills made from this line, read BEFORE it is forgotten (the same skills the forget answer's `derivedSkills` names afterwards). `[]` = none, absent = not known
    * (a split memory layout or an unreadable agent, and none found): never "none". Their text is not here.

@@ -19,6 +19,7 @@ import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
   type RuntimeToolPermissionAsk,
+  approvalWireClosedReason,
 } from "../runtime/tool-approval";
 import { secretEquals } from "../security/secret-equals";
 import { decideShellDelete } from "../runtime/shell-delete-gate";
@@ -193,7 +194,7 @@ export function mcpToolDeniedBySimulation(input: {
  * 프록시 요청 하나를 중재자에게 묻는다. 중재자가 없거나 던지면 **거부**다 —
  * 실패가 허용으로 바뀌는 순간 이 관문은 없느니만 못하다(acp.ts·local-tool-loop 과 같은 규칙).
  */
-async function decide(parsed: ProxyApprovalRequest): Promise<"allow" | "deny"> {
+async function decide(parsed: ProxyApprovalRequest, closed?: AbortSignal): Promise<"allow" | "deny"> {
   const toolName = parsed.toolName?.trim();
   if (!toolName) return "deny";
   if (mcpToolDeniedBySimulation({
@@ -220,6 +221,7 @@ async function decide(parsed: ProxyApprovalRequest): Promise<"allow" | "deny"> {
     mutating: mcpToolIsMutating({ catalogId: parsed.catalogId, toolName }),
     ...(parsed.chatId ? { chatId: parsed.chatId } : {}),
     ...(parsed.unattended ? { unattended: true as const } : {}),
+    ...(closed ? { closed } : {}),
   };
   const arbiter = getRuntimeToolPermissionArbiter();
   if (!arbiter) return defaultRuntimeToolPermission(ask) === "deny" ? "deny" : "allow";
@@ -266,7 +268,7 @@ export function startMcpProxyApprovalServer(): Promise<number> {
         // A CLI's PreToolUse hook asks about one shell command (runtime/shell-delete-gate.ts). It names a handle Main minted for the run and the
         // command, nothing else; the owner's card is withdrawn when the hook goes away (the CLI stopped it, its turn ended).
         const gone = new AbortController();
-        res.on("close", () => { if (!res.writableEnded) gone.abort(); });
+        res.on("close", () => { if (!res.writableEnded) gone.abort(approvalWireClosedReason()); });
         void readBody(req).then(async (body) => {
           let parsed: { handle?: unknown; command?: unknown } = {};
           try { parsed = JSON.parse(body) as typeof parsed; } catch { /* a request of an unknown shape is a refusal below */ }
@@ -290,9 +292,12 @@ export function startMcpProxyApprovalServer(): Promise<number> {
           res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ decision: "deny" }));
           return;
         }
+        // The card of a remote Work's question is withdrawn when the CLI lets go of this wire (its tool-call time ran out, the turn ended): tool-approval.ts approvalWireClosedReason.
+        const gone = new AbortController();
+        res.on("close", () => { if (!res.writableEnded) gone.abort(approvalWireClosedReason()); });
         let decision: "allow" | "deny";
         try {
-          decision = await decide(parsed);
+          decision = await decide(parsed, gone.signal);
         } catch {
           decision = "deny";
         }

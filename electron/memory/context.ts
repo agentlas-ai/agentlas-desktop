@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { getMemoryStoreInfo } from "./database";
+import { getMemoryDb, getMemoryStoreInfo } from "./database";
 import { selectedMemoryContextCache } from "./selected-context-cache";
 import { captureMemoryContextGeneration } from "./context-generation";
 import { readGenerationMemoryPack, recordMemoryGenerationFallback } from "./generation-pack";
@@ -56,7 +56,8 @@ import {
 } from "../store/run-events";
 import { previousTurnMemorySection } from "./previous-turn";
 import { memoryClassificationRules, workspaceRulesOn } from "./classification";
-import { pickAlwaysLoad, renderAlwaysLoad } from "../../shared/memory-classification";
+import { alwaysLoadSpec, pickAlwaysLoad, renderAlwaysLoad } from "../../shared/memory-classification";
+import { sharedOpenHere } from "./shared-ids";
 import { recordMemoryRecallApplied } from "./recall-receipt";
 import {
   buildProjectContextSlice,
@@ -957,6 +958,23 @@ export interface OwnerProfilePiece extends OwnerProfileCarry { text: string }
  * `alreadyCarried` are the texts of blocks this turn carries by another route (the approved-One-memory/profile block, the legacy One overlay): a line they hold is not
  * loaded a second time, and its id is kept out of recall too. The piece is empty (null) when there is no such line or the ruleset has no `alwaysLoad`: the turn is then byte-identical to before.
  */
+/** The always-loaded piece when shared memory is open here: the classes in their order, newest first inside a class, the same byte budget and line length as the ruleset's, written in id order like the piece always was. */
+export function pickAlwaysLoadOpen<T extends { id: string; kind: string; content: string; createdAt: string; shownKind?: string }>(rows: readonly T[], rules: Parameters<typeof alwaysLoadSpec>[0]): T[] {
+  const spec = alwaysLoadSpec(rules);
+  if (!spec) return [];
+  const classOf = (row: T): number => (row.shownKind === "boundary" ? 0 : row.shownKind === "identity" ? 2 : row.kind === "fact" ? 3 : row.kind === "preference" ? 1 : -1);
+  const ordered = [...rows].filter(row => classOf(row) >= 0).sort((x, y) => classOf(x) - classOf(y) || (x.createdAt === y.createdAt ? (x.id < y.id ? 1 : -1) : x.createdAt < y.createdAt ? 1 : -1));
+  const picked: T[] = []; let used = 0;
+  for (const row of ordered) {
+    const text = row.content.trim();
+    if (!text || Array.from(text).length > spec.maxLineChars) continue;
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (used + bytes > spec.maxBytes) continue;
+    picked.push(row); used += bytes;
+  }
+  return picked.sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+}
+
 export function ownerProfilePiece(scope: { agentId?: string | null; projectId?: string | null; projectPath?: string | null; chatId?: string | null },
   alreadyCarried: readonly string[] = []): OwnerProfilePiece | null {
   try {
@@ -968,9 +986,14 @@ export function ownerProfilePiece(scope: { agentId?: string | null; projectId?: 
       .map(entry => ({ id: entry.id, kind: entry.kind as string, content: entry.content, createdAt: entry.createdAt, shownKind: entry.requestContext?.ticket_kind ?? (entry.kind as string), blockKey: memoryBlockKey(entry.content) }));
     const carried = alreadyCarried.map(text => text.toLowerCase());
     const inCarried = (row: { content: string }) => carried.some(block => block.includes(row.content.trim().toLowerCase()));
-    const picked = pickAlwaysLoad(rows.filter(row => !inCarried(row)), rules);
+    // with shared memory open here the 800 bytes are filled in a fixed order - a boundary, then this place's own preferences, then who the person is (identity), then the facts of their life the person
+    // said most recently - so a line another place gave never pushes out this place's own preference, and a fact now only found by words (a life or taste the model used to file as a preference) is still there when it matters.
+    // Without the first-merge mark this is the function it always was.
+    const open = (() => { try { return sharedOpenHere(getMemoryDb()); } catch { return false; } })();
+    const pick = (list: typeof rows): typeof rows => (open ? pickAlwaysLoadOpen(list, rules) : pickAlwaysLoad(list, rules));
+    const picked = pick(rows.filter(row => !inCarried(row)));
     // A line the profile block or the legacy overlay already carries is loaded there; it stays out of this piece AND out of recall.
-    const duplicateIds = new Set(rows.filter(row => inCarried(row) && pickAlwaysLoad([row], rules).length > 0).map(row => row.id));
+    const duplicateIds = new Set(rows.filter(row => inCarried(row) && pick([row]).length > 0).map(row => row.id));
     if (!picked.length && !duplicateIds.size) return null;
     const text = renderAlwaysLoad(picked);
     return { text, ids: new Set([...picked.map(row => row.id), ...duplicateIds]), approxTokens: text ? approximateMemoryTokens(text) : 0 };

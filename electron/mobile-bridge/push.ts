@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { MobileBridgeConnectionContext } from "./server";
 import { isOneQuietHour } from "../../shared/one-briefing";
+import { quietWindowEnd, readSharedBoundary, type SharedBoundary } from "../one/shared-boundary";
 import { validateMobilePushParams, type MobilePushRegistration } from "../../shared/mobile-bridge";
 
 export type MobilePushOutcome = "accepted" | "unregistered" | "unavailable" | "refused";
@@ -67,6 +68,8 @@ export interface MobilePushServiceOptions {
   expiryMs?: number;
   /** The owner's quiet hours (One Briefing preferences). Absent or disabled: nothing is held. */
   quietHours?(): MobilePushQuietHours | null;
+  /** the person's shared boundary lines (do not talk first / quiet hours). Absent: read from the Personal memory when a check-in is about to ring. */
+  sharedBoundary?(): SharedBoundary | null;
   /**
    * A queued push is re-checked before it is sent again. false: gone (a decision card answered meanwhile), the entry is deleted.
    * "keep": the check itself could not run (store error), the entry stays queued for the next signal.
@@ -336,6 +339,15 @@ export class MobilePushService {
     const signalAtStart = this.recoverySignal;
     const key = `${item.deviceId}:${notice.dedupeKey}`;
     if (this.queued.has(key) || this.registry.delivered.includes(key) || !item.preferences[preference[notice.category]]) return;
+    // the person's shared boundary - said on any place - holds a check-in here too. `no_proactive`: it never rings (it stays in the conversation, like a whole-day quiet);
+    // `quiet_hours`: it waits for the end of the window that covers now. Only what the agent started by itself (`quietEligible`); an answer to the person never waits.
+    const boundary = notice.quietEligible ? (this.options.sharedBoundary ? this.options.sharedBoundary() : readSharedBoundary()) : null;
+    if (boundary?.noProactive) {
+      if (this.pendingKeyHeld(key)) { try { this.persist(this.dropPending([key])); } catch { /* ages out */ } }
+      return;
+    }
+    const sharedQuietEnd = boundary ? quietWindowEnd(boundary, new Date(this.clock())) : null;
+    if (sharedQuietEnd !== null) { this.enqueue(key, item.deviceId, notice, "quiet", sharedQuietEnd); return; }
     const quiet = notice.quietEligible ? this.options.quietHours?.() ?? null : null;
     if (quiet && isOneQuietHour(quiet, new Date(this.clock()).getHours())) {
       // Quiet hours cover the whole day: no check-in ever rings, it only stays in the conversation, which the owner sees on opening

@@ -112,7 +112,9 @@ export interface OneSupervisorSnapshot {
 export interface SupervisorSendInput { commandId: string; text: string; runtimeSelection?: RuntimeSelection; oneId?:string; permissions?:"read"|"write"|"full"; images?:ImageAttachment[]; fileGroupId?:string }
 export interface SupervisorWorkInput extends SupervisorSendInput { projectId?: string; permissions?: "read" | "write" | "full"; budgetId?:string;
   /** What must be true when the work is finished, one checkable item each: handed to Work with the brief and to One's review. */
-  doneWhen?: string[] }
+  doneWhen?: string[];
+  /** A Work started from a hand-off row: how its money / delete / send questions are asked (electron/one/plural-remote-ask.ts). */
+  remoteAsk?: { rowId: string; askVia: "row" | "local"; from: string; fromName: string } }
 export const SUPERVISOR_DONE_WHEN_LIMITS = { items: 8, chars: 240 } as const;
 /** Lenient by design: a hand-off never fails over its checklist. Non-strings and blanks drop, items are cut, the first 8 stay. */
 export function supervisorDoneWhen(value: unknown): string[] | undefined {

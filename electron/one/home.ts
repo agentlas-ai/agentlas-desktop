@@ -96,6 +96,10 @@ type KeyedRecord = OneHomeRecord & { privateKey: string; pub: string; kid: strin
 /** Marker line: the moment this version first ran. A pairing record without `pairedVia` older than it is an "old record"; a newer one is not. */
 const LEGACY_CUTOFF_KEY = "one_home:legacy_cutoff";
 const RECORD_KEY = (userId: string): string => `one_home:v1:${userId}`;
+/** Has shared memory had its first merge in this account's memory store (the mark the recall reads)? An unreadable store is not open: the mirror then keeps its old answer. */
+function sharedMemoryOpenHere(): boolean {
+  try { return (require("../memory/shared-ids") as typeof import("../memory/shared-ids")).sharedOpenHere((require("../memory/database") as typeof import("../memory/database")).getMemoryDb()); } catch { return false; }
+}
 /** The record of what the server already has of the personal agent's lines, words and profile (home-mirror.ts header: readers, deletion). */
 const MIRROR_KEY = (userId: string): string => `one_mirror:v1:${userId}`;
 
@@ -1155,7 +1159,8 @@ export function createOneHome(deps: OneHomeDeps) {
   const mirrorPorts: HomeMirrorPorts = {
     now: () => deps.now(),
     userId: () => deps.session()?.userId ?? null,
-    switchOn: () => { try { return deps.mirrorSwitchOn?.() === true; } catch { return false; } },
+    // the old mirror and the shared memory never run for the same account. Once the first merge of the shared memory happened here, the mirror's switch reads off (its record is cleaned by `forget`).
+    switchOn: () => { try { return deps.mirrorSwitchOn?.() === true && !sharedMemoryOpenHere(); } catch { return false; } },
     standing: () => {
       const session = deps.session();
       if (!session) return { ok: false, why: "signed_out", key: "" };

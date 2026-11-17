@@ -145,7 +145,7 @@ export function isRelayAuthRefusal(status: number | null): boolean {
 }
 
 /*
- * 긴 쉼(30→120분)은 "같은 쿠키·같은 비밀로는 다시 해도 안 되는" 닫힌 사유일 때만 쓴다 (Agentlas 2.0 desktop values S3, audit 가-4).
+ * 긴 쉼(30→120분)은 "같은 쿠키·같은 비밀로는 다시 해도 안 되는" 닫힌 사유일 때만 쓴다.
  * 전에는 401/403/410 한 번이면 사유와 무관하게 30분을 쉬었다: 중계 재배포 중의 403, 앞 데스크탑 등록이 아직 안 지워진 `relay_host_authority_changed`,
  * 관리형 호스트 토큰이 돌아가는 사이의 `managed_host_invalid`가 일시 장애여도 원격 접속이 30~120분 멈췄다.
  * 판정은 서버가 보낸 상태 코드와 `X-Agentlas-Refusal` 닫힌 낱말(mobile-relay.mjs REFUSAL_CODES)로만 한다 — 응답 글은 읽지 않는다.
@@ -286,6 +286,13 @@ export interface MobileBridgeCloudRelayOptions {
    * 없으면 중계 페어링 신호를 무시한다(폰은 제한 시간 뒤 실패로 끝난다).
    */
   onPairFrame?: (frameText: string) => Promise<string>;
+  /**
+   * the relay's `relay.wake` frame, with the id the desktop echoes on its ONE read (`GET /api/desktop/plural?wake=`). The frame is only a signal: nothing is stored here.
+   * An old relay never sends it; a relay with the switch closed neither.
+   */
+  onWake?: (id: unknown) => void;
+  /** The control channel said `relay.ready` (a connect, a reconnect or a renewal): the desktop reads its place once (`GET /api/desktop/plural?hostId=`). */
+  onControlReady?: () => void;
 }
 
 function relayFilePath(userDataPath: string): string {
@@ -960,6 +967,11 @@ export class MobileBridgeCloudRelay {
       this.pushPlatforms = push?.provider === "fcm" && push.available === true && Array.isArray(push.platforms)
         ? push.platforms.filter((value): value is "ios" | "android" => value === "ios" || value === "android") : [];
       this.options.onStatusChanged?.();
+      try { this.options.onControlReady?.(); } catch { /* a place read never changes the relay */ }
+      return;
+    }
+    if (message.type === "relay.wake") {
+      try { this.options.onWake?.(message.id); } catch { /* a place read never changes the relay */ }
       return;
     }
     if (message.type === "relay.push.result") {

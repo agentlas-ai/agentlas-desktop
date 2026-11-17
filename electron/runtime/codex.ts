@@ -36,6 +36,7 @@ import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
 import { toolApprovalSessionKey } from "./tool-approval";
 import { codexExecDeleteGateArgs } from "./codex-delete-gate";
+import { remoteRowShellGateWanted } from "../one/plural-remote-ask";
 import { openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
 import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
 import { mcpProxyControlInfoPath } from "../mcp-tools/proxy-channel";
@@ -1516,6 +1517,8 @@ export function codexThreadPolicy(
   permission: RunnerRequest["permission"],
   cwd = agentRunCwd(),
   approvalsReviewer: RunnerRequest["approvalsReviewer"] = "user",
+  /** A Work handed over by a hand-off row (plural-remote-ask.ts): full access keeps its sandbox, but every command that is not a known read goes to the host, which asks the sender about a delete / send / payment. */
+  remoteRowAsk = false,
 ): {
   sandbox: string;
   approvalPolicy: string;
@@ -1524,7 +1527,7 @@ export function codexThreadPolicy(
   if (permission === "full") {
     return {
       sandbox: "danger-full-access",
-      approvalPolicy: approvalsReviewer === "auto_review" ? "on-request" : "never",
+      approvalPolicy: approvalsReviewer === "auto_review" ? "on-request" : remoteRowAsk ? "untrusted" : "never",
       sandboxPolicy: { type: "dangerFullAccess" },
     };
   }
@@ -1816,7 +1819,7 @@ async function runCodexResidentTurn(input: {
   // What this process has learned about the CLI (no app-server, no thread rebind) belongs to this executable generation only.
   const executableKey = codexExecutableKey(bin, cwd, env);
   const approvalsReviewer = req.approvalsReviewer ?? "user";
-  const policy = codexThreadPolicy(req.permission, cwd, approvalsReviewer);
+  const policy = codexThreadPolicy(req.permission, cwd, approvalsReviewer, remoteRowShellGateWanted(req));
   const requestedConfigDigest = inspectCodexWorkforceGrant(req, mcpArgs);
   let workforceObservation: CodexWorkforceObservation | null = null;
   const imageDiagnosis = req.untrustedNoTools || req.restrictedReadBoundary || req.judgmentOnly
@@ -3710,13 +3713,14 @@ export const runCodex: Runner = async (
   };
   // `codex exec` has no approval loop, so a write run's shell asks the owner's card before it deletes through a PreToolUse hook (codex-delete-gate.ts,
   // shell-delete-gate.ts). Opened per turn below; the handle is stable for the run key. Only exec carries it: the app-server asks the host itself.
-  const execGateWanted = runReq.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools;
+  const execGateWanted = (runReq.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools) || remoteRowShellGateWanted(runReq);
   const execGateKey = `${KIND}\0${runReq.chatId ?? ""}\0${runReq.cwd ?? agentRunCwd()}\0${runtimeSessionOwnerId ?? ""}`;
   const execDeleteGateArgs = (): string[] => {
     if (!execGateWanted) return [];
     // Main and the daemon start the wire at boot; this only re-binds it if it went away, and only on the exec path (the hook refuses a delete it cannot ask about).
     void ensureMcpProxyApprovalServer().catch(() => undefined);
     const args = codexExecDeleteGateArgs({ control: mcpProxyControlInfoPath(), handle: shellDeleteGateHandle(execGateKey) });
+    if (args.length === 0 && remoteRowShellGateWanted(runReq)) throw new Error("remote_ask_shell_gate_unavailable");   // the sender was promised the question: a remote Work does not run without it (end: no_runner)
     if (args.length === 0) events.onStatus("[shell-delete-gate] runtime=codex-exec unavailable (no hook form on this OS): shell deletes are not asked about");
     return args;
   };

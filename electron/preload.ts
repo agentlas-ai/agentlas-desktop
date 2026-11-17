@@ -843,6 +843,7 @@ const api: AgentlasIpc = {
     ipcRenderer.invoke("runtime:getToolApprovalResolution", id),
   listToolApprovals: () => ipcRenderer.invoke("runtime:listToolApprovals"),
   listSettledToolApprovals: (chatIds: string[]) => ipcRenderer.invoke("runtime:listSettledToolApprovals", chatIds),
+  pluralHandoffAct: (input: unknown) => ipcRenderer.invoke("pluralHandoff:act", input),
   // 데몬 자동 시작(로그인 기동) — 기본 off. 값 변경 시 main 이 부팅 항목까지 정합시킨다.
   getDaemonAutostart: () => ipcRenderer.invoke("daemon:getAutostart"),
   setDaemonAutostart: (enabled: boolean) => ipcRenderer.invoke("daemon:setAutostart", enabled),

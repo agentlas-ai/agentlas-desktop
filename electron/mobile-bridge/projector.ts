@@ -1,7 +1,12 @@
 import { projectMobileCanonicalQuestionDecisions } from "./canonical-question";
 import { agentUsability, usabilityEnforced } from "../agents/usability";
 import { isMobileBridgeOneDecisionDto } from "../../shared/mobile-question-decision";
+import { decodeMemoryRoomCard, memoryRoomPlainLine } from "../../shared/memory-room-card";
+import { currentUiLocale as memoryRoomLocale } from "../ui-locale";
 import { Buffer } from "node:buffer";
+import { HANDOFF_CARD_MARKER, closedHandoffCard, decodeHandoffCard, encodeHandoffCard, handoffPlainLine } from "../../shared/plural-handoff-card";
+import { seatEventText } from "../../shared/one-seat-events";
+import { currentUiLocale } from "../ui-locale";
 import { listUiInstances } from "../harness/ui-instances";
 import { fitInlineUiTranscriptText } from "../../shared/inline-ui-transcript";
 import { MOBILE_SNAPSHOT_VISUAL_BYTES, mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
@@ -544,6 +549,8 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "hub-publish-v1",
       "remote-build",
       "remote-build-question-set-v2",
+      "remote-build-cancel-v1",
+      "remote-build-recovery-v1",
     ],
   };
 }
@@ -983,6 +990,25 @@ export interface MobileBridgeHistoryOptions {
   inlineUiTextBytes?: number;
   /** The phone reported chat.file.v1: local file paths of a stored assistant answer become `[name](agentlas-file:<n>)` links. */
   chatFileLinks?: boolean;
+  /** The phone reported handoff.card.v1: a hand-off card row is sent as the closed card value; every other phone gets one plain line of it. */
+  handoffCard?: boolean;
+}
+
+/** The text a phone is given for a hand-off card row: the marker + closed value (handoff.card.v1) or the seat-style plain line; null when the text is not a card row. */
+function projectHandoffCardRow(text: string, closed: boolean): string | null {
+  const card = decodeHandoffCard(text);
+  if (!card) return null;
+  const ctx = { ko: currentUiLocale() === "ko", now: Date.now() };
+  if (!closed) return seatEventText(handoffPlainLine(card, ctx));
+  const value = closedHandoffCard(card);
+  const clean = (v: string, max: number): string => sanitizeMobileBridgeText(v, max);
+  // every word the phone may read passes the same sanitizer as any transcript text; the questions of a card stay on the desktop's own screen (the phone answers on the row)
+  const { q: _q, log: _log, to: _to, here: _here, ...rest } = value;
+  return encodeHandoffCard({ ...rest, agent: clean(value.agent, 80), brief: clean(value.brief, 600),
+    ...(value.place ? { place: clean(value.place, 80) } : {}), ...(value.result ? { result: clean(value.result, 1200) } : {}) });
+}
+function sanitizeHandoffRowText(text: string, max: number): string {
+  return Buffer.byteLength(text, "utf8") <= max ? text : text.startsWith(HANDOFF_CARD_MARKER) ? "" : sanitizeMobileBridgeText(text, max);
 }
 
 export function projectMobileBridgeHistory(
@@ -1085,9 +1111,23 @@ export function projectMobileBridgeHistory(
     };
     const remaining = budget - outBytes - mobileBridgeJsonBytes(shell) - 16;
     if (remaining <= 0) break;
+    // A hand-off card (a 'view' row of the personal agent's conversation): the closed value for a phone that draws it, else one plain line as the quiet notice every phone already draws. Never the raw row.
+    const handoff = message.role === "system" ? projectHandoffCardRow(message.text, options.handoffCard === true) : null;
+    if (handoff !== null) {
+      const cardText = sanitizeHandoffRowText(handoff, Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining));
+      const cardCandidate: MobileBridgeChatMessageDto = { ...shell, text: cardText };
+      const cardBytes = mobileBridgeJsonBytes(cardCandidate) + (out.length > 0 ? 1 : 0);
+      if (outBytes + cardBytes > budget) break;
+      out.unshift(cardCandidate);
+      outBytes += cardBytes;
+      if (consumption) { consumption.consumed += 1; consumption.oldest = { id: message.id, createdAt: message.createdAt }; }
+      continue;
+    }
     // Older Mobile builds ignore typed notices. Preserve their existing room row and expose only verified output.
+    // The card "oldest memory deleted" of the desktop's conversation (shared/memory-room-card.ts, a 'view' row): every phone is given the one plain line of it, never the raw row.
+    const memoryRoomCard = message.role === "system" ? decodeMemoryRoomCard(message.text) : null;
     const messageText = outNotice?.dispatch?.resultText
-      ? `${outNotice.memberName} · ${outNotice.dispatch.status}\n\n${outNotice.dispatch.resultText}` : message.text;
+      ? `${outNotice.memberName} · ${outNotice.dispatch.status}\n\n${outNotice.dispatch.resultText}` : memoryRoomCard ? memoryRoomPlainLine(memoryRoomCard, memoryRoomLocale() === "ko") : message.text;
     const inlineFallback = inlineUiFallbacks?.get(message.id);
     // Typed views stay atomic. If boundary redaction would mutate their data,
     // use safe prose instead of sending corrupt JSON or sensitive HTML.

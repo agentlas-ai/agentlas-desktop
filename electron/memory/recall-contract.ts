@@ -1,7 +1,7 @@
 // The desktop's side of the recall contract that is not the ranking formula (Agentlas 2.0 K4b). PURE: no store, no Electron, no model.
 //
 // The formula itself is the desktop's own (local-embedding.ts rankHybridLocal) and the engine copied it (ruleset recall.fusion). What the engine's contract adds around it, and the desktop now reads from the same
-// ruleset file (electron/memory/curator-ruleset.json = the engine's system-agents/curator-ruleset.json, 1.16.0):
+// ruleset file (electron/memory/curator-ruleset.json = the engine's system-agents/curator-ruleset.json, 1.17.0):
 //   - the query a long prompt becomes: its first and its last userTextHeadChars / userTextTailChars characters (the question of a long paste is usually at its end), then the previous turn's summary (K3'-2b);
 //   - the tier of a line for ties (recall.tiers): user, run_verified, unverified, inferred, none;
 //   - the closed words of "could not read" (the engine hook's `memory=unavailable|partial; reason=...` line).

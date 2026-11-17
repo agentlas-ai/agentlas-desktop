@@ -99,7 +99,7 @@ export interface PersonalRow {
 export interface WireRow { id: string; kind: ServerKind; text: string; en?: string; boundary?: { type: string; from?: string; to?: string }; claimType?: string; verification?: string; createdAt: string }
 export type RowRefusal = "too_long" | "empty";
 
-/** The table of kinds, words and limits (contract section 2,). A line that cannot be written within the server's limits is not cut: it is returned as a closed refusal word and stays here. */
+/** The table of kinds, words and limits. A line that cannot be written within the server's limits is not cut: it is returned as a closed refusal word and stays here. */
 export function wireRowOf(row: PersonalRow, nowIso: string): { ok: true; row: WireRow; fp: string } | { ok: false; why: RowRefusal } {
   const native = row.native?.trim() || null;
   const content = row.content.trim();

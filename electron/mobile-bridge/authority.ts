@@ -2154,6 +2154,9 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
   const onApprovalRequested = (request: Pick<ToolApprovalRequestEvent, "id" | "chatId" | "mode" | "agentId" | "requestedAt">) => {
     const chatId = request.chatId;
     if (request.mode !== "live" || request.agentId || !chatId || !getChat(chatId) || isPersonalOneConversation(chatId)) return;
+    // A question of a Work another agent handed over is on the row, and the row's own notice (one per question) reaches the phone: no second push from the bridge (the sender's phone reads the row; an older
+    // phone's row (askVia local) carries no remoteAsk and keeps the push exactly as before).
+    if ((request as { remoteAsk?: { askVia?: string } }).remoteAsk?.askVia === "row") return;
     // The durable row is shared: a daemon-hosted card is sealed by the daemon's ledger in the same table.
     const stillCurrent = () => durableMobileApprovalPending(request.id, chatId);
     if (!stillCurrent()) return;
@@ -2163,7 +2166,15 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
   };
   const stopMainApprovals = onToolApprovalRequested(onApprovalRequested);
   const stopNativeApprovals = onNativeGuiApprovalRequested(onApprovalRequested);
-  const stopApprovals = () => { stopMainApprovals(); stopNativeApprovals(); };
+  // A question of work THIS desktop's agent handed to another agent: one push per question for the sender's phone (the server sends none for a row a desktop sent; plural-handoff-cards.ts).
+  let stopSentAsks = () => {};
+  try {
+    stopSentAsks = (require("../one/plural-handoff-cards") as typeof import("../one/plural-handoff-cards")).onSentQuestion(({ rowId, qid, chatId }, stillWaiting) => {
+      listener({ category: "approval", destination: "approvals", hostId, entityId: chatId ?? rowId,
+        dedupeKey: `handoff-ask:${hostId}:${qid}`, subject: "Agentlas", occurredAt: new Date().toISOString() }, stillWaiting);
+    });
+  } catch { /* a process with no hand-off sender sends no such push */ }
+  const stopApprovals = () => { stopMainApprovals(); stopNativeApprovals(); stopSentAsks(); };
   // A decision card the HOST wrote (askOwnerOnce) is not a run's final message, so it reaches the phone through the
   // owner-ask seam as the same thread push with the question wording. The personal One chat is skipped: its push needs a
   // message id the relay checks, and a host card there has none to give.
@@ -4787,6 +4798,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const result = await readMobileBridgeHistoryPage(chatId, limit, cursor, {
           automationReportNotice: this.clientHasCapability(context.deviceId, "thread.composition.v1"),
           chatFileLinks: this.clientHasCapability(context.deviceId, "chat.file.v1"),
+          handoffCard: this.clientHasCapability(context.deviceId, "handoff.card.v1"),
         });
         if (authority) assertPersonalOneHistoryUnchanged(authority,captureAuthority());
         return asJsonValue(result, request.method);

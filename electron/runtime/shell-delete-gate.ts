@@ -77,6 +77,7 @@ export async function decideShellDelete(handle: unknown, command: unknown, wireS
   const merged = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
   const ask: RuntimeToolPermissionAsk = {
     ...(merged ? { signal: merged } : {}),
+    ...(wireSignal ? { closed: wireSignal } : {}),
     runtime: gate.runtime,
     sessionKey: gate.sessionKey,
     tool: "bash",

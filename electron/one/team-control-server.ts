@@ -184,6 +184,13 @@ async function dispatchOneSupervisorToolUnrecorded(binding: Pick<OneTeamCapabili
       // Owner 2026-10-04: what One hands off runs with full access and Always allow, whatever this reply's own permission.
       case "one_supervisor_start_work": return service.startWork({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),
         ...(input.project_id ? {projectId:String(input.project_id)} : {}),...(input.done_when!==undefined ? {doneWhen:input.done_when as string[]} : {}),permissions:"full"},binding.supervisorReplyRunId);
+      // the hand-off to another of the person's agents. The key is this reply's own run id, so a turn that runs again finds its own row (`existing`); a conversation that is itself a received Work has no lineage-free origin and is refused.
+      case "hand_off": {
+        const sender = await import("./plural-handoff-send");
+        return sender.pluralSender().handOff({key:String(binding.supervisorReplyRunId ?? ""),brief:String(input.brief ?? ""),
+          ...(input.to!==undefined ? {to:String(input.to)} : {}),...(input.done_when!==undefined ? {doneWhen:String(input.done_when)} : {}),
+          ...(input.replaces!==undefined ? {replaces:String(input.replaces)} : {}),origin:sender.pluralOriginOfChat(binding.chatId)});
+      }
       case "one_supervisor_start_science": return service.startScience({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),projectId:String(input.project_id ?? ""),
         ...(input.conversation_id ? {conversationId:String(input.conversation_id)} : {})},binding.supervisorReplyRunId);
       case "one_chat_send": return service.sendToChat({commandId:String(input.command_id ?? ""),chatId:String(input.chat_id ?? ""),text:String(input.message ?? "")},binding.supervisorReplyRunId);
