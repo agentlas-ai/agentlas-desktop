@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.3 — 2026-11-17
+
+- Usage: the desktop shows how much of your usage has been spent as a percent, next to the credit balance.
+- Reset tickets: when your plan offers them, you can use a reset ticket from the desktop to start a fresh usage window.
+- Friend invite: you can invite a friend from the desktop.
+- These features use the Agentlas service and a signed-in account; without them the desktop works as before.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.2 — 2026-11-17
 
 - Personal agents: this desktop registers itself with your account as one of your agents when it connects, so your phone can show it next to the phone's own agent. How your desktop agent talks to you is a setting of its profile.

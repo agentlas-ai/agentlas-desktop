@@ -399,6 +399,9 @@ const api: AgentlasIpc = {
     getPlans: () => ipcRenderer.invoke("billing:getPlans"),
     checkoutReadiness: (input) => ipcRenderer.invoke("billing:checkoutReadiness", input ?? {}),
     transferEarnings: (credits: number) => ipcRenderer.invoke("billing:transferEarnings", credits),
+    resetUsage: (input: { idempotencyKey: string }) => ipcRenderer.invoke("billing:resetUsage", input),
+    friendInvite: () => ipcRenderer.invoke("billing:friendInvite"),
+    claimFriendInvite: (input: { inviteCode: string }) => ipcRenderer.invoke("billing:claimFriendInvite", input),
   },
   agentMail: {
     status: () => ipcRenderer.invoke("agentMail:status"),

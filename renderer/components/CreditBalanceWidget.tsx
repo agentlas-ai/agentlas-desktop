@@ -10,7 +10,9 @@ import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import { openPricing } from "./UpgradeCta";
-import type { HubCreditBalance } from "@/lib/types";
+import { UsageResetInvitePanel } from "./UsageResetInvitePanel";
+import { usageLine, usageExhaustedLine, usageExtraLine } from "@/lib/usage-copy";
+import type { HubCreditBalance, HubUsage } from "@/lib/types";
 
 // A balance older than this is refreshed when the window comes back (this was the old poll interval).
 const STALE_MS = 60_000;
@@ -102,6 +104,13 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
     return () => window.removeEventListener("agentlas:auth-changed", onAuthChanged);
   }, [refresh]);
 
+  // A reset answers with the new usage: draw it now, then read the balance again (the credit numbers moved too).
+  const onUsage = useCallback((usage: HubUsage) => {
+    setBal((prev) => (prev ? { ...prev, usage } : prev));
+    invalidateIpcCache("billing");
+    void refresh(true);
+  }, [refresh]);
+
   useDismissibleLayer({
     open,
     roots: [rootRef],
@@ -151,6 +160,9 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
               <span style={{ color: "var(--muted-deep)" }}>{ko ? "AI 크레딧" : "AI credits"}</span>
               <span style={{ color: "var(--muted-deep)", fontVariantNumeric: "tabular-nums" }}>{remaining.toLocaleString()}</span>
             </span>
+          )}
+          {!collapsed && bal.usage && (
+            <span data-testid="usage-line" style={{ fontSize: 10.5, lineHeight: 1.2, color: "var(--muted-deep)" }}>{usageLine(bal.usage, ko)}</span>
           )}
           <span
             role="meter"
@@ -214,9 +226,17 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
             <strong style={{ fontVariantNumeric: "tabular-nums" }}>{remaining.toLocaleString()}{limit ? <span style={{ color: "var(--muted-deep)", fontWeight: 500 }}> / {limit.toLocaleString()}</span> : null}</strong>
           </div>
           {limit > 0 && <progress aria-label={ko ? "남은 AI 사용량" : "Remaining AI usage"} max={limit} value={Math.max(0, Math.min(remaining, limit))} style={{ width: "100%", height: 6, accentColor: "var(--accent)" }} />}
+          {bal.usage && (
+            <div style={{ margin: "8px 0 0", lineHeight: 1.45 }}>
+              <div>{usageLine(bal.usage, ko)}</div>
+              {usageExhaustedLine(bal.usage, ko) && <div style={{ color: "var(--amber-deep, var(--accent))" }}>{usageExhaustedLine(bal.usage, ko)}</div>}
+              {usageExtraLine(bal.usage, ko) && <div style={{ color: "var(--muted-deep)" }}>{usageExtraLine(bal.usage, ko)}</div>}
+            </div>
+          )}
           <p style={{ margin: "8px 0 0", color: "var(--muted-deep)", lineHeight: 1.45 }}>
             {ko ? "공개 Hub · 공유/호출 무료" : "Public Hub · Free sharing and invocation"}
           </p>
+          {bal.usage?.resetTickets && <UsageResetInvitePanel usage={bal.usage} ko={ko} onUsage={onUsage} />}
         </div>
       )}
     </div>

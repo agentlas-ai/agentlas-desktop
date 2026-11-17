@@ -1031,12 +1031,24 @@ const MOBILE_BRIDGE_CREDITS_MAX_AGE_MS = 60_000;
 interface MobileBridgeCreditsProjection {
   authenticated: boolean;
   available?: number;
+  /** Added field: old phones ignore it. Only what the phone draws; never windowStart or timestamps of tickets. */
+  usage?: {
+    kind: "week" | "month" | "trial"; usedPercent: number; exhausted: boolean; windowEnd: string; extraUsage: boolean;
+    resetTickets?: { available: number; canUse: boolean };
+  };
 }
 async function getMobileBridgeCredits(): Promise<MobileBridgeCreditsProjection> {
   const balance = await getBillingCredits({ maxAgeMs: MOBILE_BRIDGE_CREDITS_MAX_AGE_MS });
   const value: MobileBridgeCreditsProjection = { authenticated: balance.authenticated === true };
   if (typeof balance.remainingCredits === "number" && Number.isFinite(balance.remainingCredits)) {
     value.available = Math.max(0, Math.floor(balance.remainingCredits));
+  }
+  const usage = balance.usage;
+  if (usage) {
+    value.usage = {
+      kind: usage.kind, usedPercent: usage.usedPercent, exhausted: usage.exhausted, windowEnd: usage.windowEnd, extraUsage: usage.extraUsage,
+      ...(usage.resetTickets ? { resetTickets: { available: usage.resetTickets.available, canUse: usage.resetTickets.canUse } } : {}),
+    };
   }
   return value;
 }

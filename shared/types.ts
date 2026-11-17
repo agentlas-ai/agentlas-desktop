@@ -6583,8 +6583,41 @@ export interface HubCreditBalance {
   limitCredits?: number;
   remainingCredits?: number;
   earningsCredits?: number;
+  /** Server usage window (weekly / transition month / trial). Absent = old server or switch off: draw credits as before, never 0%. */
+  usage?: HubUsage;
   error?: string;
 }
+
+export interface HubUsageResetTickets {
+  available: number;
+  nextExpiresAt: string | null;
+  usedThisWindow: boolean;
+  canUse: boolean;
+  blocked?: "trial_active" | "already_reset_this_window" | "nothing_to_reset" | "no_ticket";
+}
+
+export interface HubUsage {
+  kind: "week" | "month" | "trial";
+  usedPercent: number;
+  exhausted: boolean;
+  windowStart: string;
+  windowEnd: string;
+  extraUsage: boolean;
+  /** Only with the server's reset-ticket switch. Absent = no ticket / invite UI. */
+  resetTickets?: HubUsageResetTickets;
+}
+
+export type HubUsageResetResult =
+  | { ok: true; usage: HubUsage }
+  | { ok: false; code: "already_reset_this_window" | "nothing_to_reset" | "trial_active" | "no_ticket" | "ticket_expired" | "unavailable" | "rate_limited" | "signed_out" | "network" };
+
+export type HubFriendInviteResult =
+  | { ok: true; code: string; url: string; joined: number }
+  | { ok: false; code: "unavailable" | "signed_out" | "network" };
+
+export type HubFriendInviteClaimResult =
+  | { ok: true; ticketIssued: boolean }
+  | { ok: false; code: "invalid_code" | "account_too_old" | "already_claimed" | "unavailable" | "signed_out" | "network" };
 
 /**
  * Agent-only mailbox entitlement. Not served yet (2026-09-25: no mail backend).
@@ -7664,6 +7697,12 @@ export interface AgentlasIpc {
     /** Is checkout open for this plan/cycle? Asked only after "Upgrade" is pressed. Optional on older preloads. */
     checkoutReadiness?: (input: { plan: string; cycle: "monthly" | "annual" }) => Promise<BillingCheckoutReadiness>;
     transferEarnings: (credits: number) => Promise<EarningsTransferResult>;
+    /** Use one reset ticket (POST /api/billing/usage/reset). Optional on older preloads. */
+    resetUsage?: (input: { idempotencyKey: string }) => Promise<HubUsageResetResult>;
+    /** My invite link (GET /api/friend-invite/me). Optional on older preloads. */
+    friendInvite?: () => Promise<HubFriendInviteResult>;
+    /** Claim a friend's invite code (POST /api/friend-invite/claim). Optional on older preloads. */
+    claimFriendInvite?: (input: { inviteCode: string }) => Promise<HubFriendInviteClaimResult>;
   };
   /** 프롬프트 저장소 — 웹 프롬프트 카탈로그 탐색/열람/맛보기/저장(북마크). Hub 메뉴와 동형. */
   promptHub: {

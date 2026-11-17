@@ -2,7 +2,7 @@
 // 과거 Hub 렌트 수익 전송은 마켓플레이스 정산 영구 폐쇄로 비활성화한다.
 // 인증은 auth.ts의 세션 쿠키를 사용한다.
 import { fetchWithHubSession, getSessionCookieHeader, webBaseUrl } from "./auth";
-import type { BillingCheckoutReadiness, BillingPlanCatalog, BillingPlanOffer, EarningsTransferResult, HubCreditBalance } from "../shared/types";
+import type { BillingCheckoutReadiness, BillingPlanCatalog, BillingPlanOffer, EarningsTransferResult, HubCreditBalance, HubFriendInviteClaimResult, HubFriendInviteResult, HubUsage, HubUsageResetResult } from "../shared/types";
 import { PROJECT_AGENT_POOL_MAX } from "../shared/project-agent-pool";
 
 const TIMEOUT_MS = 8000;
@@ -42,6 +42,35 @@ export interface BillingCreditsReadOptions {
 /** Test seam: forget the shared read (sign-out already does this through the cookie key). */
 export function resetBillingCreditsShareForTests(): void { creditShared = null; creditFlight = null; creditObservation = null; }
 
+/** The server's `usage` object, or undefined when it is absent or not the contract shape (old server / switch off:
+ * the UI then draws credits as before and never a 0%). Unknown extra keys are dropped. */
+export function parseHubUsage(value: unknown): HubUsage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const u = value as Record<string, unknown>;
+  const kind = u.kind === "week" || u.kind === "month" || u.kind === "trial" ? u.kind : null;
+  const iso = (v: unknown): v is string => typeof v === "string" && Number.isFinite(Date.parse(v));
+  if (!kind || typeof u.usedPercent !== "number" || !Number.isFinite(u.usedPercent) || typeof u.exhausted !== "boolean"
+    || !iso(u.windowStart) || !iso(u.windowEnd) || typeof u.extraUsage !== "boolean") return undefined;
+  const usage: HubUsage = {
+    kind, usedPercent: Math.min(100, Math.max(0, Math.floor(u.usedPercent))), exhausted: u.exhausted,
+    windowStart: u.windowStart, windowEnd: u.windowEnd, extraUsage: u.extraUsage,
+  };
+  const t = u.resetTickets;
+  if (t && typeof t === "object") {
+    const r = t as Record<string, unknown>;
+    if (typeof r.available === "number" && Number.isFinite(r.available) && typeof r.canUse === "boolean") {
+      const blocked = r.blocked === "trial_active" || r.blocked === "already_reset_this_window" || r.blocked === "nothing_to_reset" || r.blocked === "no_ticket" ? r.blocked : undefined;
+      usage.resetTickets = {
+        available: Math.max(0, Math.floor(r.available)),
+        nextExpiresAt: iso(r.nextExpiresAt) ? r.nextExpiresAt : null,
+        usedThisWindow: r.usedThisWindow === true, canUse: r.canUse,
+        ...(blocked ? { blocked } : {}),
+      };
+    }
+  }
+  return usage;
+}
+
 async function fetchBillingCredits(cookie: string): Promise<HubCreditBalance> {
   creditObservation = null;
   try {
@@ -54,6 +83,8 @@ async function fetchBillingCredits(cookie: string): Promise<HubCreditBalance> {
     // The server may still include a historic creator wallet. Never project it
     // into current Desktop or paired Mobile clients after settlement closure.
     delete balance.earningsCredits;
+    const usage = parseHubUsage((balance as { usage?: unknown }).usage);
+    if (usage) balance.usage = usage; else delete balance.usage;
     // Only a read for the session that is still current is kept; an error answer is never kept.
     if (cookie === getSessionCookieHeader()) {
       const at = Date.now();
@@ -87,6 +118,79 @@ export async function getBillingCredits(options: BillingCreditsReadOptions = {})
     return await promise;
   } finally {
     if (creditFlight === entry) creditFlight = null;
+  }
+}
+
+const DESKTOP_CLIENT_HEADERS = { "x-agentlas-client": "desktop", "content-type": "application/json", accept: "application/json" };
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9_.:-]{8,128}$/;
+
+async function readCode(res: Response): Promise<string> {
+  try { const code = ((await res.json()) as { code?: unknown }).code; return typeof code === "string" ? code : ""; } catch { return ""; }
+}
+
+/** POST /api/billing/usage/reset — runs in Main (the session cookie never reaches the renderer). The same key
+ * again answers the same 200, so a retry after a lost answer cannot spend a second ticket. */
+export async function resetBillingUsage(input: { idempotencyKey?: unknown }): Promise<HubUsageResetResult> {
+  const cookie = getSessionCookieHeader();
+  if (!cookie) return { ok: false, code: "signed_out" };
+  const key = typeof input?.idempotencyKey === "string" && IDEMPOTENCY_KEY.test(input.idempotencyKey) ? input.idempotencyKey : null;
+  if (!key) return { ok: false, code: "unavailable" };
+  try {
+    const res = await timedFetch(cookie, `${webBaseUrl()}/api/billing/usage/reset`, {
+      method: "POST", headers: DESKTOP_CLIENT_HEADERS, body: JSON.stringify({ idempotencyKey: key }),
+    });
+    if (res.status === 401) return { ok: false, code: "signed_out" };
+    if (res.status === 429) return { ok: false, code: "rate_limited" };
+    if (res.status === 200) {
+      const usage = parseHubUsage(((await res.json()) as { usage?: unknown }).usage);
+      if (!usage) return { ok: false, code: "unavailable" };
+      creditShared = null; creditObservation = null; // the balance changed: the next reader asks the server
+      return { ok: true, usage };
+    }
+    const code = await readCode(res);
+    const known = ["already_reset_this_window", "nothing_to_reset", "trial_active", "no_ticket", "ticket_expired"] as const;
+    const hit = known.find((c) => c === code);
+    return { ok: false, code: hit ?? "unavailable" };
+  } catch {
+    return { ok: false, code: "network" };
+  }
+}
+
+/** GET /api/friend-invite/me — 404 (switch off / old server) and any other non-200 answer is "unavailable": the panel hides. */
+export async function getFriendInvite(): Promise<HubFriendInviteResult> {
+  const cookie = getSessionCookieHeader();
+  if (!cookie) return { ok: false, code: "signed_out" };
+  try {
+    const res = await timedFetch(cookie, `${webBaseUrl()}/api/friend-invite/me`, { headers: DESKTOP_CLIENT_HEADERS });
+    if (res.status === 401) return { ok: false, code: "signed_out" };
+    if (!res.ok) return { ok: false, code: "unavailable" };
+    const body = (await res.json()) as { code?: unknown; url?: unknown; joined?: unknown };
+    if (typeof body.code !== "string" || !/^[A-Z2-9]{8}$/.test(body.code) || typeof body.url !== "string" || !/^https:\/\/agentlas\.cloud\/i\//.test(body.url)) {
+      return { ok: false, code: "unavailable" };
+    }
+    return { ok: true, code: body.code, url: body.url, joined: typeof body.joined === "number" && Number.isFinite(body.joined) ? Math.max(0, Math.floor(body.joined)) : 0 };
+  } catch {
+    return { ok: false, code: "network" };
+  }
+}
+
+/** POST /api/friend-invite/claim — every refusal is one of the contract's words; the UI never explains why a ticket was not issued. */
+export async function claimFriendInvite(input: { inviteCode?: unknown }): Promise<HubFriendInviteClaimResult> {
+  const cookie = getSessionCookieHeader();
+  if (!cookie) return { ok: false, code: "signed_out" };
+  const code = typeof input?.inviteCode === "string" ? input.inviteCode.trim().toUpperCase() : "";
+  if (!/^[A-Z2-9]{8}$/.test(code)) return { ok: false, code: "invalid_code" };
+  try {
+    const res = await timedFetch(cookie, `${webBaseUrl()}/api/friend-invite/claim`, {
+      method: "POST", headers: DESKTOP_CLIENT_HEADERS, body: JSON.stringify({ inviteCode: code }),
+    });
+    if (res.status === 401) return { ok: false, code: "signed_out" };
+    if (res.status === 200) return { ok: true, ticketIssued: ((await res.json()) as { ticketIssued?: unknown }).ticketIssued === true };
+    const reason = await readCode(res);
+    const known = ["invalid_code", "account_too_old", "already_claimed"] as const;
+    return { ok: false, code: known.find((c) => c === reason) ?? "unavailable" };
+  } catch {
+    return { ok: false, code: "network" };
   }
 }
 

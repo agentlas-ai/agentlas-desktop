@@ -419,7 +419,7 @@ import {
   signOut,
 } from "./auth";
 import { reconcileMobileBridgeDevicesForAccount } from "./mobile-bridge/runtime";
-import { getBillingCredits, getBillingPlans, getFreshProjectAgentLimitGrant, transferEarnings } from "./billing";
+import { claimFriendInvite, getBillingCredits, getBillingPlans, getFreshProjectAgentLimitGrant, getFriendInvite, resetBillingUsage, transferEarnings } from "./billing";
 import { getBillingCheckoutReadinessForPaywall } from "./billing-trial";
 import {
   addHubPromptBookmark,
@@ -3065,6 +3065,11 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "billing:getPlans", () => getBillingPlans());
   registerAppControlDomainIpc(ipcMain, "billing:checkoutReadiness", (input: { plan?: unknown; cycle?: unknown }) => getBillingCheckoutReadinessForPaywall(input ?? {}));
   registerAppControlDomainIpc(ipcMain, "billing:transferEarnings", (credits: number) => transferEarnings(credits));
+  // Reset ticket and invite: plain handlers behind the trusted-window check, on purpose outside the app-control catalog
+  // (a ticket is spent only by the owner pressing the button; no agent operation reaches it).
+  ipcMain.handle("billing:resetUsage", (event, input: { idempotencyKey?: unknown }) => { assertTrustedSitePublishIpcSender(event); return resetBillingUsage(input ?? {}); });
+  ipcMain.handle("billing:friendInvite", (event) => { assertTrustedSitePublishIpcSender(event); return getFriendInvite(); });
+  ipcMain.handle("billing:claimFriendInvite", (event, input: { inviteCode?: unknown }) => { assertTrustedSitePublishIpcSender(event); return claimFriendInvite(input ?? {}); });
 
   // ── 프롬프트 저장소 — 웹 /api/prompts 프록시(쿠키+Origin, billing 패턴) ──────
   registerAppControlDomainIpc(ipcMain, "promptHub:list", (params?: { q?: string; category?: string }) => listHubPrompts(params));

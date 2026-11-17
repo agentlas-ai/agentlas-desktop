@@ -8,6 +8,7 @@
 // Reads: usage on a signal (runtime change, a run settling, the window coming back), never an idle timer; credits and the local model on the same signals.
 "use client";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { usageLine } from "@/lib/usage-copy";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
@@ -640,7 +641,7 @@ export function EngineUsage() {
       <div className={s.toggleRow} data-testid="credits-row">
         <IconCircleDollar size={16} />
         {creditsKnown
-          ? <span><b>{(credits?.remainingCredits ?? 0).toLocaleString()}</b> {pick(ko, COPY.aiCredits)}</span>
+          ? <span><b>{(credits?.remainingCredits ?? 0).toLocaleString()}</b> {pick(ko, COPY.aiCredits)}{credits?.usage ? ` · ${usageLine(credits.usage, ko)}` : ""}</span>
           : creditsFailed
             ? <span>{pick(ko, COPY.creditsUnread)} <button type="button" className={s.cact} onClick={() => void loadCredits(true)}>{pick(ko, COPY.retry)}</button></span>
             : credits && !credits.authenticated
