@@ -161,6 +161,9 @@ export function operationCardFor(event: OperationToolEvent, locale: OperationCar
   const body = record(unwrapOperationResult(event.result));
   const label = LABEL[kind][ko ? "ko" : "en"];
   const failure = failureOf(body, event.isError);
+  // The model called a tool before the tool list it belongs to was opened: a protocol miss the model repairs by itself in the same turn, not a failure the owner can act on
+  // (prod test a "Teammates failed" card with the raw error and its JSON stayed in the conversation after the turn went on).
+  if (failure && /\btool_menu_prepare_required\b/.test(failure)) return null;
   const operation = clip(tool.args.operation, 80);
 
   // A change the owner asked for shows its outcome. Reads are not changes and never draw a card, failed or not: a lookup the

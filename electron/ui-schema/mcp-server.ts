@@ -30,6 +30,12 @@ const SOURCE_TAIL = String.raw`const tools = [
   { name: "read_surface_protocol", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, description: "Return the spec for an interactive surface (tracker, dashboard, operating console or board the user returns to and acts on): the hidden manifest block, widgets, data, jobs and trust rules. Read it before emitting a surface; never emit one unread.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
   { name: "read_automation_protocol", annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }, description: "Return the spec for scheduling, monitoring or changing a recurring run: the ## Automation registration block, schedules, monitor sources, steps and rules. Read it before emitting an automation block; never emit one unread.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
 ];
+// The host's own clock, read when the protocol is read: a reminder's "tomorrow" is worked out from this, not from the model's memory of the date (prod test "tomorrow" was today).
+function nowLine() {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const part = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: zone, weekday: "long", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date()).map((p) => [p.type, p.value]));
+  return "\n\nNow: " + part.weekday + " " + part.year + "-" + part.month + "-" + part.day + " " + part.hour + ":" + part.minute + " (" + zone + "). Work out today, tomorrow and weekdays from this, never from memory.";
+}
 function handle(requestValue) {
   if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-ui", version: "1.0.0" } };
   if (requestValue.method === "notifications/initialized") return undefined;
@@ -39,7 +45,7 @@ function handle(requestValue) {
   const name = requestValue.params && requestValue.params.name;
   if (name === "read_ui_schema") return { content: [{ type: "text", text: SCHEMA_TEXT }] };
   if (name === "read_surface_protocol") return { content: [{ type: "text", text: SURFACE_TEXT }] };
-  if (name === "read_automation_protocol") return { content: [{ type: "text", text: AUTOMATION_TEXT }] };
+  if (name === "read_automation_protocol") return { content: [{ type: "text", text: AUTOMATION_TEXT + nowLine() }] };
   return { content: [{ type: "text", text: "Unknown agentlas-ui tool." }], isError: true };
 }
 function line(value) {

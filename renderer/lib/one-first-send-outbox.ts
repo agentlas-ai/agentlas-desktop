@@ -347,12 +347,17 @@ export type FirstSendResumeDeps = {
   hold(intentId: string, reason: FirstSendHold): void;
   tries(intentId: string): number;
   setTries(intentId: string, tries: number): void;
+  /** When this saved send was last tried (ms, this window's clock), 0 = never. A try that Main refused as "an earlier message is still being prepared" is not a failed try, so only this spacing keeps it from running again at once. */
+  lastTryAt?(intentId: string): number;
+  setLastTryAt?(intentId: string, at: number): void;
   /** Re-run the send pipeline for this exact saved send (it takes its held submission over once). */
   resume(entry: FirstSendEntry): Promise<void>;
   now(): number;
 };
 
 export const FIRST_SEND_MAX_RESUMES = 3;
+/** The least time between two tries of one saved send (prod test a waiting send was tried 769 times in 9 seconds, every 12 ms, because each refusal flipped the busy flag that starts the next look). */
+export const FIRST_SEND_RETRY_GAP_MS = 3_000;
 
 /**
  * One look at a reopened room's saved sends, oldest first. Main's receipts decide: taken -> the saved copy goes;
@@ -394,6 +399,9 @@ export async function resumeFirstSends(deps: FirstSendResumeDeps): Promise<"idle
     // saved now decides, not the copy read earlier.
     const current = deps.entries().find(item => item.intentId === entry.intentId);
     if (!current || current.notSent) continue;
+    const at = deps.now(), last = deps.lastTryAt?.(entry.intentId) ?? 0;
+    if (last > 0 && at - last >= 0 && at - last < FIRST_SEND_RETRY_GAP_MS) return "waiting";
+    deps.setLastTryAt?.(entry.intentId, at);
     deps.setTries(entry.intentId, tries + 1);
     await deps.resume(current);
     return "resumed";

@@ -172,7 +172,10 @@ export function handoffCardView(card: HandoffCardValue, ctx: HandoffCopyContext)
   const place = placeOf(card, ko);
   const header = card.k === "recv"
     ? (ko ? `전달 업무 · ${card.agent}` : `Handed-over work · ${card.agent}`)
-    : (ko ? `${card.agent}에게 전달${card.phone || card.place ? ` · ${place}` : ""}` : `Handed to ${card.agent}${card.phone || card.place ? ` · ${place}` : ""}`);
+    : card.agent
+      ? (ko ? `${card.agent}에게 전달${card.phone || card.place ? ` · ${place}` : ""}` : `Handed to ${card.agent}${card.phone || card.place ? ` · ${place}` : ""}`)
+      // written at hand-off time, before the server's list said which agent got it (the next answer fills the name in)
+      : (ko ? "다른 에이전트에게 전달" : "Handed to another agent");
   const time = handoffTimeWord(card.at, ctx);
   const sent = card.k === "sent";
   const base = { header, brief: card.brief };

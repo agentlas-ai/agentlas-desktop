@@ -10,12 +10,14 @@ import type { ScheduleSpec, WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowN
 
 export const AUTOMATION_HEADING = "## Automation";
 
-/** 모델이 방출하는 구조화 스케줄. preset+time 또는 raw cron 둘 중 하나. */
+/** 모델이 방출하는 구조화 스케줄. preset+time, raw cron, 또는 한 번만 실행하는 once(현지 시각) 중 하나. */
 export interface EmittedSchedule {
   preset?: SchedulePreset;
   time?: string; // "HH:MM"
   tz?: string; // IANA
   cron?: string;
+  /** One run at a local date-time of `tz` (""); never repeats. A cron with a fixed month and day repeats every year. */
+  once?: string;
   dow?: number | string;
   day?: number;
 }
@@ -181,6 +183,7 @@ export const AUTOMATION_PROTOCOL = [
   "```",
   "",
   'For irregular cadence use raw cron instead: "schedule": { "cron": "*/30 9-18 * * 1-5", "tz": "Asia/Seoul" }.',
+  'For a ONE-TIME reminder ("tomorrow 9am") use "schedule": { "once": "2026-11-19T09:00", "tz": "Asia/Seoul" } (local time, runs once). A cron with a fixed month and day repeats every year.',
   "",
   // ★반복 × 고정 페이로드는 시한폭탄이다. 실측 2026-08-19: 매시 정각 X 댓글
   // 자동화가 "exactly this text, unchanged"로 지어졌고, 첫 성공이 X의 중복
@@ -232,6 +235,28 @@ export const AUTOMATION_PROTOCOL = [
 
 const DEFAULT_TZ_PLACEHOLDER = "";
 
+/**
+ * A local wall-clock time of an IANA zone ("", no offset) as the UTC instant it names, or null when the text is not such a time or the zone is unknown.
+ * Pure (Intl only): the zone's offset at that moment is read back from the formatter, twice, so a time next to a DST change lands on the right side of it.
+ */
+export function zonedLocalToIso(local: string, tz: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(local.trim());
+  if (!m) return null;
+  const [y, mo, d, h, mi, se] = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0)];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || se > 59) return null;
+  const wall = Date.UTC(y, mo - 1, d, h, mi, se);
+  if (new Date(wall).getUTCMonth() !== mo - 1) return null;   // is not a day
+  let fmt: Intl.DateTimeFormat;
+  try { fmt = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch { return null; }
+  const offsetAt = (at: number): number => {
+    const part = Object.fromEntries(fmt.formatToParts(new Date(at)).map((p) => [p.type, p.value]));
+    return Date.UTC(Number(part.year), Number(part.month) - 1, Number(part.day), Number(part.hour), Number(part.minute), Number(part.second)) - Math.floor(at / 1000) * 1000;
+  };
+  let at = wall - offsetAt(wall);
+  at = wall - offsetAt(at);
+  return Number.isFinite(at) ? new Date(at).toISOString() : null;
+}
+
 /** 구조화 스케줄 → ScheduleSpec + 레거시 미러 토큰. cron 검증 실패는 errors로 표면화. */
 function resolveSchedule(
   emitted: unknown,
@@ -247,6 +272,19 @@ function resolveSchedule(
 
   const o = emitted as EmittedSchedule;
   const tz = typeof o.tz === "string" && o.tz.trim() ? o.tz.trim() : DEFAULT_TZ_PLACEHOLDER;
+
+  if (typeof o.once === "string" && o.once.trim()) {
+    const at = tz ? zonedLocalToIso(o.once, tz) : null;
+    if (!at) {
+      errors.push(`Invalid one-time schedule rejected: "${o.once.slice(0, 40)}" (a local date-time like 2026-11-19T09:00 and a "tz" are both required)`);
+      return fallback;
+    }
+    if (Date.parse(at) <= Date.now()) {
+      errors.push(`One-time schedule is in the past, rejected: "${o.once.slice(0, 40)}"`);
+      return fallback;
+    }
+    return { spec: { kind: "once", atIso: at }, token: `once:${at}`, tz };
+  }
 
   if (typeof o.cron === "string" && o.cron.trim()) {
     const cron = o.cron.trim();

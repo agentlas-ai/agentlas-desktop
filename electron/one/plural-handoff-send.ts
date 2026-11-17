@@ -27,7 +27,7 @@ const WHYS: ReadonlySet<string> = new Set(["no_runner", "limit", "desktop_update
 /** What the model is told. Closed words; `place` is a name the person knows. */
 export type HandOffOutcome =
   | { ok: true; state: "sent" | "waiting" | "existing"; id?: string; place?: string; need?: "desktop_on" | "phone_app" }
-  | { ok: false; reason: "bad_input" | "hop_limit" | "which_place" | "no_runner" | "desktop_update" | "limit" | "unavailable"; places?: Array<{ to: string; agent?: string; machine?: string; on?: boolean }> };
+  | { ok: false; reason: "bad_input" | "hop_limit" | "which_place" | "no_runner" | "desktop_update" | "limit" | "unknown_place" | "no_account" | "unavailable"; places?: Array<{ to: string; agent?: string; machine?: string; on?: boolean }> };
 
 export interface HandOffInput { to?: string; brief: string; doneWhen?: string; key: string; origin?: string | null; replaces?: string }
 export interface SentPlace { id: string; agent: string; machine: string; on: boolean; v?: number }
@@ -155,7 +155,9 @@ export function createPluralSender(ports: PluralSenderPorts) {
           ? [{ to: p.to, ...(typeof p.agent === "string" ? { agent: p.agent } : {}), ...(typeof p.machine === "string" ? { machine: p.machine } : {}), ...(typeof p.on === "boolean" ? { on: p.on } : {}) }] : []);
         return { ok: false, reason: "which_place", places: list };
       }
-      if (reason === "hop_limit" || reason === "no_runner" || reason === "desktop_update" || reason === "limit") return { ok: false, reason };
+      // every closed word the server refuses with is passed on as it is (prod test: `unknown_place` / `no_account` were folded into `bad_input` and the agent blamed its own words)
+      if (reason === "hop_limit" || reason === "no_runner" || reason === "desktop_update" || reason === "limit" || reason === "unknown_place" || reason === "no_account") return { ok: false, reason };
+      log(`create refused with a word this build does not know: ${reason.replace(/[^a-z_]/g, "").slice(0, 40) || "none"}`);
       return { ok: false, reason: "bad_input" };
     }
     return { ok: false, reason: "unavailable" };

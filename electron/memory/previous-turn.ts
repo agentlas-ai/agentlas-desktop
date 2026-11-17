@@ -56,6 +56,29 @@ function ending(terminal: { kind: string; payload: Record<string, unknown> } | n
   }
 }
 
+const STOPPED_REQUEST_CHARS = 300;
+
+/**
+ * The owner's own words of a turn that was stopped or cut off before any answer was written. The stop can land before the request reached the model (prod test Stop at 7 s, in the pre-run
+ * judgment), so the next turn's provider session never saw it and answered "I do not know what you asked". The host names the request from its own record (the turn's `origin_user_message` event),
+ * never from a search of the transcript; a turn that wrote any answer is already in the conversation and adds nothing.
+ */
+function stoppedRequestLine(rows: Row[], lastTs: string | undefined): string | null {
+  try {
+    const origin = rows.find((row) => row.kind === "origin_user_message");
+    const messageId = origin ? parse(origin).messageId : undefined;
+    if (typeof messageId !== "string" || !messageId) return null;
+    const db = getDb();
+    const request = db.prepare("SELECT chat_id, text, created_at FROM chat_messages WHERE id = ? AND role = 'user'").get(messageId) as { chat_id?: string; text?: string; created_at?: string } | undefined;
+    if (!request?.text?.trim() || !request.chat_id || !request.created_at) return null;
+    const answered = db.prepare(`SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND host_notice_json IS NULL AND row_scope IS NOT 'view'
+      AND created_at >= ? AND created_at <= ? LIMIT 1`).get(request.chat_id, request.created_at, lastTs ?? new Date().toISOString());
+    if (answered) return null;
+    const words = [...request.text.replace(/\s+/gu, " ").trim()];
+    return `The owner's request of that turn, with no answer written: ${JSON.stringify(words.slice(0, STOPPED_REQUEST_CHARS).join("") + (words.length > STOPPED_REQUEST_CHARS ? "…" : ""))}.`;
+  } catch { return null; }
+}
+
 /** The previous turn of `chatId` (the latest one before `currentRunId`), or null when there is none. */
 export function previousTurnMemorySection(chatId: string | null | undefined, currentRunId?: string | null): string | null {
   const id = String(chatId ?? "").trim();
@@ -111,6 +134,10 @@ export function turnMemorySection(runId: string): string | null {
         : []),
       `Started ${minute(rows[0].ts)}, last activity ${minute(rows[rows.length - 1].ts)}: ${end.line}.`,
     ];
+    if (!end.clean && (!terminalRow || terminalRow.kind === "invoke_cancelled" || terminalRow.kind === "invoke_interrupted")) {
+      const asked = stoppedRequestLine(rows, rows[rows.length - 1].ts);
+      if (asked) lines.push(asked);
+    }
     if (outward.length) {
       lines.push("Outside-effect calls, oldest first:");
       for (const call of outward.slice(-MAX_OUTWARD_CALLS)) {

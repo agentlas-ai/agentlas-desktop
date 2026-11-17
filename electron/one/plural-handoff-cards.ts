@@ -13,15 +13,22 @@ import { HANDOFF_RECV_ROW_PREFIX, HANDOFF_SENT_ROW_PREFIX, HANDOFF_RESULT_CHARS,
 const req = <T>(id: string): T => require(id) as T;
 const chats = (): typeof import("../store/chats") => req<typeof import("../store/chats")>("../store/chats");
 
-/** The personal agent's conversation of this desktop (the one the work is handed from / to): the newest bound one, null when there is none. */
+/**
+ * The personal agent's conversation of THIS signed-in account on this desktop, null when it has none. A machine can hold several personal identities (one per account slot, each bound to its own conversation in
+ * `one_supervisor_conversations`); a card belongs to the identity that is current now, never to "the newest bound one" (prod test: a card went to a stale slot's two-message chat and the person never saw it).
+ */
 export function personalAgentChatId(): string | null {
   try {
     const db = req<typeof import("../store/db")>("../store/db").getDb();
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get()) return null;
-    const row = db.prepare("SELECT chat_id FROM one_supervisor_conversations ORDER BY rowid DESC LIMIT 1").get() as { chat_id?: string } | undefined;
+    const oneId = req<typeof import("../store/one-profile")>("../store/one-profile").getOneProfile().oneId;
+    const row = db.prepare("SELECT chat_id FROM one_supervisor_conversations WHERE one_id=?").get(oneId) as { chat_id?: string } | undefined;
     return row?.chat_id ?? null;
   } catch { return null; }
 }
+
+/** A card with no words of its own work cannot be drawn (decodeHandoffCard needs a brief) and the server's open/done rows do not carry the brief: the card keeps the one the tool wrote, else this neutral mark. */
+const NO_BRIEF = "\u2014";
 
 /** A sender's card as the value the row keeps. `placeName` is the desktop's name (the card's header); absent = the header names the agent only. */
 export function valueOfSentCard(card: SentCard & { placeName?: string }, ctx: { here?: boolean } = {}): HandoffCardValue {
@@ -55,8 +62,10 @@ export function recordSentCard(card: SentCard & { placeName?: string }, opts: { 
     const chatId = c.chatOfViewRow(id) ?? opts.chatId ?? personalAgentChatId();
     if (!chatId) return "refused";
     // what this desktop answered here stays on the card (the new value is made from the server's row, which does not say it)
-    const kept = decodeHandoffCard(c.getViewRowText(id))?.log;
-    const value = valueOfSentCard(card);
+    const prior = decodeHandoffCard(c.getViewRowText(id));
+    const kept = prior?.log;
+    // the server's answer names no brief: the words the tool wrote at hand-off time stay (a card whose brief is empty is not drawn at all)
+    const value = valueOfSentCard(card.brief.trim() ? card : { ...card, brief: prior?.brief || NO_BRIEF });
     return c.upsertViewNoticeRow({ id, chatId, text: encodeHandoffCard(kept?.length ? { ...value, log: kept } : value), createdAt: opts.createdAt ?? new Date().toISOString() });
   } catch { return "refused"; }
 }

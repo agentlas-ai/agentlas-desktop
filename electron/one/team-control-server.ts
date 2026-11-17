@@ -187,9 +187,20 @@ async function dispatchOneSupervisorToolUnrecorded(binding: Pick<OneTeamCapabili
       // the hand-off to another of the person's agents. The key is this reply's own run id, so a turn that runs again finds its own row (`existing`); a conversation that is itself a received Work has no lineage-free origin and is refused.
       case "hand_off": {
         const sender = await import("./plural-handoff-send");
-        return sender.pluralSender().handOff({key:String(binding.supervisorReplyRunId ?? ""),brief:String(input.brief ?? ""),
+        const outcome = await sender.pluralSender().handOff({key:String(binding.supervisorReplyRunId ?? ""),brief:String(input.brief ?? ""),
           ...(input.to!==undefined ? {to:String(input.to)} : {}),...(input.done_when!==undefined ? {doneWhen:String(input.done_when)} : {}),
           ...(input.replaces!==undefined ? {replaces:String(input.replaces)} : {}),origin:sender.pluralOriginOfChat(binding.chatId)});
+        // The card of a NEW row is written here, in this reply's own conversation, with the person's words of the work: the server's open / done rows carry no brief and the process that hears them may not be this one
+        // (prod test: the ended card went to another conversation and had no words, so it was never drawn). `existing` = the row's card is already there and may be further along.
+        if (outcome.ok && outcome.id && outcome.state !== "existing") {
+          try {
+            const cards = await import("./plural-handoff-cards");
+            const to = typeof input.to === "string" && /^(phone|host_[a-f0-9]{32})$/.test(input.to.trim()) ? input.to.trim() : "";
+            cards.recordSentCard({ id: outcome.id, to, toName: outcome.place ?? "", brief: String(input.brief ?? "").trim().slice(0, 600),
+              state: outcome.state === "waiting" ? (outcome.need === "phone_app" ? "waiting_phone_app" : "waiting_desktop_off") : "reserved", approvals: [] }, { chatId: binding.chatId });
+          } catch { /* a card never changes the hand-off */ }
+        }
+        return outcome;
       }
       case "one_supervisor_start_science": return service.startScience({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),projectId:String(input.project_id ?? ""),
         ...(input.conversation_id ? {conversationId:String(input.conversation_id)} : {})},binding.supervisorReplyRunId);

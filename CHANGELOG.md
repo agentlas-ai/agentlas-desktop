@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.4 — 2026-11-18
+
+- Hand-off: when your phone agent or another desktop agent finishes work you handed over, the result now appears as a card in your agent's conversation. It used to be kept in the wrong conversation and left without the words of your request.
+- Reminders: "remind me tomorrow at 9" is saved as a one-time reminder on the right day. The agent reads the app's own clock for dates and has a one-time form for reminders (a schedule with a fixed month and day repeats every year).
+- Stopped requests: after you stop a request, "continue" now knows what the request was.
+- Group chats: a message that waits for a busy chat is tried again every few seconds instead of in a rapid loop.
+- Errors: a hand-off refused for an unknown place or account now says so, and an internal tool-list notice no longer shows up as a failed card.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.3 — 2026-11-17
 
 - Usage: the desktop shows how much of your usage has been spent as a percent, next to the credit balance.

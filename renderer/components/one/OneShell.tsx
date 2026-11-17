@@ -8307,6 +8307,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
    *   with a one-tap resend. Never a second run on an unknown answer, never a recovery turn.
    */
   const firstSendResumeTriesRef = useRef(new Map<string, number>());
+  const firstSendResumeAtRef = useRef(new Map<string, number>());
   const firstSendResumeRunningRef = useRef(false);
   const resumeFirstSendsRef = useRef<(chatId: string) => Promise<void>>(async () => undefined);
   resumeFirstSendsRef.current = async (chatId: string) => {
@@ -8329,6 +8330,8 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
         hold: (intentId, reason) => holdFirstSend(chatId, intentId, reason),
         tries: (intentId) => firstSendResumeTriesRef.current.get(intentId) ?? 0,
         setTries: (intentId, tries) => { firstSendResumeTriesRef.current.set(intentId, tries); },
+        lastTryAt: (intentId) => firstSendResumeAtRef.current.get(intentId) ?? 0,
+        setLastTryAt: (intentId, at) => { firstSendResumeAtRef.current.set(intentId, at); if (firstSendResumeAtRef.current.size > 64) firstSendResumeAtRef.current.delete(firstSendResumeAtRef.current.keys().next().value as string); },
         resume: async (entry) => {
           // The look is over; the resumed submit owns the entry now (it is live until it settles).
           firstSendResumeRunningRef.current = false;
