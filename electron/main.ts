@@ -2375,7 +2375,9 @@ async function resolveOrdinaryQuit(): Promise<void> {
     const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : undefined;
     const options = {
       type: "question" as const, message: text.message, detail: text.detail, buttons: text.buttons,
-      defaultId: 0, cancelId: QUIT_PROMPT_CHOICES.indexOf("cancel"), noLink: true,
+      // The focused button is the one Enter presses: never the one that stops the running work (Windows human test Alt+F4 opened this prompt
+      // with "Stop work and quit" focused). "Keep running in background" loses nothing and the work ends the app by itself.
+      defaultId: QUIT_PROMPT_CHOICES.indexOf("background"), cancelId: QUIT_PROMPT_CHOICES.indexOf("cancel"), noLink: true,
     };
     const answer = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
     const choice = QUIT_PROMPT_CHOICES[answer.response] ?? "cancel";

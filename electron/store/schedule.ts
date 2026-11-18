@@ -162,6 +162,65 @@ export function specFromStored(stored: string, tz: string): ScheduleSpec | null 
   return parseLegacyToken(raw, tz);
 }
 
+/**
+ * The `scheduleSpec` a model sends to automations.create, read the way it meant it (the model entrance in ipc.ts, nowhere else).
+ * Production (agentlas-light, "다음 주 금요일 3시 한 번"): three calls in a row sent {type:"once",at:"…+09:00",tz} and were
+ * refused; the fourth, {kind:"once",atIso}, was stored. Each neighbouring name has exactly one reading, so a key that is ABSENT is
+ * filled from it (`type` for kind, `at`/`time`/`datetime`/`when` for atIso, `cron`/`expression` for expr, `timezone` for tz,
+ * `intervalMs` for everyMs); a value is never invented. null = still not a time the scheduler can use, and the caller refuses it:
+ *  - once: the time has no offset (its instant would depend on this machine's zone) or is not a date or is already past
+ *    (a once spec with no future time stores as a job that never runs).
+ *  - cron: not a valid expression. interval: everyMs is not a positive number.
+ */
+export function readModelScheduleSpec(raw: unknown, tz: string, now: Date = new Date()): ScheduleSpec | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const input = raw as Record<string, unknown>;
+  const pick = (...keys: string[]): unknown => {
+    for (const key of keys) {
+      const value = input[key];
+      if (value !== undefined && value !== null && value !== "") return value;
+    }
+    return undefined;
+  };
+  // The kind as models spell it: "one_time" / "one-time" / "onetime" / "one_off" / "oneshot" are all "once" (prod {type:"one_time"} was refused twice).
+  const rawKind = pick("kind", "type");
+  const spelled = typeof rawKind === "string" ? rawKind.trim().toLowerCase().replace(/[\s-]+/g, "_") : rawKind;
+  const kind = spelled === "one_time" || spelled === "onetime" || spelled === "one_off" || spelled === "oneoff" || spelled === "oneshot" || spelled === "one_shot" ? "once" : spelled;
+  if (kind === "manual") return { kind: "manual" };
+  if (kind === "once") {
+    const at = pick("atIso", "at", "time", "datetime", "when");
+    if (typeof at !== "string" || !/(Z|[+-]\d{2}:?\d{2})$/i.test(at.trim())) return null;
+    const ms = Date.parse(at.trim());
+    return Number.isFinite(ms) && ms > now.getTime() ? { kind: "once", atIso: new Date(ms).toISOString() } : null;
+  }
+  if (kind === "cron") {
+    const expr = pick("expr", "cron", "expression");
+    const zone = pick("tz", "timezone");
+    if (typeof expr !== "string" || !isCronExpression(expr.trim())) return null;
+    const useTz = typeof zone === "string" && zone ? zone : tz || "UTC";
+    try {
+      new Cron(expr.trim(), { timezone: useTz });
+    } catch {
+      return null;
+    }
+    return { kind: "cron", expr: expr.trim(), tz: useTz };
+  }
+  if (kind === "interval") {
+    const every = pick("everyMs", "intervalMs");
+    if (typeof every !== "number" || !Number.isFinite(every) || every <= 0) return null;
+    return { kind: "interval", everyMs: every, anchor: pick("anchor") === "lastRun" ? "lastRun" : "wallclock" };
+  }
+  return null;
+}
+
+/**
+ * Can the scheduler tell WHEN this stored automation runs? Same reading computeNextRun does (schedule_json first, else the schedule column).
+ * false = computeNextRun would fall back to "24 hours from now" for it: a job at an hour nobody chose. Used by the start-up pause of such rows.
+ */
+export function storedScheduleReadable(schedule: string, scheduleJson: string | null | undefined, tz: string): boolean {
+  return specFromStored(scheduleJson && scheduleJson.trim() ? scheduleJson : schedule, tz) !== null;
+}
+
 export type SchedulePreset = "daily" | "weekday" | "weekly" | "monthly" | "hourly";
 
 /**

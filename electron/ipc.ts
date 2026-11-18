@@ -535,7 +535,7 @@ import {
   lastGoalLedgerFailure,
 } from "./mcp/goal-ledger";
 import { findAutomationByGoalId } from "./store/automations";
-import { specFromStored, defaultTz } from "./store/schedule";
+import { specFromStored, defaultTz, readModelScheduleSpec } from "./store/schedule";
 import { maybeDispatchEffectObservation } from "./long-run/effect-observation";
 import { isGoalObserving } from "./long-run/effect-observation-tickets";
 import { emitDesktopStoreChange } from "./store/change-bus";
@@ -5680,11 +5680,24 @@ export function registerIpcHandlers(): void {
       // with `scheduleSpec: null` was stored as a 24-hour job, due the next morning), and a time-driven automation whose schedule cannot be read is refused with its reason instead of falling back to 24 hours.
       if (byModel && (storedInput.triggerType ?? "schedule") === "schedule") {
         const spec = (storedInput as { scheduleSpec?: unknown }).scheduleSpec;
-        const json = spec && typeof spec === "object" ? JSON.stringify(spec) : (storedInput as { scheduleJson?: string | null }).scheduleJson ?? null;
-        if (!specFromStored(json && json.trim() ? json : storedInput.scheduleHuman, storedInput.timezone || defaultTz())) {
-          throw new AutomationWorkspaceError("automation_schedule_unreadable", "the schedule cannot be read as a time: send scheduleSpec as {kind:\"once\",atIso:\"<ISO time>\"}, {kind:\"cron\",expr,tz} or {kind:\"interval\",everyMs,anchor}, or a legacy token such as daily-09:00; a sentence is not a schedule");
+        const zone = storedInput.timezone || defaultTz();
+        // A scheduleSpec object is read once, by the names a model uses for its parts (store/schedule.ts readModelScheduleSpec), and an object that still
+        // is not a usable time is refused: a spec with a kind but no future time used to be stored as a job that never runs.
+        const read = spec && typeof spec === "object" ? readModelScheduleSpec(spec, zone) : null;
+        const json = spec && typeof spec === "object" ? (read ? JSON.stringify(read) : null) : (storedInput as { scheduleJson?: string | null }).scheduleJson ?? null;
+        if (!(spec && typeof spec === "object" ? read : specFromStored(json && json.trim() ? json : storedInput.scheduleHuman, zone))) {
+          throw new AutomationWorkspaceError("automation_schedule_unreadable", "the schedule cannot be read as a time: send scheduleSpec as {kind:\"once\",atIso:\"<ISO time with an offset such as +09:00, in the future>\"}, {kind:\"cron\",expr,tz} or {kind:\"interval\",everyMs,anchor}, or a legacy token such as daily-09:00; a sentence is not a schedule");
         }
-        if (spec && typeof spec === "object") (storedInput as { scheduleJson?: string | null }).scheduleJson = JSON.stringify(spec);
+        if (read) {
+          (storedInput as { scheduleJson?: string | null }).scheduleJson = JSON.stringify(read);
+          // The schedule column is NOT NULL: a model that sends only scheduleSpec got a raw "SQLITE_CONSTRAINT_NOTNULL: automations.schedule" back (prod "3시간 뒤"). The words are the spec's own description.
+          if (typeof storedInput.scheduleHuman !== "string" || !storedInput.scheduleHuman.trim()) {
+            const { describeSchedule } = await import("./store/schedule");
+            let words = "";
+            try { words = describeSchedule(read, currentUiLocale() === "ko" ? "ko" : "en"); } catch { words = ""; }
+            (storedInput as { scheduleHuman?: string }).scheduleHuman = words || JSON.stringify(read);
+          }
+        }
       }
       const created = withOwnerAutomationWorkspaceIntent(workspaceMode, null,
         () => createAutomation({ ...storedInput, createdBy: byModel ? "agent" : "user" }));
@@ -5729,6 +5742,30 @@ export function registerIpcHandlers(): void {
     );
     const before = getAutomation(id);
     const { workspaceMode, workspaceGoalId, ...storedPatch } = patch;
+    // A model changes a schedule with `scheduleSpec` (and words) in the patch. updateAutomation reads only `scheduleJson`, so the new time was dropped and
+    // the next run stayed where it was while the words said otherwise (prod test "오후 4시로 바꿔줘": "update done", next run still 14:00).
+    // Read it here the way the create entrance does (readModelScheduleSpec), store the normalised JSON, and refuse what cannot be read as a time.
+    if (appControlInvocationPermission() !== null) {
+      const raw = storedPatch as { scheduleSpec?: unknown; scheduleJson?: string | null; scheduleHuman?: string; timezone?: string | null };
+      const zone = (typeof raw.timezone === "string" && raw.timezone) || before?.timezone || defaultTz();
+      const unreadable = () => new AutomationWorkspaceError("automation_schedule_unreadable", "the schedule cannot be read as a time: send scheduleSpec as {kind:\"once\",atIso:\"<ISO time with an offset such as +09:00, in the future>\"}, {kind:\"cron\",expr,tz} or {kind:\"interval\",everyMs,anchor}, or a legacy token such as daily-09:00; a sentence is not a schedule");
+      if (raw.scheduleSpec !== undefined) {
+        const read = raw.scheduleSpec && typeof raw.scheduleSpec === "object" ? readModelScheduleSpec(raw.scheduleSpec, zone) : null;
+        if (!read) throw unreadable();
+        raw.scheduleJson = JSON.stringify(read);
+        if (typeof raw.scheduleHuman !== "string" || !raw.scheduleHuman.trim()) {
+          const { describeSchedule } = await import("./store/schedule");
+          let words = "";
+          try { words = describeSchedule(read, currentUiLocale() === "ko" ? "ko" : "en"); } catch { words = ""; }
+          raw.scheduleHuman = words || JSON.stringify(read);
+        }
+        delete raw.scheduleSpec;
+      } else if (typeof raw.scheduleHuman === "string" && raw.scheduleJson === undefined) {
+        // New words alone: they must be a time the scheduler reads (a legacy token), and the stored spec of the OLD time must not outlive them.
+        if (!specFromStored(raw.scheduleHuman, zone)) throw unreadable();
+        raw.scheduleJson = null;
+      }
+    }
     const next = withOwnerAutomationWorkspaceIntent(workspaceMode, before,
       () => updateAutomation(id, storedPatch), workspaceGoalId);
     // 오너가 핀을 실제로 바꾼 경우만 "오너의 선택"으로 적는다 — 그 뒤로는 복사본 추종을 멈춘다.

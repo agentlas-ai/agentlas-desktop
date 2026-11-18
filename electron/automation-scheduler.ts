@@ -41,6 +41,7 @@ import {
   countConsecutiveFailures,
   countGraphRunAttemptsForRun,
   computeNextRun,
+  pauseUnreadableScheduleAutomations,
   getLatestGraphRunOccurrenceId,
   isAutomationRunParentMissingError,
   pinAutomationRuntimeIfUnset,
@@ -2652,6 +2653,8 @@ export function startAutomationScheduler(): void {
   // 시작 직후 1회 점검 — 앱이 꺼져 있던 동안 놓친 due를 한 번 따라잡는다(누적 폭주 방지: markRun이 다음 미래로 전진).
   startupTimer = setTimeout(() => {
     startupTimer = null;
+    // A row an older version stored with a schedule nobody can read would otherwise fire every 24 h at a guessed hour: pause it before the first tick.
+    try { pauseUnreadableScheduleAutomations(); } catch { /* the first tick below still runs */ }
     tick();
   }, 5_000);
   startupTimer.unref?.();

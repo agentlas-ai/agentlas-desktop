@@ -10170,6 +10170,12 @@ button[data-toggle-state="on"] {
   opacity: 0.55;
   cursor: default;
 }
+/* A Work pane's composer while a run goes: the stop button keeps the corner and the steering send and the mic move left of it. Space.module.css puts the
+   send and the stop button at right:10px (mic at right:50px), so the later send button covered the stop button and a pane's run could not be stopped
+   from its own composer (the source shows the same overlap on every OS). */
+.chat-input-shell[data-pane-composer="true"]:has(.chat-input-stop-button) .chat-input-send-button { right: 52px !important; }
+.chat-input-shell[data-pane-composer="true"]:has(.chat-input-stop-button) .chat-input-voice > * { right: 94px !important; }
+.chat-input-shell[data-pane-composer="true"]:has(.chat-input-stop-button) textarea[data-chat-input] { padding-right: 134px !important; }
 .agentlas-chat-latest-button {
   position: absolute;
   left: 50%;

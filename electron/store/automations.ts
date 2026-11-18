@@ -20,7 +20,7 @@ import { emitDesktopStoreChange, desktopStoreTransaction } from "./change-bus";
 import { restoreAgentForUse } from "../archive/auto-archive";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
 import { purgeOrphanChatMarks } from "../runtime/session-scope";
-import { nextRun, specFromStored, defaultTz } from "./schedule";
+import { nextRun, specFromStored, defaultTz, storedScheduleReadable } from "./schedule";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { evaluateCondition } from "../triggers/condition";
@@ -287,6 +287,29 @@ export function computeNextRun(
     return new Date(from.getTime() + 24 * 3600 * 1000).toISOString();
   }
   return nextRun(spec, from);
+}
+
+/**
+ * Pauses every automation that is ON and time-driven but whose stored schedule cannot be read. Before v2.0.5 a model could store a
+ * sentence as the schedule ("(금) 오후 3시 1회", no spec); computeNextRun then fell back to +24 h and the job ran every day
+ * at the hour it was created, never when the owner meant (prod test). Run when the scheduler starts, so a row made by an
+ * older version is stopped instead of firing at a guessed time. The owner sees it as Paused and turns it back on after fixing the time.
+ * Returns how many were paused.
+ */
+export function pauseUnreadableScheduleAutomations(): number {
+  const db = getDb();
+  const rows = db.prepare("SELECT id, schedule, schedule_json, timezone FROM automations WHERE enabled = 1 AND trigger_type = 'schedule'")
+    .all() as Array<{ id: string; schedule: string; schedule_json: string | null; timezone: string | null }>;
+  let paused = 0;
+  for (const row of rows) {
+    if (storedScheduleReadable(row.schedule, row.schedule_json, row.timezone || defaultTz())) continue;
+    if (db.prepare("UPDATE automations SET enabled = 0, next_run_at = NULL WHERE id = ? AND enabled = 1").run(row.id).changes === 1) {
+      paused += 1;
+      console.info(`[automation] paused: the schedule cannot be read as a time (${row.id})`);
+      emitDesktopStoreChange({ entity: "automation", id: row.id });
+    }
+  }
+  return paused;
 }
 
 const TOOLCHAIN_IMPLEMENTATION_PREFIX = "toolchain.implementation.v1:";

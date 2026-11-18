@@ -921,6 +921,27 @@ export function TaskSidePanel(props: TaskSidePanelProps) {
   return <TaskSidePanelContent key={JSON.stringify([props.browserScopeKey ?? null, props.screenChatId])} {...props} />;
 }
 
+/**
+ * One Outputs row per file. A file edited in several turns is several artifacts (each run, even each task, binds its own), and the Overview listed
+ * "notes.md" once per edit (Windows human test three rows for one file). The row keeps the place where the file first appeared and opens
+ * its latest version (items are in event order, oldest first). Same kind and same name (trimmed, any case) is the same file here: the list names files
+ * by their name only, so two rows with one name could not be told apart anyway.
+ */
+export function distinctOutputFiles<T extends { id: string; kind: string; label: string }>(items: readonly T[]): T[] {
+  const key = (item: T): string => `${item.kind}\0${item.label.trim().toLocaleLowerCase()}`;
+  const latest = new Map<string, T>();
+  for (const item of items) latest.set(key(item), item);
+  const seen = new Set<string>();
+  const rows: T[] = [];
+  for (const item of items) {
+    const k = key(item);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    rows.push(latest.get(k) as T);
+  }
+  return rows;
+}
+
 function TaskSidePanelContent({
   items,
   earlierOutputs,
@@ -1858,7 +1879,7 @@ function TaskSidePanelContent({
           subagents={overviewSubagents}
           commands={overviewCommands}
           onOpenTerminal={() => openRailTab("terminal")}
-          outputs={(visible ? items : []).map((item) => ({ id: item.id, name: item.label, kind: item.kind, onOpen: () => openArtifact(item) }))}
+          outputs={distinctOutputFiles(visible ? items : []).map((item) => ({ id: item.id, name: item.label, kind: item.kind, onOpen: () => openArtifact(item) }))}
           earlier={earlierOutputs ? <EarlierOutputsSection view={earlierOutputs} locale={locale} /> : undefined}
         >
           <ContinuityStatus chatId={screenChatId} locale={locale} detail />

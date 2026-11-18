@@ -257,6 +257,8 @@ function queryTerms(query: string): string[] {
 }
 
 type OperationsInput = { query?: unknown; area?: unknown; operation?: unknown; limit?: unknown; offset?: unknown; include_restricted?: unknown;
+  /** Not a listing argument: a model that hands it here means to RUN the operation (see appControlOperationsLocal). */
+  args?: unknown;
   /** false: words only (harness_search deciding whether the app catalogue answers a query at all). */
   meaning?: unknown };
 export type AppControlOperationsResult = {
@@ -269,6 +271,9 @@ export type AppControlOperationsResult = {
   nearest_note?: string;
   /** Present only when this process has no window and the window process could not be reached. */
   app_window?: { available: false; code: string; message: string };
+  /** The listing tool was handed `args`: nothing ran. */
+  executed?: false;
+  run_with?: { tool: "one_app_call"; operation: string };
 };
 
 /** Main owns the IPC handlers and the windows. A process without a configured host (the background service that runs
@@ -337,6 +342,11 @@ export function appControlOperationsLocal(input: OperationsInput): AppControlOpe
       available: all.filter(operation => (operation.surface === "science" ? operation.path.split(".").slice(0, 2).join(".") : operation.path.split(".")[0]) === key && available(operation)).length,
     })).sort((a, b) => a.area.localeCompare(b.area));
   };
+  // A model that passes `args` to this listing tool means to run the operation (production agentlas-light, "다음 주 금요일 3시 한 번"
+  // reminder: automations.create with the right once-schedule was sent here twice, got a 36 KB description back, and told the owner
+  // "the create call returned the operation description, not a result"). Nothing ran: say so in a line and name the tool that runs it.
+  if (exact && input.args !== undefined) return { science_installed: science, total: 0, executed: false, run_with: { tool: "one_app_call", operation: exact },
+    hint: "this tool only lists operations and ran nothing: send operation and args to one_app_call" };
   if (!area && !query && !exact) return { science_installed: science, total: all.length, areas: areaList(),
     ...(input.include_restricted === true ? { restricted: restricted() } : {}) };
   // An area that is not one ("settings") is read as words to search for.

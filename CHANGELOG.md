@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.6 — 2026-11-18
+
+- Work panel: the composer now shows its stop button while a run is going; the send arrow no longer covers it.
+- Quitting: the quit prompt's default button is now "Keep running in background" instead of "Stop work and quit".
+- Reminders made through the assistant: more spellings of a one-time schedule are understood, changing a reminder's time now moves its next run, an old reminder whose schedule cannot be read is paused at start instead of firing at a guessed hour, and a refused attempt that the assistant repeats no longer leaves a stale "failed" card.
+- Overview panel: the Outputs list shows one row per file instead of one per edit.
+- Assistant: it no longer mistakes the app-operation listing tool for the tool that runs an operation.
+- Diagnostics: the background service records why its native channel is unavailable.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.5 — 2026-11-18
 
 - Hand-off: your personal agent's conversation now draws the result card of work handed to your phone agent or another desktop (the card was kept but not shown there).

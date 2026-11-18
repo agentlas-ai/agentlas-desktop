@@ -1303,6 +1303,10 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
       // Preserve existing Science/control service behavior while exposing exact
       // native readiness failure. No native request has been issued/replayed.
       console.warn("[agentlasd] native invocation unavailable:", nativeInvocationUnavailableCode);
+      // The service's stdout is discarded (app-launcher stdio "ignore"), so the warning above is never seen: the closed code goes to the diagnostics file
+      // too (Windows VM 2.0.5: the daemon reported identity/store/control_socket_ready and never native_invocation_socket_ready, and the app retried the
+      // attach every 30 s for hours with only "native_auth_channel_lost" to show for it).
+      recordServicePhase(`native_invocation_unavailable:${nativeInvocationUnavailableCode}`);
     }
   }
 
