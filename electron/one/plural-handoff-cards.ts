@@ -21,7 +21,13 @@ export function personalAgentChatId(): string | null {
   try {
     const db = req<typeof import("../store/db")>("../store/db").getDb();
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get()) return null;
-    const oneId = req<typeof import("../store/one-profile")>("../store/one-profile").getOneProfile().oneId;
+    // Only the signed-in account's slot: the app shows the signed-out slot's One ("One", "Checking connection") for a moment while the session settles, and a card written then went to that slot's conversation
+    // (the stray two-message chat of the prod test). Signed out = no card now; the row waits on the server and the next answer keeps it.
+    const profile = req<typeof import("../store/one-profile")>("../store/one-profile");
+    const peek = profile.peekOneProfile();   // the signed-in account's own slot, never created here
+    let oneId: string | null = peek.state === "present" ? peek.oneId : null;
+    if (!oneId && profile.getOneProfileOrigin() !== "signed-out") oneId = profile.getOneProfile().oneId;
+    if (!oneId) return null;
     const row = db.prepare("SELECT chat_id FROM one_supervisor_conversations WHERE one_id=?").get(oneId) as { chat_id?: string } | undefined;
     return row?.chat_id ?? null;
   } catch { return null; }

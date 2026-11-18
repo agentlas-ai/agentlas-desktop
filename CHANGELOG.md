@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.5 — 2026-11-18
+
+- Hand-off: your personal agent's conversation now draws the result card of work handed to your phone agent or another desktop (the card was kept but not shown there).
+- Reminders: a reminder whose schedule the app cannot read as a time is refused with the reason instead of quietly becoming a 24-hour job; the agent is told which forms to use.
+- Stopped requests: a Stop in the personal agent's conversation is read as a stop, and "continue" names the request you stopped.
+- Group rooms: a message that was left waiting for a room's earlier message is no longer held for ever by a stuck earlier send; a room's stuck send older than ten minutes is released by the next message.
+- Hand-off cards are never written to the signed-out profile's conversation.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.4 — 2026-11-18
 
 - Hand-off: when your phone agent or another desktop agent finishes work you handed over, the result now appears as a card in your agent's conversation. It used to be kept in the wrong conversation and left without the words of your request.

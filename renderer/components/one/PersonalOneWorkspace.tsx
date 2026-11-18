@@ -4,6 +4,8 @@ import { composeMessageReply, displayMessageReply, type MessageReply } from "@/l
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents, grantForDroppedFile, grantForPastedAttachment, grantForPastedImage } from "@/lib/ipc";
+import { HandoffCard } from "@/components/PluralHandoffCards";
+import { decodeHandoffCard } from "@shared/plural-handoff-card";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { createStoreChangeThrottle, sameSnapshotIgnoring } from "@/lib/store-change-policy";
 import { ChatContinuationProjector, type ChatContinuationRow } from "@/lib/chat-continuations";
@@ -149,6 +151,20 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   useChatSelectionIntent(historyScope); // keeps this view registered as the owner of the conversation's pending pick
   const inlineUi=useInlineUiInstances(snapshot?.conversationChatId);
   const historyScopeRef=useRef(historyScope);historyScopeRef.current=historyScope;
+  // The hand-off cards of this conversation (shared/plural-handoff-card.ts: `handoff-card:` / `handoff-recv:` view rows). The supervisor snapshot carries no view rows, so they are read from the chat's own page and drawn after the
+  // transcript, oldest first (prod test the card was kept in the right conversation with its words and the dori screen still drew nothing).
+  const [handoffRows,setHandoffRows]=useState<Array<{id:string;text:string}>>([]);
+  useEffect(()=>{
+    const chatId=snapshot?.conversationChatId;
+    if(!chatId){setHandoffRows([]);return;}
+    let alive=true,timer:number|undefined;
+    const load=async()=>{try{const page=await ipc()?.chats?.messagesPage?.({chatId,limit:120});if(!alive||!page)return;
+      const rows=page.messages.filter(item=>item.role==="system"&&/^handoff-(card|recv):/.test(String(item.id))).slice(-8).map(item=>({id:String(item.id),text:item.text}));
+      setHandoffRows(prior=>JSON.stringify(prior)===JSON.stringify(rows)?prior:rows);}catch{/* the next change reads again */}};
+    void load();
+    const off=ipcEvents()?.onStoreChanged?.(change=>{if(change.entity==="chat"&&change.id===chatId){window.clearTimeout(timer);timer=window.setTimeout(()=>void load(),400);}});
+    return()=>{alive=false;window.clearTimeout(timer);off?.();};
+  },[snapshot?.conversationChatId]);
   const groups=useMemo(()=>personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []),[snapshot?.messages,snapshot?.turns]);
   const groupIndexes=useMemo(()=>new Map(groups.map((group,index)=>[group.message.id,index])),[groups]);
   const [historyWindow,setHistoryWindow]=useState<{scope:string;ids:string[];expanded:boolean;followLatest:boolean}|null>(null);
@@ -764,6 +780,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
           </div></Fragment>;});})()}
           {historyEnd<groups.length&&<button type="button" style={historyButtonStyle} data-personal-one-history="later" onClick={()=>revealHistory("later")}>{copy("다음 대화 24개 보기","Show 24 later turns")}</button>}
           {snapshot?.delegations?.filter(item=>!item.originReplyRunId || !snapshot.turns?.some(turn=>turn.runId===item.originReplyRunId)).map(delegation)}
+          {handoffRows.map(row=>{const card=decodeHandoffCard(row.text);return card?<div key={row.id} data-personal-one-handoff-card={row.id}><HandoffCard value={card}/></div>:null;})}
         </div>
       </div>
       </IntellectUiActions.Provider>

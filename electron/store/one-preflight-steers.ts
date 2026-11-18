@@ -134,6 +134,26 @@ const steerReceipt = (row: SteerRow): OnePreflightSteerReceipt => ({
   createdAt: row.created_at,
 });
 
+/**
+ * An `open` row is driven by the renderer document that opened it (team preflight, then invoke:run) and lasts seconds. One that is older than this is not being driven any more: its renderer gave up without telling Main
+ * (prod test a group room's row stayed `open` for 78 minutes in the same Main epoch while its window lived, so every later message of the room was refused `one_preflight_chat_pending` and waited for ever, with the
+ * line "sends itself"). It is held by the same rule as a gone renderer (a run Main's send queue already accepted for it keeps its place), and a held row never refuses a later send.
+ */
+export const OPEN_PREFLIGHT_STALE_MS = 10 * 60_000;
+
+/** The open row of a chat that still counts, after holding the ones nobody drives any more. */
+function openPreflightOfChat(chatId: string, nowIso: string): { submission_id: string } | undefined {
+  const cutoff = new Date(Date.parse(nowIso) - OPEN_PREFLIGHT_STALE_MS).toISOString();
+  const stale = getDb().prepare("SELECT submission_id FROM one_preflight_submissions WHERE chat_id = ? AND state = 'open' AND updated_at < ?")
+    .all(chatId, cutoff) as Array<{ submission_id: string }>;
+  for (const row of stale) {
+    const out = releaseOnePreflightSubmissionOfGoneRenderer(row.submission_id);
+    if (out?.state === "held") console.info(`[one-preflight] chat ${chatId} had an open submission nobody drives any more (older than ${OPEN_PREFLIGHT_STALE_MS / 60_000} minutes); it was held`);
+  }
+  return getDb().prepare("SELECT submission_id FROM one_preflight_submissions WHERE chat_id = ? AND state = 'open' LIMIT 1")
+    .get(chatId) as { submission_id: string } | undefined;
+}
+
 /** A Main-issued receipt is required before the renderer clears a queued direction. */
 export function beginOnePreflightSubmission(
   input: OnePreflightSubmissionInput, ownerProcessEpoch: string,
@@ -159,9 +179,7 @@ export function beginOnePreflightSubmission(
         // started. Its saved send takes it over exactly once: the CAS below opens it for the current owner epoch.
         if (liveRuntimeJson(input.chatId) !== runtimeJson) adoptShownRuntime(input.chatId, input.runtimeSelection);
         if (liveRuntimeJson(input.chatId) !== runtimeJson) throw new Error("one_preflight_runtime_changed");
-        const open = getDb().prepare(
-          "SELECT submission_id FROM one_preflight_submissions WHERE chat_id = ? AND state = 'open' LIMIT 1",
-        ).get(input.chatId);
+        const open = openPreflightOfChat(input.chatId, now);
         if (open) throw new Error("one_preflight_chat_pending");
         const reopened = getDb().prepare("UPDATE one_preflight_submissions " +
           "SET state = 'open', owner_process_epoch = ?, parent_run_id = NULL, steer_template_json = NULL, updated_at = ? " +
@@ -178,9 +196,7 @@ export function beginOnePreflightSubmission(
     }
     if (liveRuntimeJson(input.chatId) !== runtimeJson) adoptShownRuntime(input.chatId, input.runtimeSelection);
     if (liveRuntimeJson(input.chatId) !== runtimeJson) throw new Error("one_preflight_runtime_changed");
-    const open = getDb().prepare(
-      "SELECT submission_id FROM one_preflight_submissions WHERE chat_id = ? AND state = 'open' LIMIT 1",
-    ).get(input.chatId);
+    const open = openPreflightOfChat(input.chatId, now);
     if (open) throw new Error("one_preflight_chat_pending");
     getDb().prepare("INSERT INTO one_preflight_submissions " +
       "(submission_id,chat_id,prompt_digest,runtime_digest,runtime_selection_json,owner_process_epoch," +

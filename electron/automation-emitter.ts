@@ -5,7 +5,7 @@
 // v33: 모델이 (a) 구조화 스케줄({preset,time,tz} 또는 {cron,tz})과 (b) 선택적 ordered steps[]를
 // 방출할 수 있다. steps가 있으면 stepsToGraph로 WorkflowGraph를 합성하고, 없으면 graph=null(오늘의
 // 단일 프롬프트). 모델 생성 cron은 schedule.ts로 검증하고 파싱 실패는 표면화한다(조용히 드롭 X).
-import { validateCron, compilePreset, type SchedulePreset } from "./store/schedule";
+import { validateCron, compilePreset, specFromStored, type SchedulePreset } from "./store/schedule";
 import type { ScheduleSpec, WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeType, PollSource, TriggerCondition } from "../shared/types";
 
 export const AUTOMATION_HEADING = "## Automation";
@@ -266,7 +266,14 @@ function resolveSchedule(
 
   // 레거시 문자열 형식.
   if (typeof emitted === "string") {
-    return { spec: null, token: emitted.trim() || "daily-09:00", tz: DEFAULT_TZ_PLACEHOLDER };
+    const token = emitted.trim() || "daily-09:00";
+    // A string the scheduler cannot read is not a schedule: stored as it is, it becomes a 24-hour job (prod test the model wrote "once:KST" and the reminder
+    // was due the next morning, then every day). Only the legacy tokens, "cron:<expr>" and a bare cron expression are kept; anything else is refused with its reason.
+    if (!specFromStored(token, "UTC")) {
+      errors.push(`Unknown schedule string rejected: "${token.slice(0, 60)}" (use a structured schedule: {"once": "2026-11-19T09:00", "tz": ...}, {"cron": ..., "tz": ...} or {"preset": ..., "time": ..., "tz": ...})`);
+      return fallback;
+    }
+    return { spec: null, token, tz: DEFAULT_TZ_PLACEHOLDER };
   }
   if (!emitted || typeof emitted !== "object") return fallback;
 

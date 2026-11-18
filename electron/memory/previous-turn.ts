@@ -47,6 +47,8 @@ function minute(ts: string | null | undefined): string {
 function ending(terminal: { kind: string; payload: Record<string, unknown> } | null): { line: string; clean: boolean } {
   if (!terminal) return { line: "no end was recorded (the app closed or the run was cut off)", clean: false };
   const code = typeof terminal.payload.errorCode === "string" ? terminal.payload.errorCode.slice(0, 60) : null;
+  // The owner's Stop in the personal agent's conversation is recorded as `invoke_threw` with errorCode "cancelled", not as `invoke_cancelled` (prod test): it is a stop, not a failure.
+  if (code === "cancelled") return { line: "stopped before it finished", clean: false };
   switch (terminal.kind) {
     case "invoke_completed": return { line: "completed", clean: true };
     case "invoke_waiting": return { line: "ended waiting for input", clean: true };
@@ -134,7 +136,7 @@ export function turnMemorySection(runId: string): string | null {
         : []),
       `Started ${minute(rows[0].ts)}, last activity ${minute(rows[rows.length - 1].ts)}: ${end.line}.`,
     ];
-    if (!end.clean && (!terminalRow || terminalRow.kind === "invoke_cancelled" || terminalRow.kind === "invoke_interrupted")) {
+    if (!end.clean && (!terminalRow || terminalRow.kind === "invoke_cancelled" || terminalRow.kind === "invoke_interrupted" || parse(terminalRow).errorCode === "cancelled")) {
       const asked = stoppedRequestLine(rows, rows[rows.length - 1].ts);
       if (asked) lines.push(asked);
     }

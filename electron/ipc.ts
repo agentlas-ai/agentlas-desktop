@@ -535,6 +535,7 @@ import {
   lastGoalLedgerFailure,
 } from "./mcp/goal-ledger";
 import { findAutomationByGoalId } from "./store/automations";
+import { specFromStored, defaultTz } from "./store/schedule";
 import { maybeDispatchEffectObservation } from "./long-run/effect-observation";
 import { isGoalObserving } from "./long-run/effect-observation-tickets";
 import { emitDesktopStoreChange } from "./store/change-bus";
@@ -5675,6 +5676,16 @@ export function registerIpcHandlers(): void {
         { timeoutMs: 6_000 },
       );
       const { workspaceMode, ...storedInput } = input;
+      // The schedule a model sends is read here, once: a `scheduleSpec` object is the schedule (the store reads `scheduleJson`, and a spec left beside a sentence was dropped: prod test "(금) 오후 3시 1회"
+      // with `scheduleSpec: null` was stored as a 24-hour job, due the next morning), and a time-driven automation whose schedule cannot be read is refused with its reason instead of falling back to 24 hours.
+      if (byModel && (storedInput.triggerType ?? "schedule") === "schedule") {
+        const spec = (storedInput as { scheduleSpec?: unknown }).scheduleSpec;
+        const json = spec && typeof spec === "object" ? JSON.stringify(spec) : (storedInput as { scheduleJson?: string | null }).scheduleJson ?? null;
+        if (!specFromStored(json && json.trim() ? json : storedInput.scheduleHuman, storedInput.timezone || defaultTz())) {
+          throw new AutomationWorkspaceError("automation_schedule_unreadable", "the schedule cannot be read as a time: send scheduleSpec as {kind:\"once\",atIso:\"<ISO time>\"}, {kind:\"cron\",expr,tz} or {kind:\"interval\",everyMs,anchor}, or a legacy token such as daily-09:00; a sentence is not a schedule");
+        }
+        if (spec && typeof spec === "object") (storedInput as { scheduleJson?: string | null }).scheduleJson = JSON.stringify(spec);
+      }
       const created = withOwnerAutomationWorkspaceIntent(workspaceMode, null,
         () => createAutomation({ ...storedInput, createdBy: byModel ? "agent" : "user" }));
       await resyncTriggers();
