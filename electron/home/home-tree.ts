@@ -13,6 +13,7 @@ import {
   type HomeTreeRow,
   type HomeTreeSnapshot,
 } from "../../shared/home-tree";
+import { AGENT_DISPLAY_NAME_SQL } from "../../shared/agent-display-name";
 
 /*
  * Home's left tree, read side. Every function here only SELECTs. The tree is a view over rows that
@@ -83,13 +84,27 @@ function memberIds(json: string | null): string[] {
   } catch { return []; }
 }
 
+/**
+ * The name a row shows for an agent: the owner's own display name when one is saved (installed_agents.local_display_name), else the package
+ * name. Every other screen reads the same order (renderer pickLocalized), so a rename shows in the tree too. A store from before
+ * that column simply has the package name.
+ */
+function agentRows<T>(db: Database.Database, extra: string, chunk: string[]): T[] {
+  const marks = chunk.map(() => "?").join(",");
+  try {
+    return db.prepare(`SELECT id, ${AGENT_DISPLAY_NAME_SQL} AS name${extra} FROM installed_agents WHERE id IN (${marks})`).all(...chunk) as T[];
+  } catch {
+    return db.prepare(`SELECT id, name${extra} FROM installed_agents WHERE id IN (${marks})`).all(...chunk) as T[];
+  }
+}
+
 function agentNames(db: Database.Database, s: Schema, ids: Iterable<string>): Map<string, string> {
   const out = new Map<string, string>();
   if (!s.agents) return out;
   const list = [...new Set(ids)];
   for (let i = 0; i < list.length; i += 400) {
     const chunk = list.slice(i, i + 400);
-    for (const row of db.prepare(`SELECT id, name FROM installed_agents WHERE id IN (${chunk.map(() => "?").join(",")})`).all(...chunk) as Array<{ id: string; name: string }>) {
+    for (const row of agentRows<{ id: string; name: string }>(db, "", chunk)) {
       out.set(row.id, row.name);
     }
   }
@@ -238,7 +253,7 @@ export function homeLines(db: Database.Database, input: unknown, now = Date.now(
   if (s.agents) {
     for (let i = 0; i < wanted.length; i += 400) {
       const chunk = wanted.slice(i, i + 400);
-      for (const row of db.prepare(`SELECT id, name, tone FROM installed_agents WHERE id IN (${chunk.map(() => "?").join(",")})`).all(...chunk) as Array<{ id: string; name: string; tone: string | null }>) {
+      for (const row of agentRows<{ id: string; name: string; tone: string | null }>(db, ", tone", chunk)) {
         agents.set(row.id, { name: row.name, tone: row.tone || "one-puppy" });
       }
     }

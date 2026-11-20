@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { AgentlasIpc, ChatContinuitySnapshot, ChatGoalContext, GoalResumeConfirmation, GoalResumeReview, GoalRuntimeSelectionReceipt } from "../../../shared/types";
-import { goalObjectiveText } from "../../../shared/auto-goal";
+import { goalObjectiveDisplay, goalObjectiveText } from "../../../shared/auto-goal";
 import { confirmGoalResumeReview } from "../../../shared/goal-resume-review";
 import { IconEdit, IconTarget, IconTrash } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
@@ -472,33 +472,31 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
   const nextCheckAt = view.context?.wait?.nextCheckAt;
   const nextCheck = nextCheckAt && Number.isFinite(Date.parse(nextCheckAt))
     ? new Date(nextCheckAt).toLocaleString(ko ? "ko-KR" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : null;
-  const label = view.pending === "delete" ? (ko ? "목표를 삭제하는 중" : "Deleting goal")
-    : view.pending === "pause" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
-    : !observationFresh ? (ko ? "Goal 상태를 다시 확인하는 중" : "Rechecking Goal state")
-    : status === "pausing" ? (ko ? "멈추는 중 · 목표는 보존됩니다" : "Stopping · goal preserved")
-    : ownerGrantHeld ? (ko ? "오너 지시 없이 만들어진 목표라 아직 시작하지 않았어요 · 이어가기를 누르면 시작합니다"
-      : "Set up without an instruction from you, so it has not started · press Resume to start it")
+  const label = view.pending === "delete" ? (ko ? "목표 삭제 중" : "Deleting goal")
+    : view.pending === "pause" ? (ko ? "멈추는 중 · 목표 보존" : "Stopping · goal kept")
+    : !observationFresh ? (ko ? "상태 확인 중" : "Rechecking")
+    : status === "pausing" ? (ko ? "멈추는 중 · 목표 보존" : "Stopping · goal kept")
+    : ownerGrantHeld ? (ko ? "시작 전 · 이어가기를 누르면 시작" : "Not started · press Resume")
     : status === "blocked" && verificationUnavailable
-      ? (ko ? "앱이 결과를 확인하지 못해 다음 작업을 멈췄어요. 작업이 실패했다는 뜻은 아니에요."
-        : "The app could not check the result, so it paused further work. This does not mean the task failed.")
+      ? (ko ? "결과를 확인 못 해 멈춤 · 실패는 아님" : "Paused: could not check the result")
     : observationFresh && surface.state !== "unknown"
       ? goalSurfaceStatusLabel(surface.state, locale)
-    : status === "paused" ? (ko ? "일시정지됨" : "Paused")
+    : status === "paused" ? (ko ? "일시정지" : "Paused")
     : status === "blocked" && needsOngoingConfirmation
-      ? (ko ? "이 Goal의 다음 판단 주기는 확인 대기 중입니다 · 별도 예약 Graph 상태는 자동화에서 확인하세요" : "This Goal's next decision cycle awaits confirmation · check Automations for separately scheduled Graph runs")
+      ? (ko ? "다음 확인 대기 중" : "Next check pending")
     : status === "blocked" && claimedDispatchUncertain
-      ? (ko ? "이전 호출이 전달됐는지 불확실합니다 · 기록은 보존했고 자동 재실행을 막았습니다" : "Previous dispatch may have reached the runtime · history preserved and automatic replay stopped")
+      ? (ko ? "전달 불확실 · 자동 재실행 멈춤" : "Delivery unclear · replay stopped")
     : status === "blocked" && claimedBindingChanged
-      ? (ko ? "Goal 연결이 변경됐습니다 · 기록은 보존했고 자동 재실행을 막았습니다" : "Goal binding changed · history preserved and automatic replay stopped")
+      ? (ko ? "연결 바뀜 · 자동 재실행 멈춤" : "Link changed · replay stopped")
     : status === "blocked" && effectBoundaryUncertain
-      ? (ko ? "이전 호출의 효과 경계를 확인할 수 없습니다 · 기록은 보존했고 자동 재실행을 막았습니다" : "The previous effect boundary could not be verified · history preserved and automatic replay stopped")
-    : status === "blocked" ? (ko ? "진행이 멈췄습니다 · 재개 전 상태 확인이 필요합니다" : "Blocked · check the outcome before resuming")
-    : status === "verifying" ? (ko ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria")
-    : timedWait ? (ko ? `작동 중 · 다음 확인 ${nextCheck ?? "예정"}` : `Running · next check ${nextCheck ?? "scheduled"}`)
-    : status === "waiting_tool" ? (ko ? "이 Goal의 도구 결과 대기 중" : "Waiting for this Goal's tool result")
-    : status === "queued" ? (ko ? "이 Goal의 다음 실행 준비 중" : "Preparing this Goal's next run")
-    : status === "running" ? (ko ? "이 Goal을 실행하고 있습니다" : "This Goal is running")
-    : view.context?.objective || (ko ? "다음 요청으로 목표를 확정합니다" : "Your next request will define the goal");
+      ? (ko ? "반영 불확실 · 자동 재실행 멈춤" : "Outcome unclear · replay stopped")
+    : status === "blocked" ? (ko ? "멈춤 · 재개 전 확인 필요" : "Blocked · check before resuming")
+    : status === "verifying" ? (ko ? "결과 확인 중" : "Checking result")
+    : timedWait ? (ko ? `진행 중 · 다음 확인 ${nextCheck ?? "예정"}` : `Running · next check ${nextCheck ?? "set"}`)
+    : status === "waiting_tool" ? (ko ? "도구 결과 대기" : "Waiting for a tool")
+    : status === "queued" ? (ko ? "다음 실행 준비 중" : "Next run getting ready")
+    : status === "running" ? (ko ? "진행 중" : "Running")
+    : goalObjectiveDisplay(view.context?.objective ?? "") || (ko ? "다음 요청이 목표가 돼요" : "Your next request sets the goal");
   const shortStatus = view.pending ? (ko ? "처리 중" : "Working")
     : !observationFresh ? (ko ? "확인 중" : "Checking")
     : status === "blocked" && verificationUnavailable ? (ko ? "검증 오류" : "Verification error")

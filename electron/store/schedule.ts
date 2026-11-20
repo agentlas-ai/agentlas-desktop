@@ -26,8 +26,23 @@ export function nextRun(spec: ScheduleSpec, from: Date = new Date()): string | n
   switch (spec.kind) {
     case "cron": {
       try {
-        const next = new Cron(spec.expr, { timezone: spec.tz }).nextRun(from);
-        return next ? next.toISOString() : null;
+        const cron = new Cron(spec.expr, { timezone: spec.tz });
+        if (!cronHasFilters(spec)) {
+          const next = cron.nextRun(from);
+          return next ? next.toISOString() : null;
+        }
+        // Slots the cron yields that the filters (every Nth week, skipped dates) remove are walked past. The walk is bounded: a filter that
+        // removes every slot in two years of them (a skipped list covering them all) ends the schedule instead of spinning.
+        let cursor = from;
+        for (let guard = 0; guard < CRON_FILTER_WALK; guard += 1) {
+          const next = cron.nextRun(cursor);
+          if (!next) return null;
+          // Past the last day nothing will ever run again: stop walking (the job ends: the scheduler turns a job with no next run off).
+          if (spec.until && localDateIn(next, spec.tz) > spec.until) return null;
+          if (cronSlotAllowed(spec, next)) return next.toISOString();
+          cursor = next;
+        }
+        return null;
       } catch {
         return null;
       }
@@ -48,6 +63,52 @@ export function nextRun(spec: ScheduleSpec, from: Date = new Date()): string | n
     default:
       return null;
   }
+}
+
+/** How many cron slots one nextRun may walk past while the filters remove them (every 52nd week of a daily cron is 51*7 = 357 slots). */
+const CRON_FILTER_WALK = 800;
+/** A skipDates list longer than this is refused when it is read from a model (a year of public holidays is ~20; a list of hundreds is not a list a person made). */
+export const SKIP_DATES_MAX = 100;
+export const EVERY_WEEKS_MAX = 52;
+
+export function cronHasFilters(spec: { everyWeeks?: unknown; skipDates?: unknown; until?: unknown }): boolean {
+  return !!spec.everyWeeks || typeof spec.until === "string" || (Array.isArray(spec.skipDates) && spec.skipDates.length > 0);
+}
+
+/** The local calendar date (YYYY-MM-DD) of an instant in a zone. */
+export function localDateIn(at: Date, tz: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(at);
+}
+
+/** Days since 1970-01-01 of a YYYY-MM-DD date, counted on the calendar (no zone, no DST). */
+function dayNumber(date: string): number {
+  const [y, m, d] = date.split("-").map(Number);
+  return Math.floor(Date.UTC(y, (m || 1) - 1, d || 1) / 86_400_000);
+}
+/** Monday-start week index of a calendar date (1970-01-01 was a Thursday; day 4 = Monday 1970-01-05). */
+function weekIndex(date: string): number {
+  return Math.floor((dayNumber(date) - 4) / 7);
+}
+
+/** Does the cron slot `at` pass the spec's filters? (every Nth week from a date, skipped dates) */
+export function cronSlotAllowed(spec: { tz: string; everyWeeks?: { every: number; from: string }; skipDates?: string[]; until?: string }, at: Date): boolean {
+  const local = localDateIn(at, spec.tz);
+  if (spec.until && local > spec.until) return false;
+  if (spec.skipDates?.includes(local)) return false;
+  const weeks = spec.everyWeeks;
+  if (weeks) {
+    if (local < weeks.from) return false;
+    if ((weekIndex(local) - weekIndex(weeks.from)) % Math.max(1, weeks.every) !== 0) return false;
+  }
+  return true;
+}
+
+/** "YYYY-MM-DD" that is a real calendar date. */
+export function isCalendarDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [y, m, d] = value.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d));
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
 }
 
 /** cron 표현식이 croner로 파싱 가능한지 검증(UI 라이브 검증 + insert 전 게이트). */
@@ -132,7 +193,8 @@ export function parseLegacyToken(token: string, tz: string): ScheduleSpec | null
 function isCronExpression(raw: string): boolean {
   const parts = raw.split(/\s+/);
   if (parts.length !== 5 && parts.length !== 6) return false;
-  return parts.every((part) => /^[0-9*,\-/]+$/.test(part) || /^[A-Za-z]{3}(-[A-Za-z]{3})?$/.test(part));
+  // `5#L` (the last Friday) and `5#2` (the second Friday), `L` (the last day of the month): croner's own day-of-week / day-of-month forms.
+  return parts.every((part) => /^[0-9*,\-/#L]+$/.test(part) || /^[A-Za-z]{3}(-[A-Za-z]{3})?$/.test(part));
 }
 
 export function specFromStored(stored: string, tz: string): ScheduleSpec | null {
@@ -172,6 +234,52 @@ export function specFromStored(stored: string, tz: string): ScheduleSpec | null 
  *    (a once spec with no future time stores as a job that never runs).
  *  - cron: not a valid expression. interval: everyMs is not a positive number.
  */
+/** The names a model's scheduleSpec may carry. A key outside this list is something the scheduler would NOT do: it is refused, never dropped (the answer would then promise it). */
+const MODEL_SPEC_KEYS = new Set(["kind", "type", "atIso", "at", "time", "datetime", "when", "expr", "cron", "expression", "tz", "timezone", "everyMs", "intervalMs", "anchor", "everyWeeks", "skipDates", "until"]);
+
+/** `everyWeeks` and `skipDates` of a cron spec. {} = none, null = present but not usable. */
+export function readCronFilters(input: Record<string, unknown>): { everyWeeks?: { every: number; from: string }; skipDates?: string[]; until?: string } | null {
+  const out: { everyWeeks?: { every: number; from: string }; skipDates?: string[]; until?: string } = {};
+  const until = input.until;
+  if (until !== undefined && until !== null) {
+    if (!isCalendarDate(until)) return null;
+    out.until = until;
+  }
+  const weeks = input.everyWeeks;
+  if (weeks !== undefined && weeks !== null) {
+    if (typeof weeks !== "object" || Array.isArray(weeks)) return null;
+    const w = weeks as Record<string, unknown>;
+    if (typeof w.every !== "number" || !Number.isInteger(w.every) || w.every < 2 || w.every > EVERY_WEEKS_MAX || !isCalendarDate(w.from)) return null;
+    out.everyWeeks = { every: w.every, from: w.from };
+  }
+  const skip = input.skipDates;
+  if (skip !== undefined && skip !== null) {
+    if (!Array.isArray(skip) || skip.length > SKIP_DATES_MAX || !skip.every(isCalendarDate)) return null;
+    if (skip.length) out.skipDates = [...new Set(skip as string[])].sort();
+  }
+  return out;
+}
+
+/**
+ * Why a model's scheduleSpec is not usable, in the words the model gets back; null = nothing wrong with its keys. Two refusals the generic
+ * "cannot be read" does not say: a key the scheduler has no meaning for (a model wrote {kind:"cron",expr,biweekly:true} and the answer then promised
+ * every other week while the job ran every week:), and a malformed everyWeeks / skipDates.
+ */
+export function modelScheduleSpecProblem(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const input = raw as Record<string, unknown>;
+  const unknown = Object.keys(input).filter((key) => !MODEL_SPEC_KEYS.has(key));
+  if (unknown.length) {
+    return `scheduleSpec has ${unknown.map((key) => `"${key}"`).join(", ")}, which the scheduler does not act on, so the job would not do what that says. A cron spec can add everyWeeks {every:2..${EVERY_WEEKS_MAX}, from:"YYYY-MM-DD" (the first run's date)} for every Nth week, and skipDates ["YYYY-MM-DD", ...] (at most ${SKIP_DATES_MAX}) for dates that do not run, and until "YYYY-MM-DD" for the last day it runs (a job that ends on a date); the last Friday of the month is expr "0 17 * * 5#L". A rule beyond these (a holiday calendar by name, "unless it rains") cannot be stored: say so to the person instead of saving a plainer job.`;
+  }
+  if ((input.everyWeeks !== undefined && input.everyWeeks !== null) || (input.skipDates !== undefined && input.skipDates !== null) || (input.until !== undefined && input.until !== null)) {
+    const kind = typeof input.kind === "string" ? input.kind : input.type;
+    if (kind !== "cron") return "everyWeeks, skipDates and until belong to a {kind:\"cron\"} spec only";
+    if (readCronFilters(input) === null) return `everyWeeks must be {every: integer 2..${EVERY_WEEKS_MAX}, from:"YYYY-MM-DD"} skipDates a list of at most ${SKIP_DATES_MAX} real "YYYY-MM-DD" dates and until a real "YYYY-MM-DD" (the last day it runs)`;
+  }
+  return null;
+}
+
 export function readModelScheduleSpec(raw: unknown, tz: string, now: Date = new Date()): ScheduleSpec | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const input = raw as Record<string, unknown>;
@@ -203,7 +311,9 @@ export function readModelScheduleSpec(raw: unknown, tz: string, now: Date = new 
     } catch {
       return null;
     }
-    return { kind: "cron", expr: expr.trim(), tz: useTz };
+    const filters = readCronFilters(input);
+    if (filters === null) return null;
+    return { kind: "cron", expr: expr.trim(), tz: useTz, ...filters };
   }
   if (kind === "interval") {
     const every = pick("everyMs", "intervalMs");
@@ -219,6 +329,22 @@ export function readModelScheduleSpec(raw: unknown, tz: string, now: Date = new 
  */
 export function storedScheduleReadable(schedule: string, scheduleJson: string | null | undefined, tz: string): boolean {
   return specFromStored(scheduleJson && scheduleJson.trim() ? scheduleJson : schedule, tz) !== null;
+}
+
+/**
+ * What a model is told after it saved or changed a schedule: the words of the STORED spec and its next three runs, computed by the same nextRun
+ * the scheduler uses, so the answer is written from what will happen and not from what was asked ("every other Tuesday" saved as every Tuesday).
+ */
+export function scheduleReceipt(a: { scheduleSpec?: ScheduleSpec | null; nextRunAt?: string | null }, locale: "ko" | "en"): { words: string; nextRuns: string[] } | null {
+  const spec = a.scheduleSpec;
+  if (!spec) return null;
+  const runs: string[] = [];
+  let cursor = a.nextRunAt && Number.isFinite(Date.parse(a.nextRunAt)) ? a.nextRunAt : nextRun(spec, new Date());
+  while (cursor && runs.length < 3) {
+    runs.push(cursor);
+    cursor = nextRun(spec, new Date(Date.parse(cursor)));
+  }
+  return { words: describeSchedule(spec, locale), nextRuns: runs };
 }
 
 export type SchedulePreset = "daily" | "weekday" | "weekly" | "monthly" | "hourly";
@@ -263,3 +389,4 @@ export function compilePreset(
 // 표시 문구는 shared/schedule-describe.ts(순수, croner 비의존)로 분리해 렌더러와 공유한다.
 // 기존 import 경로를 유지하기 위해 여기서 그대로 재수출한다.
 export { describeSchedule } from "../../shared/schedule-describe";
+import { describeSchedule } from "../../shared/schedule-describe";

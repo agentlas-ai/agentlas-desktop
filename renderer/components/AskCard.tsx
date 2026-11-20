@@ -88,6 +88,7 @@ export function AskCard({
   subtitle,
   actionRow,
   collapsible = false,
+  closeLabel,
   collapsed: collapsedProp,
   onCollapsedChange,
   statusLabel,
@@ -102,6 +103,8 @@ export function AskCard({
    * 접힌 카드도 답을 기다리는 중이다(닫기와 다르다: 닫기는 건너뜀이다).
    */
   collapsible?: boolean;
+  /** What the close button does, said in words (its name and tooltip). A card whose close is not a plain "Close" must say what closing means. */
+  closeLabel?: string;
   /** 접힘 상태를 밖에서 쥘 때. 없으면 카드가 스스로 쥔다. */
   collapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
@@ -324,7 +327,8 @@ export function AskCard({
               <button
                 type="button"
                 className={styles.close}
-                aria-label={ko ? "닫기" : "Close"}
+                aria-label={closeLabel ?? (ko ? "닫기" : "Close")}
+                title={closeLabel}
                 onClick={onClose}
               >
                 <IconClose size={15} />

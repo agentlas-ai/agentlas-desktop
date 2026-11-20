@@ -3,15 +3,14 @@
 // Connector (MCP server) detail — tools it exposes and the connection/auth card.
 // Every state shown here comes from the typed status probe or the OAuth status
 // read; login and keys run the existing flows owned by the page.
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
-import { IconSettings, IconUser } from "@/components/Icon";
+import { IconUser } from "@/components/Icon";
 import { ToolLogo } from "./ToolLogo";
 import type { InstalledMcpServer, McpServerStatus, McpToolCatalogEntry, PluginBrandAsset } from "@/lib/types";
 import { executionCommand, runtimePrerequisite } from "./PluginSetupReview";
 import { Breadcrumb, CollapsedRows, DetailHeader, GlyphTool, InfoRows, MoreMenu, PromptCard, Section } from "./DetailParts";
-import { connectionLabel, connectionState, hostOf, oneLine, transportLabel, type ConnectionState } from "./toolsModel";
+import { connectionLabel, connectionNoticeLine, connectionProof, connectionState, hostOf, oneLine, transportLabel, type ConnectionState } from "./toolsModel";
 import styles from "./ToolsUi.module.css";
 
 type OAuthRead = { supported: boolean; connected: boolean } | null;
@@ -87,13 +86,18 @@ export function ConnectorDetail({
   const action = state ? actionFor(state) : null;
   const tone = state === "ready" ? "ready" : state === "keys" || state === "login" || state === "rejected" ? "warn" : undefined;
 
+  const proof = state === "ready" ? connectionProof(status, ko) : "";
+  // A good connection is shown as a result (the chip), not as a button: the dark "Verify" stayed after it and read as "not done yet". The button appears only
+  // when there is something to do, named for it. (No Manage button: it opened the vault of every key, not this connector's. Its keys are edited here.)
   const headerActions = server ? <>
     <MoreMenu label={ko ? "더 보기" : "More"} items={[
+      ...(server.envKeys.length > 0 ? [{ label: ko ? "키 다시 입력" : "Enter the key again", onClick: () => onEnterKeys(server, server.envKeys) }] : []),
       { label: server.enabled ? ko ? "끄기" : "Turn off" : ko ? "켜기" : "Turn on", onClick: () => onToggle(server) },
       { label: ko ? "제거" : "Remove", onClick: () => onRemove(server), danger: true },
     ]} />
-    <Link href="/library/env" className={styles.lightButton}><IconSettings size={14} />{ko ? "관리" : "Manage"}</Link>
-    <button type="button" className={styles.darkButton} onClick={() => onVerify(server)}>{ko ? "연결 확인" : "Verify"}</button>
+    {state === "ready"
+      ? <span className={styles.statusChip} data-tone="ready" role="status" data-connector-connected="true">{ko ? "연결됨" : "Connected"}{tools.length ? ` · ${ko ? `도구 ${tools.length}개` : `${tools.length} tools`}` : ""}</span>
+      : action && <button type="button" className={styles.darkButton} onClick={action.run}>{action.label}</button>}
   </> : entry ? <button type="button" className={styles.darkButton} disabled={busy} onClick={() => onInstall(entry)}>{busy ? ko ? "추가하는 중…" : "Adding…" : ko ? "추가" : "Add"}</button> : null;
 
   const command = server ? (server.transport === "stdio" ? executionCommand(server.command, server.args) : server.url) : entry ? (entry.transport === "stdio" ? executionCommand(entry.command, entry.args) : entry.url) : null;
@@ -117,7 +121,7 @@ export function ConnectorDetail({
             {smallIcon}
             <span className={styles.cardText}>
               <span className={styles.cardTitle}>{shortName}</span>
-              <span className={styles.cardSub} data-tone={tone}>{state ? `${connectionLabel(state, ko)} · ${transportLabel(transport, ko)}` : transportLabel(transport, ko)}{state === "ready" && tools.length ? ` · ${ko ? `도구 ${tools.length}개` : `${tools.length} tools`}` : ""}</span>
+              <span className={styles.cardSub} data-tone={tone}>{state ? `${connectionLabel(state, ko)} · ${transportLabel(transport, ko)}` : transportLabel(transport, ko)}{proof ? ` · ${proof}` : ""}</span>
             </span>
             {action && <button type="button" className={styles.smallButton} onClick={action.run}>{action.label}</button>}
           </div>
@@ -144,7 +148,10 @@ export function ConnectorDetail({
               : <button type="button" className={styles.smallButton} onClick={() => onVerify(server, "login")}>{ko ? "로그인" : "Sign in"}</button>}
           </div>}
         </div>
-        {server && status?.error && state !== "ready" && !loadFailed && <p className={styles.notice} role="status">{oneLine(status.error, 240)}</p>}
+        {server && status?.error && state !== "ready" && !loadFailed && <div className={styles.notice} role="status">
+          <p>{connectionNoticeLine(status, transport, ko)}</p>
+          <details><summary>{ko ? "자세히" : "Details"}</summary><code className={styles.mono}>{oneLine(status.error, 240)}</code></details>
+        </div>}
       </Section>
 
       <Section title={ko ? "정보" : "Information"}>

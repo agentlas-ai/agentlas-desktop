@@ -195,6 +195,14 @@ export async function approvalUnitOfChat(chatId: string): Promise<"project" | "c
   } catch { return null; }
 }
 
+/**
+ * Whether a card of the queue is still WAITING for the person. An expired / settled-elsewhere card (terminal) stays in the queue only so the person can dismiss it,
+ * and the conversation draws it as "승인 만료"; it is a closed record, not a wait - the dashboard and the dock badge must not count it.
+ */
+export function toolApprovalIsWaiting(id: string, actionStates: ReadonlyMap<string, ToolApprovalActionState>): boolean {
+  return actionStates.get(id)?.phase !== "terminal";
+}
+
 /** 훅 밖(전역 주의 저장소 lib/attention)에서 같은 큐를 구독한다. */
 export function subscribeToolApprovals(fn: () => void): () => void {
   return subscribe(fn);
@@ -336,9 +344,23 @@ export function markChatVisible(chatId: string | null | undefined): () => void {
     emit();
   };
 }
+/**
+ * the conversation a request is for. Main stamped it when it made the request (the stamp's chat; one function for every surface); a Main
+ * that does not stamp yet (older build) leaves the request's own chatId. null = a request of no conversation: no conversation pane draws it.
+ */
+export function toolApprovalChatOf(request: Pick<ToolApprovalRequestEvent, "chatId" | "scope">): string | null {
+  if (request.scope) return request.scope.chat ?? null;
+  return request.chatId ?? null;
+}
+/** The one renderer test "is this request this conversation's card" (the pane's own pick of a slot is lib/composer-decision-target.ts). */
+export function toolApprovalIsForChat(request: Pick<ToolApprovalRequestEvent, "chatId" | "scope">, chatId: string | null | undefined): boolean {
+  const owner = toolApprovalChatOf(request);
+  return !!chatId && owner !== null && owner === chatId;
+}
 /** 요청을 인라인으로 그릴 대화가 지금 화면에 없는가(→ 배지 대상). */
 export function needsBadge(request: ToolApprovalRequestEvent, visible: ReadonlySet<string>): boolean {
-  return !(request.chatId && visible.has(request.chatId));
+  const owner = toolApprovalChatOf(request);
+  return !(owner && visible.has(owner));
 }
 
 /**

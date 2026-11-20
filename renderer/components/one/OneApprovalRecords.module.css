@@ -3,7 +3,7 @@
  * the colour is on the result ICON alone (approved = grey-green, declined = red, the rest grey). Opened, the line shows request / target / answer in a
  * ruled block (values only); there is no button in it (a record, nothing to answer again).
  */
-.list { display: flex; flex-direction: column; gap: 2px; width: 100%; min-width: 0; margin: 6px 0; }
+.list { display: flex; flex-direction: column; gap: 2px; box-sizing: border-box; width: min(var(--chat-column-width, 740px), 100%); min-width: 0; margin: 6px auto; }
 .row { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; column-gap: 10px; width: 100%; min-height: 36px; box-sizing: border-box; padding: 6px 2px; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-size: 14px; line-height: 1.4; text-align: left; cursor: pointer; }
 .row:hover, .row:focus-visible { background: var(--fill-1); outline: none; }
 .icon { display: grid; place-items: center; color: var(--muted-deep, var(--ink-soft)); }

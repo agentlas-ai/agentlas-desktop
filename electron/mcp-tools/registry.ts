@@ -12,6 +12,7 @@ import {
 } from "../opencrab/constants";
 import type { InstalledMcpServer, McpTransport } from "../../shared/types";
 import { parseCredentialRefs } from "./credential-refs";
+import { signalRoadsMaybeChanged } from "../connectors/road-signal";
 
 interface ServerRow {
   id: string;
@@ -108,6 +109,7 @@ export function installFromCatalog(catalogId: string): InstalledMcpServer {
     JSON.stringify(envKeys),
     now,
   );
+  signalRoadsMaybeChanged(); // a program of this computer's road set (connectors/desktop-paths.ts re-measures; nobody listening = nothing)
   return getServer(id)!;
 }
 
@@ -209,6 +211,7 @@ export function installCustomServer(def: {
       db.prepare("UPDATE mcp_servers SET credential_refs_json = ? WHERE id = ?").run(JSON.stringify(parsedRefs.refs), id);
     }
   })();
+  signalRoadsMaybeChanged();
   return getServer(id)!;
 }
 
@@ -294,12 +297,14 @@ export function scrubLegacyOpenCrabCredentialUrls(): { scrubbed: number } {
 export function removeServer(id: string): void {
   getDb().prepare("DELETE FROM mcp_servers WHERE id = ?").run(id);
   // agent_mcp_servers는 FK ON DELETE CASCADE로 자동 정리됨
+  signalRoadsMaybeChanged();
 }
 
 export function setServerEnabled(id: string, enabled: boolean): InstalledMcpServer {
   getDb().prepare("UPDATE mcp_servers SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
   const server = getServer(id);
   if (!server) throw new Error(`MCP server not found: ${id}`);
+  signalRoadsMaybeChanged();
   return server;
 }
 
@@ -311,7 +316,7 @@ export function setServerEnabled(id: string, enabled: boolean): InstalledMcpServ
  * includes the epoch (prepared-transport.ts), so client.ts refuses a preparation made before the move. */
 export function revokeServerConnectionSession(id: string, options: { keepEnabled?: boolean } = {}): InstalledMcpServer {
   const db = getDb();
-  return db.transaction(() => {
+  const revoked = db.transaction(() => {
     const row = db.prepare("SELECT * FROM mcp_servers WHERE id = ?").get(id) as ServerRow | undefined;
     if (!row) throw Object.assign(new Error("connector_not_installed"), { code: "connector_not_installed" });
     if (row.connection_epoch === undefined) throw Object.assign(new Error("connection_epoch_unsupported"), { code: "connection_epoch_unsupported" });
@@ -325,6 +330,8 @@ export function revokeServerConnectionSession(id: string, options: { keepEnabled
     if (changed.changes !== 1) throw Object.assign(new Error("connection_epoch_conflict"), { code: "connection_epoch_conflict" });
     return getServer(id)!;
   }).immediate();
+  signalRoadsMaybeChanged();
+  return revoked;
 }
 
 /** A connection's on/off switch (desktop, phone, the model's connector.disconnect): on enables; off is a revoke

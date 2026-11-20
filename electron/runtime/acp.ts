@@ -81,6 +81,7 @@ import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 import { composeDeclaredPrompt } from "./prompt-order";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
+import { confinementNotice } from "../../shared/runtime-confinement";
 
 /** How to spawn an ACP agent. Adding a runtime = one row (mirrors contracts/runtime-registry.json). */
 export interface AcpAgentSpec {
@@ -1278,6 +1279,11 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     const ownerCanAnswer = !req.unattended && !req.unattendedNoAsk;
     const turnAsks: AgentlasAskQuestion[] = [];
     let turnPlanText = "";
+    // Kimi and Cursor have no flag that keeps a write run inside its folder (grok and copilot do or are arbitrated by the host): say so as a typed notice, never silently.
+    if (spec.id === "kimi" || spec.id === "cursor") {
+      const unconfined = confinementNotice(spec.id, req.permission, req.locale);
+      if (unconfined) events.onNotice?.(unconfined);
+    }
     const client = new AcpSessionClient(events, req.permission, locale, {
       ownerQuestion: (question) => { if (ownerCanAnswer) turnAsks.push(question); },
       signal: approvalTurn.signal,

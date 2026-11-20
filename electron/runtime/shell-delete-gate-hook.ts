@@ -1,5 +1,6 @@
 /**
- * Delete gate for a write run's shell - the CLI starts this process right before its Bash / PowerShell tool runs (PreToolUse).
+ * Delete gate for a write run's shell - the CLI starts this process right before its Bash / PowerShell tool runs (PreToolUse). It also refuses a command that
+ * registers a job in an OS scheduler, in every mode this script runs in (os-scheduler-gate-hook.ts).
  * The judgment is approval-rule.ts shellCommandDeletes (the one function every executor uses). A command that deletes nothing leaves
  * with no output (the usual permission flow). A delete asks Main over the approval server's loopback wire and prints the owner's answer;
  * EVERY failure - no gate in the environment, no control file, no connection, a bad reply, a timeout - refuses the delete: a delete never
@@ -7,7 +8,7 @@
  */
 import fs from "node:fs";
 import http from "node:http";
-import { approvalRefusalResultText, shellCommandDeletes } from "./approval-rule";
+import { approvalRefusalResultText, askRegistersOsScheduler, shellCommandDeletes } from "./approval-rule";
 
 const ASK_TIMEOUT_MS = 320_000;
 
@@ -54,14 +55,16 @@ process.stdin.on("end", () => {
   agy = Boolean(input.toolCall);
   let command = "";
   if (agy) {
-    // Antigravity's plugin hook lives in the product mirror for every mode; only a write run (the runner sets REQUIRED) is gated here.
-    if (process.env.AGENTLAS_SHELL_GATE_REQUIRED !== "1") return;
     if (input.toolCall?.name !== "run_command") return;
     command = typeof input.toolCall.args?.CommandLine === "string" ? input.toolCall.args.CommandLine : "";
   } else {
     if (input.tool_name !== "Bash" && input.tool_name !== "PowerShell") return;
     command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
   }
+  // A job in an OS scheduler is refused in every mode (os-scheduler-gate-hook.ts); the delete card below is a write run's alone.
+  if (command && askRegistersOsScheduler({ command })) { deny(approvalRefusalResultText({ action: "os_scheduler", cause: "app_owns_schedules" })); return; }
+  // Antigravity's plugin hook lives in the product mirror for every mode; only a write run (the runner sets REQUIRED) asks about a delete here.
+  if (agy && process.env.AGENTLAS_SHELL_GATE_REQUIRED !== "1") return;
   if (!command || !shellCommandDeletes(command)) return;
   const controlFile = process.env.AGENTLAS_SHELL_GATE_CONTROL;
   const handle = process.env.AGENTLAS_SHELL_GATE_HANDLE;

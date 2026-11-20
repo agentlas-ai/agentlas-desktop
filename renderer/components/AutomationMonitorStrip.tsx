@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import type { Automation, ChatGoalContext } from "@/lib/types";
 import { enabledScheduleWithoutNextRun } from "@/lib/automation-schedule-state";
+import { waitTimeLabel } from "@/lib/wait-time-label";
 import styles from "./AutomationMonitorStrip.module.css";
 
 /** A projection of existing durable automations. Opening this UI never runs one. */
@@ -34,16 +35,18 @@ function GoalWaitMonitor({ chatId, locale }: { chatId: string | null; locale: "k
   if(!wait || wait.state==="cancelled" || wait.state==="dispatched")return error
     ? <p className={styles.error} role="status">{error}</p> : null;
   const active=context.runStatus==="waiting_tool" && wait.state==="pending";
-  const status=active?(wait.subjectKind==="timer"?(ko?"다음 목표 주기 예약됨":"Next goal cycle scheduled"):(ko?"결과 기다리는 중":"Waiting for a result"))
-    :context.runStatus==="paused"?(ko?"대기 일시정지":"Wait paused")
-    :wait.state==="expired"?(ko?"대기 시간 종료":"Wait deadline reached"):(ko?"작업 확인 필요":"Work needs attention");
+  const timer=wait.subjectKind==="timer";
+  const status=active?(timer?(ko?"다음 확인이 예정돼 있어요":"A check is scheduled"):(ko?"결과 기다리는 중":"Waiting for a result"))
+    :context.runStatus==="paused"?(ko?"기다림을 멈춰 둠":"Waiting is paused")
+    :wait.state==="expired"?(ko?"기다리는 시간이 끝남":"Wait time is over"):(ko?"확인이 필요해요":"Needs your attention");
+  const nextCheck=active?waitTimeLabel(wait.nextCheckAt,locale):null;
   return <details className={styles.root} data-goal-wait={wait.waitId}>
     <summary><span className={styles.dot} data-active={active}/>{status}</summary>
     <div className={styles.list}>
-      <p>{ko?"앱 실행 중 변화를 확인하고, 결과가 도착하면 같은 작업을 이어갑니다.":"Checks while the app is running and continues the same task when the result arrives."}</p>
-      <div className={styles.row}><div><strong>{wait.subjectKind==="timer"?(ko?"다음 목표 주기":"Next goal cycle"):wait.subjectKind==="artifact"?(ko?"산출물 변경":"Artifact change"):(ko?"진행 중인 작업 결과":"Running task result")}</strong>
-        {active && wait.nextCheckAt && <span>{ko?"다음 확인: ":"Next check: "}{new Date(wait.nextCheckAt).toLocaleTimeString(locale)}</span>}
-        {wait.deadline && <span>{ko?"기다리는 기한: ":"Deadline: "}{new Date(wait.deadline).toLocaleString(locale)}</span>}
+      <p>{timer?(ko?"정한 시각이 되면 이 대화에서 이어서 확인해요. 앱이 켜져 있어야 해요.":"At the set time the check continues in this chat. The app has to be open."):(ko?"결과가 오면 이 대화에서 이어서 해요. 앱이 켜져 있어야 해요.":"When the result arrives the work continues in this chat. The app has to be open.")}</p>
+      <div className={styles.row}><div><strong>{timer?(ko?"정한 시각에 확인":"Check at the set time"):wait.subjectKind==="artifact"?(ko?"산출물이 바뀌면 확인":"Check when the output changes"):(ko?"진행 중인 작업이 끝나면 확인":"Check when the running task ends")}</strong>
+        {nextCheck && <span>{ko?"다음 확인: ":"Next check: "}{nextCheck}</span>}
+        {wait.deadline && <span>{ko?"기다리는 기한: ":"Deadline: "}{waitTimeLabel(wait.deadline,locale)??new Date(wait.deadline).toLocaleString(locale)}</span>}
       </div>{active && <button type="button" onClick={()=>{
         if(!chatId || !context)return;
         void ipc()?.chats.pauseGoal(chatId,context.goalId).then(value=>setContext(value)).catch(()=>setError(ko?"중지하지 못했습니다. 다시 시도해 주세요.":"Could not stop. Try again."));

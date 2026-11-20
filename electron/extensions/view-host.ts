@@ -1124,7 +1124,11 @@ export async function openScienceExtensionView(input: {
   });
   view.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   view.webContents.on("render-process-gone", (_event, details) => {
+    if (activeViews.get(active.ownerId) !== active) return;
     clearSciencePresentation(active);
+    // A stopped interface leaves a blank native rectangle over the whole window, above the host page's own "could not be opened" card.
+    // Retire it so that card, with its retry and its way back to Work, is the thing on screen.
+    closeActive(active, false);
     active.send({ id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "error", errorCode: "science-renderer-stopped", errorMessage: details.reason });
   });
   view.webContents.on("unresponsive", () => {

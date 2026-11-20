@@ -27,7 +27,17 @@ import type {
   Trigger,
   TriggerKind,
 } from "@/lib/types";
-import { ScheduleBuilder, type ScheduleBuilderValue } from "@/components/automation/ScheduleBuilder";
+import { ScheduleBuilder, scheduleProblemText, type ScheduleBuilderValue } from "@/components/automation/ScheduleBuilder";
+import type { ScheduleProblem } from "@shared/schedule-form";
+import {
+  clearNewAutomationDraft,
+  fsPathProblem,
+  readNewAutomationDraft,
+  saveBlocker,
+  writeNewAutomationDraft,
+  type NewAutomationDraft,
+  type SaveBlocker,
+} from "@/lib/automation-form-guard";
 import { automationEditPatch } from "@/lib/automation-edit-patch";
 import { IconBuilding, IconSparkles } from "@/components/Icon";
 import {
@@ -89,14 +99,27 @@ function automationEffortsFor(
 }
 
 export default function NewAutomationWrapper() {
+  // "지우고 새로 시작": 쓰던 내용을 비우고 폼을 처음 상태로 다시 세운다(key 가 바뀌면 상태가 새로 시작된다).
+  const [fresh, setFresh] = useState(0);
   return (
     <Suspense fallback={null}>
-      <NewAutomationPage />
+      <NewAutomationPage
+        key={fresh}
+        onStartOver={() => {
+          clearNewAutomationDraft();
+          setFresh((n) => n + 1);
+        }}
+      />
     </Suspense>
   );
 }
 
-function NewAutomationPage() {
+function blockerMessage(t: ReturnType<typeof useT>["t"], blocker: SaveBlocker): string {
+  if (blocker.startsWith("schedule:")) return scheduleProblemText(t, blocker.slice("schedule:".length) as ScheduleProblem);
+  return t(`auto.new.blocker.${blocker as Exclude<SaveBlocker, `schedule:${string}`>}`);
+}
+
+function NewAutomationPage({ onStartOver }: { onStartOver: () => void }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const editId = searchParams.get("id") ?? "";
@@ -139,10 +162,15 @@ function NewAutomationPage() {
   const [loadFailed, setLoadFailed] = useState(false);
   const reviewUntouchedRef = useRef(true);
   const executionAiRef = useRef<HTMLDivElement>(null);
+  // 쓰던 폼 보관(새로 만들 때만): 나갔다 돌아오면 이름·지시문·고른 것이 남아 있다. 만들었거나 취소했으면 더는 쓰지 않는다.
+  const [draftReady, setDraftReady] = useState(Boolean(editId));
+  const [draftRestored, setDraftRestored] = useState(false);
+  const draftDoneRef = useRef(false);
+  const pendingDraftRef = useRef<NewAutomationDraft | null>(null);
 
   const applyOneReviewSeed = useCallback((seed: OneSuggestionReviewSeed): OneReviewSeedApplyResult => {
     if (seed.kind !== "automation" || seed.targetSurface !== "automation") return "blocked";
-    if (!loaded) return "defer";
+    if (!loaded || !draftReady) return "defer";
     if (
       editId
       || !reviewUntouchedRef.current
@@ -158,7 +186,55 @@ function NewAutomationPage() {
     // target, enablement, and execution are never inferred here.
     setName(seed.name);
     return "applied";
-  }, [chainAfter, editId, fsPath, initialSpec, loaded, name, prompt, toolModeTouched]);
+  }, [chainAfter, draftReady, editId, fsPath, initialSpec, loaded, name, prompt, toolModeTouched]);
+
+  // 쓰던 폼 되살리기. One 제안 검토로 열린 폼(oneReview)은 그쪽이 채우므로 묵은 초안이 대신하지 않는다.
+  useEffect(() => {
+    if (editId) {
+      setDraftReady(true);
+      return;
+    }
+    const handoff = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("oneReview") !== null;
+    const draft = handoff ? null : readNewAutomationDraft();
+    if (draft) {
+      setName(draft.name);
+      setPrompt(draft.prompt);
+      setTriggerType(draft.triggerType);
+      setFsPath(draft.fsPath);
+      setFsOn(draft.fsOn);
+      setChainAfter(draft.chainAfter);
+      setToolMode(draft.toolMode);
+      setHubMode(draft.hubMode);
+      if (draft.schedule) {
+        // 빌더는 처음 받은 일정을 부모에 다시 알리지 않는다 — 부모가 같은 값을 들고 있어야 저장 때 빠지지 않는다.
+        setInitialSpec(draft.schedule.spec);
+        setSched({ spec: draft.schedule.spec, legacyToken: draft.schedule.legacyToken, problem: null });
+      }
+      // 대상·프로젝트는 지금도 있는지 목록을 읽은 뒤에 되돌린다.
+      pendingDraftRef.current = draft;
+      setDraftRestored(true);
+    }
+    setDraftReady(true);
+  }, [editId]);
+
+  useEffect(() => {
+    if (editId || !draftReady || draftDoneRef.current) return;
+    writeNewAutomationDraft({
+      version: 1,
+      name,
+      prompt,
+      triggerType,
+      fsPath,
+      fsOn,
+      chainAfter,
+      targetType,
+      targetId,
+      projectContextChoice,
+      toolMode,
+      hubMode,
+      schedule: sched && !sched.problem ? { spec: sched.spec, legacyToken: sched.legacyToken } : null,
+    });
+  }, [editId, draftReady, name, prompt, triggerType, fsPath, fsOn, chainAfter, targetType, targetId, projectContextChoice, toolMode, hubMode, sched]);
 
   useEffect(() => {
     const api = ipc();
@@ -235,6 +311,26 @@ function NewAutomationPage() {
         }
         setLoaded(true);
         return;
+      }
+      // 새로 만들기: 보관해 둔 대상·프로젝트가 지금도 있고 그 사이 아무것도 건드리지 않았을 때만 되돌린다.
+      const pending = pendingDraftRef.current;
+      pendingDraftRef.current = null;
+      if (pending && reviewUntouchedRef.current) {
+        const targetStillThere = pending.targetId !== "" && (
+          pending.targetType === "firm"
+            ? fm.some((f) => f.id === pending.targetId)
+            : pending.targetType === "hub"
+              ? hub.some((a) => a.slug === pending.targetId)
+              : visible.some((a) => a.id === pending.targetId)
+        );
+        if (targetStillThere) {
+          setTargetType(pending.targetType);
+          setTargetId(pending.targetId);
+        }
+        if (pending.projectContextChoice === "__none__" || projectRows.some((project) => project.id === pending.projectContextChoice)) {
+          setProjectContextChoice(pending.projectContextChoice);
+          setProjectContextTouched(true);
+        }
       }
     })();
   }, [editId]);
@@ -408,6 +504,8 @@ function NewAutomationPage() {
             }
           : {}),
       });
+      draftDoneRef.current = true;
+      clearNewAutomationDraft();
       if (blankCanvas) {
         navigate(`/automation/flow?id=${encodeURIComponent(created.id)}`, "replace");
       } else {
@@ -526,7 +624,20 @@ function NewAutomationPage() {
       : current);
   }
 
-  const canSubmit = !!name.trim() && !!targetId && !!projectContextChoice && !busy;
+  // 저장 단추가 꺼진 이유는 단추 곁에 말한다 — 이유 없이 꺼진 단추는 막다른 길이다.
+  const blocker = saveBlocker({
+    name,
+    triggerType,
+    fsPath,
+    chainAfter,
+    scheduleProblem: sched?.problem,
+    projectContextChoice,
+    targetId,
+    hasAnyTarget: firms.length + agents.length + hubAgents.length > 0,
+    loadFailed,
+  });
+  const canSubmit = blocker === null && !busy;
+  const watchPathProblem = triggerType === "fs" ? fsPathProblem(fsPath) : null;
 
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper-2)" }}>
@@ -555,6 +666,15 @@ function NewAutomationPage() {
         )}
 
         <OneSuggestionReviewHandoffBanner surface="automation" locale={locale} onReviewSeed={applyOneReviewSeed} />
+
+        {draftRestored && (
+          <p role="status" style={{ margin: "0 0 12px", padding: "9px 11px", borderRadius: 9, background: "var(--fill-1)", color: "var(--ink)", fontSize: 12, lineHeight: 1.6 }}>
+            {t("auto.new.draft.restored")}{" "}
+            <button type="button" onClick={onStartOver} style={{ color: "var(--accent)", fontSize: 12, fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}>
+              {t("auto.new.draft.clear")}
+            </button>
+          </p>
+        )}
 
         <Field label={t("auto.field.name")}>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("auto.field.name.placeholder")} autoFocus style={inputStyle} />
@@ -591,14 +711,23 @@ function NewAutomationPage() {
                 마운트 시 1회뿐이라(ScheduleBuilder.tsx의 최초 1회 useEffect), initialSpec이
                 아직 null인 첫 렌더에 마운트되면 저장된 스케줄을 영영 못 읽고 기본값
                 (daily 09:00)을 그대로 emit → 이름만 고쳐 저장해도 실행 시각이 조용히 바뀐다. */}
-            {loaded && <ScheduleBuilder value={initialSpec} onChange={setSched} />}
+            {loaded && draftReady && <ScheduleBuilder value={initialSpec} onChange={setSched} />}
           </Field>
         )}
 
         {triggerType === "fs" && (
           <>
             <Field label={t("auto.trigger.fs.path")}>
-              <input value={fsPath} onChange={(e) => setFsPath(e.target.value)} placeholder="/Users/you/Downloads" style={{ ...inputStyle, fontFamily: "var(--font-mono)" }} />
+              <input
+                value={fsPath}
+                onChange={(e) => setFsPath(e.target.value)}
+                placeholder="/Users/you/Downloads"
+                aria-invalid={watchPathProblem === "relative" ? true : undefined}
+                style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
+              />
+              <p role="status" style={{ margin: "6px 2px 0", fontSize: 11, lineHeight: 1.5, color: watchPathProblem === "relative" ? "var(--red-deep, var(--danger))" : "var(--muted-deep)" }}>
+                {watchPathProblem === "relative" ? t("auto.new.blocker.fs_relative") : t("auto.trigger.fs.hint")}
+              </p>
             </Field>
             <Field label={t("auto.trigger.fs.on")}>
               <div style={{ display: "flex", gap: 6 }}>
@@ -872,8 +1001,14 @@ function NewAutomationPage() {
           </div>
         )}
 
-        <div style={{ display: "flex", gap: 10, marginTop: 24, flexWrap: "wrap" }}>
-          <button onClick={() => void submit(false)} disabled={!canSubmit} style={primaryBtn(canSubmit)}>
+        {blocker && !busy && (
+          <p id="automation-save-blocker" role="status" style={{ margin: "20px 0 0", fontSize: 12, lineHeight: 1.5, color: "var(--muted-deep)" }}>
+            {blockerMessage(t, blocker)}
+          </p>
+        )}
+
+        <div style={{ display: "flex", gap: 10, marginTop: blocker && !busy ? 10 : 24, flexWrap: "wrap" }}>
+          <button onClick={() => void submit(false)} disabled={!canSubmit} aria-describedby={blocker ? "automation-save-blocker" : undefined} style={primaryBtn(canSubmit)}>
             {editId ? t("auto.edit.save") : t("project.btn.create")}
           </button>
           {!editId && (
@@ -881,7 +1016,17 @@ function NewAutomationPage() {
               {t("auto.new.blank")}
             </button>
           )}
-          <button onClick={() => router.back()} style={secondaryBtn}>
+          <button
+            onClick={() => {
+              // 취소는 버리겠다는 뜻이다 — 보관해 둔 초안도 함께 버린다(그냥 나가는 것과 다르다).
+              if (!editId) {
+                draftDoneRef.current = true;
+                clearNewAutomationDraft();
+              }
+              router.back();
+            }}
+            style={secondaryBtn}
+          >
             {t("common.cancel")}
           </button>
         </div>

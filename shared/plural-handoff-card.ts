@@ -15,8 +15,12 @@ export const HANDOFF_RESULT_CHARS = 2000;
 export type HandoffCardKind = "sent" | "recv";
 /** The states a card can be in (the wire's SentCardState; a received card uses claimed / approval / done / failed / stopped). */
 export type HandoffCardState =
-  | "reserved" | "waiting_desktop_off" | "waiting_phone_app" | "claimed" | "claimed_desktop_off" | "approval"
+  | "asking" | "reserved" | "waiting_desktop_off" | "waiting_phone_app" | "claimed" | "claimed_desktop_off" | "approval"
   | "done" | "failed" | "stopped" | "expired" | "cancelled";
+
+/** How a row that went through the consent chip ended up: sent under an Always-allow rule, denied, or never answered. The words are in consentCopy / handoffCardView. */
+export type HandoffConsentEnd = "rule" | "deny" | "unanswered";
+const CONSENT_ENDS: ReadonlySet<string> = new Set(["rule", "deny", "unanswered"]);
 
 export interface HandoffCardValue {
   v: 1;
@@ -49,13 +53,15 @@ export interface HandoffCardValue {
   q?: HandoffQuestion[];
   /** Sent: what this desktop answered here, one quiet line each (at most 10). */
   log?: HandoffAnswerLine[];
+  /** Sent: the row went through the consent chip (state `asking` while the person has not answered). */
+  consent?: HandoffConsentEnd;
 }
 export interface HandoffQuestion { qid: string; kind: "money" | "delete" | "send"; target: string; preview?: string }
 export interface HandoffAnswerLine { kind: "money" | "delete" | "send"; target: string; result: "allowed" | "denied" | "cancelled"; at: string }
 const QID = /^[A-Za-z0-9_.:@-]{1,128}$/;
 const KIND_SET: ReadonlySet<string> = new Set(["money", "delete", "send"]);
 
-const STATES: ReadonlySet<string> = new Set(["reserved", "waiting_desktop_off", "waiting_phone_app", "claimed", "claimed_desktop_off", "approval", "done", "failed", "stopped", "expired", "cancelled"]);
+const STATES: ReadonlySet<string> = new Set(["asking", "reserved", "waiting_desktop_off", "waiting_phone_app", "claimed", "claimed_desktop_off", "approval", "done", "failed", "stopped", "expired", "cancelled"]);
 const cut = (value: unknown, max: number): string => (typeof value === "string" ? value : "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").slice(0, max);
 
 /** The stored text of a card row. */
@@ -105,10 +111,11 @@ export function decodeHandoffCard(text: string | null | undefined): HandoffCardV
     ...(to ? { to } : {}),
     ...(q.length ? { q } : {}),
     ...(log.length ? { log } : {}),
+    ...(typeof r.consent === "string" && CONSENT_ENDS.has(r.consent) ? { consent: r.consent as HandoffConsentEnd } : {}),
   };
 }
 
-export type HandoffAction = "cancel" | "retry" | "plan" | "login";
+export type HandoffAction = "cancel" | "retry" | "plan" | "login" | "dismiss";
 export type HandoffIcon = "send" | "clock" | "phoneOff" | "spinner" | "question" | "flag" | "alert" | "pause" | "blocked" | "cancel";
 export interface HandoffCardView {
   header: string;
@@ -144,17 +151,20 @@ function failureWords(card: HandoffCardValue, ko: boolean): { text: string; acti
   const before = card.started === false;
   const why = card.why ?? "error";
   if (before) {
-    if (why === "desktop_update") return { text: ko ? `실패 · ${place} 업데이트 필요` : `Failed · ${place} needs an update`, actions: ["retry"] };
-    if (why === "no_runner") return { text: ko ? "실패 · AI 모델 로그인 필요" : "Failed · sign in to the AI model", actions: ["retry"] };
-    if (why === "limit") return { text: ko ? "실패 · 사용 한도 초과" : "Failed · usage limit reached", actions: ["retry"] };
-    return { text: ko ? "실패 · 오류 발생" : "Failed · something went wrong", actions: ["retry"] };
+    if (why === "desktop_update") return { text: ko ? `실패 · ${place} 업데이트 필요` : `Failed · ${place} needs an update`, actions: ["retry", "dismiss"] };
+    if (why === "no_runner") return { text: ko ? "실패 · AI 모델 로그인 필요" : "Failed · sign in to the AI model", actions: ["retry", "dismiss"] };
+    if (why === "limit") return { text: ko ? "실패 · 사용 한도 초과" : "Failed · usage limit reached", actions: ["retry", "dismiss"] };
+    return { text: ko ? "실패 · 오류 발생" : "Failed · something went wrong", actions: ["retry", "dismiss"] };
   }
-  if (why === "permission") return { text: ko ? "실패 · 위치 권한 없음" : "Failed · no location permission", actions: [] };
-  if (why === "phone_app") return { text: ko ? "실패 · 폰 응답 없음" : "Failed · the phone did not answer", actions: [] };
-  if (why === "limit") return { text: ko ? "실패 · 사용 한도 초과" : "Failed · usage limit reached", actions: ["plan"] };
-  if (why === "approval_unavailable") return { text: ko ? "실패 · 읽기 전용 권한" : "Failed · read-only permission", actions: [] };
-  if (why === "no_runner") return { text: ko ? "실패 · AI 모델 로그인 필요" : "Failed · sign in to the AI model", actions: card.here ? ["login"] : [] };
-  return { text: ko ? "실패 · 오류 발생" : "Failed · something went wrong", actions: [] };
+  if (why === "permission") return { text: ko ? "실패 · 위치 권한 없음" : "Failed · no location permission", actions: ["dismiss"] };
+  if (why === "phone_app") return { text: ko ? "실패 · 폰 응답 없음" : "Failed · the phone did not answer", actions: ["dismiss"] };
+  if (why === "limit") return { text: ko ? "실패 · 사용 한도 초과" : "Failed · usage limit reached", actions: ["plan", "dismiss"] };
+  if (why === "approval_unavailable") return { text: ko ? "실패 · 읽기 전용 권한" : "Failed · read-only permission", actions: ["dismiss"] };
+  if (why === "no_runner") return { text: ko ? "실패 · AI 모델 로그인 필요" : "Failed · sign in to the AI model", actions: card.here ? ["login"] : ["dismiss"] };
+  // An error after the work began (the phone agent's model call timed out and the card said only "error" with no way on). The cause the server gave is `error`; the card says where it ended and offers
+  // the two ways on: ask again (a NEW hand-off, so the person's chip asks again too, nothing is sent behind their back) or dismiss. A result the work already left is kept, so only a card with none offers the retry.
+  const noResult = !card.result;
+  return { text: ko ? `실패 · ${place}에서 오류로 끝났어요` : `Failed · ended with an error on ${place}`, actions: noResult ? ["retry", "dismiss"] : ["dismiss"] };
 }
 
 function stoppedWords(card: HandoffCardValue, ko: boolean): string {
@@ -174,15 +184,20 @@ export function handoffCardView(card: HandoffCardValue, ctx: HandoffCopyContext)
     ? (ko ? `전달 업무 · ${card.agent}` : `Handed-over work · ${card.agent}`)
     : card.agent
       ? (ko ? `${card.agent}에게 전달${card.phone || card.place ? ` · ${place}` : ""}` : `Handed to ${card.agent}${card.phone || card.place ? ` · ${place}` : ""}`)
-      // written at hand-off time, before the server's list said which agent got it (the next answer fills the name in)
-      : (ko ? "다른 에이전트에게 전달" : "Handed to another agent");
+      // written at hand-off time, before the server's list said which agent got it (the next answer fills the name in). The place it went is known from the
+      // first moment (the row's `to`, or the desktop's name): the card says it, so the person is never left with "another agent" for a hand-off to their phone.
+      : card.phone || card.to === "phone" || card.place
+        ? (ko ? `${card.phone || card.to === "phone" ? "폰" : card.place}의 에이전트에게 전달` : `Handed to the agent on ${card.phone || card.to === "phone" ? "Phone" : card.place}`)
+        : (ko ? "다른 에이전트에게 전달" : "Handed to another agent");
   const time = handoffTimeWord(card.at, ctx);
   const sent = card.k === "sent";
   const base = { header, brief: card.brief };
   const note = card.more ? (ko ? `나머지 결과 · ${place}의 ${card.agent} 대화` : `Rest of the result · in ${card.agent}'s conversation on ${place}`) : undefined;
   const withResult = { ...(card.result ? { result: card.result } : {}), ...(card.result && note ? { note } : {}) };
   switch (card.state) {
-    case "reserved": return { ...base, status: ko ? "전달됨" : "Sent", tone: "neutral", icon: "send", actions: ["cancel"] };
+    // The row waits for the person's chip: nothing was sent. The chip's own words are consentCopy; this line is what a conversation without the buttons (an older phone) reads.
+    case "asking": return { ...base, status: ko ? "확인 대기 · 아직 보내지 않음" : "Waiting for you · not sent yet", tone: "neutral", icon: "question", actions: [] };
+    case "reserved": return { ...base, status: card.consent === "rule" ? (ko ? "항상 허용으로 보냄" : "Sent under Always allow") : (ko ? "전달됨" : "Sent"), tone: "neutral", icon: "send", actions: ["cancel"] };
     case "waiting_desktop_off": return { ...base, status: ko ? `대기 · ${place} 꺼짐` : `Waiting · ${place} is off`, tone: "neutral", icon: "clock", actions: ["cancel"] };
     case "waiting_phone_app": return { ...base, status: ko ? "대기 · 폰에서 Agentlas 실행 필요" : "Waiting · open Agentlas on the phone", tone: "neutral", icon: "phoneOff", actions: ["cancel"] };
     case "claimed": return { ...base, status: ko ? "진행 중" : "In progress", tone: "neutral", icon: "spinner", actions: sent ? ["cancel"] : [] };
@@ -191,8 +206,10 @@ export function handoffCardView(card: HandoffCardValue, ctx: HandoffCopyContext)
     case "done": return { ...base, status: ko ? `종료${time ? ` ${time}` : ""}` : `Ended${time ? ` ${time}` : ""}`, tone: "neutral", icon: "flag", actions: [], ...withResult };
     case "failed": { const f = failureWords(card, ko); return { ...base, status: f.text, tone: "error", icon: "alert", actions: sent ? f.actions.filter((a) => a !== "retry" || card.to) : [], ...withResult }; }
     case "stopped": return { ...base, status: stoppedWords(card, ko), tone: "neutral", icon: "pause", actions: [], ...withResult };
-    case "expired": return { ...base, status: ko ? "실행 불가 · 시작 기한 경과" : "Cannot run · start deadline passed", tone: "error", icon: "blocked", actions: sent && card.to ? ["retry"] : [] };
-    case "cancelled": return card.late
+    case "expired": return card.consent === "unanswered"
+      ? { ...base, status: ko ? "보내지 않음 · 답이 없었어요" : "Not sent · no answer", tone: "neutral", icon: "blocked", actions: sent && card.to ? ["retry"] : [] }
+      : { ...base, status: ko ? "실행 불가 · 시작 기한 경과" : "Cannot run · start deadline passed", tone: "error", icon: "blocked", actions: sent && card.to ? ["retry"] : [] };
+    case "cancelled": return card.consent === "deny" ? { ...base, status: ko ? "보내지 않음 · 거부함" : "Not sent · you denied", tone: "neutral", icon: "cancel", actions: [] } : card.late
       ? { ...base, status: ko ? `취소 전 종료${time ? ` ${time}` : ""}` : `Ended before the cancel${time ? ` ${time}` : ""}`, tone: "neutral", icon: "flag", actions: [], ...withResult }
       : { ...base, status: ko ? "취소됨" : "Cancelled", tone: "neutral", icon: "cancel", actions: [] };
   }
@@ -208,6 +225,48 @@ export function handoffPlainLine(card: HandoffCardValue, ctx: HandoffCopyContext
 /** The value a phone that says `handoff.card.v1` receives: the same closed shape, the result cut to what a message may carry. */
 export function closedHandoffCard(card: HandoffCardValue, resultChars = 1200): HandoffCardValue {
   return { ...card, ...(card.result ? { result: [...card.result].slice(0, resultChars).join("") } : {}) };
+}
+
+/* -------------------------------------------------------------------------------------------- the consent chip */
+export type ConsentChoice = "allow" | "always" | "deny";
+export interface ConsentChipCopy {
+  /** "{A} wants to hand this to {B}": the question line. */
+  header: string;
+  brief: string;
+  /** "Done when: ..." or empty. */
+  doneWhen: string;
+  choices: Array<{ id: ConsentChoice; label: string; note?: string; role?: "primary" | "deny" }>;
+}
+/**
+ * 이/가 after a name: a Hangul syllable with a final consonant takes 이, one without takes 가 ("폰는" was wrong; the always line now needs no particle, it says what the phone's own line says).
+ * Anything that does not end in Hangul (a Latin name, a digit) keeps 가, as the chip always did.
+ */
+export function subjectParticle(word: string): "이" | "가" {
+  const last = [...word.trim()].pop();
+  if (!last) return "가";
+  const code = last.codePointAt(0)!;
+  if (code < 0xac00 || code > 0xd7a3) return "가";
+  return (code - 0xac00) % 28 === 0 ? "가" : "이";
+}
+
+/**
+ * The chip's words, here and nowhere else (the phone's `plural_consent_*` strings say the same, in the same order): Allow, Always allow, Deny. Names are the ones the person knows; an agent with no name is the neutral word.
+ * `toName` is the receiving agent with its desktop ("Dino · Studio", or "Dino · Phone").
+ */
+export function consentCopy(input: { fromName: string; toName: string; brief: string; doneWhen?: string }, ko: boolean): ConsentChipCopy {
+  const a = input.fromName.trim() || (ko ? "내 에이전트" : "Your agent");
+  const b = input.toName.trim() || (ko ? "다른 에이전트" : "another agent");
+  const done = (input.doneWhen ?? "").replace(/\s+/g, " ").trim();
+  return {
+    header: ko ? `${a}${subjectParticle(a)} ${b}에게 일을 넘기려 해요` : `${a} wants to hand this to ${b}`,
+    brief: input.brief,
+    doneWhen: done ? (ko ? `끝 기준: ${done}` : `Done when: ${done}`) : "",
+    choices: [
+      { id: "allow", label: ko ? "허용" : "Allow", role: "primary" },
+      { id: "always", label: ko ? "항상 허용" : "Always allow", note: ko ? `${a}→${b} 다시 안 물어요` : `${a}→${b} won't ask again` },
+      { id: "deny", label: ko ? "거부" : "Deny", role: "deny" },
+    ],
+  };
 }
 
 /* -------------------------------------------------------------------------------------------- the confirmation card (BP) */

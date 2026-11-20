@@ -457,11 +457,14 @@ export async function toolCall(args: Args, ctx: HarnessCallContext): Promise<Por
     const { mcpConfigKey } = await import("../mcp-tools/mcp-config");
     let consentTarget = `server:${inventory.server.id}`;
     if (inventory.prepared) { try { consentTarget = (await import("../mcp-tools/prepared-transport")).preparedMcpConsentResource(inventory.prepared, inventory.server); } catch { /* the server id stands */ } }
-    const asked = await approveConnectorToolCall({
+    const { approvalWithinCallWindow } = await import("./app-call-approval");
+    const asked = await approvalWithinCallWindow({ chatId: ctx.chatId, server: inventory.server.id, tool: toolName, schemaDigest, args: callArgs, permission: ctx.permission ?? "read" }, () => approveConnectorToolCall({
       serverKey: inventory.prepared?.configKey ?? mcpConfigKey(inventory.server), catalogId: inventory.server.catalogId ?? null, tool: toolName, schemaDigest, consentTarget,
       arguments: callArgs, chatId: ctx.chatId, permission: ctx.permission ?? "read", unattended: ctx.unattended === true,
       annotations: tool.annotations ?? null, ...(ctx.signal ? { signal: ctx.signal } : {}),
-    });
+    }));
+    // The owner's card is still open at the end of the call window: say so (the same call asked again joins the card), never "refused" and never "done".
+    if (!asked.ok && asked.reason === "approval_pending") return { status: "ok", data: (await import("../app-control/pending-calls")).appCallPendingNotice(toolName) };
     if (!asked.ok) return refused(asked.reason, asked.text);
     if (ctx.signal?.aborted) return stoppedBeforeSend();
   }

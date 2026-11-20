@@ -1146,93 +1146,6 @@ function AutomationBlock({
   );
 }
 
-/** Exact host-issued identity is required for actions; old name-only receipts remain readable. */
-export function OneAutomationRegistrationCard({
-  automationId,
-  name,
-  action,
-  schedule,
-  locale,
-}: {
-  automationId?: string;
-  name: string;
-  action: "created" | "updated" | "paused" | "resumed";
-  schedule?: string;
-  locale: "ko" | "en";
-}) {
-  const ko = locale === "ko";
-  const { message, runNow, editInChat } = useAutomationActions(locale, name);
-  const [record, setRecord] = useState<Automation | null>(null);
-  const [recordRead, setRecordRead] = useState(false);
-  const [reviewOpen, setReviewOpen] = useState(false);
-  useEffect(() => {
-    const api = ipc();
-    setRecord(null);
-    setRecordRead(false);
-    setReviewOpen(false);
-    if (!api || !automationId) { setRecordRead(true); return; }
-    let active = true;
-    const read = () => api.automations.get(automationId).then((row) => {
-      if (active) { setRecord(row?.id === automationId ? row : null); setRecordRead(true); }
-    }).catch(() => { if (active) { setRecord(null); setRecordRead(true); } });
-    void read();
-    const off = ipcEvents()?.onStoreChanged?.((change) => {
-      if (change.entity === "automation" && (!change.id || change.id === automationId)) void read();
-    });
-    return () => { active = false; off?.(); };
-  }, [automationId]);
-  const scheduleLine = record?.scheduleHuman || schedule || "";
-  const scheduleNeedsReview = record ? enabledScheduleWithoutNextRun(record) : false;
-  const lastRunLine = scheduleNeedsReview
-    ? (ko ? "다음 예약 없음 · 실행 내역 확인" : "No next run · check history")
-    : record?.enabled && record.nextRunAt
-    ? `${ko ? "다음 실행" : "Next run"} · ${formatTimelineAt(record.nextRunAt, locale)}`
-    : "";
-  return (
-    <section className={styles.root} aria-label={ko ? "등록된 자동화" : "Registered automation"} data-one-automation-registration="true">
-      <article className={styles.result}>
-        <div className={styles.body}>
-          <section className={styles.block} data-block-kind="Automation">
-            <h4>{displayValue(name)}</h4>
-            <p className={styles.summary}>
-              {scheduleNeedsReview
-                ? (ko ? "자동화는 켜져 있지만 다음 실행이 예약되지 않았어요. 실행 내역에서 이유를 확인하세요." : "This automation is on, but no next run is scheduled. Check its run history for the reason.")
-                : action === "created"
-                ? (ko ? "자동화를 등록했어요." : "This automation is registered.")
-                : action === "paused"
-                ? (ko ? "자동화를 중지했어요." : "This automation is paused.")
-                : action === "resumed"
-                ? (ko ? "자동화를 다시 켰어요." : "This automation is resumed.")
-                : (ko ? "자동화를 업데이트했어요." : "This automation is updated.")}
-            </p>
-            <AutomationCardFrame
-              locale={locale}
-              statusState={scheduleNeedsReview ? "attention" : !record || !record.enabled ? "working" : "completed"}
-              statusLabel={!record
-                ? (recordRead ? (ko ? "현재 상태 확인 불가" : "Current state unavailable") : (ko ? "현재 상태 확인 중" : "Checking current state"))
-                : !record.enabled
-                ? (ko ? "꺼짐" : "Off")
-                : scheduleNeedsReview
-                ? (ko ? "확인 필요" : "Needs attention")
-                : automationStatusLabel("registered", locale)}
-              scheduleLine={scheduleLine}
-              nodes={[]}
-              lastRunLine={lastRunLine}
-              automationId={record && record.id === automationId ? record.id : null}
-              actionMessage={message}
-              onRunNow={runNow}
-              onEditInChat={editInChat}
-              onReview={scheduleNeedsReview && record ? () => setReviewOpen((open) => !open) : undefined}
-              reviewOpen={reviewOpen}
-            />
-            {scheduleNeedsReview && reviewOpen && record && <RunHistoryPanel automation={record} locale={locale} compact />}
-          </section>
-        </div>
-      </article>
-    </section>
-  );
-}
-
 function agentBuildStageLabel(status: OneSurfaceAgentBuildBlock["stages"][number]["status"], locale: "ko" | "en"): string {
   if (status === "working") return locale === "ko" ? "진행 중" : "Working";
   if (status === "completed") return locale === "ko" ? "완료" : "Completed";
@@ -1866,7 +1779,7 @@ function displayValue(value: unknown): string {
 }
 
 function sanitizeText(value: string): string {
-  return stripAgentIdentityBadges(redactLocalPaths(redactSecrets(value))
+  return stripAgentIdentityBadges(redactSecrets(value)
     .replace(/\[([^\]]+)\]\(\s*\[?link omitted\]?\s*\)/gi, "$1")
     .replace(/\[link omitted\]/gi, "")
     .replace(/(\*\*|__)([^\r\n]+?)\1/g, "$2")
@@ -1874,20 +1787,6 @@ function sanitizeText(value: string): string {
     .replace(/[✅❌⚠]\uFE0F?/gu, "")
     .replace(/[ \t]{2,}/g, " "))
     .trim();
-}
-
-function redactLocalPaths(value: string): string {
-  const unixPath = /\/(?:Users|home|private|var|tmp|Volumes)\/[^\s"'<>]+/g;
-  const windowsPath = /\b[A-Za-z]:\\(?:Users|Documents and Settings|Temp)\\[^\s"'<>]+/g;
-  return value
-    .replace(unixPath, (path) => localLocationLabel(path, "en"))
-    .replace(windowsPath, (path) => localLocationLabel(path, "en"));
-}
-
-function localLocationLabel(path: string, locale: "ko" | "en"): string {
-  const basename = path.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).pop();
-  const prefix = tFor(locale, "one.res.local_path_prefix");
-  return basename ? `${prefix} ${redactSecrets(basename)}` : prefix;
 }
 
 function formatBytes(value: number): string {

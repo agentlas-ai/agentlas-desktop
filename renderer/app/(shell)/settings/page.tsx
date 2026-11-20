@@ -31,7 +31,7 @@ import {
 import { AUTO_PROVIDER, MULTIMODAL_PROVIDERS } from "@shared/multimodal";
 import { credentialRetryTargets } from "@shared/credential-recovery";
 import { daemonAutostartSentence } from "@shared/daemon-autostart-notice";
-import { pairingQrShouldRenew } from "@shared/pairing-qr-renewal";
+import { PAIRING_QR_AUTO_RENEWALS, pairingQrShouldRenew } from "@shared/pairing-qr-renewal";
 import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconWand } from "@/components/Icon";
 import { MigrationPanel } from "@/components/MigrationPanel";
@@ -53,6 +53,7 @@ import { PricingPanel } from "@/components/settings/PricingPanel";
 import { multimodalProviderPatch, wholeListWritable, type StoredListLoad } from "@/lib/edit-patch";
 import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
 import { manualSetupFor, manualSetupShellLabel, manualSetupText, setupOsFromNavigator, type ManualSetupRuntime } from "@shared/runtime-manual-setup";
+import { engineConnection } from "@shared/runtime-connection";
 import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
@@ -542,7 +543,7 @@ export default function SettingsPage() {
         }}
       >
         <h1 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700 }}>
-          {settingsSection === "personal" ? (locale === "ko" ? "설정" : "Settings") : t("settings.title")}
+          {settingsSection === "models" ? t("settings.title") : (locale === "ko" ? "설정" : "Settings")}
           {settingsSection === "personal" ? <small style={{ marginLeft: 10, fontFamily: "var(--rd-f-body, inherit)", fontSize: 12.5, fontWeight: 400, color: "var(--muted-deep, var(--ink-soft))" }}>{locale === "ko" ? "개인 에이전트" : "Personal agent"}</small> : null}
         </h1>
       </header>
@@ -1497,9 +1498,18 @@ function MobileBridgePanel({ active }: { active: boolean }) {
                 ? locale === "ko" ? "이 Desktop을 폰에서 제어할 수 있습니다" : "This Desktop is ready for Mobile"
                 : locale === "ko" ? "모바일 연결을 시작하지 못했습니다" : "Mobile connection is unavailable"}
             </div>
-            <div style={{ marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5, overflowWrap: "anywhere" }}>
-              {status?.endpoint ?? (locale === "ko" ? "Desktop Bridge가 준비되지 않았습니다." : "Desktop Bridge is not ready.")}
-            </div>
+            {status?.endpoint ? (
+              <details data-testid="mobile-bridge-endpoint-details" style={{ marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}>
+                <summary style={{ cursor: "pointer" }}>{locale === "ko" ? "연결 주소 보기(문제 해결용)" : "Connection address (for troubleshooting)"}</summary>
+                <code style={{ overflowWrap: "anywhere" }}>{status.endpoint}</code>
+              </details>
+            ) : (
+              <div style={{ marginTop: 4, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5, overflowWrap: "anywhere" }}>
+                {status === null
+                  ? locale === "ko" ? "연결 주소가 아직 확인되지 않았습니다." : "The connection address has not been confirmed."
+                  : locale === "ko" ? "Desktop Bridge가 준비되지 않았습니다." : "Desktop Bridge is not ready."}
+              </div>
+            )}
           </div>
           <button
             data-testid="mobile-bridge-retry"
@@ -1712,12 +1722,12 @@ function MobileBridgePanel({ active }: { active: boolean }) {
         )}
 
         {pairing && qrDataUrl && (
-          <div data-testid="mobile-bridge-pairing" style={{ display: "grid", gridTemplateColumns: "minmax(240px, 288px) 1fr", gap: 20, marginTop: 18, alignItems: "center" }}>
-            <div style={{ border: "1px solid var(--paper-edge)", borderRadius: 18, background: "var(--paper)", padding: 12 }}>
+          <div data-testid="mobile-bridge-pairing" style={{ display: "flex", flexWrap: "wrap", gap: 20, marginTop: 18, alignItems: "center" }}>
+            <div style={{ flex: "0 1 288px", minWidth: 200, border: "1px solid var(--paper-edge)", borderRadius: 18, background: "var(--paper)", padding: 12 }}>
               {/* The data URL is produced locally; the QR contains a two-minute nonce and public certificate only. */}
               <img src={qrDataUrl} alt={locale === "ko" ? "Agentlas Mobile 연결 QR" : "Agentlas Mobile pairing QR"} style={{ display: "block", width: "100%", aspectRatio: "1" }} />
             </div>
-            <div style={{ minWidth: 0 }}>
+            <div style={{ flex: "1 1 240px", minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 700 }}>
                 {locale === "ko"
                   ? "Agentlas 앱에서 스캔하세요 — 기기 추가 → QR 스캔"
@@ -1730,6 +1740,15 @@ function MobileBridgePanel({ active }: { active: boolean }) {
                 {locale === "ko"
                   ? "폰 기본 카메라로는 연결되지 않습니다. 2분 후 만료되며 한 번만 쓸 수 있고, 장기 기기 키나 Desktop 비밀값은 QR에 들어가지 않습니다."
                   : "Your phone's default camera cannot complete this pairing. It expires in two minutes and works once; the QR never contains a long-lived device key or Desktop secret."}
+              </p>
+              {/* The Desktop makes the next code by itself when this one runs out (up to PAIRING_QR_AUTO_RENEWALS times), and the new one looks the same: the end time says which code this is. */}
+              <p role="status" data-testid="mobile-bridge-pairing-until" style={{ margin: "0 0 12px", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.6 }}>
+                {(() => {
+                  const until = new Date(pairing.expiresAt).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+                  return locale === "ko"
+                    ? `이 코드는 ${until}까지 쓸 수 있어요. 지나면 이 화면이 새 코드를 스스로 만들어요(최대 ${PAIRING_QR_AUTO_RENEWALS}번).`
+                    : `This code works until ${until}. When it runs out, this page makes a new one by itself (up to ${PAIRING_QR_AUTO_RENEWALS} times).`;
+                })()}
               </p>
               <button
                 type="button"
@@ -2545,12 +2564,14 @@ function UpdatePanel() {
     };
   }, []);
 
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
   async function check() {
     const api = ipc();
     if (!api || checking) return;
     setChecking(true);
     try {
       await api.updater.check();
+      setCheckedAt(Date.now());
     } finally {
       setTimeout(() => setChecking(false), 900);
     }
@@ -2663,8 +2684,11 @@ function UpdatePanel() {
             v{version || "?"}
           </div>
           {core && <CoreEngineLine core={core} onUpdated={refreshCore} />}
-          <div style={{ fontSize: 12, color: "var(--muted-deep)", marginTop: 6, lineHeight: 1.55, whiteSpace: "normal", overflowWrap: "anywhere" }}>
+          <div role="status" aria-live="polite" style={{ fontSize: 12, color: "var(--muted-deep)", marginTop: 6, lineHeight: 1.55, whiteSpace: "normal", overflowWrap: "anywhere" }}>
             {statusText}
+            {checkedAt !== null && (state.status === "not-available" || state.status === "idle")
+              ? ` · ${t("settings.update.checked_at", { time: new Date(checkedAt).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }) })}`
+              : ""}
           </div>
         </div>
         {resumeConfirm && (
@@ -3429,7 +3453,8 @@ function CliInstallPanel({
   const auth = useRuntimeAuth();
   const [connectFor, setConnectFor] = useState<RuntimeChipSpec | null>(null);
   const [copilotNote, setCopilotNote] = useState<{ label: string; command: string; note: string | null } | null>(null);
-  const copilotInstalled = statuses.some((s) => s.kind === "acp" && s.acpAgentId === "github-copilot-cli");
+  // The same rule as the Dashboard's Connections row (shared/runtime-connection.ts): the ACP seat has no sign-in probe, so its model listing is the evidence.
+  const copilotState = engineConnection({ runtime: statuses.find((s) => s.kind === "acp" && s.acpAgentId === "github-copilot-cli"), hasProbe: false });
   const copilot = CLI_DEFS.find((def) => def.kind === "github-copilot-cli");
   const subOf = (kind: string, fallback: string) => CLI_DEFS.find((def) => def.kind === kind)?.sub ?? fallback;
 
@@ -3457,8 +3482,13 @@ function CliInstallPanel({
               logo="/brand/llm/githubcopilot.svg"
               name={copilot.name}
               sub={copilot.sub}
-              ready={false}
-              badge={copilotInstalled ? cc.unverified : cc.notInstalled}
+              ready={copilotState === "connected"}
+              badge={copilotState === "connected" ? cc.installed
+                : copilotState === "refused" ? (ko ? "계정 사용 권한 없음" : "Account not authorized")
+                : copilotState === "signed-out" ? cc.signedOut
+                : copilotState === "unverified" ? cc.unverified
+                : cc.notInstalled}
+              badgeTone={copilotState === "connected" ? "ok" : copilotState === "refused" || copilotState === "signed-out" ? "warn" : undefined}
               action={{ label: cc.connect, onClick: () => {
                 if (!copilot.manual) return;
                 const setup = manualSetupFor(copilot.manual, setupOsFromNavigator(typeof navigator === "undefined" ? undefined : navigator));

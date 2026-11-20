@@ -27,6 +27,8 @@ import {
   startOnePersonaNameSync,
   subscribeOnePersonaName,
 } from "./one-persona-name";
+import { credentialStoreName, uiPlatform, useUiPlatform } from "./platform-copy";
+import { agentDisplayName } from "@shared/agent-display-name";
 
 export type Locale = "ko" | "en";
 export type LocalePref = Locale | "system";
@@ -102,7 +104,7 @@ const dict = {
     "nav.agent": "에이전트 관리",
     "nav.group.studio": "에이전트 앱",
     "nav.apps": "앱",
-    "nav.automations": "에이전트 그래프",
+    "nav.automations": "자동화",
     "nav.group.connect": "커넥트",
     "nav.telegram": "텔레그램",
     "nav.group.agent_cloud": "에이전트 클라우드",
@@ -128,7 +130,7 @@ const dict = {
     "nav.collapse_sidebar": "메뉴 접기",
     "nav.expand": "펼치기",
     "nav.collapse": "접기",
-    "nav.pending_approvals": "{n}개 승인 대기",
+    "nav.pending_approvals": "내 답을 기다리는 일 {n}개",
     "nav.personal_agent": "개인 에이전트",
     "nav.top.build_sub": "새 에이전트 구조 만들기",
     "nav.top.agent_sub": "프로젝트에 장착할 팀·에이전트 관리",
@@ -515,11 +517,11 @@ const dict = {
     "chatstream.speak_stop": "읽기 중지",
 
     // Settings
-    "settings.title": "설정 — LLM 연결",
-    "settings.banner": "Agentlas는 LLM을 호스팅하지 않아요. 모든 호출은 내 데스크탑에서 내 구독·키·로컬 모델로 직접 이뤄져요. API 키는 OS 보안 저장소(키체인 · 자격 증명 관리자)에만 저장되고 Agentlas 서버를 거치지 않아요.",
+    "settings.title": "설정 — 모델과 엔진",
+    "settings.banner": "Agentlas는 LLM을 호스팅하지 않아요. 모든 호출은 내 데스크탑에서 내 구독·키·로컬 모델로 직접 이뤄져요. API 키는 OS 보안 저장소({store})에만 저장되고 Agentlas 서버를 거치지 않아요.",
     "settings.detected": "감지된 LLM",
     "settings.byok": "BYOK — 직접 API 키 연결",
-    "settings.byok.note": "키는 이 데스크탑의 보안 저장소(macOS 키체인 · Windows 자격 증명 관리자)에만 저장돼요. Agentlas 서버를 거치지 않아요.",
+    "settings.byok.note": "키는 이 데스크탑의 보안 저장소({store})에만 저장돼요. Agentlas 서버를 거치지 않아요.",
     "settings.active": "활성화",
     "settings.activated": "활성",
     "settings.save": "저장",
@@ -615,6 +617,7 @@ const dict = {
     "settings.update.installing": "로컬 상태 복구본을 확인했고 v{version} 설치를 시작해요.",
     "settings.update.updated": "v{version} 업데이트 후 계정·SQLite·에이전트 상태를 확인했어요.",
     "settings.update.not_available": "이 앱은 최신 버전입니다.",
+    "settings.update.checked_at": "{time}에 확인했어요",
     "settings.update.error": "업데이트 확인 실패: {message}",
     "settings.update.manual_required": "자동 설치를 안전하게 완료하지 않아 기존 앱과 로컬 데이터를 그대로 유지했어요.",
     "settings.update.install_not_applied": "이전 업데이트가 적용되지 않았어요. 로컬 데이터는 그대로 두고 공식 설치본으로 앱만 다시 설치할 수 있어요.",
@@ -679,7 +682,7 @@ const dict = {
     "project.section.chats": "채팅",
     "project.empty_chats": "아직 작업이 없어요. 우측 상단 새 작업으로 시작해 주세요.",
     "project.new_chat": "새 작업",
-    "project.confirm_delete": "'{name}' 프로젝트를 삭제할까요? 채팅은 root로 옮겨집니다.",
+    "project.confirm_delete": "'{name}' 프로젝트를 삭제할까요?\n이 프로젝트의 채팅은 '프로젝트 없음'으로 옮겨져요. 폴더와 파일은 지우지 않고 디스크에 그대로 남아요.",
 
     // Automation
     "auto.title": "자동화",
@@ -864,11 +867,33 @@ const dict = {
     "auto.sched.once.at": "실행 시각",
     "auto.sched.next": "다음 실행",
     "auto.sched.summary": "요약",
+    "auto.sched.problem.cron_blank": "cron 식을 입력해 주세요. 예: 0 9 * * 1-5",
+    "auto.sched.problem.cron_invalid": "cron 식이 올바르지 않아요.",
+    "auto.sched.problem.cron_never": "문법은 맞지만 앞으로 실행될 날이 없어요. 예: 2월 31일은 없어요.",
+    "auto.sched.problem.tz_invalid": "알 수 없는 타임존이에요. 예: Asia/Seoul",
+    "auto.sched.problem.time_blank": "시각을 골라 주세요.",
+    "auto.sched.problem.once_blank": "실행할 날짜와 시각을 골라 주세요.",
+    "auto.sched.problem.once_invalid": "날짜와 시각을 다시 골라 주세요.",
+    "auto.sched.problem.once_past": "이미 지난 시각이에요. 앞으로의 시각을 골라 주세요.",
+    "auto.sched.dow.hint": "요일을 여러 개 누를 수 있어요. 하나는 꼭 골라야 해요.",
+    "auto.sched.day.skip": "{day}일이 없는 달은 건너뛰어요.",
+    "auto.sched.tz.hint": "비우면 이 컴퓨터의 타임존({tz})을 써요.",
     "auto.new.blank": "빈 캔버스에서 만들기",
     "auto.new.blank.hint": "노드를 직접 배치해 워크플로우를 만듭니다.",
     "auto.edit.title": "자동화 편집",
     "auto.edit.save": "변경 저장",
     "auto.list.edit": "편집",
+    "auto.list.ended": "종료됨",
+    "auto.list.ended.hint": "한 번만 실행하는 자동화가 끝났어요. 다시 쓰려면 편집에서 시각을 바꿔 주세요.",
+    "auto.new.blocker.name": "이름을 입력해 주세요.",
+    "auto.new.blocker.context": "작업 컨텍스트를 골라 주세요.",
+    "auto.new.blocker.target": "작업 대상을 골라 주세요.",
+    "auto.new.blocker.target_none": "고를 수 있는 대상이 아직 없어요. 에이전트 허브에서 팀이나 에이전트를 설치해 주세요.",
+    "auto.new.blocker.fs_blank": "감시할 경로를 입력해 주세요.",
+    "auto.new.blocker.fs_relative": "전체 경로로 써 주세요. 예: /Users/이름/Downloads (~ 는 쓸 수 없어요)",
+    "auto.new.blocker.chain": "먼저 실행될 자동화를 골라 주세요.",
+    "auto.new.draft.restored": "쓰던 내용을 불러왔어요.",
+    "auto.new.draft.clear": "지우고 새로 시작",
     "auto.list.run": "지금 실행",
     "auto.list.run_hint": "스케줄과 무관하게 지금 1회 테스트 실행하고 캔버스에서 지켜봅니다.",
     // 트리거 종류
@@ -877,6 +902,7 @@ const dict = {
     "auto.trigger.fs": "파일/폴더 변경",
     "auto.trigger.chain": "다른 자동화 완료 후",
     "auto.trigger.fs.path": "감시할 경로",
+    "auto.trigger.fs.hint": "폴더도 파일도 감시해요. 아직 없는 경로는 생기는 대로 이어서 감시해요.",
     "auto.trigger.fs.on": "변경 종류",
     "auto.trigger.fs.on.create": "생성",
     "auto.trigger.fs.on.modify": "수정",
@@ -1089,7 +1115,7 @@ const dict = {
     // Env vault (Library > Environment)
     "env.title": "전역 Env",
     "env.subtitle": "데스크톱에 내장된 전역 키 저장소 — 모든 에이전트와 회사가 함께 씁니다. 한 번 저장하면 중복 설정 없이 자동으로 공유됩니다.",
-    "env.security_note": "값은 이 데스크탑의 보안 저장소(macOS 키체인 · Windows 자격 증명 관리자)에만 저장돼요. Agentlas 서버를 거치지 않고, 채팅 화면이나 다른 에이전트에 노출되지 않아요.",
+    "env.security_note": "값은 이 데스크탑의 보안 저장소({store})에만 저장돼요. Agentlas 서버를 거치지 않고, 채팅 화면이나 다른 에이전트에 노출되지 않아요.",
     "env.search": "변수·에이전트 검색",
     "env.sort.usage": "사용 많은 순",
     "env.sort.name": "이름순",
@@ -2311,6 +2337,35 @@ const dict = {
     "one.shell.decision.remind_24h": "24시간 뒤 다시 알림",
     "one.shell.decision.close": "지금 닫기",
     "one.shell.decision.reopen": "검토할 결정 다시 열기",
+    "composer.agentPick.label": "에이전트 고르기",
+    "composer.agentPick.empty": "맞는 에이전트가 없어요",
+    "question.closed.line": "질문 {count}개 닫음",
+    "question.reopen": "다시 열기",
+    "question.saved.title": "저장된 답",
+    "question.saved.auto": "자동 이어감",
+    "question.saved.retry": "다시 시도",
+    "question.saved.autoBody": "저장했어요. 끝나는 대로 이어가요.",
+    "question.saved.retryBody": "저장된 글 그대로 다시 시도해요.",
+    "question.saved.lostBody": "이어갈 실행을 못 찾았어요. 새 메시지로 요청해 주세요.",
+    "question.next": "다음 질문",
+    "question.sendsWhenSettled": "정리되면 전송",
+    "question.closeLabel": "닫기 · 아무것도 안 보냄",
+    "room.stop": "멈추기",
+    "room.stop.putBack": "보내지 않고 입력창에 돌려놓았어요",
+    "room.send.waiting": "앞의 답이 끝나면 보내요",
+    "room.send.held": "보내지 못했어요",
+    "receipt.action.resend_other_ai": "다른 AI로",
+    "receipt.action.hand_to_personal_one": "개인 에이전트로",
+    "receipt.action.grant_permission": "권한 올리기",
+    "receipt.action.login": "로그인",
+    "receipt.action.pick_project_folder": "폴더 고르기",
+    "receipt.action.reopen_question": "다시 열기",
+    "pending.strip.pause": "멈춤",
+    "pending.strip.resume": "켜기",
+    "pending.strip.wait": "답 대기",
+    "pending.strip.goal_wait": "목표 확인",
+    "pending.strip.unnamed": "이름 없음",
+    "room.send.uncertain": "보냈는지 확인하지 못했어요",
     "one.shell.decision.reject_hint": "거절과 나중에 결정은 승인이나 외부 실행을 시작하지 않아요.",
     "one.shell.receipt.selected": "선택했어요",
     "one.shell.receipt.change_mind": "나중에 바꾸고 싶으면 One에게 그대로 말하면 돼요.",
@@ -2463,7 +2518,7 @@ const dict = {
     "nav.agent": "Manage agents",
     "nav.group.studio": "Agent Apps",
     "nav.apps": "Apps",
-    "nav.automations": "Agent graphs",
+    "nav.automations": "Automations",
     "nav.group.connect": "Connect",
     "nav.telegram": "Telegram",
     "nav.group.agent_cloud": "Agent Cloud",
@@ -2489,7 +2544,7 @@ const dict = {
     "nav.collapse_sidebar": "Collapse sidebar",
     "nav.expand": "Expand",
     "nav.collapse": "Collapse",
-    "nav.pending_approvals": "{n} pending approvals",
+    "nav.pending_approvals": "{n} waiting for you",
     "nav.personal_agent": "Personal agent",
     "nav.top.build_sub": "Create new organizational structures",
     "nav.top.agent_sub": "Manage teams and agents attached to projects",
@@ -2876,11 +2931,11 @@ const dict = {
     "chatstream.speak_stop": "Stop reading",
 
     // Settings
-    "settings.title": "Settings — LLM",
-    "settings.banner": "Agentlas doesn't host any LLM. Every call happens on your machine, with your subscription/keys/local models. API keys are stored only in your OS credential store (Keychain, Credential Manager) — they never touch Agentlas servers.",
+    "settings.title": "Settings — Models and engines",
+    "settings.banner": "Agentlas doesn't host any LLM. Every call happens on your machine, with your subscription/keys/local models. API keys are stored only in your OS credential store ({store}) — they never touch Agentlas servers.",
     "settings.detected": "Detected LLMs",
     "settings.byok": "BYOK — Connect your own API keys",
-    "settings.byok.note": "Keys are stored only in this computer's credential store (macOS Keychain, Windows Credential Manager). They never touch Agentlas servers.",
+    "settings.byok.note": "Keys are stored only in this computer's credential store ({store}). They never touch Agentlas servers.",
     "settings.active": "Activate",
     "settings.activated": "Active",
     "settings.save": "Save",
@@ -2976,6 +3031,7 @@ const dict = {
     "settings.update.installing": "The local recovery copy was verified and v{version} is starting installation.",
     "settings.update.updated": "Account, SQLite, and agent continuity were verified after updating to v{version}.",
     "settings.update.not_available": "This app is up to date.",
+    "settings.update.checked_at": "Checked at {time}",
     "settings.update.error": "Update check failed: {message}",
     "settings.update.manual_required": "Automatic install did not complete safely, so the existing app and local data were left unchanged.",
     "settings.update.install_not_applied": "The previous update was not applied. Reinstall the app from the official installer while keeping local data.",
@@ -3040,7 +3096,7 @@ const dict = {
     "project.section.chats": "Chats",
     "project.empty_chats": "No tasks yet. Use New task at the top right to start.",
     "project.new_chat": "New task",
-    "project.confirm_delete": "Delete project '{name}'? Chats move to the root.",
+    "project.confirm_delete": "Delete project '{name}'?\nIts chats move to \"No project\". The folder and its files are not deleted; they stay on disk.",
 
     // Automation
     "auto.title": "Automations",
@@ -3225,11 +3281,33 @@ const dict = {
     "auto.sched.once.at": "Run at",
     "auto.sched.next": "Next run",
     "auto.sched.summary": "Summary",
+    "auto.sched.problem.cron_blank": "Enter a cron expression, e.g. 0 9 * * 1-5",
+    "auto.sched.problem.cron_invalid": "cron expression is not valid.",
+    "auto.sched.problem.cron_never": "The syntax is fine, but it never runs again. For example, there is no Feb 31.",
+    "auto.sched.problem.tz_invalid": "Unknown timezone. For example: Asia/Seoul",
+    "auto.sched.problem.time_blank": "Pick a time.",
+    "auto.sched.problem.once_blank": "Pick the date and time to run.",
+    "auto.sched.problem.once_invalid": "Pick the date and time again.",
+    "auto.sched.problem.once_past": "That time has already passed. Pick a time ahead.",
+    "auto.sched.dow.hint": "You can pick several days. At least one stays selected.",
+    "auto.sched.day.skip": "Months without a {day}th are skipped.",
+    "auto.sched.tz.hint": "Leave it empty to use this computer's timezone ({tz}).",
     "auto.new.blank": "Start from a blank canvas",
     "auto.new.blank.hint": "Place nodes yourself to build a workflow.",
     "auto.edit.title": "Edit automation",
     "auto.edit.save": "Save changes",
     "auto.list.edit": "Edit",
+    "auto.list.ended": "Ended",
+    "auto.list.ended.hint": "This one-time automation has finished. To use it again, change its time in Edit.",
+    "auto.new.blocker.name": "Enter a name.",
+    "auto.new.blocker.context": "Choose a work context.",
+    "auto.new.blocker.target": "Choose what runs this.",
+    "auto.new.blocker.target_none": "There is nothing to choose yet. Install a team or agent from Agent Hub.",
+    "auto.new.blocker.fs_blank": "Enter a path to watch.",
+    "auto.new.blocker.fs_relative": "Use a full path, e.g. /Users/you/Downloads (~ is not expanded).",
+    "auto.new.blocker.chain": "Choose the automation that runs first.",
+    "auto.new.draft.restored": "Your unfinished form was restored.",
+    "auto.new.draft.clear": "Clear and start over",
     "auto.list.run": "Run now",
     "auto.list.run_hint": "Run once right now regardless of schedule and watch it live on the canvas.",
     // Trigger types
@@ -3238,6 +3316,7 @@ const dict = {
     "auto.trigger.fs": "File / folder change",
     "auto.trigger.chain": "After another automation",
     "auto.trigger.fs.path": "Path to watch",
+    "auto.trigger.fs.hint": "Folders and files both work. A path that doesn't exist yet is watched once it appears.",
     "auto.trigger.fs.on": "Change type",
     "auto.trigger.fs.on.create": "Created",
     "auto.trigger.fs.on.modify": "Modified",
@@ -3450,7 +3529,7 @@ const dict = {
     // Env vault
     "env.title": "Global Env",
     "env.subtitle": "A built-in global key store — shared by every agent and firm. Save once and it's reused automatically, no duplicate setup.",
-    "env.security_note": "Values are stored only in this computer's credential store (macOS Keychain, Windows Credential Manager). They never reach Agentlas servers and are never shown in chats or to other agents.",
+    "env.security_note": "Values are stored only in this computer's credential store ({store}). They never reach Agentlas servers and are never shown in chats or to other agents.",
     "env.search": "Search variables or agents",
     "env.sort.usage": "Most used",
     "env.sort.name": "Name",
@@ -4672,6 +4751,35 @@ const dict = {
     "one.shell.decision.remind_24h": "Remind me in 24 hours",
     "one.shell.decision.close": "Close for now",
     "one.shell.decision.reopen": "Reopen decision to review",
+    "composer.agentPick.label": "Pick an agent",
+    "composer.agentPick.empty": "No matching agent",
+    "question.closed.line": "{count} question(s) closed",
+    "question.reopen": "Reopen",
+    "question.saved.title": "Saved answer",
+    "question.saved.auto": "Continuing",
+    "question.saved.retry": "Try again",
+    "question.saved.autoBody": "Saved. It continues when the run settles.",
+    "question.saved.retryBody": "Tries again with the saved text unchanged.",
+    "question.saved.lostBody": "The run to continue was not found. Send a new message.",
+    "question.next": "Next question",
+    "question.sendsWhenSettled": "Sends when settled",
+    "question.closeLabel": "Close · nothing is sent",
+    "room.stop": "Stop",
+    "room.stop.putBack": "Not sent - put back in the input box",
+    "room.send.waiting": "Sends when the earlier answer ends",
+    "room.send.held": "Not sent",
+    "receipt.action.resend_other_ai": "Try another AI",
+    "receipt.action.hand_to_personal_one": "To personal agent",
+    "receipt.action.grant_permission": "Allow more",
+    "receipt.action.login": "Sign in",
+    "receipt.action.pick_project_folder": "Pick a folder",
+    "receipt.action.reopen_question": "Reopen",
+    "pending.strip.pause": "Pause",
+    "pending.strip.resume": "Resume",
+    "pending.strip.wait": "Waiting",
+    "pending.strip.goal_wait": "Goal check",
+    "pending.strip.unnamed": "Untitled",
+    "room.send.uncertain": "Could not confirm it was sent",
     "one.shell.decision.reject_hint": "Rejecting or deciding later does not approve or start an external action.",
     "one.shell.receipt.selected": "Selected",
     "one.shell.receipt.change_mind": "If you change your mind, just tell One.",
@@ -4787,9 +4895,11 @@ function resolveSystem(localeStr: string): Locale {
   return localeStr.toLowerCase().startsWith("ko") ? "ko" : "en";
 }
 
-function interpolate(text: string, vars?: Record<string, string | number>): string {
-  if (!vars) return text;
-  return text.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? `{${k}}`));
+// {store} = the OS word for where secrets live (Keychain / Windows Credential Manager / system keyring).
+// Callers may pass their own vars; the platform word fills only what they leave out.
+function interpolate(text: string, vars?: Record<string, string | number>, store?: string): string {
+  if (!vars && !(store && text.includes("{store}"))) return text;
+  return text.replace(/\{(\w+)\}/g, (_, k) => String(vars?.[k] ?? (k === "store" && store ? store : `{${k}}`)));
 }
 
 async function readSystemLocale(): Promise<Locale> {
@@ -4880,6 +4990,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const personaName = useSyncExternalStore(subscribeOnePersonaName, getOnePersonaName, () => DEFAULT_ONE_NAME);
   useEffect(() => { startOnePersonaNameSync(); }, []);
 
+  const uiPlat = useUiPlatform();
   const t = useCallback(
     (key: DictKey, vars?: Record<string, string | number>) => {
       // per-key 폴백은 en(기본 언어). 어떤 키가 현재 로케일에 없으면 영어로 떨어지고,
@@ -4888,10 +4999,10 @@ export function I18nProvider({ children }: { children: ReactNode }) {
         (dict[locale] as Record<string, string>)[key] ??
         (dict.en as Record<string, string>)[key] ??
         key;
-      const text = interpolate(raw, vars);
+      const text = interpolate(raw, vars, credentialStoreName(locale === "ko", uiPlat));
       return ONE_PERSONA_KEYS.has(key) ? personalizeOneText(text, personaName, locale) : text;
     },
-    [locale, personaName],
+    [locale, personaName, uiPlat],
   );
 
   // locale이 확정(_ready)되기 전에는 텍스트를 그리지 않는다 — OS 언어를 IPC로 받기 전에는
@@ -4928,7 +5039,7 @@ export function useT(): I18nValue {
       locale: "en",
       pref: "system",
       setPref: async () => "en",
-      t: (k, v) => interpolate((dict.en as Record<string, string>)[k] ?? k, v),
+      t: (k, v) => interpolate((dict.en as Record<string, string>)[k] ?? k, v, credentialStoreName(false)),
     };
   }
   return ctx;
@@ -4944,21 +5055,20 @@ export function tFor(locale: Locale, key: DictKey, vars?: Record<string, string 
     (dict[locale] as Record<string, string>)[key] ??
     (dict.en as Record<string, string>)[key] ??
     key;
-  const text = interpolate(raw, vars);
+  const text = interpolate(raw, vars, credentialStoreName(locale === "ko", uiPlatform()));
   return ONE_PERSONA_KEYS.has(key) ? personalizeOneText(text, getOnePersonaName(), locale) : text;
 }
 
 /** 다국어 시드 객체에서 현재 locale에 맞는 표시 이름·태그라인을 뽑는 헬퍼.
  *  영어 사용자에게 한국어가 새지 않게 하는 통일 진입점. */
-export function pickLocalized<T extends { name: string; nameEn?: string; tagline?: string; taglineEn?: string }>(
+export function pickLocalized<T extends { name: string; nameEn?: string; tagline?: string; taglineEn?: string; localDisplayName?: string }>(
   item: T,
   locale: Locale,
 ): { name: string; tagline: string } {
-  if (locale === "en") {
-    return {
-      name: item.nameEn?.trim() || item.name,
-      tagline: item.taglineEn?.trim() || item.tagline || "",
-    };
-  }
-  return { name: item.name, tagline: item.tagline ?? "" };
+  // The name the owner gave an installed agent (Agent files > Edit) wins in both languages, so one rename reads the same on every
+  // screen. Listings and firms carry no such field and are unchanged.
+  const name = agentDisplayName(item, locale);
+  return locale === "en"
+    ? { name, tagline: item.taglineEn?.trim() || item.tagline || "" }
+    : { name, tagline: item.tagline ?? "" };
 }

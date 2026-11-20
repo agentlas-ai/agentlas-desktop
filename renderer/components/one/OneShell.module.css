@@ -2340,7 +2340,8 @@
 
 .composerPopoverRow:hover { color: var(--ink); }
 .composerPopoverRow:focus-visible,
-.composerPopoverRow[data-selected="true"] { background: var(--paper-3); outline: none; }
+.composerPopoverRow[data-selected="true"],
+.composerPopoverRow[data-active="true"] { background: var(--paper-3); outline: none; }
 .composerPopoverIcon { display: grid; place-items: center; color: var(--ink-soft); }
 .composerPopoverCopy { min-width: 0; display: grid; gap: 2px; }
 .composerPopoverCopy strong { overflow: hidden; font-size: 12px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
@@ -4722,7 +4723,8 @@
 .shell[data-embed="true"] .body[data-task-active="true"][data-context-rail="true"],
 .shell[data-embed="true"] .body[data-rail-collapsed="true"][data-context-rail="true"],
 .shell[data-embed="true"] .body[data-task-active="true"][data-rail-collapsed="true"][data-context-rail="true"] {
-  grid-template-columns: minmax(0, 1fr) var(--one-rail-width, 210px);
+  /* The rail never takes the pane: the conversation keeps 320px beside it (the rail gives way down to 140px), so a narrow pane keeps its composer. */
+  grid-template-columns: minmax(0, 1fr) min(var(--one-rail-width, 210px), max(140px, calc(100% - 320px)));
 }
 .shell[data-embed="true"] .workspace { grid-column: 1; }
 .shell[data-embed="true"] .body > [data-one-runtime-artifacts="true"] { grid-column: 2; }

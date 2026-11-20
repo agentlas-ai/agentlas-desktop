@@ -169,7 +169,7 @@ function validateRelativePath(root: string, input: unknown): string {
   if (path.isAbsolute(input)) {
     const lexical = path.resolve(input);
     const inside = contained(root, lexical) ? lexical : realPrefixPath(lexical);
-    if (!contained(root, inside)) pathDenied(`absolute path is outside the working folder; use a path relative to it${pluginHint}`);
+    if (!contained(root, inside)) pathDenied(`absolute path is outside the working folder (${root}); a relative path cannot reach it and saying yes in the chat does not widen it. The owner attaches that folder with the folder chip under the conversation, or in the project's settings when the chat belongs to a project; say exactly that in plain words, never "filesystem plugin" or "connection"${pluginHint}`);
     return path.relative(root, inside) || ".";
   }
   // 두 방언 모두 검사한다. 다른 방언의 Windows 절대/UNC 경로(POSIX 호스트) 또는 POSIX 절대

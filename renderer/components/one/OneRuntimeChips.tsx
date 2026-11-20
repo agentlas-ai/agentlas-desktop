@@ -12,11 +12,12 @@ import { llmLogoSrc } from "@/lib/llm-logo";
 import { beginChatSelection, useChatSelectionIntent, readChatSelectionIntent, reconcileChatSelectionIntent } from "@/lib/chat-selection-intent";
 import { readChatForRuntime } from "@/lib/chat-runtime-read";
 import { goalRuntimeRefusalNotice, isOvertakenSelectionCode } from "@/lib/goal-runtime-refusal";
-import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, observedRunDiffersFromRequest, useObservedComposerRun, withOneRuntimeSelection } from "@/lib/one-runtime-chip";
+import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, observedRunDiffersFromRequest, useObservedComposerRun, withOneRuntimeSelection, type ObservedComposerRun } from "@/lib/one-runtime-chip";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { ipcErrorCode } from "@shared/ipc-error-code";
 import { sameRuntimeIdentity, selectionForRuntime } from "@shared/runtime-selection";
 import type { Chat, RuntimeSelection, RuntimeStatus } from "@shared/types";
+import { registerComposerControls } from "@/lib/composer-control-bus";
 import { OneComposerControls, type OneComposerMenuKey, type OneComposerModelOption } from "./OneComposerControls";
 import styles from "./OneShell.module.css";
 
@@ -29,6 +30,7 @@ export function OneRuntimeChips({
   disabled = false,
   draftSelection,
   onSelectionConfirmed,
+  onObservedRun,
 }: {
   chatId: string | null;
   locale: "ko" | "en";
@@ -36,15 +38,25 @@ export function OneRuntimeChips({
   /** A Work draft chooses only its next request; it never reads or writes a conversation pin. */
   draftSelection?: { value: RuntimeSelection | null; onChange: (selection: RuntimeSelection | null) => void };
   onSelectionConfirmed?: (chat: Chat) => void;
+  /** The AI that ran this conversation's latest turn, as Main recorded it (null = none known). The usage banner follows it, so it is read once here, not by a second reader. */
+  onObservedRun?: (run: ObservedComposerRun | null) => void;
 }) {
   const draft = draftSelection !== undefined;
   const choice = useChatSelectionIntent(draft ? null : chatId);
   const observedRun = useObservedComposerRun(draft ? null : chatId);
+  const observedRunRef = useRef(onObservedRun);
+  observedRunRef.current = onObservedRun;
+  useEffect(() => { observedRunRef.current?.(observedRun); }, [observedRun?.state, observedRun?.kind, observedRun?.backend, observedRun?.model]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { observedRunRef.current?.(null); }, []);
   const [inventory, setInventory] = useState<RuntimeStatus[]>([]);
   const [models, setModels] = useState<OneComposerModelOption[]>([]);
+  // What Main resolves for a conversation with no pin of its own: the orchestrator pool's first usable member (the same answer the run takes).
+  const [poolPick, setPoolPick] = useState<RuntimeSelection | null>(null);
   const [pin, setPin] = useState<{ chatId: string; selection: RuntimeSelection | null } | null>(null);
   const [revision, setRevision] = useState(0);
   const [menu, setMenu] = useState<"model" | "effort" | null>(null);
+  // A receipt card's "Send through another AI" opens this picker (lib/composer-control-bus.ts); a draft chip (no conversation) offers none.
+  useEffect(() => (draft || !chatId || disabled ? undefined : registerComposerControls(chatId, { openRuntimePicker: () => setMenu("model") })), [draft, chatId, disabled]);
   const [failed, setFailed] = useState(false);
   // Set only for a refusal caused outside the app (signed out, not installed...): the one plain sentence that says which.
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -71,6 +83,21 @@ export function OneRuntimeChips({
     const refresh = () => {
       const request = ++generation;
       void api.runtime.detect().then((runtimes) => { if (!cancelled && request === generation) setInventory(runtimes); }).catch(() => { if (!cancelled && request === generation) setInventory([]); });
+    };
+    const off = ipcEvents()?.onStoreChanged?.((change) => { if (change.entity === "runtime") refresh(); });
+    refresh();
+    return () => { cancelled = true; off?.(); };
+  }, []);
+
+  useEffect(() => {
+    const api = ipc();
+    if (!api?.runtime?.listRoleMembers) return;
+    let cancelled = false;
+    let generation = 0;
+    const refresh = () => {
+      const request = ++generation;
+      void api.runtime.listRoleMembers().then((state) => { if (!cancelled && request === generation) setPoolPick(state?.picks?.orchestrator?.selection ?? null); })
+        .catch(() => { if (!cancelled && request === generation) setPoolPick(null); });
     };
     const off = ipcEvents()?.onStoreChanged?.((change) => { if (change.entity === "runtime") refresh(); });
     refresh();
@@ -131,10 +158,12 @@ export function OneRuntimeChips({
   }, [inventory]);
 
   const shownPin = draft ? draftSelection.value : choice?.selection ?? (pin && pin.chatId === chatId ? pin.selection : null);
+  // No pin: the chip shows what the run will take (the pool's pick), not whichever row the legacy single-runtime flag marks.
+  const displayPin = shownPin ?? poolPick;
   const runtime = useMemo(() => draft
-    ? chipRuntimeFor(inventory, shownPin)
-    : pin && pin.chatId === chatId ? chipRuntimeFor(inventory, shownPin) : null,
-  [chatId, inventory, pin, shownPin, draft]);
+    ? chipRuntimeFor(inventory, displayPin)
+    : pin && pin.chatId === chatId ? chipRuntimeFor(inventory, displayPin) : null,
+  [chatId, inventory, pin, displayPin, draft]);
 
   useEffect(() => {
     if (!menu) return;

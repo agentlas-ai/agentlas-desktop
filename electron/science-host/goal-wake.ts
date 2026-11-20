@@ -35,15 +35,23 @@ function turnScope(input: ScienceGoalWakeInput, queuedOnly = false, terminalAllo
 export function scienceHostGoalWake<T extends { runId: string }>(input: ScienceGoalWakeInput, start: () => T):
   { start: true; result: T } | { start: false; reason: "chat_busy" | "owner_request_queued" | "wake_budget_reached"; retryAt?: string } {
   const { binding } = turnScope(input);
-  return tryHostGoalWake({ runId: workloadId(input.projectId), chatId: binding.runtimeChatId,
+  const verdict = tryHostGoalWake({ runId: workloadId(input.projectId), chatId: binding.runtimeChatId,
     source: "continuation", cause: "research-continuation", invocationRunId: input.invocationRunId,
     gate: invocationService }, start, result => result.runId === input.invocationRunId);
+  // The SDK's wake port knows three deferral causes. A chat the person stopped (chat/chat-stop.ts) waits like a busy one: the same retry
+  // later, and nothing starts until they speak or press a Goal control.
+  if (verdict.start) return verdict;
+  return { start: false, reason: sdkWakeReason(verdict.reason), ...(verdict.retryAt ? { retryAt: verdict.retryAt } : {}) };
 }
 
-export function readScienceHostGoalWake(input: ScienceGoalWakeInput): HostGoalWakeDeferral | null {
+type SdkWakeReason = "chat_busy" | "owner_request_queued" | "wake_budget_reached";
+const sdkWakeReason = (reason: SdkWakeReason | "owner_stopped"): SdkWakeReason => (reason === "owner_stopped" ? "chat_busy" : reason);
+
+export function readScienceHostGoalWake(input: ScienceGoalWakeInput): (Omit<HostGoalWakeDeferral, "reason"> & { reason: SdkWakeReason }) | null {
   try {
     const { binding } = turnScope(input, true);
-    return readHostGoalWakeDeferral({ runId: workloadId(input.projectId), chatId: binding.runtimeChatId, invocationRunId: input.invocationRunId });
+    const deferral = readHostGoalWakeDeferral({ runId: workloadId(input.projectId), chatId: binding.runtimeChatId, invocationRunId: input.invocationRunId });
+    return deferral ? { ...deferral, reason: sdkWakeReason(deferral.reason) } : null;
   } catch { return null; }
 }
 

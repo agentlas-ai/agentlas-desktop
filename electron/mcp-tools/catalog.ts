@@ -27,6 +27,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Optional read-only context from your connected ontology",
     category: "data",
     transport: "http",
+    // Connector card facts (; web placement vocabulary), from the README env lines: OPENCRAB_MCP_URL_KEY (a token inside the URL, kept in the Keychain)
+    auth: "token",
+    needs: ["network"],
     url: OPENCRAB_MCP_URL_SENTINEL,
     trust: "community",
     docsUrl: "https://github.com/AlexAI-MCP/OpenCrab",
@@ -54,6 +57,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Read/post channel messages, reply in threads, look up users",
     category: "communication",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: SLACK_BOT_TOKEN
+    auth: "token",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-slack"],
     trust: "official",
@@ -89,6 +95,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Read/send server & channel messages, look up members",
     category: "communication",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: DISCORD_TOKEN
+    auth: "token",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "mcp-discord"],
     trust: "community",
@@ -117,6 +126,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Search issues/PRs/code, read files, manage repos",
     category: "dev",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: GITHUB_PERSONAL_ACCESS_TOKEN
+    auth: "token",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-github"],
     trust: "official",
@@ -144,6 +156,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Read/write/search files in folders you allow (no key)",
     category: "dev",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: no env; reads and writes the folders it is given
+    auth: "none",
+    needs: ["filesystem", "process"],
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-filesystem", "~"],
     trust: "official",
@@ -161,6 +176,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Read-only SQL queries and schema inspection",
     category: "data",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: DATABASE_URL (a connection string is the credential)
+    auth: "token",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-postgres"],
     trust: "official",
@@ -190,6 +208,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Inspect and manage Railway projects, services, deployments, variables, and logs",
     category: "dev",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: RAILWAY_API_TOKEN
+    auth: "token",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "@railway/mcp-server"],
     trust: "official",
@@ -217,6 +238,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Search, read, and create pages & databases",
     category: "productivity",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: NOTION_TOKEN
+    auth: "token",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "@notionhq/notion-mcp-server"],
     trust: "official",
@@ -244,6 +268,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Create/search/update issues, view projects",
     category: "productivity",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: LINEAR_API_KEY
+    auth: "api_key",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "mcp-linear"],
     trust: "community",
@@ -272,6 +299,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Route Agentlas Hub/Cloud agents, prepare runtime bundles, resolve Hub plugin needs",
     category: "dev",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: no env; a local program
+    auth: "none",
+    needs: ["process"],
     command: "~/.agentlas/runtime/current/bin/hephaestus",
     args: ["mcp", "serve"],
     trust: "official",
@@ -289,6 +319,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Web & local search (real-time info)",
     category: "web",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: BRAVE_API_KEY
+    auth: "api_key",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "@modelcontextprotocol/server-brave-search"],
     trust: "official",
@@ -318,6 +351,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
       "Design research over 257k+ real app screens — references, competitive analysis, design-token extraction. Evidence, not vibes.",
     category: "web",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: LAZYWEB_MCP_TOKEN (mcp-remote bridge to a hosted MCP)
+    auth: "token",
+    needs: ["process", "network"],
     command: "npx",
     // 원격 streamable-HTTP MCP(https://www.lazyweb.com/mcp)를 mcp-remote로 stdio 브리지.
     args: ["-y", "mcp-remote", "https://www.lazyweb.com/mcp"],
@@ -345,6 +381,9 @@ export const MCP_TOOL_CATALOG: McpToolCatalogEntry[] = [
     descriptionEn: "Search & install 6,000+ production-grade UI components/blocks (Radix + Tailwind).",
     category: "dev",
     transport: "stdio",
+    // Connector card facts (; web placement vocabulary), from the README env lines: no env
+    auth: "none",
+    needs: ["process", "network"],
     command: "npx",
     args: ["-y", "shadcn@latest", "mcp"],
     trust: "official",

@@ -55,11 +55,12 @@ export function isOwnerEndedInvocation(receipt: Pick<InvocationRunReceipt, "stat
 }
 
 /** 대화에 남기는 한 줄 — 무엇 때문에 멈췄는지와, 실패가 아니라는 사실. */
-export function invocationHostStopCopy(cause: InvocationHostStopCause, locale: "ko" | "en"): { short: string; detail: string } {
+export function invocationHostStopCopy(cause: InvocationHostStopCause, locale: "ko" | "en", facts: { hasGoal?: boolean } = {}): { short: string; detail: string } {
   const ko = locale === "ko";
+  // The Goal clause is a promise about THIS conversation: only a conversation that has a Goal hears it; a caller that does not know says nothing about a Goal.
   if (cause === "app_closed") return ko
-    ? { short: "앱 종료로 멈춤", detail: "앱이 종료되어 이 실행이 멈췄습니다. 실행 오류가 아닙니다. Goal 이 있는 대화는 앱을 다시 열면 앱이 계속합니다." }
-    : { short: "stopped when the app closed", detail: "This run stopped because the app closed. It is not a run error. A conversation with a Goal continues on its own after the app reopens." };
+    ? { short: "앱 종료로 멈춤", detail: `앱이 종료되어 이 실행이 멈췄습니다. 실행 오류가 아닙니다.${facts.hasGoal === true ? " 이 대화의 Goal 은 앱을 다시 열면 앱이 계속합니다." : ""}` }
+    : { short: "stopped when the app closed", detail: `This run stopped because the app closed. It is not a run error.${facts.hasGoal === true ? " This conversation's Goal continues on its own after the app reopens." : ""}` };
   if (cause === "update_restart") return ko
     ? { short: "업데이트로 멈춤", detail: "업데이트를 설치하려고 이 실행을 잠시 멈췄습니다. 실행 오류가 아닙니다. 앱이 다시 켜지면 계속합니다." }
     : { short: "paused for the update", detail: "This run was paused so the update could install. It is not a run error. It continues when the app comes back." };
@@ -88,8 +89,8 @@ export function runStopCause(facts: { status?: unknown; hostStopCause?: unknown 
 }
 
 /** One line for any stop cause; the owner's Stop says it stopped, that it is not a run error, and what continues it. */
-export function runStopCopy(cause: RunStopCause, locale: "ko" | "en"): { short: string; detail: string } {
-  if (cause !== OWNER_STOP_CAUSE) return invocationHostStopCopy(cause, locale);
+export function runStopCopy(cause: RunStopCause, locale: "ko" | "en", facts: { hasGoal?: boolean } = {}): { short: string; detail: string } {
+  if (cause !== OWNER_STOP_CAUSE) return invocationHostStopCopy(cause, locale, facts);
   return locale === "ko"
     ? { short: "중단됨", detail: "실행을 중단했습니다. 실행 오류가 아닙니다. 새 지시를 보내면 계속 실행합니다." }
     : { short: "Stopped", detail: "You stopped this run. It is not a run error. Send a new direction to continue." };

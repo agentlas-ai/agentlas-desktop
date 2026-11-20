@@ -145,5 +145,10 @@ export function runtimeQuotaFailureMessage(input: {
       : `This background run stopped at ${input.runtime}'s usage limit. Review this run's recorded results and runtime status.`
     : ko ? `${input.runtime} 사용 한도가 찼습니다. 다른 모델을 선택하거나 한도 상태를 확인하세요.`
       : `${input.runtime} has hit its usage limit. Choose another model or check its quota status.`;
-  return [message, reset].filter(Boolean).join(" ");
+  // The way out, in this one line (one implementation). A limit belongs to the account: another account is used at once, and the
+  // same account is asked again by the next message every few minutes (store/runtime-retry.ts RUNTIME_RETRY_PROBE_GAP_MS).
+  const way = input.unattended ? null
+    : ko ? "다른 계정으로 바꿨다면 바로 다시 보내 보세요. 플랜을 올렸거나 한도가 일찍 풀렸다면 몇 분 뒤에 다시 보내 보세요."
+      : "If you switched to another account, send again right away. If you upgraded your plan or the limit lifted early, send again in a few minutes.";
+  return [message, reset, way].filter(Boolean).join(" ");
 }

@@ -17,7 +17,7 @@ export function VisualMenu({ items, ko, label }: { items: VisualMenuItem[]; ko: 
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  useDismissibleLayer({open, roots: [rootRef], onDismiss: () => setOpen(false), restoreFocusRef: triggerRef});
+  useDismissibleLayer({open, roots: [rootRef], onDismiss: () => setOpen(false), restoreFocusRef: triggerRef, dismissOnFocusLeave: true});
   useEffect(() => {
     if (open) menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, [open]);

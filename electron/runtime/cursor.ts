@@ -1,4 +1,5 @@
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { confinementNotice } from "../../shared/runtime-confinement";
 import { memoryDeathCause } from "./child-death";
 // Cursor Agent CLI runtime. The official headless contract is
 // `cursor-agent --print --output-format stream-json --model <model> <prompt>`.
@@ -297,6 +298,9 @@ async function runCursorTurn(req: RunnerRequest, events: RunnerEvents, dispatch:
   // Cursor requires --force to apply writes in headless mode. Never add it for
   // read-only invocations; normal Agentlas write/full tasks remain automated.
   if (req.permission === "write" || req.permission === "full") args.push("--force");
+  // --force applies writes anywhere the process can reach; a write run says it is not confined (typed notice).
+  const unconfined = confinementNotice("cursor", req.permission, req.locale);
+  if (unconfined) events.onNotice?.(unconfined);
   // Cursor's Auto is its own live model selector. Omitting it keeps the account default.
   if (req.model && req.model !== "auto") args.push("--model", req.model);
   args.push(promptFor(req));

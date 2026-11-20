@@ -164,6 +164,14 @@ export function connectionState(server: InstalledMcpServer, status: McpServerSta
   return "unverified";
 }
 
+/** "12 tools · checked 14:07" - the proof line for a connection that answered a real tools/list; empty when nothing was proven. */
+export function connectionProof(status: McpServerStatus | undefined, ko: boolean): string {
+  if (!status || !status.connected || status.tools.length === 0) return "";
+  const at = new Date(status.checkedAt);
+  const time = Number.isNaN(at.getTime()) ? "" : at.toLocaleTimeString(ko ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit" });
+  return ko ? `도구 ${status.tools.length}개${time ? ` · ${time} 확인` : ""}` : `${status.tools.length} tools${time ? ` · checked ${time}` : ""}`;
+}
+
 export function connectionLabel(state: ConnectionState, ko: boolean): string {
   switch (state) {
     case "unknown": return ko ? "상태 확인 불가" : "State unverified";
@@ -190,6 +198,22 @@ export function transportLabel(transport: string, ko: boolean): string {
 export function oneLine(value: string | undefined, max = 140): string {
   const clean = (value ?? "").replace(/\s+/g, " ").trim();
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+/**
+ * The one sentence under a connection that did not answer, chosen from the typed failure the status carries (never from the words of the error).
+ * The raw error text stays available to the person as detail, not as the message.
+ */
+export function connectionNoticeLine(status: Pick<McpServerStatus, "failureCode" | "missingEnv">, transport: string, ko: boolean): string {
+  if (status.missingEnv.length > 0 || status.failureCode === "configuration_missing") return ko ? "필요한 키가 아직 없어요. '키 입력'으로 넣어 주세요." : "A required key is missing. Add it with Enter key.";
+  if (status.failureCode === "authentication_required") return ko ? "로그인이나 키가 필요해요." : "Sign-in or a key is needed.";
+  if (status.failureCode === "connection_cancelled") return ko ? "연결 확인을 취소했어요." : "The connection check was cancelled.";
+  if (status.failureCode === "connection_unavailable") {
+    return transport === "stdio"
+      ? (ko ? "이 프로그램이 시작되지 않았거나 바로 종료됐어요. 명령과 인자를 확인해 주세요." : "This program did not start or ended right away. Check the command and its arguments.")
+      : (ko ? "이 주소에 연결하지 못했어요. 주소와 네트워크를 확인해 주세요." : "Could not connect to this address. Check the address and your network.");
+  }
+  return ko ? "연결을 확인하지 못했어요." : "The connection could not be checked.";
 }
 
 export function listingName(listing: MarketplaceListing, ko: boolean): string {

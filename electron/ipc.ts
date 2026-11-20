@@ -18,7 +18,7 @@ import { createRendererInvocationPreparation } from "./invocation/renderer-prepa
 import { answerOneDispatchQuestion } from "./one/team-dispatch";
 import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
 import { assertOwnerMayWriteRoom } from "./one/personal-agent-rooms";
-import { recoverInterruptedLeadRooms, routeLeadRoomOwnerMessage } from "./one/room-lead-runtime";
+import { isMarkedLeadRoom, recoverInterruptedLeadRooms, routeLeadRoomOwnerMessage, stopRoomConversation } from "./one/room-lead-runtime";
 import { registerOneHarnessIpc } from "./one/harness-ipc";
 import { registerLiveDocumentIpc } from "./live-document/ipc";
 import { registerFinanceIpc } from "./finance/ipc";
@@ -291,12 +291,14 @@ import { onNativeGuiInvocationEvent } from "./invocation/native-gui-events";
 import { invocationService } from "./invocation/service";
 import { createRendererSendQueue, type RendererSourceBoundary } from "./invocation/renderer-send-queue";
 import { createFollowupCustodyStore } from "./store/followup-custody-core";
-import { abandonWaitingRetries, canQueuePendingSend, waitingRetryCount } from "./invocation/pending-chat-sends";
+import { canQueuePendingSend, waitingRetryCount } from "./invocation/pending-chat-sends";
+import { listOwnerInputs } from "./chat/owner-input-queue";
+import { readStopEpoch, stopChatOwnerInputs } from "./chat/chat-stop";
 import { createQueuedOwnerInputCustody, type QueuedOwnerStartBoundary } from "./invocation/queued-owner-input-custody";
 import { queuedSendRunState, queuedSendPlacement, undispatchedStartWaits } from "./invocation/renderer-send-queue";
 import { isPossiblyRecordedSendRefusal, isTransientSendRefusal } from "../shared/transient-send-refusal";
 import { readRecordedOwnerSteer } from "./invocation/recorded-owner-steer";
-import { abandonOwnerWaitingRetries, cancelInvocationOwnerRun, invocationCurrentTurnControl, stopInvocationGoal } from "./runtime/invocation-owner-control";
+import { abandonOwnerWaitingRetries, cancelInvocationOwnerRun, invocationCurrentTurnControl, stopInvocationGoal, takeStopWithdrawals } from "./runtime/invocation-owner-control";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
 import { hephaestusAvailable, hephaestusDoctor, hephaestusRoot, readHephaestusUpdateJournal, runHephaestusRuntimeUpdate } from "./hephaestus/engine";
@@ -480,6 +482,7 @@ import {
   commitPendingConfirmationAnswer,
   listCommittedQuestionAnswers,
   listPendingConfirmations,
+  listPendingConfirmationsFor,
   snoozePendingConfirmation,
 } from "./confirm";
 import {
@@ -509,7 +512,7 @@ import {
   getChatWorkingFolder,
   listArchivedChats,
   listChatMessages,
-  listChatMessagesPage, listAgentRoomWorkMessages,
+  listChatMessagesPage, withAnswerStarts, listAgentRoomWorkMessages,
   repairRootChatSurfaceController,
   listChatsByFirm,
   listChatsByProject,
@@ -535,7 +538,12 @@ import {
   lastGoalLedgerFailure,
 } from "./mcp/goal-ledger";
 import { findAutomationByGoalId } from "./store/automations";
-import { specFromStored, defaultTz, readModelScheduleSpec } from "./store/schedule";
+import { specFromStored, defaultTz, readModelScheduleSpec, modelScheduleSpecProblem, scheduleReceipt } from "./store/schedule";
+/** The stored schedule in words and its next three runs, beside the automation a model just saved (store/schedule.ts scheduleReceipt). */
+function withScheduleReceipt<T extends { scheduleSpec?: import("../shared/types").ScheduleSpec | null; nextRunAt?: string | null }>(view: T): T & { scheduleReceipt?: { words: string; nextRuns: string[] } } {
+  const receipt = scheduleReceipt(view, currentUiLocale() === "ko" ? "ko" : "en");
+  return receipt ? { ...view, scheduleReceipt: receipt } : view;
+}
 import { maybeDispatchEffectObservation } from "./long-run/effect-observation";
 import { isGoalObserving } from "./long-run/effect-observation-tickets";
 import { emitDesktopStoreChange } from "./store/change-bus";
@@ -968,12 +976,18 @@ import {
 import {
   getToolApprovalResolution,
   listPendingToolApprovals,
+  listPendingToolApprovalsFor,
+  resolveToolApprovalFrom,
+  toolApprovalVisibleTo,
   listSettledToolApprovals,
   onToolApprovalRequested,
   onToolApprovalResolved,
   resolveToolApproval,
   noteToolApprovalHandler,
 } from "./runtime/tool-approval";
+import { appWideScopeStamp } from "./scope/scope-gate";
+/** a window is the app-wide surface of THIS account (shared/scope-stamp.ts); the pane that draws a card is the renderer's own pick (composer-decision-target.ts). */
+function windowScopeViewer() { return { account: appWideScopeStamp().account, surface: "global-sheet" as const }; }
 import { recordApprovalClosure } from "./runtime/approval-closure-notice";
 import {
   grantChatAlwaysApproval,
@@ -3198,7 +3212,7 @@ export function registerIpcHandlers(): void {
     assertTrustedSitePublishIpcSender(_e);
     return answerOneDispatchQuestion(input);
   });
-  registerAppControlDomainIpc(ipcMain, "confirm:listPending", () => listPendingConfirmations());
+  registerAppControlDomainIpc(ipcMain, "confirm:listPending", () => listPendingConfirmationsFor(windowScopeViewer()));
   registerAppControlDomainIpc(ipcMain, "confirm:commitAnswer", (input: {
     chatId?: unknown;
     reply?: unknown;
@@ -3278,6 +3292,8 @@ export function registerIpcHandlers(): void {
       setModelRoleMembersStore(role, selections);
       clearDetectCache();
       await detectRuntimes();
+      // Every mounted model chip holds its own inventory and pool pick: without this event they keep the pool from before the change.
+      emitDesktopStoreChange({ entity: "runtime" });
       return desktopRuntimeRolePoolState();
     },
   );
@@ -4257,12 +4273,12 @@ export function registerIpcHandlers(): void {
     // Pending question text is private: only the trusted Desktop top frame
     // may recover it after its event subscription (or renderer) restarts.
     assertTrustedSitePublishIpcSender(event);
-    return listRuntimeAskUserRequests();
+    return listRuntimeAskUserRequests(windowScopeViewer());
   });
   ipcMain.handle("confirm:submitAskUserAnswer", async (event, requestId: string, answer: string | null) => {
     assertTrustedSitePublishIpcSender(event);
     const id = String(requestId), value = typeof answer === 'string' ? answer : null;
-    return submitRuntimeAskUserAnswer(id, value);
+    return submitRuntimeAskUserAnswer(id, value, { ...windowScopeViewer(), claimedChat: null });
   });
   registerAppControlDomainIpc(ipcMain, "browser:status", () => getBrowserStatus());
   registerAppControlDomainIpc(ipcMain, "browser:listSites", () => browserListSites());
@@ -4418,8 +4434,28 @@ export function registerIpcHandlers(): void {
     if (typeof chatId === "string" && chatId) revokeChatAlwaysApproval(chatId.slice(0, 128));
     return listAlwaysApprovedChatIds();
   });
-  registerAppControlDomainIpc(ipcMain, "runtime:listToolApprovals", async () => [...new Map([...listPendingToolApprovals(), ...(configuredNativeGuiControls()?.listAvailableApprovals() ?? [])].map(request => [request.id, request])).values()]);
+  registerAppControlDomainIpc(ipcMain, "runtime:listToolApprovals", async () => [...new Map([...listPendingToolApprovalsFor(windowScopeViewer()), ...(configuredNativeGuiControls()?.listAvailableApprovals() ?? [])].map(request => [request.id, request])).values()]);
   registerAppControlDomainIpc(ipcMain, "pluralHandoff:act", (input: unknown) => import("./one/plural-handoff-cards").then((m) => m.actOnHandoffCard(input)));
+  // The consent chip. The chips waiting on this desktop are the sender's in-memory list (replaced by every server answer, no other copy); the first read attaches ONE listener that tells every window when the list changes, so no screen polls.
+  let consentTold = false;
+  registerAppControlDomainIpc(ipcMain, "pluralConsent:asks", async () => {
+    const sender = (await import("./one/plural-handoff-send")).pluralSender();
+    if (!consentTold) {
+      consentTold = true;
+      sender.onConsentAsks(() => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed() && !win.webContents.isDestroyed()) { try { win.webContents.send("pluralConsent:changed"); } catch { /* renderer may be closing */ } }
+        }
+      });
+    }
+    return { asks: [...sender.consentAsks()] };
+  });
+  registerAppControlDomainIpc(ipcMain, "pluralConsent:allows", async () => {
+    const rules = await (await import("./one/plural-handoff-send")).pluralSender().allows();
+    return rules ? { ok: true, rules } : { ok: false, rules: [] };
+  });
+  registerAppControlDomainIpc(ipcMain, "pluralConsent:allowOff", async (from: unknown, to: unknown) =>
+    ({ state: typeof from === "string" && typeof to === "string" ? await (await import("./one/plural-handoff-send")).pluralSender().allowOff(from, to) : null }));
   ipcMain.handle("runtime:listSettledToolApprovals", (_e, chatIds: unknown) => listSettledToolApprovals(
     Array.isArray(chatIds) ? chatIds.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 256).slice(0, 128) : []));
   ipcMain.handle("runtime:getToolApprovalResolution", (_e, id: string) => {
@@ -4448,9 +4484,11 @@ export function registerIpcHandlers(): void {
       decision, note, chatId, requestId: typeof id === "string" ? id.slice(0, 256) : "", event: _e,
       resolve: () => {
         if (native?.hasApproval(id)) return native.resolveApproval(_e, id, decision, actionId);
-        return resolveToolApproval(
+        // the window answers through the gate (another account / a conversation the card is not for is refused and the card stays open).
+        return resolveToolApprovalFrom(
           typeof id === "string" ? id.slice(0, 256) : "",
           decision,
+          { ...windowScopeViewer(), claimedChat: chatId ?? null },
           typeof actionId === "string" ? actionId.slice(0, 512) : "",
           "desktop",
         );
@@ -4470,6 +4508,7 @@ export function registerIpcHandlers(): void {
   installHostToolPermissionPolicy({ hostKind: "main", getAuthenticatedActorIds });
 
   onToolApprovalRequested((request) => {
+    if (!toolApprovalVisibleTo(request, windowScopeViewer())) return;
     for (const window of BrowserWindow.getAllWindows()) {
       if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
       try {
@@ -4674,7 +4713,7 @@ export function registerIpcHandlers(): void {
     // A chat that is not stored (deleted, or a pending chat the window already shows) has no history: an empty page, not
     // a thrown error (production 2026-10-12 20:55 KST: seven handler errors in nine seconds from one open chat).
     if (!getChat(input.chatId)) return { messages: [], hasOlder: false };
-    return listChatMessagesPage(input.chatId, input.limit ?? 200, input.before);
+    return withAnswerStarts(input.chatId, listChatMessagesPage(input.chatId, input.limit ?? 200, input.before));
   });
   ipcMain.handle("chats:agentRoomWork", (_event, input: { agentId: string; limit?: number }) => {
     assertTrustedSitePublishIpcSender(_event);
@@ -5676,6 +5715,16 @@ export function registerIpcHandlers(): void {
         { timeoutMs: 6_000 },
       );
       const { workspaceMode, ...storedInput } = input;
+      // The target and the conversation a model names must exist (automation-target-check.ts); a call from a conversation had them filled by the host.
+      if (byModel) {
+        const { automationOriginChatProblem, automationTargetProblem } = await import("./automation-target-check");
+        const problem = automationTargetProblem(storedInput.targetType, storedInput.targetId)
+          ?? (storedInput.targetType === undefined || storedInput.targetId === undefined ? { code: "automation_target_required", detail: "targetType and targetId are needed when the call does not come from a conversation." } : null)
+          ?? automationOriginChatProblem((storedInput.monitor ?? (storedInput.trigger as { monitor?: { originChatId?: unknown } } | null | undefined)?.monitor)?.originChatId);
+        if (problem) throw new AutomationWorkspaceError(problem.code, problem.detail);
+      }
+      const { targetType: createTargetType, targetId: createTargetId } = storedInput;
+      if (createTargetType === undefined || createTargetId === undefined) throw new AutomationWorkspaceError("automation_target_required", "targetType and targetId are needed.");
       // The schedule a model sends is read here, once: a `scheduleSpec` object is the schedule (the store reads `scheduleJson`, and a spec left beside a sentence was dropped: prod test "(금) 오후 3시 1회"
       // with `scheduleSpec: null` was stored as a 24-hour job, due the next morning), and a time-driven automation whose schedule cannot be read is refused with its reason instead of falling back to 24 hours.
       if (byModel && (storedInput.triggerType ?? "schedule") === "schedule") {
@@ -5683,6 +5732,8 @@ export function registerIpcHandlers(): void {
         const zone = storedInput.timezone || defaultTz();
         // A scheduleSpec object is read once, by the names a model uses for its parts (store/schedule.ts readModelScheduleSpec), and an object that still
         // is not a usable time is refused: a spec with a kind but no future time used to be stored as a job that never runs.
+        const problem = modelScheduleSpecProblem(spec);
+        if (problem) throw new AutomationWorkspaceError("automation_schedule_unreadable", problem);
         const read = spec && typeof spec === "object" ? readModelScheduleSpec(spec, zone) : null;
         const json = spec && typeof spec === "object" ? (read ? JSON.stringify(read) : null) : (storedInput as { scheduleJson?: string | null }).scheduleJson ?? null;
         if (!(spec && typeof spec === "object" ? read : specFromStored(json && json.trim() ? json : storedInput.scheduleHuman, zone))) {
@@ -5691,7 +5742,8 @@ export function registerIpcHandlers(): void {
         if (read) {
           (storedInput as { scheduleJson?: string | null }).scheduleJson = JSON.stringify(read);
           // The schedule column is NOT NULL: a model that sends only scheduleSpec got a raw "SQLITE_CONSTRAINT_NOTNULL: automations.schedule" back (prod "3시간 뒤"). The words are the spec's own description.
-          if (typeof storedInput.scheduleHuman !== "string" || !storedInput.scheduleHuman.trim()) {
+          // They are the spec's own description even when the model wrote words: the words on the card, the list and the phone are what the scheduler will do, never a promise beside it ("격주" over a weekly cron).
+          {
             const { describeSchedule } = await import("./store/schedule");
             let words = "";
             try { words = describeSchedule(read, currentUiLocale() === "ko" ? "ko" : "en"); } catch { words = ""; }
@@ -5700,9 +5752,9 @@ export function registerIpcHandlers(): void {
         }
       }
       const created = withOwnerAutomationWorkspaceIntent(workspaceMode, null,
-        () => createAutomation({ ...storedInput, createdBy: byModel ? "agent" : "user" }));
+        () => createAutomation({ ...storedInput, targetType: createTargetType, targetId: createTargetId, createdBy: byModel ? "agent" : "user" }));
       await resyncTriggers();
-      return automationWorkspaceView(created);
+      return byModel ? withScheduleReceipt(automationWorkspaceView(created)) : automationWorkspaceView(created);
     },
   );
   registerAppControlDomainIpc(ipcMain, "automations:toggle", async (id: string, enabled: boolean) => {
@@ -5740,6 +5792,12 @@ export function registerIpcHandlers(): void {
       { toolMode: patch.toolMode, name: patch.name, promptTemplate: patch.promptTemplate, targetLabel: patch.targetType },
       { timeoutMs: 6_000 },
     );
+    if (appControlInvocationPermission() !== null && (patch.targetType !== undefined || patch.targetId !== undefined)) {
+      const { automationTargetProblem } = await import("./automation-target-check");
+      const current = getAutomation(id);
+      const problem = automationTargetProblem(patch.targetType ?? current?.targetType, patch.targetId ?? current?.targetId);
+      if (problem) throw new AutomationWorkspaceError(problem.code, problem.detail);
+    }
     const before = getAutomation(id);
     const { workspaceMode, workspaceGoalId, ...storedPatch } = patch;
     // A model changes a schedule with `scheduleSpec` (and words) in the patch. updateAutomation reads only `scheduleJson`, so the new time was dropped and
@@ -5750,10 +5808,12 @@ export function registerIpcHandlers(): void {
       const zone = (typeof raw.timezone === "string" && raw.timezone) || before?.timezone || defaultTz();
       const unreadable = () => new AutomationWorkspaceError("automation_schedule_unreadable", "the schedule cannot be read as a time: send scheduleSpec as {kind:\"once\",atIso:\"<ISO time with an offset such as +09:00, in the future>\"}, {kind:\"cron\",expr,tz} or {kind:\"interval\",everyMs,anchor}, or a legacy token such as daily-09:00; a sentence is not a schedule");
       if (raw.scheduleSpec !== undefined) {
+        const problem = modelScheduleSpecProblem(raw.scheduleSpec);
+        if (problem) throw new AutomationWorkspaceError("automation_schedule_unreadable", problem);
         const read = raw.scheduleSpec && typeof raw.scheduleSpec === "object" ? readModelScheduleSpec(raw.scheduleSpec, zone) : null;
         if (!read) throw unreadable();
         raw.scheduleJson = JSON.stringify(read);
-        if (typeof raw.scheduleHuman !== "string" || !raw.scheduleHuman.trim()) {
+        {
           const { describeSchedule } = await import("./store/schedule");
           let words = "";
           try { words = describeSchedule(read, currentUiLocale() === "ko" ? "ko" : "en"); } catch { words = ""; }
@@ -5765,13 +5825,16 @@ export function registerIpcHandlers(): void {
         if (!specFromStored(raw.scheduleHuman, zone)) throw unreadable();
         raw.scheduleJson = null;
       }
+      // A `scheduleJson` string the model wrote itself is read the same way: the store used to take any text and, when it was no spec, fall back to "24 hours from now"
+      // ({"preset":"daily","time":"22:45"} was stored, the next run was tomorrow at the edit's time, and the answer said "tonight 22:45").
+      if (typeof raw.scheduleJson === "string" && raw.scheduleJson.trim() && !specFromStored(raw.scheduleJson, zone)) throw unreadable();
     }
     const next = withOwnerAutomationWorkspaceIntent(workspaceMode, before,
       () => updateAutomation(id, storedPatch), workspaceGoalId);
     // 오너가 핀을 실제로 바꾼 경우만 "오너의 선택"으로 적는다 — 그 뒤로는 복사본 추종을 멈춘다.
     noteOwnerAutomationPinEdit(id, before?.runtimeSelection ?? null, patch, "desktop_editor");
     await resyncTriggers();
-    return automationWorkspaceView(next);
+    return appControlInvocationPermission() !== null ? withScheduleReceipt(automationWorkspaceView(next)) : automationWorkspaceView(next);
   });
   registerAppControlDomainIpc(ipcMain, "automations:remove", async (id: string) => {
     const { removeAutomationSafely } = await import("./automation-removal");
@@ -7922,11 +7985,12 @@ export function registerIpcHandlers(): void {
     assertTrustedSitePublishIpcSender(_event);
     if (isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
     if (typeof chatId !== "string" || !chatId) return { stopped: 0 };
-    const stopped = abandonWaitingRetries(getDb(), chatId);
-    if (stopped > 0) { try { emitDesktopStoreChange({ entity: "chat", id: chatId }); } catch { /* cosmetic */ } }
-    return { stopped };
+    // The Stop of the chat (chat/chat-stop.ts): the waiting retries AND every other ordinary send that has not started, the message being
+    // prepared, the Stop counter. It announces the change itself.
+    const out = stopChatOwnerInputs(chatId);
+    return { stopped: out.withdrawn.length };
   });
-  ipcMain.handle("invoke:cancel", async (_event, runId: string) => {
+  const invokeCancel = async (_event: Electron.IpcMainInvokeEvent, runId: string) => {
     assertTrustedSitePublishIpcSender(_event);
     const native = configuredNativeGuiOwner();
     if (native && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
@@ -7957,6 +8021,74 @@ export function registerIpcHandlers(): void {
     if (capture?.retained && !(capture.unavailable && recovered?.hasRun(runId))) return { runId, status: await native!.cancel(runId) };
     if (recovered?.hasRun(runId)) return { runId, status: await recovered.cancel(_event, runId) };
     return { runId, status: await cancelInvocationOwnerRun(runId) };
+  };
+  ipcMain.handle("invoke:cancel", invokeCancel);
+  // The one Stop of a conversation: the live run (a turn waiting on its Goal verification counts), then everything else that can
+  // still write into the chat. `withdrawn` are the messages that were NOT sent, with their words: the window puts them in the input box and
+  // shows "not sent, put back in the input box". Owner-only, like invoke:cancel.
+  ipcMain.handle("chat:stop", async (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    if (typeof chatId !== "string" || !chatId || chatId.length > 256) return { chatId: "", runId: null, status: "not-found" as const, epoch: 0, withdrawn: [] };
+    takeStopWithdrawals(chatId); // an older Stop's leftovers are never handed to this one
+    // A group room run by the lead router has no run of its own: its Stop is the room's (the router's request, every live member session, the Stop counter), the same
+    // one the room status line's button reaches (one/room-lead-runtime.ts stopRoomConversation).
+    if (isMarkedLeadRoom(chatId)) {
+      const room = await stopRoomConversation(chatId);
+      const runId = room.cancelledRuns[0] ?? null;
+      return runId
+        ? { chatId, runId, status: "requested" as const, epoch: room.epoch, withdrawn: room.withdrawn }
+        : { chatId, runId: null, status: "not-found" as const, epoch: room.epoch, withdrawn: room.withdrawn };
+    }
+    // This process's run first (a turn waiting on its Goal verification counts), then whoever hosts it (the background service).
+    const live = invocationService.currentTurn(chatId, { includeVerification: true }) ?? await Promise.resolve(invocationCurrentTurnControl.currentTurn(chatId)).catch(() => null);
+    const runId = live?.runId ?? null;
+    if (runId) {
+      const receipt = await invokeCancel(_event, runId); // abandonOwnerWaitingRetries(runId) inside = stopChatOwnerInputs
+      return { chatId, runId, status: receipt.status, epoch: readStopEpoch(null, chatId), withdrawn: takeStopWithdrawals(chatId) };
+    }
+    const out = stopChatOwnerInputs(chatId);
+    return { chatId, runId: null, status: "not-found" as const, epoch: out.epoch, withdrawn: out.withdrawn };
+  });
+  // The owner-input read model: the sends of this chat that are not (yet) a transcript row, one state each. Read-only.
+  ipcMain.handle("chat:ownerInputs", (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return typeof chatId === "string" && chatId && chatId.length <= 256 ? listOwnerInputs(getDb(), chatId) : [];
+  });
+  // the promises this conversation still has (its schedules, the waits it is owed an answer for, its Goal's wait) - rows only, read-only.
+  ipcMain.handle("chat:pendingPromises", async (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    const { pendingPromisesOfChat } = await import("./chat/pending-promises");
+    return typeof chatId === "string" && chatId && chatId.length <= 256 ? pendingPromisesOfChat(chatId) : { chatId: "", items: [] };
+  });
+  // the question cards a person closed with X are the conversation's state in the database (chat/closed-question-cards.ts), the same for every window and every start.
+  ipcMain.handle("chat:closedQuestions", async (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return (await import("./chat/closed-question-cards")).listClosedQuestionCards(chatId);
+  });
+  ipcMain.handle("chat:closeQuestion", async (_event, input: { chatId: string; key: string; count?: number }) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    return (await import("./chat/closed-question-cards")).closeQuestionCard({ chatId: input?.chatId, key: input?.key, ...(typeof input?.count === "number" ? { count: input.count } : {}) });
+  });
+  ipcMain.handle("chat:reopenQuestion", async (_event, input: { chatId: string; key: string }) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    return (await import("./chat/closed-question-cards")).reopenQuestionCard({ chatId: input?.chatId, key: input?.key });
+  });
+  ipcMain.handle("chat:pruneQuestions", async (_event, input: { chatId: string; liveKeys: string[] }) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return (await import("./chat/closed-question-cards")).pruneClosedQuestionCards({ chatId: input?.chatId, liveKeys: Array.isArray(input?.liveKeys) ? input.liveKeys : [] });
+  });
+  ipcMain.handle("chat:importClosedQuestions", async (_event, legacy: Record<string, unknown>) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return (await import("./chat/closed-question-cards")).importLegacyClosedQuestionCards(legacy && typeof legacy === "object" ? legacy : {});
+  });
+  // the state of the objects behind the receipt cards of one conversation (a schedule paused or deleted, the receiving conversation's title), by receipt id.
+  ipcMain.handle("chat:receiptLive", async (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    const { receiptLiveOfChat } = await import("./harness/receipt-live");
+    return typeof chatId === "string" && chatId && chatId.length <= 256 ? receiptLiveOfChat(chatId) : {};
   });
   ipcMain.handle(
     "invoke:unsteer",

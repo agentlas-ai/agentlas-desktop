@@ -20,9 +20,6 @@ export function customerSafeProgressDetail(_status: string | null | undefined): 
   return "";
 }
 
-const LOCAL_PATH = "[local path]";
-const LOCAL_PATH_KO = "[로컬 경로]";
-
 // This is deliberately narrow: it removes transport/runtime envelopes that
 // leaked through a persisted provider reply. It does not classify an answer,
 // invent a replacement sentence, or suppress ordinary technical prose.
@@ -35,36 +32,26 @@ function isInternalRuntimeEnvelope(paragraph: string): boolean {
   return signals.length >= 2 || (signals.length >= 1 && HAS_ABSOLUTE_LOCAL_PATH.test(paragraph));
 }
 
-function redactLocalPaths(text: string, locale: OneSafeLocale): string {
-  const replacement = locale === "ko" ? LOCAL_PATH_KO : LOCAL_PATH;
-  // ★마크다운 이미지 참조(![alt](/abs/path.png))는 통째로 보존한다(2026-08-18 캡처
-  // 정본 사고): 이 치환이 이미지 src를 "[local path]" 로 바꿔 One 채팅의 캡처가
-  // 항상 빈 박스로 렌더됐다. src는 텍스트로 보이는 경로가 아니라 <img> 로만
-  // 쓰이므로, 경로 삭제는 이미지 밖 텍스트에만 적용한다.
-  return text
-    .split(/(!\[[^\]\n]*\]\([^)\n]*\))/)
-    .map((segment, index) =>
-      index % 2 === 1
-        ? segment
-        : segment.replace(ABSOLUTE_LOCAL_PATH, (match, prefix: string) => `${prefix}${replacement}${match.endsWith(".") ? "." : ""}`),
-    )
-    .join("");
-}
-
 /**
- * The renderer owns the final customer-copy boundary. Provider replies can be
- * persisted verbatim, so remove only standalone infrastructure envelopes and
- * redact machine-local absolute paths before the text reaches One's surface.
+ * The renderer owns the final customer-copy boundary for its own screen. Provider replies can be persisted verbatim, so remove only
+ * standalone infrastructure envelopes. it does NOT mask local paths: the owner's own desktop view keeps the real paths of the owner's
+ * own machine (a file the answer names must be findable; "[로컬 경로]" in place of the folder hid it). What leaves the machine is
+ * masked once, at the channel's boundary, by shared/remote-projection.ts (the phone's bridge); the renderer never masks.
  */
-export function toCustomerSafeText(
+export function withoutRuntimeEnvelopes(
   text: string | null | undefined,
-  locale: OneSafeLocale = "en",
+  /** Kept for the callers' signature; nothing here depends on the language any more. */
+  _locale: OneSafeLocale = "en",
+  /** Retained for callers written before; a path is never masked here, with or without it. */
+  _options: { keepLocalPaths?: boolean } = {},
 ): string {
   if (!text) return "";
   return text
     .split(/(\n\s*\n+)/)
     .filter((part) => !isInternalRuntimeEnvelope(part))
-    .map((part) => redactLocalPaths(part, locale))
     .join("")
     .trim();
 }
+
+/** The name this function had while it also masked paths. Kept for callers and gates written before; the desktop renderer calls `withoutRuntimeEnvelopes`. */
+export const toCustomerSafeText = withoutRuntimeEnvelopes;

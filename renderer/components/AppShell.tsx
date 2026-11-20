@@ -501,6 +501,7 @@ function GuideFab({
     open,
     roots: [rootRef],
     restoreFocusRef: triggerRef,
+    dismissOnFocusLeave: true,
     onDismiss: () => setOpen(false),
   });
 
@@ -600,6 +601,7 @@ function GuideFab({
       <div style={{ position: "relative", width: 46, height: 46 }}>
         <button
           ref={triggerRef}
+          data-help-trigger="true"
           onClick={() => setOpen((o) => !o)}
           aria-label={ko ? "도움말" : "Help"}
           style={{

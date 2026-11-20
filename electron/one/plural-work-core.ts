@@ -27,6 +27,10 @@ const TRANSIENT_WORDS = new Set(["contended", "unavailable", "error"]);
 export const RESULT_HEAD_CHARS = 2000;
 /** The unsent `close` lines one process keeps for its next request: the server's row is closed by the end of the row anyway, so a lost one costs a card line only. */
 export const PLURAL_UNSENT_CLOSES_MAX = 50;
+/** The questions whose unplaced answer is remembered (said once / retried): the most any one desktop holds open at once is two or three, so 64 is far past what is read. */
+export const PLURAL_UNPLACED_MAX = 64;
+/** How many more times a row's answer that failed to be placed (the window's channel to the service was down a moment) is read again, spaced by the same ladder as every request. */
+export const PLURAL_PLACE_RETRIES = 3;
 /** The row ids of running plural Work sent on a GET (`running`): the URL stays short; a desktop with more Works going sends the oldest first and the rest on the next read. */
 export const PLURAL_RUNNING_IDS_MAX = 40;
 
@@ -107,7 +111,7 @@ export function messageBatchText(items: ReadonlyArray<{ t: string; at?: string |
   return items.map(i => { const s = stamp(i.at, now); return s ? `[${s}] ${i.t}` : i.t; }).join("\n\n");
 }
 
-export type Sent = { kind: "ok"; status: string; body: Record<string, unknown> } | { kind: "closed" } | { kind: "gave_up" } | { kind: "refused" };
+export type Sent = { kind: "ok"; status: string; body: Record<string, unknown> } | { kind: "closed" } | { kind: "gave_up" } | { kind: "refused"; httpStatus: number; code?: string };
 
 /** What the host gate asks of the row (plural-remote-ask.ts `PluralRowAsker`, B's interface; structurally the same). */
 export interface PluralRowAskerLike {
@@ -123,6 +127,15 @@ export function createPluralWorkReceiver(ports: PluralWorkPorts) {
   let closed = false, stopped = false;
   let running: Promise<void> | null = null, again: PluralAnswerLike | null = null;
   const unsentCloses: Array<{ id: string; qid: string; why: CloseWhy; answer?: AskAnswer }> = [];
+  const unplaced = new Set<string>();                          // questions whose answer from the row could not be applied here (said once each, bounded)
+  const placeTries = new Map<string, number>();                // qid -> tries after a failure to place (bounded): a failure that can pass reads the row again, a few times
+  /** The number of this try (1..PLURAL_PLACE_RETRIES), or 0 when the retries of this question are used up. */
+  const noteRetry = (qid: string): number => {
+    const n = (placeTries.get(qid) ?? 0) + 1;
+    placeTries.delete(qid); placeTries.set(qid, n);
+    while (placeTries.size > PLURAL_UNPLACED_MAX) placeTries.delete(placeTries.keys().next().value as string);
+    return n <= PLURAL_PLACE_RETRIES ? n : 0;
+  };
 
   /** One request with the retry ladder. `closed` = the server's switch is closed (404). */
   async function send(body: Record<string, unknown>): Promise<Sent> {
@@ -133,7 +146,7 @@ export function createPluralWorkReceiver(ports: PluralWorkPorts) {
       const status = typeof out.body?.status === "string" ? out.body.status : "";
       if (out.ok && out.body && !TRANSIENT_WORDS.has(status)) { closed = false; return { kind: "ok", status, body: out.body }; }
       const transient = out.unreachable === true || out.status >= 500 || out.status === 429 || out.status === 0 || (out.ok && TRANSIENT_WORDS.has(status));
-      if (!transient) return { kind: "refused" };
+      if (!transient) return { kind: "refused", httpStatus: out.status, ...(typeof out.code === "string" ? { code: out.code.slice(0, 40) } : {}) };
       if (attempt >= PLURAL_RETRY.retries) return { kind: "gave_up" };
       let wait = PLURAL_RETRY.firstMs * 2 ** attempt;
       if (out.status === 429 && out.retryAfterMs !== undefined && out.retryAfterMs > 0) { if (out.retryAfterMs > PLURAL_RETRY.retryAfterMaxMs) return { kind: "gave_up" }; wait = out.retryAfterMs; }
@@ -148,6 +161,8 @@ export function createPluralWorkReceiver(ports: PluralWorkPorts) {
     const body: Record<string, unknown> = { op: "finish", id, run: commandId, state: end.state, ...(end.why ? { why: end.why } : {}), started: end.started, ...(result ? { result } : {}) };
     const out = await send(body);
     if (out.kind === "gave_up") log(`finish ${commandId}: not sent, the next read sends it again`);
+    // A refusal (signed out in this process, a row the server no longer takes) used to vanish: the phone then waited for an end that never came and nothing said why.
+    else if (out.kind === "refused") log(`finish ${commandId}: refused ${out.httpStatus}${out.code ? ` ${out.code}` : ""}`);
   }
 
   /** Closes a question could not tell the row about are told again by the next request of this process. */
@@ -194,9 +209,15 @@ export function createPluralWorkReceiver(ports: PluralWorkPorts) {
     if (inFlight.has(entry.id)) return;
     const job = ports.jobOf(commandId);
     if (!job) { await finishRow(commandId, { state: "failed", why: "interrupted", started: false }); return; }   // nobody of this desktop runs it
+    let readStep = 0;
     for (const a of entry.approvals) {
-      try { await ports.answerLocal(a.qid, a.answer); } catch (error) { log(`answer ${a.qid} not placed: ${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`); }
+      let placed = false;
+      try { placed = await ports.answerLocal(a.qid, a.answer); placeTries.delete(a.qid); }
+      catch (error) { log(`answer ${a.qid} not placed: ${error instanceof Error ? error.message.slice(0, 120) : "unknown"}`); readStep = Math.max(readStep, noteRetry(a.qid)); }
+      // a question this process could not close is said once: the row shows the answer, so the line is the only trace that it was not applied here
+      if (!placed && !unplaced.has(a.qid)) { unplaced.add(a.qid); while (unplaced.size > PLURAL_UNPLACED_MAX) unplaced.delete(unplaced.values().next().value as string); log(`answer ${a.qid} from the row is not applied yet`); }
     }
+    if (readStep > 0) void (async () => { await ports.sleep(PLURAL_RETRY.firstMs * 2 ** (readStep - 1)); if (!stopped) ports.readAgain(); })();
     if (!TERMINAL.has(job.phase)) return;                                                                 // still going (or waiting its turn): nothing more to say
     const end = ports.outcomeOf(commandId);
     if (end) await finishRow(commandId, end);

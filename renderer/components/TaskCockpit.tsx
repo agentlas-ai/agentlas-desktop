@@ -3,6 +3,7 @@ import { writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-pre
 import { MessageReplyPreview } from "./MessageActions";
 import { WaitingRetryStop } from "./WaitingRetryStop";
 import { alertPopup, confirmPopup } from "@/lib/popup";
+import { clearableMessageCount, clearHistoryConfirmWords, schedulesOfConversation } from "@/lib/clear-history-confirm";
 import { composeMessageReply, type MessageReply } from "@/lib/message-reply";
 import { createTrailingDebounce } from "@/lib/store-change-policy";
 
@@ -11,7 +12,7 @@ import { useWorkStartHandoff, useWorkStartRecovery, type WorkStartRecoveryTarget
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { chatBelongsToOne } from "@shared/chat-surface";
 import { selectionForRuntime } from "@shared/runtime-selection";
-import { chipRuntimeFor } from "@/lib/one-runtime-chip";
+import { chipRuntimeFor, observedRunDiffersFromRequest, type ObservedComposerRun } from "@/lib/one-runtime-chip";
 import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
 import { OneRuntimeChips } from "@/components/one/OneRuntimeChips";
 import { isInterruptedPartial, isLivePartialCommitBoundary, markInterruptedPartial } from "@shared/interrupted-partial";
@@ -35,6 +36,11 @@ import { filePreviewEmptyMessage } from "@/lib/file-preview-reason";
 import { InactiveToolNotice } from "@/components/InactiveToolNotice";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { navigate } from "@/lib/navigation";
+import { chatStopAccepted, withdrawnWords } from "@/lib/chat-stop";
+import { watchChat } from "@/lib/chat-signal";
+import { applySendRules } from "@/lib/chat-transcript-model";
+import { useOwnerInputs } from "@/lib/owner-inputs";
+import { closeQuestionCard, fenceCardKey, reopenQuestionCard, useClosedQuestionCards } from "@/lib/question-cards";
 import { isPlaceholderTaskTitle, taskTitleForDisplay } from "@/lib/task-title";
 import { detailForUser, failureCode, failureMessage, isCancellationCode, isChatBusyFailure, knownStartFailureHuman, looksLikeMachineText } from "@/lib/invocation-failure";
 import { useContext, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
@@ -88,6 +94,8 @@ import {
   type PipelineStage,
 } from "@/components/ChatStream";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
+import { chatTurnFiles } from "@/lib/chat-turn-files";
+import { linkedFileOfTurnFile } from "@/components/one/OneTurnFiles";
 
 /*
  * Work 작성창의 폭과 여백. 실제 작성창은 ChatInput.tsx 의 `width: min(100%, 740px)` 이다.
@@ -249,8 +257,10 @@ function pumpWorkFollowupIntents(api: NonNullable<ReturnType<typeof ipc>>, chatI
 import { normalizeToolCall, shadowsToolRecordedPath } from "@shared/tool-call-detail";
 import { shellWrittenPaths } from "@shared/shell-written-paths";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
-import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
+import { QuestionCardHost, ClosedQuestionLine, type QuestionSheetAnswer } from "@/components/decision/QuestionCardHost";
+import { CappedDecisionBox } from "@/components/ComposerDecisionPortal";
 import { askResendMessage, questionOutrunByNewerUserMessage, type AskActionBlock } from "@shared/ask-action-bar";
+import { questionsAfterOwnerReply } from "@shared/question-reply";
 import { savedAnswerNextStep } from "@/lib/question-answer-delivery";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { extractQuestions } from "@/lib/ask-question";
@@ -258,6 +268,7 @@ import { stripMultimodalSetup } from "@/lib/multimodal-setup";
 import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
 import { completePromptStartIntent } from "@/lib/prompt-actions";
 import { ChatInput, ComposerGoalBar } from "@/components/ChatInput";
+import { PendingPromisesStrip } from "@/components/PendingPromisesStrip";
 import { usePaneActions } from "@/components/space/pane-context";
 import { goalNextWakeOf } from "@shared/goal-wake";
 import { WorkbenchPanel, type SurfaceActionHandler, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
@@ -300,6 +311,7 @@ import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputVi
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { currentWorkSidebarWidth, WORK_SIDEBAR_WIDTH_EVENT } from "@/lib/work-sidebar-width";
+import { RAIL_COMPOSER_CLEARANCE_VAR, railComposerClearance, railLaysOver } from "@/lib/pane-rail-layout";
 import { DefectReportButton } from "./support/DefectReport";
 import {
   appendChatFileMarker,
@@ -381,9 +393,13 @@ function receiptRecoveryMessage(
   }
   // Main 이 직접 끊은 실행(앱 종료·Goal 일시정지/삭제)은 실행 오류가 아니다 — 붉은 실패 줄 대신 이유를 적는다.
   const hostStop = receipt.hostStopCause ? invocationHostStopCopy(receipt.hostStopCause, locale) : null;
-  // Host stops (update, app quit, Goal pause), cancellations and interruptions without an error are internal states:
-  // nothing to draw (owner 2026-10-14). Real failures and sign-in waits stay, they need the owner.
-  if (hostStop || receipt.status === "cancelled" || (receipt.status === "interrupted" && !receipt.errorMessage?.trim() && !receipt.errorCode?.trim())) return null;
+  // Host stops (update, app quit, Goal pause) and interruptions without an error are internal states: nothing to draw (owner
+  //). The person's own Stop is one quiet line, so a conversation read again later still says why the turn has no answer.
+  // Real failures and sign-in waits stay, they need the owner.
+  if (!hostStop && receipt.status === "cancelled") {
+    return { id: `run-recovery:${receipt.runId}:cancelled`, role: "system", recoveryForRunId: receipt.runId, text: locale === "ko" ? "중지함" : "Stopped" };
+  }
+  if (hostStop || (receipt.status === "interrupted" && !receipt.errorMessage?.trim() && !receipt.errorCode?.trim())) return null;
   const isFailure = receipt.status === "failed" || receipt.status === "interrupted";
   const baseText = receipt.status === "waiting_input"
     ? (locale === "ko" ? "로그인이 필요해 작업을 기다리고 있습니다. 로그인 후 계속할 수 있습니다." : "This task is waiting for sign-in. It can continue after login.")
@@ -1055,8 +1071,12 @@ function WorkRailResult({
   if (isCodeArtifactName(preview.name) && preview.content) {
     return <CodeIdeViewer path={preview.path} name={preview.name} locale={locale} initialContent={preview.content} fill />;
   }
+  const emptyNote = () => <p role="status" style={{ margin: 0, padding: 16, color: "var(--muted-deep)", fontSize: 12.5, lineHeight: 1.6 }}>{filePreviewEmptyMessage(preview.reason, locale, preview.name, preview.path)}</p>;
   if (preview.viewerKind === "markdown") {
-    return <Markdown text={preview.content || ""} messageId={`work-rail:${preview.path || preview.fileUrl}`} />;
+    // A file that could not be read (or is empty) says so; a blank pane read as "the file has nothing in it".
+    // The placeholder that opens before the read has finished (reason "not-read", `available` unset) stays quiet: the content is on its way.
+    if (preview.content) return <Markdown text={preview.content} messageId={`work-rail:${preview.path || preview.fileUrl}`} />;
+    return preview.available === false || preview.reason !== "not-read" ? emptyNote() : null;
   }
   if (preview.viewerKind === "json" || preview.viewerKind === "text") {
     return <pre style={{ margin: 0, padding: 16, whiteSpace: "pre-wrap", overflow: "auto", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55 }}>{preview.content || filePreviewEmptyMessage(preview.reason, locale, preview.name, preview.path)}</pre>;
@@ -1521,7 +1541,9 @@ function historyEntryToStreamMessage(entry: {
   text: string;
   createdAt?: string;
   durableMessageId?: string;
+  clientIntentId?: string;
   imageDataUrls?: string[];
+  answerStart?: number;
 }): StreamMessage {
   const parsedFiles = parseChatFileMessage(entry.text);
   const role: StreamMessage["role"] =
@@ -1536,6 +1558,7 @@ function historyEntryToStreamMessage(entry: {
     return {
       id: entry.id,
       role,
+      ...(entry.clientIntentId ? { clientIntentId: entry.clientIntentId } : {}),
       text: normalizeChatHostNotice(entry.role, entry.hostNotice) ? entry.text : parsedFiles.visibleText,
       ...durableIdentity,
       imageDataUrls: entry.imageDataUrls,
@@ -1548,6 +1571,8 @@ function historyEntryToStreamMessage(entry: {
     id: entry.id,
     role,
     text: setup.text,
+    // Main's answer start (the text before it is progress between tool calls) is kept only when the text was not changed on the way: an edit shifts the offsets.
+    ...(entry.answerStart && entry.answerStart > 0 && entry.answerStart < setup.text.length && setup.text === entry.text ? { answerStart: entry.answerStart } : {}),
     ...durableIdentity,
     // History's row id and the live final's durableMessageId identify the
     // same assistant answer, even if the two reads arrive in either order.
@@ -1687,6 +1712,19 @@ function settleTranscriptRun(
     } : message);
 }
 
+/**
+ * Main says this chat is idle. A row still drawn as working that is not the run just settled lost its terminal event: a turn Main started from
+ * the send queue while this view followed another run (one subscription at a time). It kept counting "답변 작성 중 1시간 54분" under a finished answer, and
+ * because the reconcile below stands down while any row is working, the durable transcript never replaced it. Only the working flags are cleared;
+ * the durable snapshot that follows gives the row its real text and duration.
+ */
+function settleOrphanedLiveRows(current: StreamMessage[], settledRunId: string | null): StreamMessage[] {
+  if (!current.some(message => message.role === "agent" && (message.busy || message.streaming) && message.runId !== settledRunId)) return current;
+  return current.map(message => message.role === "agent" && (message.busy || message.streaming) && message.runId !== settledRunId
+    ? { ...message, busy: false, streaming: false, thinking: message.thinking ? { ...message.thinking, active: false } : message.thinking }
+    : message);
+}
+
 function restoreWorkFollowupMessages(current: StreamMessage[], intents: readonly OneFollowupIntent[]): StreamMessage[] {
   const ids = new Set(current.map(message => message.id));
   const matched = new Set<string>();
@@ -1793,7 +1831,24 @@ function reconcileTranscriptSnapshot(
   });
   const durableTailSignatures = new Set(durableWithRichSteps.slice(durableAnchor + 1).map(signature));
   const currentTail = current.slice(currentAnchor + 1);
-  const pendingDirections = currentTail.filter((message) => optimisticIds.has(message.id));
+  // A direction still tracked as pending is dropped once the saved transcript already holds the same words after the shared anchor: both were drawn
+  // as two identical bubbles for one saved row. One saved row cancels one pending bubble, so two real sends of the same
+  // words still show twice.
+  const savedUserWords = new Map<string, number>();
+  for (const message of durableWithRichSteps.slice(durableAnchor + 1)) {
+    if (message.role !== "user") continue;
+    const key = signature(message);
+    savedUserWords.set(key, (savedUserWords.get(key) ?? 0) + 1);
+  }
+  const pendingDirections = currentTail.filter((message) => {
+    if (!optimisticIds.has(message.id)) return false;
+    if (message.role !== "user") return true;
+    const key = signature(message);
+    const saved = savedUserWords.get(key) ?? 0;
+    if (saved === 0) return true;
+    savedUserWords.set(key, saved - 1);
+    return false;
+  });
   const freshlySettled = currentTail.filter((message) => (
     message.finishedAt != null
     && !message.busy
@@ -2266,57 +2321,10 @@ function restoreAnsweredQuestions(
      *   뒤에 사용자 메시지가 없고 확정 답이 없으면 산다)과 같게 맞춘다.
      */
     if (!nextUser) return msg;
-    const answerText = (nextUser?.text?.trim() ?? "") || committedReply;
-    // 질문 시트 배치 스캐폴드("질문: …\n선택: …\n답변: …" 청크의 \n\n join —
-    // ChatQuestionSheet.composeQuestionReply와 짝)는 질문별로 파싱해 각 질문에 제 답만 넣는다.
-    // (예전처럼 전체 줄을 모든 질문에 주입하면 재로드 후 인용 카드가 오염된다)
-    const scaffold = parseQuestionBatchReply(answerText);
-    if (scaffold) {
-      return {
-        ...msg,
-        questions: msg.questions.map((q) => {
-          if (q.answer && q.answer.length) return q;
-          const match = scaffold.find((chunk) => chunk.question === q.question.trim());
-          return { ...q, answer: match && match.answers.length ? match.answers : ["—"] };
-        }),
-      };
-    }
-    const answers = answerText
-      ? answerText.split("\n").map((s) => s.replace(/^•\s*/, "").trim()).filter(Boolean)
-      : ["✓"];
-    return {
-      ...msg,
-      questions: msg.questions.map((q) => (q.answer && q.answer.length ? q : { ...q, answer: answers })),
-    };
+    // 질문 시트 배치 스캐폴드("질문: …\n선택: …\n답변: …" 청크의 \n\n join — composeQuestionReply와 짝)만 이 질문의 답이다.
+    // 사람이 입력창에 따로 쓴 말은 새 메시지다: 질문은 답 없이 닫히고, 그 말이 답으로 그려지지 않는다.
+    return { ...msg, questions: questionsAfterOwnerReply(msg.questions, nextUser.text ?? "") };
   });
-}
-
-/** 배치 답장 스캐폴드 파서 — "질문:" 시작 청크마다 {question, answers(선택+답변)}로 분해.
- *  스캐폴드 형식이 아니면 null → 기존 줄 분해 폴백. */
-function parseQuestionBatchReply(text: string): Array<{ question: string; answers: string[] }> | null {
-  const trimmed = text.trim();
-  if (!/^(질문|Question): /.test(trimmed)) return null;
-  const chunks = trimmed.split(/\n\n+/);
-  const parsed: Array<{ question: string; answers: string[] }> = [];
-  for (const chunk of chunks) {
-    const lines = chunk.split("\n");
-    const qLine = lines.find((l) => /^(질문|Question): /.test(l));
-    if (!qLine) continue;
-    const question = qLine.replace(/^(질문|Question): /, "").trim();
-    const answers: string[] = [];
-    for (const line of lines) {
-      const m = line.match(/^(선택|답변|Selected|Answer): (.*)$/);
-      if (!m) continue;
-      if (m[1] === "선택" || m[1] === "Selected") {
-        answers.push(...m[2].split(",").map((s) => s.trim()).filter(Boolean));
-      } else {
-        const note = m[2].trim();
-        if (note) answers.push(note);
-      }
-    }
-    parsed.push({ question, answers });
-  }
-  return parsed.length > 0 ? parsed : null;
 }
 
 
@@ -2417,6 +2425,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
   const [resolvedOrg, setResolvedOrg] = useState<ResolvedOrg | null>(null);
   const [project, setProject] = useState<Project | null>(null);
   const [messages, setMessages] = useState<StreamMessage[]>([]);
+  const messagesNowRef = useRef<StreamMessage[]>(messages);
+  messagesNowRef.current = messages;
   const hydratedChatFileGroupsRef = useRef(new Map<string, ChatFileItem[]>());
   useEffect(() => {
     hydratedChatFileGroupsRef.current.clear();
@@ -2596,6 +2606,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
   }, []);
   // 활성 런타임/모델 — 헤더 칩 표시 + BYOK 인라인 모델 변경. 진행 중 실행의 runId(취소용).
   const [activeRuntime, setActiveRuntime] = useState<RuntimeStatus | null>(null);
+  // The AI that actually answered after a runtime fallback. Only the usage banner reads it (the saved pin is never touched):
+  // it must not keep warning about the AI the run already moved off.
+  const [fallbackRuntime, setFallbackRuntime] = useState<RuntimeStatus | null>(null);
+  // The AI that ran the latest turn, as Main recorded it (OneRuntimeChips reads it once and reports it here). When it is not the AI the pin asks for, the usage
+  // banner speaks of the AI that answered, not of the one the run already moved off ("Codex limit" over an answer that ran on Claude Code).
+  const [observedRun, setObservedRun] = useState<ObservedComposerRun | null>(null);
   const [selectionSendWaiting, setSelectionSendWaiting] = useState(false);
   const runIdRef = useRef<string | null>(null);
   // Whether this chat was in the last activeChats broadcast. Lets the view see
@@ -2799,8 +2815,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
       finally { checking = false; }
     };
     void check();
-    const timer = window.setInterval(() => { void check(); }, 5000);
-    return () => { disposed = true; window.clearInterval(timer); };
+    // The steer's receipt changes when Main settles it (a store signal of this conversation); one safety net, no 5 s loop.
+    const off = watchChat(chatId, () => { void check(); });
+    return () => { disposed = true; off(); };
   }, [chatId, workFollowupDrafts.length > 0, applyWorkFollowupReceipt]);
   useEffect(() => {
     if (hydratedChatId !== chatId || !isCurrentChat()) return;
@@ -2939,8 +2956,25 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
   const [rightPanelTab, setRightPanelTab] = useState<ChatRightPanelTab>("agent");
   const [rightPanelWidth, setRightPanelWidth] = useState(() => readRightPanelWidth());
   const rightPanelPreferredWidthRef = useRef(rightPanelWidth);
+  // In a Space pane the rail belongs to that pane. The open state is one stored preference, and every mounted pane listened to it, so pressing the panel
+  // button in one pane opened the rail in all of them. A pane the person is not working in ignores that write; the pane that was
+  // pressed already set its own state before writing.
+  const followsPanelPreferenceRef = useRef(true);
+  followsPanelPreferenceRef.current = !embedded || scopeActive;
+  // The pane's own width decides whether the rail has room beside the chat or lies over it (see TaskSidePanel.module.css, data-pane-narrow).
+  const [shellElement, setShellElement] = useState<HTMLDivElement | null>(null);
+  const [paneNarrow, setPaneNarrow] = useState(false);
+  useEffect(() => {
+    if (!embedded || !shellElement || typeof ResizeObserver === "undefined") { setPaneNarrow(false); return undefined; }
+    const measure = () => setPaneNarrow(railLaysOver(shellElement.clientWidth, rightPanelWidth));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(shellElement);
+    return () => observer.disconnect();
+  }, [embedded, shellElement, rightPanelWidth]);
   useEffect(() => {
     const unsubscribePanel = subscribeAppUiPreference("chatRightPanel", (panel) => {
+      if (!followsPanelPreferenceRef.current) return;
       setRightPanelOpen(panel.open);
       setRightPanelTab(panel.tab);
       setWorkerSelection(null);
@@ -3025,9 +3059,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(있을 때만 배너).
   const [recap, setRecap] = useState<{ summary: string; count: number } | null>(null);
   const [defaultRunFolder, setDefaultRunFolder] = useState<string | null>(null);
+  // A conversation in a project works in the project's folder (mcp/client.ts: its own working folder, else the project's), and the chat row keeps
+  // its own empty; a relative path a tool wrote and a relative image link in an answer are read against that folder.
+  const chatWorkFolder = restoredFolder ?? project?.folderPath ?? null;
   const mediaBasePaths = useMemo(
-    () => mediaBasePathCandidates(restoredFolder, defaultRunFolder),
-    [restoredFolder, defaultRunFolder],
+    () => mediaBasePathCandidates(chatWorkFolder, defaultRunFolder),
+    [chatWorkFolder, defaultRunFolder],
   );
   // 파셜마다 대화 전체를 정규식으로 재스캔하면 비용이 대화 길이에 비례해 자란다
   // ("오래 쓰면 느려짐"의 렌더러 쪽 원인). 스트리밍 중 본문이 자라는 메시지는
@@ -3152,6 +3189,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
       writeRightPanelPreference(false, "agent");
     }
   }, [rightPanelTab]);
+  // Bumped when the person opens a file (a chip, an Outputs row, a link): the panel then shows the Result view, not whatever view it was on.
+  const [resultOpenRequest, setResultOpenRequest] = useState(0);
   const openPanelTab = useCallback((tab: ChatRightPanelTab) => {
     setRightPanelTab(tab);
     setRightPanelOpen(true);
@@ -3206,7 +3245,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
     setSurface(null);
     setArtifact(null);
     setMediaPreview(next);
-    if (presentation === "open") openPanelTab("panel");
+    if (presentation === "open") { openPanelTab("panel"); setResultOpenRequest((value) => value + 1); }
     const shouldReadText =
       api &&
       Boolean(requestChatId) &&
@@ -3237,7 +3276,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
          * 보세요")이 남는다. 파일이 없는데 사람을 파인더로 보내 없는 파일을 찾게 만든다.
          * 읽기가 실패했다는 것은 최소한 "여기서 못 읽었다"이므로, 부재로 말한다.
          */
-        next = { ...next, content: "", available: false, reason: "missing" };
+        // The reader answers a file that is not there with its own typed "missing" (fs/workspace.ts), so a failed read here is a refusal or an error:
+        // the file may be right there. Say "not read here" (open it outside) rather than telling the person it is gone.
+        next = { ...next, content: "", available: false, reason: "not-read" };
       }
     }
     // 읽은 내용으로 채운다. 자리는 위에서 이미 열었으므로 여기서 다시 열지 않는다.
@@ -3687,7 +3728,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           // A fallback is scoped to the running invocation. Work may attach to
           // or replay a One-origin run, but that event must not replace the
           // room's saved selection or the next send/steer will feed the
-          // temporary fallback back into execution as a new user choice.
+          // temporary fallback back into execution as a new user choice. The usage banner alone follows the AI that answered.
+          const fellBackTo = ev.runtimeSelection;
+          void ipc()?.runtime?.detect?.().then((list) => { if (isCurrentChat()) setFallbackRuntime(chipRuntimeFor(list, fellBackTo)); }).catch(() => undefined);
         }
         if (notice.message) {
         transcriptRevisionRef.current += 1;
@@ -3898,6 +3941,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
               text: setup.text,
               ...(ev.goalResult ? { goalResult: ev.goalResult } : {}),
               ...(ev.durableMessageId ? { durableMessageId: ev.durableMessageId } : {}),
+              ...(ev.answerStart && ev.answerStart > 0 && ev.answerStart < setup.text.length && setup.text === raw ? { answerStart: ev.answerStart } : {}),
               imageDataUrls: ev.imageDataUrls ?? msg.imageDataUrls,
               busy: false,
               streaming: false,
@@ -4016,12 +4060,25 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
         const failureText = locale === "ko"
           ? `⚠️ 작업이 완료되지 않았습니다.\n사유: ${failureMessage}`
           : `⚠️ The work did not complete.\nReason: ${failureMessage}`;
+        // The person's own Stop leaves its mark: the turn stays in the conversation with its work line ("중지함"), even when nothing was
+        // streamed yet. Dropping the empty placeholder left the person's message alone, as if the answer had vanished. The typed
+        // `cancelled` code is the same one Main stamps and the activity projection reads (ChatStream workActivityStateFromMessage).
+        const stoppedByPerson = wasUserCancel || wasStoppedElsewhere;
         const keepPlaceholder = (m: StreamMessage[]) =>
           m.flatMap((msg) => {
             if (msg.id !== placeholderId) return [msg];
-            if (!msg.text || !msg.text.trim()) return [];
+            if (!msg.text || !msg.text.trim()) {
+              return stoppedByPerson
+                ? [{ ...msg, text: "", busy: false, streaming: false, finishedAt: Date.now(),
+                  thinking: msg.thinking ? { ...msg.thinking, active: false } : msg.thinking, pipeline: completePipeline(msg.pipeline),
+                  questions: undefined, questionSourceMessageId: undefined, pendingCommittedReply: undefined,
+                  pendingContinuationRunId: undefined, pendingContinuationAutoResume: undefined,
+                  failure: { code: "cancelled", message: terminalStatus } }]
+                : [];
+            }
             return [{
               ...msg,
+              ...(stoppedByPerson ? { failure: { code: "cancelled", message: terminalStatus } } : {}),
               // Same banner Main stores with the partial (One shows it via history):
               // without it a cut-off stream reads as the finished answer.
               text: isInterruptedPartial(msg.text) ? msg.text : markInterruptedPartial(msg.text, locale),
@@ -4318,6 +4375,30 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
     return () => { disposed = true; unsubscribe(); refreshOpenChat.cancel(); };
   }, [chat?.runtimeSelection, chatId, hydratedChatId, isCurrentChat]);
 
+  /*
+   * The runtime the usage banner above the composer reads is the one the model chip shows: this conversation's pin. It was read
+   * when the conversation opened and when the runtimes changed, never when the pin changed, so after the person picked another
+   * model (here, in another window or on the phone) the banner still spoke about the model they had just left ("Codex limit"
+   * under a Haiku chip). One key per conversation and pin; the first key of a conversation is the load above.
+   */
+  const pinnedRuntimeKey = chat ? JSON.stringify([chat.id, chat.runtimeSelection ?? null]) : null;
+  const pinnedRuntimeKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = pinnedRuntimeKeyRef.current;
+    pinnedRuntimeKeyRef.current = pinnedRuntimeKey;
+    if (previous !== null && previous !== pinnedRuntimeKey) setFallbackRuntime(null);
+    const api = ipc();
+    if (!api?.runtime?.detect || !chat || pinnedRuntimeKey === null || previous === null || previous === pinnedRuntimeKey) return;
+    if ((JSON.parse(previous) as [string])[0] !== chat.id) return;
+    let disposed = false;
+    const pin = chat.runtimeSelection ?? null;
+    void api.runtime.detect().then((list) => {
+      if (!disposed) setActiveRuntime(chipRuntimeFor(list, pin));
+    }).catch(() => undefined);
+    return () => { disposed = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedRuntimeKey]);
+
   // The transcript is durable, so the Agent work panel must be durable too.
   // Rebuild terminal run activity from Main's redacted run ledger after a
   // reload instead of showing "Idle / 0 steps" beside a completed team reply.
@@ -4501,8 +4582,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
         if (cancelled) return;
         const rightPanelPreference = readRightPanelPreference();
         if (rightPanelPreference?.open && rightPanelPreference.tab !== "panel") {
-          setRightPanelTab(rightPanelPreference.tab);
-          setRightPanelOpen(true);
+          // A pane the person is not working in stays closed: restoring the stored "open" in every pane at once is the same all-panes-open bug.
+          if (followsPanelPreferenceRef.current) {
+            setRightPanelTab(rightPanelPreference.tab);
+            setRightPanelOpen(true);
+          }
         } else if (!rightPanelPreference && savedFolder && !embedded) {
           // An embedded surface (the Finance chat) opens its rail only when the owner does: its answers carry their own result cards.
           setRightPanelTab("file");
@@ -4780,7 +4864,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           // Active-chat removal can beat the frame that consumes the terminal
           // event. Settle only its canonical run before the live-draft guard;
           // a newer run still keeps that guard and its subscription intact.
-          return reconcileTranscriptSnapshot(settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateRows), next, recovery, optimisticIds);
+          return reconcileTranscriptSnapshot(settleOrphanedLiveRows(settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateRows), endedRunId), next, recovery, optimisticIds);
         });
       });
     });
@@ -4848,7 +4932,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           setMessages((current) => (
             transcriptRevisionRef.current === historyRevision
               ? reconcileTranscriptSnapshot(
-                  settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateRows),
+                  settleOrphanedLiveRows(settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents, lateRows), endedRunId),
                   next,
                   recovery,
                   workFollowupOptimisticIds(),
@@ -4861,12 +4945,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
       }
     };
     const first = setTimeout(reconcile, 700);
-    // 정상 주기를 2500→5000으로 상향(escalation 구조는 유지) — busy 중 폴링 부하 절감.
-    const iv = setInterval(reconcile, 5000);
+    // While a run is live the history and ledger are re-read on this conversation's store signal (a row written, a run settled) and one safety net, not every 5 s.
+    const off = watchChat(chatId, () => { void reconcile(); });
     return () => {
       stopped = true;
       clearTimeout(first);
-      clearInterval(iv);
+      off();
     };
   }, [busy, chatId, locale, workFollowupOptimisticIds]);
 
@@ -4885,6 +4969,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
 
   const requestRunCancellation = useCallback((runId: string) => {
     const api = ipc();
+    // The Stop is the conversation's (chat.stop), not one run id's: the run this screen knew is only the way in.
+    const stopChatId = chat?.id ?? chatId;
+    void runId;
     const restoreRejectedCancellation = () => {
       const rollback = cancelRollbackSteersRef.current ?? [];
       const knownIds = new Set(rollback.map((item) => item.optimisticMessageId));
@@ -4905,18 +4992,17 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
       restoreRejectedCancellation();
       return;
     }
-    void api.invoke.cancel(runId).then((receipt) => {
-      if (
-        receipt?.runId !== runId
-        || (receipt.status !== "requested" && receipt.status !== "already-requested")
-      ) {
-        throw new Error("invoke_cancel_receipt_mismatch");
-      }
+    // The conversation's one Stop: the live run AND every send that has not started. The words of the sends Main took back go into the input box.
+    void api.chat.stop(stopChatId).then((receipt) => {
+      if (!chatStopAccepted(receipt)) throw new Error("chat_stop_receipt_refused");
       // Accepted cancellation settles only on the terminal event; keep the
       // stop-pending UI until that event arrives.
       cancelRollbackSteersRef.current = null;
+      const back = withdrawnWords(receipt);
+      if (back.length) setComposerPrefill((current) => [current ?? "", ...back].filter((words) => words.trim()).join("\n"));
+      if (!receipt.runId) { cancelRequestedRef.current = false; setCancelPending(false); }
     }).catch(restoreRejectedCancellation);
-  }, [locale]);
+  }, [locale, chat?.id, chatId]);
 
   const send = useCallback(
     async (
@@ -5170,6 +5256,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
       // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
       const runRequest = {
         runId,
+        // The id of this send: Main stores it on the person's row, so the bubble is matched by id, never by its words.
+        clientIntentId: runId,
         chatId: chat.id,
         userPrompt: invocationPrompt,
         images,
@@ -5222,7 +5310,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
       const userMessageId = uid();
       setMessages((m) => [
         ...m,
-        { id: userMessageId, role: "user" as const, text: visiblePrompt, imageDataUrls, chatFiles: attachedChatFiles },
+        { id: userMessageId, role: "user" as const, text: visiblePrompt, imageDataUrls, chatFiles: attachedChatFiles, clientIntentId: runId },
         {
           id: placeholderId,
           role: "agent",
@@ -5612,9 +5700,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
     steerQueueRef.current = [];
     setQueuedSteers([]);
     // runId가 아직 안 왔으면(invoke:run 왕복 중) 취소 의사만 기록 → 도착 즉시 취소된다.
-    const runId = runIdRef.current ?? lastRunIdRef.current;
-    if (!runId) return;
-    requestRunCancellation(runId);
+    // The run this screen started, else the chat's current turn as Main names it (a run Main started by itself - an answered question's continuation, a
+    // Goal pass - has no id here: lib/stop-run-target.ts), else the last known one.
+    // The conversation's one Stop (api.chat.stop) finds the live run itself - one this screen started, one Main started on its own (an answered question's continuation, a Goal
+    // pass) or one waiting on its Goal verification - and takes back every send that has not started, so it is asked even when this screen knows no run id.
+    requestRunCancellation(runIdRef.current ?? lastRunIdRef.current ?? "");
   }, [chatId, locale, requestRunCancellation, refreshWorkFollowupDrafts]);
 
   // 실행 중 steering — 사용자의 새 지시는 즉시 대화에 보이지만 현재 모델 턴을
@@ -5631,7 +5721,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
         const optimisticMessageId = `steer:${intentId}`;
         transcriptRevisionRef.current += 1;
         setMessages(current => [...current, {
-          id: optimisticMessageId, role: "user", text,
+          id: optimisticMessageId, role: "user", text, clientIntentId: intentId,
           imageDataUrls: frozenOpts?.images?.map(image => `data:${image.mediaType};base64,${image.data}`),
         }]);
         void prepareWorkFollowup(chat.id, async () => {
@@ -5757,6 +5847,13 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
    * 질문이 꼬리를 물었다 — 그 per-question 자동 전송은 폐기.)
    * 시트에서 안 고른 질문도 잠금("—")해 시트가 다시 뜨지 않게 한다.
    */
+  /** The question card of this message passes (answered elsewhere, replaced, moved to the composer): it is closed in the conversation's state like the X does, never written into the answers. */
+  const foldedMessagesRef = useRef<StreamMessage[]>([]);
+  foldedMessagesRef.current = messages;
+  const dismissQuestionBatch = useCallback((messageId: string) => {
+    const row = foldedMessagesRef.current.find((message) => message.id === messageId);
+    if (row?.questions?.length) closeQuestionCard(chat?.id, fenceCardKey(row.questions), row.questions.length);
+  }, [chat?.id]);
   /**
    * An answer Main would not save for its exact question (a newer question replaced it, the owner already wrote after it,
    * or no receipt can be found) is still the owner's message: it goes out as a new message naming the question, through
@@ -5949,22 +6046,21 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
   const answerQuestionBatchRef = useRef<typeof answerQuestionBatch | null>(null);
   answerQuestionBatchRef.current = answerQuestionBatch;
 
-  /** 질문 시트 × 닫기 — 이 배치의 미답 질문을 잠가("—") 시트를 접는다. 전송 없음. */
-  const dismissQuestionBatch = useCallback((messageId: string) => {
-    transcriptRevisionRef.current += 1;
-    setMessages((m) =>
-      m.map((msg) =>
-        msg.id === messageId
-          ? {
-              ...msg,
-              questions: msg.questions?.map((q) =>
-                q.answer && q.answer.length ? q : { ...q, answer: ["—"] },
-              ),
-            }
-          : msg,
-      ),
-    );
-  }, []);
+  /*
+   * The X of the question card: the card is CLOSED in the conversation's state in the database (the same store every surface and every window reads,
+   * electron/chat/closed-question-cards.ts) and leaves the one Reopen line. Nothing is written into the question's own answers (the old "—" mark was a local edit of the
+   * message list that a re-read of the history lost), nothing is sent and no run stops.
+   */
+  const closedQuestionCards = useClosedQuestionCards(chat?.id);
+  /*
+   * The list the window draws is the transcript model's send rules over its own rows (lib/chat-transcript-model.ts): a send is one bubble under its intent id (the
+   * optimistic copy goes the moment a stored row carries the id) and Main's state of a send that is not delivered yet rides on it as a line.
+   */
+  const ownerInputs = useOwnerInputs(chat?.id);
+  const displayMessages = useMemo(() => applySendRules(messages, {
+    optimisticIntentOf: (row) => (!row.durableMessageId && row.clientIntentId ? row.clientIntentId : /^(?:steer|followup):/.test(row.id) ? row.id.replace(/^[^:]+:/, "") : null),
+    ownerInputs,
+  }), [messages, ownerInputs]);
 
   // 바텀 시트에 올릴 질문 묶음 — 가장 최근에 질문을 낸 어시스턴트 메시지 하나만 본다.
   // (더 오래된 미답 질문은 stale — 대화가 이미 지나갔으므로 다시 묻지 않는다.)
@@ -5988,9 +6084,13 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
             createdAt: row.createdAt,
           })),
         );
+        const cardKey = fenceCardKey(m.questions);
+        const closedEntry = closedQuestionCards.find((item) => item.key === cardKey);
         return unanswered.length > 0
           ? {
               block: (outrun ? "newer_message" : "none") as AskActionBlock,
+              cardKey,
+              closed: Boolean(closedEntry),
               messageId: m.id,
               sourceMessageId: m.questionSourceMessageId ?? m.id,
               questions: unanswered,
@@ -6002,7 +6102,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
       }
     }
     return null;
-  }, [messages, optimisticAnsweredQuestionId]);
+  }, [messages, optimisticAnsweredQuestionId, closedQuestionCards]);
 
   /*
    * The newest answer Main saved whose continuation has not started — the sheet's own question, or an older one a newer
@@ -6480,15 +6580,24 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           setSessionNotice(locale === "ko" ? "실행 중인 대화는 비울 수 없습니다. 먼저 실행을 멈춰 주세요." : "You cannot clear while this run is active. Stop it first.");
           return;
         }
-        // clear 요청이 main에서 판정되는 동안에도 stale steering/recap이 다시
-        // 발사되지 않게 renderer projection을 먼저 무효화한다.
-        steerQueueRef.current = [];
-        setQueuedSteers([]);
-        cancelRequestedRef.current = false;
-        setCancelPending(false);
-        recapGenerationRef.current += 1;
-        setRecap(null);
-        void api.invoke.clearHistory(chat.id).then(() => {
+        // 지우기는 되돌릴 수 없다: 앱의 확인 창(confirmPopup)이 무엇이 지워지는지 말하고, 취소는 아무것도 바꾸지 않는다.
+        const clearChatId = chat.id;
+        void (async () => {
+          const rows = messagesNowRef.current;
+          const schedules = await Promise.resolve(api.automations?.list?.()).then((list) => (Array.isArray(list) ? list : [])).catch(() => []);
+          const words = clearHistoryConfirmWords({ locale: locale === "ko" ? "ko" : "en", messages: clearableMessageCount(rows), schedules: schedulesOfConversation(rows, schedules as Array<{ id: string; enabled?: boolean | number | null }>) });
+          const ok = await confirmPopup(words.message, { locale: locale === "ko" ? "ko" : "en", title: words.title, tone: "danger", confirmLabel: words.confirmLabel, cancelLabel: words.cancelLabel });
+          // Cancelled, or the person moved to another conversation / a run started meanwhile: nothing changed.
+          if (!ok || !isCurrentChat() || chat.id !== clearChatId) return;
+          // clear 요청이 main에서 판정되는 동안에도 stale steering/recap이 다시
+          // 발사되지 않게 renderer projection을 먼저 무효화한다.
+          steerQueueRef.current = [];
+          setQueuedSteers([]);
+          cancelRequestedRef.current = false;
+          setCancelPending(false);
+          recapGenerationRef.current += 1;
+          setRecap(null);
+          await api.invoke.clearHistory(clearChatId).then(() => {
           transcriptRevisionRef.current += 1;
           setMessages([]);
           setLiveAgents({});
@@ -6498,9 +6607,10 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           setMediaPreview(null);
           dropChatViewSnapshot(chat.id);
           setSessionNotice(locale === "ko" ? "대화 기록과 연결된 런타임 세션을 비웠습니다." : "Conversation history and its linked runtime session were cleared.");
-        }).catch(() => {
-          setSessionNotice(locale === "ko" ? "세션 기록을 비우지 못했습니다." : "The session history was not cleared.");
-        });
+          }).catch(() => {
+            setSessionNotice(locale === "ko" ? "세션 기록을 비우지 못했습니다." : "The session history was not cleared.");
+          });
+        })();
       } else {
         if (externalChatId !== undefined) {
           if (!onNewSession) { setSessionNotice(locale === "ko" ? "새 대화를 여는 경로가 연결되지 않았습니다." : "The new conversation action is unavailable."); return; }
@@ -6537,7 +6647,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
   usePaneActions({
     session: handleSessionAction,
     busy,
-    viewer: { toggle: () => (rightPanelOpen && rightPanelTab === "panel" ? closeRightPanel() : openPanelTab("panel")), enabled: hasViewablePanelContent, open: rightPanelOpen && rightPanelTab === "panel" },
+    // Always enabled: the rail is not only results (Overview, Terminal, Browser, Screen), its empty state says what to do, the pane menu's "Open side panel" opens it
+    // with no result, and a room pane's button is enabled too - one entrance, one rule (it was greyed here until a result existed).
+    viewer: { toggle: () => (rightPanelOpen && rightPanelTab === "panel" ? closeRightPanel() : openPanelTab("panel")), enabled: true, open: rightPanelOpen && rightPanelTab === "panel" },
   });
 
   // A linked prompt may prefill or start a task, but product actions never ride in chat text.
@@ -6775,6 +6887,17 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
   // The reply focuses the composer of THIS conversation. With several Work panes in Space a document-wide query found the first
   // pane's composer, whichever pane the reply was pressed in.
   const inputWrapRef = useRef<HTMLDivElement | null>(null);
+  // A rail that lies over the transcript (a narrow pane, or a narrow window) stops above the composer: the composer area's height is measured while the rail
+  // is open (on its own size changes - typing a long message, a decision card - never on a clock) and handed to the CSS (TaskSidePanel.module.css).
+  useEffect(() => {
+    const wrap = inputWrapRef.current;
+    if (!shellElement || !wrap || !rightPanelOpen || typeof ResizeObserver === "undefined") return undefined;
+    const apply = () => shellElement.style.setProperty(RAIL_COMPOSER_CLEARANCE_VAR, `${railComposerClearance(wrap.offsetHeight)}px`);
+    apply();
+    const observer = new ResizeObserver(apply);
+    observer.observe(wrap);
+    return () => { observer.disconnect(); shellElement.style.removeProperty(RAIL_COMPOSER_CLEARANCE_VAR); };
+  }, [shellElement, rightPanelOpen]);
   const handleMessageReply = useCallback((reply: MessageReply) => {
     setMessageReply(reply);
     inputWrapRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
@@ -7096,6 +7219,13 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
     [latestWorkActivityMessage, messages],
   );
   const workBrowserHistoryUrl = useMemo(() => taskBrowserUrl(workActivity.items), [workActivity.items]);
+  // The conversation's files, once: the chip line under every answer and the panel Overview's Outputs list read this one ledger.
+  const turnFileLedger = useMemo(() => chatTurnFiles(
+    messages,
+    (message) => message.activityRuns?.length ? message.activityRuns.map((run) => run.state) : [workActivityStateFromMessage(message)],
+    locale === "ko" ? "ko" : "en",
+    chatWorkFolder ?? defaultRunFolder,
+  ), [messages, locale, chatWorkFolder, defaultRunFolder]);
   const workRailResultKey = artifact
     ? `artifact:${artifact.id}`
     : liveWorkbenchSurface
@@ -7403,9 +7533,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
   return (
     <div
       className={`task-cockpit-shell ${oneActivityStyles.taskCockpitShell}`}
+      ref={setShellElement}
       data-work-embedded={embedded ? "true" : undefined}
       data-work-chat-id={chatId}
       data-output-flow={rightPanelOpen ? "true" : "false"}
+      data-pane-narrow={paneNarrow ? "true" : undefined}
       style={{
         position: "relative",
         display: "flex",
@@ -7427,6 +7559,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           // Messages share the composer's edges in a narrow column too: the composer keeps 16px sides there, the
           // stream kept 32px plus its 8px scrollbar gutter, so text ran 24px inside the composer on each side
           // (960px window with the result rail: 288px of text over a 336px composer).
+          ["--chat-column-width" as string]: `${WORK_COMPOSER_WIDTH_PX}px`,
           ["--chat-stream-padding" as string]: `24px clamp(8px, calc((100% - ${WORK_COMPOSER_WIDTH_PX + 32}px) / 2 + 8px), 32px)` }}
       >
       <header
@@ -7591,7 +7724,10 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           이 배너만 감싸는 것이 없어 창 양끝에 그대로 붙었고, 바로 아래 배너는
           margin 0 16px 라 두 줄이 서로 어긋나 보였다. */}
       <div style={{ margin: "0 16px" }}>
-        <KeyStatusBanner mode="banner" compact relevantRuntime={activeRuntime} />
+        <KeyStatusBanner mode="banner" compact relevantRuntime={
+          observedRun && activeRuntime && observedRunDiffersFromRequest(observedRun, activeRuntime)
+            ? { kind: observedRun.kind as RuntimeStatus["kind"], backend: (observedRun.backend ?? undefined) as RuntimeStatus["backend"] }
+            : fallbackRuntime ?? activeRuntime} />
       </div>
 
       <div style={{ margin: "0 16px" }}>
@@ -7671,7 +7807,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
         <ChatStream
           artifactChatId={chatId || undefined}
           onUiFollowup={handleUiFollowup}
-          messages={messages}
+          messages={displayMessages}
           onReply={handleMessageReply}
           onInspectWorker={inspectWorkerPanel}
           agentName="Agentlas"
@@ -7687,20 +7823,24 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           interactionBusy={busy}
           stopRequested={cancelPending}
           mediaBasePaths={mediaBasePaths}
-          workspaceRoot={restoredFolder ?? defaultRunFolder ?? undefined}
+          workspaceRoot={chatWorkFolder ?? defaultRunFolder ?? undefined}
+          turnFilesByMessage={turnFileLedger.byMessage}
           focusMessageId={requestedFocusMessageId}
         />
       </div>
       {/* 실행 전 API 키 요청 바텀 시트 — 값은 vault(env.set)로만, IPC는 완료 신호만 */}
       {keyRequestSheet && (
         <McpKeyRequestSheet
+          chatId={chat?.id ?? null}
           request={keyRequestSheet}
           onResolved={() => setKeyRequestSheet(null)}
         />
       )}
       {/* 에이전트 질문 바텀 시트 — 인라인 카드 대신 여기 모아 전부 답하고 1회 전송 */}
-      {pendingQuestionSheet && (
-        <ChatQuestionSheet
+      {pendingQuestionSheet && !pendingQuestionSheet.closed && (
+        <QuestionCardHost
+          source="chat-fence"
+          chatId={chat?.id ?? null}
           questions={pendingQuestionSheet.questions}
           initialReply={pendingQuestionSheet.initialReply}
           onRetryCommitted={pendingQuestionSheet.continuationRunId ? () => { void resumeCommittedQuestion(); } : undefined}
@@ -7715,13 +7855,19 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
               pendingQuestionSheet.questions.map((item) => item.question).join(" / "),
             )
           }
-          onDismiss={() => dismissQuestionBatch(pendingQuestionSheet.messageId)}
+          onDismiss={() => {
+            closeQuestionCard(chat?.id, pendingQuestionSheet.cardKey, pendingQuestionSheet.questions.length);
+            // Closing says what it was: no answer was sent and no run was stopped; the next message below continues the conversation.
+            setSessionNotice(locale === "ko"
+              ? "질문을 답하지 않고 닫았습니다. 에이전트에게 아무것도 보내지 않았고 실행도 멈추지 않았습니다. 아래 입력창에 메시지를 보내면 이어집니다."
+              : "You closed the question without answering. Nothing was sent to the agent and no run was stopped. Send a message below to continue.");
+          }}
           block={pendingQuestionSheet.block}
           onResend={(text) => {
             // 답을 새 메시지로 — 옛 질문은 접고, 작성창과 같은 전송 경로로 보낸다. 실행이 도는 중이면 그 경로가
             // Main 의 지시 대기열에 저장해 두고 실행이 정리되는 대로 보낸다(이 화면의 상태에 맡겨 두지 않는다:
             // 예전에는 화면을 떠나거나 다시 그리면 그 답이 사라졌다).
-            dismissQuestionBatch(pendingQuestionSheet.messageId);
+            closeQuestionCard(chat?.id, pendingQuestionSheet.cardKey, pendingQuestionSheet.questions.length);
             submitOrQueue(text);
           }}
         />
@@ -7757,7 +7903,7 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
         flexDirection: "column", alignItems: "stretch", ["--one-composer-width" as string]: `${WORK_COMPOSER_WIDTH_PX}px`,
       }}>
       {/* 도구 승인은 이 대화 안에서, 묻는 순간에(오너 결정 2026-08-15) — 컴포저 스택의 첫 칸이라 Goal 줄·컴포저와 좌우가 같다 */}
-      <ToolApprovalInline chatId={chat?.id ?? null} compact chip composerWidth={WORK_COMPOSER_WIDTH_PX} composerInset={WORK_COMPOSER_INSET_PX} />
+      <CappedDecisionBox><ToolApprovalInline chatId={chat?.id ?? null} compact chip composerWidth={WORK_COMPOSER_WIDTH_PX} composerInset={WORK_COMPOSER_INSET_PX} /></CappedDecisionBox>
       <AutomationMonitorStrip key={chatId} chatId={chatId || null} locale={locale} />
       {/* One Goal surface (owner 2026-10-04 "골 하나만 해라"): with a Goal, the bar above the conversation holds the
           objective, its controls and next check, and folds the continuity detail; nothing is attached to the composer. */}
@@ -7800,6 +7946,12 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           }}
         >
           {sessionNotice}
+        </div>
+      )}
+      {pendingQuestionSheet?.closed && pendingQuestionSheet.block === "none" && (
+        <div style={{ width: "min(calc(100% - 32px), 740px)", margin: "7px auto 0", padding: "7px 10px", borderRadius: 8, boxSizing: "border-box", border: "var(--hairline)", background: "var(--paper-2)", color: "var(--ink-soft)" }}>
+          <ClosedQuestionLine count={closedQuestionCards.find((item) => item.key === pendingQuestionSheet.cardKey)?.count ?? pendingQuestionSheet.questions.length}
+            onReopen={() => { reopenQuestionCard(chat?.id, pendingQuestionSheet.cardKey); setSessionNotice(null); }} />
         </div>
       )}
       {visibleWorkStartRecovery && (
@@ -7885,9 +8037,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           {locale === "ko" ? "모델 선택을 확인하는 중이에요. 확인되면 바로 보냅니다."
             : "Checking the model selection. It sends as soon as that is confirmed."}
         </p>}
-        <WaitingRetryStop chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} live={busy} maxWidth={WORK_COMPOSER_WIDTH_PX} />
+        <PendingPromisesStrip chatId={chat.id} />
+        <WaitingRetryStop chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} live={busy} maxWidth={WORK_COMPOSER_WIDTH_PX}
+          onWithdrawn={(words) => setComposerPrefill((current) => [current ?? "", ...words].filter((text) => text.trim()).join("\n"))} />
         <ChatInput
-          runtimeControls={<OneRuntimeChips key={chat.id} chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} disabled={busy || !agent} onSelectionConfirmed={(updated) => {
+          runtimeControls={<OneRuntimeChips key={chat.id} chatId={chat.id} locale={locale === "ko" ? "ko" : "en"} disabled={busy || !agent} onObservedRun={setObservedRun} onSelectionConfirmed={(updated) => {
             if (isCurrentChat() && updated.id === chatId) setChat(current => isCurrentChat() && updated.id === chatId ? updated : current);
           }} />}
           onSend={handleChatInputSend}
@@ -7968,6 +8122,9 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
                 screenChatId={chat.id}
         browserScopeKey={chatId || undefined}
         environment={project ? { name: project.name, folder: project.folderPath ?? null } : null}
+        files={turnFileLedger.chat}
+        onOpenFile={(file) => openLinkedFile(linkedFileOfTurnFile(file))}
+        resultOpenRequest={resultOpenRequest}
         browserHistoryUrl={workBrowserHistoryUrl}
         browserPreviewUrl={mediaPreview?.viewerKind === "browser" ? mediaPreview.browserUrl : undefined}
         result={(

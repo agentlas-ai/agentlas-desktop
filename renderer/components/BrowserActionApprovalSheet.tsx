@@ -195,8 +195,8 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
       setQueue((current) => current.filter((item) => item.requestId !== req.requestId));
       setExpiredNotice(
         ko
-          ? "승인 시간이 만료되어 이번 브라우저 작업은 실행되지 않았습니다."
-          : "Approval expired. This browser action was not executed.",
+          ? "승인 시간이 지나 거절로 처리됐습니다. 이번 브라우저 작업은 실행되지 않았습니다."
+          : "Approval timed out and was treated as declined. This browser action was not executed.",
       );
     }, remaining);
     return () => {
@@ -205,11 +205,11 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
     };
   }, [ko, req]);
 
+  // The line that says a request ended without an answer stays until the person closes it (or a new request takes the place): a four-second toast
+  // was gone before anyone looked, and the card seemed to vanish into "Running" with no word on whether it was allowed or declined.
   useEffect(() => {
-    if (!expiredNotice) return;
-    const timer = window.setTimeout(() => setExpiredNotice(null), 4_000);
-    return () => window.clearTimeout(timer);
-  }, [expiredNotice]);
+    if (req) setExpiredNotice(null);
+  }, [req]);
 
   const feedbackNode = sendError || noteFailedText ? (
     <div role="alert" data-testid="browser-approval-outcome"
@@ -229,6 +229,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
     return expiredNotice || noteFailedText ? (
       <div className={`baa-expired ${oneRoute ? "one" : ""}`} role="status">
         {expiredNotice ?? feedbackNode}
+        {expiredNotice ? <button type="button" data-baa-expired-dismiss="true" onClick={() => setExpiredNotice(null)} style={{ marginLeft: 10 }}>{ko ? "확인" : "OK"}</button> : null}
         <style jsx>{`
           .baa-expired {
             position: fixed;
@@ -363,7 +364,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange, s
     </>
   );
   return (
-    <ComposerDecisionPortal enabled={usesConversationComposer}>
+    <ComposerDecisionPortal enabled={usesConversationComposer} chatId={req.owner?.chatId ?? null}>
       <div
         ref={wrapperRef}
         className="baa-wrap"

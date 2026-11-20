@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { tFor } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import styles from "./OneVoiceInputHelp.module.css";
@@ -72,7 +72,11 @@ export function OneVoiceInputHelp({ locale, composerRef, disabled = false, surfa
     roots: [panelRef, triggerRef],
     onDismiss: () => setOpen(false),
     restoreFocusRef: triggerRef,
+    dismissOnFocusLeave: true,
   });
+
+  // The composer went quiet mid-answer: a hint opened before must not stay over the answer's own controls.
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
 
   const instruction = platform === "mac"
     ? voiceCopy(locale, "one.voice.instr_mac")

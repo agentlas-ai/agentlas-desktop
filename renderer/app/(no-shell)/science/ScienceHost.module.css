@@ -97,6 +97,32 @@
   letter-spacing: 0;
 }
 
+.fallbackActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.fallbackCard button.secondary {
+  border: 1px solid var(--science-border-default);
+  background: transparent;
+  color: var(--science-ink);
+}
+
+.fallbackDetail {
+  margin-top: 14px;
+  color: var(--muted-deep);
+  font-size: 12px;
+  text-align: left;
+}
+
+.fallbackDetail code {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
 /* The conversation's result cards above its outputs: the cards bring their own frame; the panel only gives them room. */
 .cards {
   display: grid;

@@ -9,6 +9,7 @@ import type { InstructionSnapshot } from "../../shared/runtime-instructions";
 import { automaticGoalResumeRequest } from "../invocation/automatic-goal";
 import { exactLegacyGoalLifecycleRuntimeSelection, prepareLegacyGoalLifecycle } from "../invocation/legacy-goal-lifecycle";
 import { appendChatMessage, getChat, getChatWorkingFolder } from "../store/chats";
+import { ownerStopHoldsWriters } from "../chat/chat-stop";
 import { getProject } from "../store/projects";
 import { getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { currentUiLocale } from "../ui-locale";
@@ -393,6 +394,8 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
           refuse("legacy_goal_binding_unavailable"); continue;
         }
         if (dispatcher.activeChatIds().includes(chat.id)) { refuse("chat_busy"); continue; }
+        // The person pressed Stop and has said nothing since: a restart does not replay the Goal into the chat.
+        if (ownerStopHoldsWriters(chat.id, { longRunId: id })) { refuse("owner_stopped"); continue; }
         // A stale wait subscription is an observation/dispatch state of its
         // own. If it is still pending or claimed, the wait reconciler or its
         // exact successor owns the next transition; legacy lifecycle repair
@@ -638,6 +641,8 @@ export async function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartup
         refuse("chat_binding_changed"); continue;
       }
       if (dispatcher.activeChatIds().includes(chat.id)) { refuse("chat_busy"); continue; }
+      // The person pressed Stop and has said nothing since: a restart does not replay the Goal into the chat.
+      if (ownerStopHoldsWriters(chat.id, { longRunId: candidate.id })) { refuse("owner_stopped"); continue; }
       // Executor order: saved chat folder, then Project folder (the same fix as continuation.ts, 68e6f94b).
       const explicitCwd = getChatWorkingFolder(chat.id)
         ?? (chat.projectId ? getProject(chat.projectId)?.folderPath ?? null : null);

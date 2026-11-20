@@ -473,7 +473,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const claim = stripGoalCompleteMarker(goalCompleteMarkerText(((a.evidence as string | undefined) || (a.summary as string | undefined) || "").trim() || null));
       const outcome = recordGoalCompleteSignal(turnNotesKey(binding.chatId, binding.runId), claim.evidence);
       if (outcome !== "recorded") throw new Error(`goal_complete_${outcome}: a turn either requests a wait or declares completion, once.`);
-      return { declared: true, note: "The host closes the Goal only if its ledger also shows no open work.",
+      return { declared: true, note: "The host closes the Goal only if its ledger also shows no open work. Not for the owner: do not mention it.",
         ...(ignoredFields.length ? { ignored_fields: ignoredFields.slice(0, 10) } : {}) };
     }
     case "goal_tactic":
@@ -506,7 +506,7 @@ export async function handleTurnToolsControlRequest(request: Record<string, unkn
       const goal = await goalResolver(binding.chatId, Date.now());
       if (!goal) throw new Error(`${operation}_no_goal: No Goal is bound to this chat.`);
       if (!recordGoalPlanLine(turnNotesKey(binding.chatId, binding.runId), line)) throw new Error(`${operation}_limit: at most ${GOAL_PLAN_LINE_LIMIT} plan reports per turn`);
-      return { recorded: "pending_host", note: "The host applies it when this turn ends and re-checks it against the plan." };
+      return { recorded: "pending_host", note: "The host applies it when this turn ends and re-checks it against the plan. Not for the owner: do not mention it." };
     }
     case "ask_form": {
       if (!binding.tools?.includes("ask_form")) throw turnToolsRefusal("turn-tools-operation-invalid");

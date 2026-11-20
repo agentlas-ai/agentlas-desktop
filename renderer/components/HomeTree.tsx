@@ -23,9 +23,10 @@ import { requestNewChat } from "@/lib/new-chat-request";
 import type { OneOrgMember } from "@shared/one-org";
 import { AttentionDot } from "./AttentionDot";
 import { RenameChatDialog } from "./RenameChatDialog";
+import { NewAgentChatDialog } from "./NewAgentChatDialog";
 import { ConversationListButton, briefingSourceName } from "./one/ConversationListButton";
 import { OneSessionTree } from "./one/OneSessionTree";
-import { IconArrowUp, IconChevronDown, IconChevronRight, IconEdit, IconFolder, IconInbox, IconPanelRight, IconPlus, IconSettings, IconTrash } from "./Icon";
+import { IconArrowUp, IconChevronDown, IconChevronRight, IconEdit, IconFolder, IconInbox, IconPanelRight, IconPlus, IconSettings, IconTrash, IconUsers } from "./Icon";
 import { PinIcon } from "./space/PinIcon";
 import { SpaceMenu, type SpaceMenuItem } from "./space/SpaceMenu";
 import { CHAT_DRAG_MIME, spaceCopy, type ChatDragPayload } from "./space/copy";
@@ -343,6 +344,8 @@ export function HomeTree({ locale }: { locale: Locale }) {
   const openSet = useMemo(() => new Set(openKey ? openKey.split(",") : []), [openKey]);
   const [menu, setMenu] = useState<{ x: number; y: number; row: HomeTreeRow; anchor: HTMLElement } | null>(null);
   const [renaming, setRenaming] = useState<{ chatId: string; current: string } | null>(null);
+  // The agent-chat dialog (one agent = a one-to-one, two or more = a group room) for the project whose row asked; the only way a person makes a group room.
+  const [agentChatFor, setAgentChatFor] = useState<{ projectId: string; projectName: string } | null>(null);
   const [dropMark, setDropMark] = useState<{ id: string; side: "before" | "after" } | null>(null);
   const dragRef = useRef<ChatDragPayload | null>(null);
   const groupIdsRef = useRef(new Map<string, string[]>());
@@ -536,6 +539,8 @@ export function HomeTree({ locale }: { locale: Locale }) {
           </button>
           <button type="button" className={`project-sidebar-collapse ${styles.rowPlus}`} data-home-new={name} onClick={() => requestNewChat({ projectId, projectName: name })}
             aria-label={copy.newChatIn(name)} title={copy.newChatTitle}><IconPlus size={14} /></button>
+          <button type="button" className={`project-sidebar-collapse ${styles.rowPlus}`} data-home-new-agent-chat={name} onClick={() => setAgentChatFor({ projectId, projectName: name })}
+            aria-label={copy.newAgentChatIn(name)} title={copy.newAgentChatTitle}><IconUsers size={14} /></button>
           <button type="button" className="project-sidebar-collapse" onClick={() => openProjectSettings({ mode: "edit", projectId })}
             aria-label={copy.projectSettingsFor(name)} title={copy.projectSettings}><IconSettings size={14} /></button>
           {fold}
@@ -567,6 +572,7 @@ export function HomeTree({ locale }: { locale: Locale }) {
           remove: () => { void onRemove(menu.row.id); },
         })} /> : null}
       {renaming ? <RenameChatDialog chatId={renaming.chatId} current={renaming.current} locale={locale} onClose={() => setRenaming(null)} /> : null}
+      <NewAgentChatDialog open={agentChatFor !== null} projectId={agentChatFor?.projectId ?? null} projectName={agentChatFor?.projectName ?? null} locale={locale} onClose={() => setAgentChatFor(null)} />
       <div className={`project-sidebar-label ${styles.projectsLabel}`}>
         <span>{copy.projects}</span>
         <button type="button" className={styles.labelPlus} data-new-project="true" onClick={() => openProjectSettings()} aria-label={copy.newProjectAria} title={copy.newProject}><IconPlus size={13} /></button>

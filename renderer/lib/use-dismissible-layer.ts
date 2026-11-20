@@ -7,7 +7,8 @@ import { useEffect, useRef, type RefObject } from "react";
  *
  * A layer stays open only while interaction remains inside one of its owned
  * roots. Pointer interaction elsewhere and an unmodified Escape dismiss it;
- * Escape restores focus to the trigger for keyboard continuity.
+ * Escape restores focus to the trigger for keyboard continuity. A menu opts
+ * into `dismissOnFocusLeave` so that Tab out of it closes it as well.
  */
 export function useDismissibleLayer({
   open,
@@ -16,6 +17,7 @@ export function useDismissibleLayer({
   restoreFocusRef,
   dismissOnScroll = false,
   dismissOnWindowBlur = false,
+  dismissOnFocusLeave = false,
 }: {
   open: boolean;
   roots: Array<RefObject<HTMLElement | null>>;
@@ -23,6 +25,8 @@ export function useDismissibleLayer({
   restoreFocusRef?: RefObject<HTMLElement | null>;
   dismissOnScroll?: boolean;
   dismissOnWindowBlur?: boolean;
+  /** Keyboard focus moving to anything outside the roots closes the layer (a menu left open over the page after Tab). */
+  dismissOnFocusLeave?: boolean;
 }) {
   const rootsRef = useRef(roots);
   const dismissRef = useRef(onDismiss);
@@ -52,15 +56,25 @@ export function useDismissibleLayer({
       window.requestAnimationFrame(() => restoreFocusRef?.current?.focus());
     };
 
+    const onFocusIn = (event: FocusEvent) => {
+      if (coveredByModal()) return;
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (rootsRef.current.some((ref) => ref.current?.contains(target))) return;
+      dismiss();
+    };
+
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKeyDown, true);
+    if (dismissOnFocusLeave) document.addEventListener("focusin", onFocusIn, true);
     if (dismissOnScroll) window.addEventListener("scroll", dismiss, true);
     if (dismissOnWindowBlur) window.addEventListener("blur", dismiss);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown, true);
+      if (dismissOnFocusLeave) document.removeEventListener("focusin", onFocusIn, true);
       if (dismissOnScroll) window.removeEventListener("scroll", dismiss, true);
       if (dismissOnWindowBlur) window.removeEventListener("blur", dismiss);
     };
-  }, [dismissOnScroll, dismissOnWindowBlur, open, restoreFocusRef]);
+  }, [dismissOnFocusLeave, dismissOnScroll, dismissOnWindowBlur, open, restoreFocusRef]);
 }

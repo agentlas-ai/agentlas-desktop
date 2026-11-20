@@ -69,6 +69,7 @@ export function ProductModeMenu({
     roots: [triggerRef, menuRef],
     onDismiss: () => setOpen(false),
     restoreFocusRef: triggerRef,
+    dismissOnFocusLeave: true,
   });
   useEffect(() => {
     if (!onMenuExtentChange) return;

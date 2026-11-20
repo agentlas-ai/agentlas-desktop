@@ -20,13 +20,14 @@ import Link from "next/link";
 import { mcpOAuthAPI, runMcpOAuthAttempt } from "@/components/plugins/McpOAuthAttempt";
 import { hostProvidedIndex, isHostProvidedServer } from "@/components/plugins/hostProvided";
 import {
-  bundledSkills, connectionState, connectorDisplayName, listingName, listingTagline, oneLine, pluginSlugOfServer,
+  bundledSkills, connectionLabel, connectionProof, connectionState, connectorDisplayName, listingName, listingTagline, oneLine, pluginSlugOfServer,
   type ItemType, type SkillRef,
 } from "@/components/plugins/toolsModel";
 import { ConnectorDetail } from "@/components/plugins/ConnectorDetail";
 import { PluginDetail } from "@/components/plugins/PluginDetail";
 import { SkillDetail } from "@/components/plugins/SkillDetail";
 import { CardSection, Hero, RowGrid, type CardItem, type HeroSlide } from "@/components/plugins/DiscoverView";
+import { AccountConnectorsSection } from "@/components/plugins/AccountConnectors";
 import { GlyphSkill } from "@/components/plugins/DetailParts";
 import styles from "./page.module.css";
 import { useT } from "@/lib/i18n";
@@ -40,6 +41,7 @@ import {
   IconLock, IconSparkles, IconSearch, IconRefresh, IconSettings, IconPlus, IconChevronDown,
 } from "@/components/Icon";
 import { CredentialStoreWord } from "@/components/PlatformWord";
+import { customMcpEndpointProblem, type CustomMcpEndpointProblem } from "@/lib/custom-mcp-endpoint";
 
 type Scope = "mine" | "discover";
 type Route =
@@ -115,9 +117,12 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
   const [cBusy, setCBusy] = useState(false);
   const customInFlight = useRef(false);
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const endpointValid = validCustomMcpEndpoint(cUrl);
+  const endpointProblem = customMcpEndpointProblem(cUrl);
+  const endpointValid = endpointProblem === null;
+  // Two connections with one name look the same in the list and in the remove confirmation: the second one is refused, not added.
+  const nameTaken = !!cName.trim() && installed.some((row) => [row.name, row.nameEn].some((name) => !!name && name.trim().toLocaleLowerCase() === cName.trim().toLocaleLowerCase()));
   const keysValid = !cEnv.trim() || cEnv.split(/[,\s]+/).every((key) => /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(key));
-  const customValid = !!cName.trim() && keysValid && (cTransport === "stdio" ? !!cCommand.trim() : endpointValid);
+  const customValid = !!cName.trim() && !nameTaken && keysValid && (cTransport === "stdio" ? !!cCommand.trim() : endpointValid);
   const customOpenCrabUrl = cTransport !== "stdio" && isOpenCrabCredentialUrl(cUrl);
   useEffect(() => {
     if (window.location.hash === "#custom") { setType("connector"); setRoute({ kind: "custom" }); }
@@ -236,9 +241,11 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
     const name = locale === "en" ? server.nameEn || server.name : server.name;
     if (!await confirmPopup(t("mcps.confirm_remove", { name }), { locale, tone: "danger", confirmLabel: ko ? "제거" : "Remove" })) return;
     await api.mcpTools.remove(server.id);
+    // The row leaves the list at once; re-reading the inventory probes every connection and takes seconds, during which the removed row stayed on screen.
+    setInstalled((rows) => rows.filter((row) => row.id !== server.id));
     setStatuses((s) => { const next = { ...s }; delete next[server.id]; return next; });
-    await refresh();
     setRoute({ kind: "browse" });
+    void refresh();
   }
 
   async function removePlugin(name: string, servers: InstalledMcpServer[]) {
@@ -246,8 +253,10 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
     if (!api || !servers.length) return;
     if (!await confirmPopup(t("mcps.confirm_remove", { name }), { locale, tone: "danger", confirmLabel: ko ? "제거" : "Remove" })) return;
     for (const server of servers) await api.mcpTools.remove(server.id);
-    await refresh();
+    const gone = new Set(servers.map((server) => server.id));
+    setInstalled((rows) => rows.filter((row) => !gone.has(row.id)));
     setRoute({ kind: "browse" });
+    void refresh();
   }
 
   async function toggle(server: InstalledMcpServer) {
@@ -310,7 +319,7 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
     }
     if (status.missingEnv.length || !status.connected) throw new Error(mcpConnectionFailureMessage(status, ko));
     if (!status.tools.length) throw new Error(ko ? "서버 응답은 있지만 사용 가능한 도구가 없어요. (empty_tools)" : "The server responded but supplied no tools. (empty_tools)");
-    return { evidence: [`tools/list · ${status.tools.length} ${ko ? "개 도구" : "tools"}`, status.tools.slice(0, 3).map((tool) => tool.name).join(", "), new Date(status.checkedAt).toLocaleTimeString()] };
+    return { evidence: [connectionProof(status, ko), status.tools.slice(0, 3).map((tool) => tool.name).join(", ")] };
   }, [connecting, ko, hub.listings]);
 
   /* ── derived data ─────────────────────────────────────────────── */
@@ -492,15 +501,25 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
     {skillMatches.length === 0 && <Empty text={ko ? "표시할 스킬이 없어요." : "No skills to show."} />}
   </>;
 
+  /** What is wrong with a row's connections, for the badge in "Mine": the first server that needs a sign-in or a key, or whose key was refused or whose service is down.
+   * Not "unverified" or "pending" (a plugin that opens its browser only when needed is neither broken nor checked): those say nothing here. */
+  const rowProblem = (rowServers: InstalledMcpServer[]): string | undefined => {
+    for (const server of rowServers) {
+      const state = connectionState(server, statuses[server.id], loadFailed);
+      if (state === "login" || state === "keys" || state === "rejected" || state === "down") return connectionLabel(state, ko);
+    }
+    return undefined;
+  };
   const mineItems: CardItem[] = type === "plugin"
-    ? installedPluginSlugs.map((slug) => { const listing = listingBySlug.get(slug); return listing ? pluginCard(listing, "row") : { key: slug, icon: <ToolLogo slug={slug} name={slug} frame="row" brandMap={brandMap} />, name: slug, installed: true, onOpen: () => openPlugin(slug) }; })
+    ? installedPluginSlugs.map((slug) => { const listing = listingBySlug.get(slug); const problem = rowProblem(pluginServers.get(slug) ?? []); return listing ? { ...pluginCard(listing, "row"), problem } : { problem, key: slug, icon: <ToolLogo slug={slug} name={slug} frame="row" brandMap={brandMap} />, name: slug, installed: true, onOpen: () => openPlugin(slug) }; })
     : type === "connector"
-      ? visible.map((server) => ({ key: server.id, icon: <ToolLogo catalogId={server.catalogId} name={server.nameEn || server.name} frame="row" brandMap={brandMap} />, name: serverName(server), description: pluginSlugOfServer(server) ? pluginLabel(pluginSlugOfServer(server) as string) : undefined, installed: true, onOpen: () => openConnector(server) }))
+      ? visible.map((server) => ({ key: server.id, problem: rowProblem([server]), icon: <ToolLogo catalogId={server.catalogId} name={server.nameEn || server.name} frame="row" brandMap={brandMap} />, name: serverName(server), description: pluginSlugOfServer(server) ? pluginLabel(pluginSlugOfServer(server) as string) : undefined, installed: true, onOpen: () => openConnector(server) }))
       : installedSkills.map((skill) => ({ ...skillCard(skill), icon: <span className={styles.skillRowIcon}><GlyphSkill size={18} /></span> }));
   const mine = <>
     {!loaded ? <Empty text={ko ? "불러오는 중…" : "Loading…"} /> : loadFailed ? <Empty text={ko ? "설치 상태를 읽지 못했어요" : "Could not read installed state"} /> : mineItems.length === 0
       ? <Empty text={ko ? `설치된 ${typeLabel(type)} 없음` : `No ${typeLabel(type).toLowerCase()} installed`} />
       : <RowGrid ko={ko} items={mineItems.map((item) => ({ ...item, installed: true }))} />}
+    {type === "connector" && <AccountConnectorsSection ko={ko} />}
   </>;
 
   /* ── detail routes ────────────────────────────────────────────── */
@@ -542,7 +561,8 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
     detail = <div className={styles.customPage}>
       <h1 className={styles.customTitle}>{ko ? "커스텀 MCP 추가" : "Add custom MCP"}</h1>
       <div className={styles.customCard}>
-        <input className={styles.input} value={cName} onChange={(e) => setCName(e.target.value)} placeholder={t("mcps.custom.name")} aria-label={ko ? "연결 표시 이름" : "Connection display name"} />
+        <input className={styles.input} value={cName} onChange={(e) => setCName(e.target.value)} placeholder={t("mcps.custom.name")} aria-label={ko ? "연결 표시 이름" : "Connection display name"} aria-invalid={nameTaken} />
+        {nameTaken && <p className={styles.fieldAlert} role="alert">{ko ? "같은 이름의 연결이 이미 있어요. 다른 이름을 써 주세요." : "A connection with this name already exists. Use a different name."}</p>}
         <div className={styles.segment} role="tablist">
           <button type="button" role="tab" aria-selected={cTransport !== "stdio"} data-active={cTransport !== "stdio"} onClick={() => setCTransport(cTransport === "stdio" ? "http" : cTransport)}>{t("mcps.custom.mode_remote")}</button>
           <button type="button" role="tab" aria-selected={cTransport === "stdio"} data-active={cTransport === "stdio"} onClick={() => setCTransport("stdio")}>{t("mcps.custom.mode_local")}</button>
@@ -554,7 +574,7 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
           </div>
         ) : <>
           <input className={`${styles.input} ${styles.mono}`} value={cUrl} onChange={(e) => onUrlChange(e.target.value)} placeholder={t("mcps.custom.url")} aria-label={ko ? "MCP API 주소" : "MCP API endpoint"} aria-invalid={!!cUrl.trim() && !endpointValid} />
-          {!!cUrl.trim() && !endpointValid && <p className={styles.fieldAlert} role="alert">{ko ? "인증정보가 포함되지 않은 HTTP(S) 주소를 입력하세요. 키는 Vault에 저장해 주세요." : "Enter an HTTP(S) endpoint without credentials. Store keys in Vault."}</p>}
+          {!!cUrl.trim() && endpointProblem && <p className={styles.fieldAlert} role="alert">{customEndpointMessage(endpointProblem, ko)}</p>}
           {cUrl.trim() && <div className={styles.detected}>
             <span>{t("mcps.custom.detected")}</span>
             <button type="button" data-active={cTransport === "http"} onClick={() => setCTransport("http")}>HTTP</button>
@@ -627,7 +647,7 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
         </>}
       </div>
       {skillModal && <SkillModal ko={ko} skill={skillModal} onClose={() => setSkillModal(null)} onOpenFull={() => { const skill = skillModal; setSkillModal(null); openSkill(skill, "plugin"); }} />}
-      {connecting && <AuthorizeDialog name={serverName(connecting)} mode={connectMode} logo={<ToolLogo catalogId={connecting.catalogId} name={connecting.nameEn || connecting.name} frame="hero" brandMap={brandMap} />} ko={ko} run={connectServer} setupLink={connecting.envKeys.length ? { label: ko ? "저장된 키·연결 확인" : "Review saved keys and connections", href: "/library/env" } : undefined} onClose={() => { setConnecting(null); void refresh(); }} onDone={() => { setConnecting(null); void refresh(); }} />}
+      {connecting && <AuthorizeDialog name={serverName(connecting)} mode={connectMode} recheck={connectionState(connecting, statuses[connecting.id], false) === "ready"} logo={<ToolLogo catalogId={connecting.catalogId} name={connecting.nameEn || connecting.name} frame="hero" brandMap={brandMap} />} ko={ko} run={connectServer} setupLink={connecting.envKeys.length ? { label: ko ? "저장된 키·연결 확인" : "Review saved keys and connections", href: "/library/env" } : undefined} onClose={() => { setConnecting(null); void refresh(); }} onDone={() => { setConnecting(null); void refresh(); }} />}
       {loginStep && <LoginStep ko={ko} state={loginStep} brandMap={brandMap} onAdvance={setLoginStep}
         onDone={(result, keyQueue) => { setLoginStep(null); if (keyQueue.length > 0) { setKeyStep({ state: { queue: keyQueue, index: 0, result }, serverIds: [] }); return; } void finishInstall(result); }} />}
       {keyStep && <KeyStep ko={ko} state={keyStep.state} brandMap={brandMap} onAdvance={(next) => setKeyStep((current) => current ? { ...current, state: next } : current)}
@@ -636,12 +656,16 @@ function LibraryMcpsView({ passiveEntry }: { passiveEntry: boolean }) {
   );
 }
 
-function validCustomMcpEndpoint(value: string): boolean {
-  try {
-    const url = new URL(value.trim());
-    return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password && !url.hash
-      && ![...url.searchParams.keys()].some((key) => /(?:token|key|secret|password|authorization|credential|signature)/iu.test(key));
-  } catch { return false; }
+function customEndpointMessage(problem: CustomMcpEndpointProblem, ko: boolean): React.ReactNode {
+  switch (problem) {
+    case "scheme": return ko ? "주소는 http:// 또는 https:// 로 시작해야 해요." : "The address must start with http:// or https://.";
+    case "host": return ko ? "주소에 서버 이름이 없어요. 예: https://example.com/mcp" : "The address has no server name. For example: https://example.com/mcp";
+    case "port": return ko ? "포트 번호는 1부터 65535 사이여야 해요." : "The port must be a number from 1 to 65535.";
+    case "credentials": return ko ? <>주소에 아이디나 비밀번호를 넣지 마세요. 키는 <CredentialStoreWord ko />에 따로 저장해요.</> : <>Do not put a user name or password in the address. Keys are stored separately in <CredentialStoreWord ko={false} />.</>;
+    case "secret-query": return ko ? <>주소 안의 토큰이나 키는 지워 주세요. 키는 <CredentialStoreWord ko />에 따로 저장해요.</> : <>Remove tokens or keys from the address. Keys are stored separately in <CredentialStoreWord ko={false} />.</>;
+    case "fragment": return ko ? "주소 끝의 # 부분은 지워 주세요." : "Remove the # part at the end of the address.";
+    default: return ko ? "주소 형식이 올바르지 않아요. 예: https://example.com/mcp" : "The address is not valid. For example: https://example.com/mcp";
+  }
 }
 
 function isOpenCrabCredentialUrl(value: string): boolean {

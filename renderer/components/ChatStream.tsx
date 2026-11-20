@@ -13,6 +13,7 @@ import { snapMarkdownAnchor } from "@shared/streaming-segments";
 import { GoalResultReport } from "./GoalResultReport";
 import type { ChatHostNotice } from "../../shared/types";
 import { isHousekeepingHostNotice, normalizeChatHostNotice } from "../../shared/chat-host-notice";
+import { parsePeerArrivals, peerArrivalLine } from "../../shared/peer-envelope-marker";
 import { HostContinuationNotice } from "./HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "./automation/AutomationChatActivity";
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
@@ -23,7 +24,7 @@ import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
 import { Markdown, MarkdownSegment, StreamingMarkdown, type CodeArtifact, type LinkedFileArtifact, type MediaArtifact } from "./Markdown";
 import { AnswerCardsForTurns } from "./AnswerCards";
-import { useT } from "@/lib/i18n";
+import { tFor, useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { isOneArtifactPreviewCapabilityV1, type OneArtifactPreviewCapabilityV1 } from "@shared/one-artifacts";
 import {
@@ -47,7 +48,7 @@ import { IconAlertTriangle, IconChevronDown, IconClose } from "./Icon";
 import { InlineUiInstances } from "./UiInstances";
 import { ApprovalRecordLines } from "./one/OneApprovalRecords";
 import { OneTurnFiles } from "./one/OneTurnFiles";
-import { turnFilesOfActivity } from "@/lib/turn-files";
+import { turnFilesOfActivity, type TurnFile } from "@/lib/turn-files";
 import { approvalClosedRowIds, placeApprovalRecords } from "@/lib/approval-record-lines";
 import { useSettledApprovals } from "@/lib/use-settled-approvals";
 import type { ChatFileItem } from "@/lib/chat-files";
@@ -57,6 +58,9 @@ import type { OneActivityItem, OneActivityState } from "@/lib/one-activity";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { inferOwnerLocale, ownerActivityText } from "@shared/owner-visible-activity-text";
 import { ownerFailureTitle } from "@shared/owner-failure-title";
+import { isReceiptRowId } from "@shared/receipt-card";
+import { ReceiptRowCard } from "@/components/ReceiptCard";
+import { historyWindowLastId, resolveHistoryWindow, type HistoryWindow } from "@/lib/chat-history-window";
 
 /**
  * Work keeps its transport projection in StreamMessage for compatibility with
@@ -233,6 +237,8 @@ export interface StreamActivityRun {
 
 export interface StreamMessage {
   /** Display-only segments; canonical transcript/run identities stay upstream. */
+  /** Where the answer starts inside `text` (Main's history page, answerStart); the text before it is progress the model wrote between tool calls. */
+  answerStart?: number;
   continuation?: boolean;
   continuationFrozen?: boolean;
   continuationOwnsMetadata?: boolean;
@@ -245,6 +251,10 @@ export interface StreamMessage {
   id: string;
   role: "user" | "agent" | "system";
   text: string;
+  /** The id the composer made for this person's send (Main stores it on the row): one send is one bubble under it. */
+  clientIntentId?: string;
+  /** Main's state of a send that is not (yet) delivered: the line under the bubble says waiting / not sent / not confirmed. */
+  ownerInputState?: "accepted" | "waiting" | "starting" | "delivered" | "held" | "uncertain" | "withdrawn";
   /** Main-issued invocation identity for this assistant turn, when available. */
   runId?: string;
   /** Receipt-only fallback; never used as an assistant/run identity anchor. */
@@ -354,6 +364,7 @@ export function ChatStream({
   artifactChatId,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
   workspaceRoot,
+  turnFilesByMessage,
   focusMessageId,
   onReply,
   onUiFollowup,
@@ -369,6 +380,11 @@ export function ChatStream({
   emptyDirectory?: ChatEmptyDirectory;
   /** 실행 폴더 — 도구 행의 파일 경로를 이 기준 상대경로로 줄인다. */
   workspaceRoot?: string;
+  /**
+   * The files each answer made, from the conversation's one ledger (lib/chat-turn-files.ts: a path an earlier answer wrote reads "Edited" in a later one,
+   * and the panel's Outputs list names the same files). Keyed by the message's id; an answer without an entry computes its own, as before.
+   */
+  turnFilesByMessage?: ReadonlyMap<string, readonly TurnFile[]>;
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
@@ -451,12 +467,11 @@ export function ChatStream({
     : "empty";
   const previousScrollSignalRef = useRef(scrollSignal);
   const previousTailRef = useRef({ id: last?.id, count: messages.length });
-  const [historyWindow, setHistoryWindow] = useState<{ scope?: string; firstId: string; lastId: string } | null>(null);
+  const [historyWindow, setHistoryWindow] = useState<HistoryWindow | null>(null);
   const scopedWindow = historyWindow?.scope === artifactChatId ? historyWindow : null;
-  const firstIndex = scopedWindow ? messages.findIndex(message => message.id === scopedWindow.firstId) : -1;
-  const lastIndex = scopedWindow ? messages.findIndex(message => message.id === scopedWindow.lastId) : -1;
-  const historyStart = firstIndex >= 0 && lastIndex >= firstIndex ? firstIndex : Math.max(0, messages.length - CHAT_HISTORY_PAGE_SIZE);
-  const historyEnd = firstIndex >= 0 && lastIndex >= firstIndex ? lastIndex + 1 : messages.length;
+  const pinnedRange = resolveHistoryWindow(messages, scopedWindow);
+  const historyStart = pinnedRange ? pinnedRange.start : Math.max(0, messages.length - CHAT_HISTORY_PAGE_SIZE);
+  const historyEnd = pinnedRange ? pinnedRange.end : messages.length;
   const visibleMessages = useMemo(() => messages.slice(historyStart, historyEnd), [messages, historyStart, historyEnd]);
   // AL: the answered or closed approval cards of this conversation, one quiet line each where the card stood (stored ledger rows; none when there are none).
   const settledApprovals = useSettledApprovals(artifactChatId ? [artifactChatId] : []);
@@ -512,7 +527,7 @@ export function ChatStream({
     pendingJumpRef.current = id;
     setAwayFromBottom(true);
     setHasNewContent(false);
-    setHistoryWindow({ scope: scopeRef.current, firstId: rows[start].id, lastId: rows[end - 1].id });
+    setHistoryWindow({ scope: scopeRef.current, firstId: rows[start].id, lastId: historyWindowLastId(rows, end) });
   }, [clearUserPin]);
   useLayoutEffect(() => {
     const anchor = pinnedUserViewportRef.current;
@@ -531,7 +546,7 @@ export function ChatStream({
     if (start === end) return;
     stickToBottomRef.current = false;
     clearUserPin();
-    setHistoryWindow({ scope: artifactChatId, firstId: messages[start].id, lastId: messages[end - 1].id });
+    setHistoryWindow({ scope: artifactChatId, firstId: messages[start].id, lastId: historyWindowLastId(messages, end) });
   }
 
   useEffect(() => {
@@ -644,7 +659,7 @@ export function ChatStream({
     stickToBottomRef.current = false;
     clearUserPin();
     if (visibleMessages.length) setHistoryWindow(current => current?.scope === artifactChatId ? current : {
-      scope: artifactChatId, firstId: visibleMessages[0].id, lastId: visibleMessages.at(-1)!.id,
+      scope: artifactChatId, firstId: visibleMessages[0].id, lastId: historyWindowLastId(messages, historyEnd),
     });
   }
 
@@ -784,6 +799,7 @@ export function ChatStream({
               onInspectWorker={onInspectWorker}
               artifactChatId={artifactChatId}
               mediaBasePaths={mediaBasePaths}
+              turnFilesOverride={turnFilesByMessage?.get(m.continuationSourceMessageId ?? m.id)}
             />
           </div>
           </MessageActions>
@@ -946,14 +962,14 @@ export function ChatStream({
         .agentlas-chat-latest-button {
           position: absolute;
           z-index: 4;
-          left: 50%;
-          bottom: 14px;
-          transform: translateX(-50%);
+          /* Bottom-right corner, not the middle: in a narrow pane a long message fills the width, and a button in the middle sat on its text. */
+          right: 14px;
+          bottom: 10px;
           display: grid;
           place-items: center;
           align-items: center;
-          width: 38px;
-          height: 38px;
+          width: 34px;
+          height: 34px;
           padding: 0;
           border: 1px solid var(--paper-edge);
           border-radius: 50%;
@@ -1197,6 +1213,7 @@ const Bubble = memo(function Bubble({
   onInspectWorker,
   artifactChatId,
   mediaBasePaths,
+  turnFilesOverride,
 }: {
   message: StreamMessage;
   agentName: string;
@@ -1212,6 +1229,8 @@ const Bubble = memo(function Bubble({
   onInspectWorker?: (runId: string, group: OneWorkerWorkGroup) => void;
   artifactChatId?: string;
   mediaBasePaths: string[];
+  /** This answer's files from the conversation's ledger (ChatStream `turnFilesByMessage`). */
+  turnFilesOverride?: readonly TurnFile[];
 }) {
   const { locale } = useT();
   // These hooks must run before the role-specific early returns below. A
@@ -1236,8 +1255,8 @@ const Bubble = memo(function Bubble({
   }, [message.activityRuns, message.id, message.notices, message.runId, workActivity]);
   // AK: the files this answer made or changed (typed write / edit calls of its run), once it has finished.
   const turnFiles = useMemo(() => (message.role === "agent" && !message.busy && !message.streaming
-    ? turnFilesOfActivity(workActivities.map(({ state }) => state), locale === "ko" ? "ko" : "en", workspaceRootForRun) : []),
-  [message.role, message.busy, message.streaming, workActivities, locale, workspaceRootForRun]);
+    ? (turnFilesOverride ?? turnFilesOfActivity(workActivities.map(({ state }) => state), locale === "ko" ? "ko" : "en", workspaceRootForRun)) : []),
+  [message.role, message.busy, message.streaming, workActivities, locale, workspaceRootForRun, turnFilesOverride]);
   // Activity notices belong under the work heading. Keep a separate plain
   // row only for an actionable sign-in, a context boundary, or a notice that
   // is absent from the canonical activity projection.
@@ -1280,10 +1299,18 @@ const Bubble = memo(function Bubble({
             {displayMessageReply(message.text, locale)}
           </div>
         )}
+        {/* Main's state of a send that is not delivered yet: one line under the bubble, never guessed from the words. */}
+        {(message.ownerInputState === "waiting" || message.ownerInputState === "starting" || message.ownerInputState === "held" || message.ownerInputState === "uncertain") && (
+          <p role="status" data-owner-input-state={message.ownerInputState} style={{ margin: "3px 2px 0", textAlign: "right", color: "var(--muted-deep)", fontSize: 11.5 }}>
+            {tFor(locale === "ko" ? "ko" : "en", message.ownerInputState === "held" ? "room.send.held" : message.ownerInputState === "uncertain" ? "room.send.uncertain" : "room.send.waiting")}
+          </p>
+        )}
       </div>
     );
   }
   if (message.role === "system") {
+    // A host receipt: the one receipt card, drawn from the row's closed value - never the row's text.
+    if (isReceiptRowId(message.id)) return <ReceiptRowCard row={message} chatId={artifactChatId} />;
     if (normalizeChatHostNotice(message.role, message.hostNotice)) {
       const notice = <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} notice={message.hostNotice} chatId={artifactChatId} />;
       // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28, One 과 같은 표면).
@@ -1307,6 +1334,10 @@ const Bubble = memo(function Bubble({
       ) : <div style={{ color: "var(--muted-deep)", fontSize: 12.5 }}>{label}</div>;
     }
     if (isInternalSystemNote(message.text)) return null;
+    // A message another conversation of the project sent here is stored as a system row (the model's input): the person reads one plain line
+    // naming the sender, like the One window and the split pane do (shared/peer-envelope-marker.ts).
+    const peerArrivals = parsePeerArrivals(message.text);
+    if (peerArrivals) return <p role="status" data-peer-arrival="true" style={{ margin: 0, color: "var(--muted-deep)", fontSize: 12.5 }}>{peerArrivalLine(peerArrivals, locale === "ko")}</p>;
     const isError = message.text.trim().startsWith("⚠️");
     return (
       <div
@@ -1738,6 +1769,7 @@ function SingleRunBody({
 }) {
   const text = message.text ?? "";
   const busy = Boolean(message.busy);
+  const { locale: bodyLocale } = useT();
   const toolSteps = useMemo(() => (message.steps ?? []).filter((s) => s.tool), [message.steps]);
   const groups = useMemo(() => buildToolGroups(toolSteps, text), [toolSteps, text]);
   // 콜백/배열 identity 고정 — 완결 세그먼트(MarkdownSegment memo)가 부모 재렌더마다
@@ -1756,14 +1788,18 @@ function SingleRunBody({
   const stableBasePaths = useMemo(() => mediaBasePaths.slice(), [basePathsKey]);
   if (!text.trim() && toolSteps.length === 0) return null;
 
-  const segments: Array<{ key: string; text: string; group?: StreamStep[] }> = [];
+  // A finished message whose answer start is known folds what the model wrote between tool calls (and those tool rows) into one closed "progress" block;
+  // no answerStart (older rows, a live message) draws exactly as before.
+  const foldAt = !busy && !message.streaming && message.answerStart && message.answerStart > 0 ? snapAnchor(text, message.answerStart) : 0;
+  const segments: Array<{ key: string; text: string; group?: StreamStep[]; progress?: boolean }> = [];
   let cursor = 0;
   for (const g of groups) {
     // key는 앵커 값이 아니라 그룹 첫 스텝 id — 앵커가 스냅으로 움직여도 그룹/세그먼트가
     // 리마운트되지 않아 펼침 상태와 memo가 보존된다.
-    segments.push({ key: `seg-${g.steps[0]?.id ?? g.anchor}`, text: text.slice(cursor, g.anchor), group: g.steps });
+    segments.push({ key: `seg-${g.steps[0]?.id ?? g.anchor}`, text: text.slice(cursor, g.anchor), group: g.steps, progress: g.anchor <= foldAt });
     cursor = g.anchor;
   }
+  if (foldAt > cursor) { segments.push({ key: "seg-progress-tail", text: text.slice(cursor, foldAt), progress: true }); cursor = foldAt; }
   const tail = text.slice(cursor);
   const lastGroup = groups[groups.length - 1];
   const lastGroupLive =
@@ -1789,23 +1825,38 @@ function SingleRunBody({
         overflow: "hidden",
       }}
     >
-      {segments.map((seg, i) => (
-        <Fragment key={seg.key}>
-          {seg.text.trim() && (
-            <div style={{ minWidth: 0 }}>
-              <MarkdownSegment text={seg.text} messageId={`${message.id}:${seg.key}`} {...markdownProps} />
-            </div>
-          )}
-          {seg.group && seg.group.length > 0 && (
-            <ToolGroupBlock
-              steps={seg.group}
-              live={lastGroupLive && i === segments.length - 1}
-              onOpenLinkedFile={onOpenLinkedFile}
-              onOpenWorkflow={onOpenWorkflow}
-            />
-          )}
-        </Fragment>
-      ))}
+      {(() => {
+        const drawSegment = (seg: (typeof segments)[number], i: number) => (
+          <Fragment key={seg.key}>
+            {seg.text.trim() && (
+              <div style={{ minWidth: 0 }}>
+                <MarkdownSegment text={seg.text} messageId={`${message.id}:${seg.key}`} {...markdownProps} />
+              </div>
+            )}
+            {seg.group && seg.group.length > 0 && (
+              <ToolGroupBlock
+                steps={seg.group}
+                live={lastGroupLive && i === segments.length - 1}
+                onOpenLinkedFile={onOpenLinkedFile}
+                onOpenWorkflow={onOpenWorkflow}
+              />
+            )}
+          </Fragment>
+        );
+        const progressCount = segments.findIndex((seg) => !seg.progress);
+        const folded = progressCount === -1 ? segments.length : progressCount;
+        return (
+          <>
+            {folded > 0 && (
+              <details data-answer-progress="true" style={{ color: "var(--muted-deep)", fontSize: 13 }}>
+                <summary>{bodyLocale === "ko" ? "진행 과정" : "Progress"}</summary>
+                {segments.slice(0, folded).map((seg, i) => drawSegment(seg, i))}
+              </details>
+            )}
+            {segments.slice(folded).map((seg, i) => drawSegment(seg, folded + i))}
+          </>
+        );
+      })()}
       {tail.trim() && (
         <div style={{ minWidth: 0 }}>
           <StreamingMarkdown text={tail} messageId={`${message.id}:t${cursor}`} growing={Boolean(message.streaming)} {...markdownProps} />

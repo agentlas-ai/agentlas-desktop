@@ -22,6 +22,7 @@ import { markChildHostKilled, observeChildDeath } from "./child-death";
 import { resolveManagedNodeRuntime } from "./managed-node";
 import { nativeCliBinDirs } from "./native-cli";
 import { claimAttemptChild, type AttemptChildren } from "./attempt-children";
+import { agentStartedDescendants, commandOfProcessSync, listeningProcesses, listeningProcessesSync, orphansLeftInFolder, readProcessTable, readProcessTableSync } from "./process-table";
 import { memoryEnvForSpawn } from "./memory-env";
 import { windowsCmdSpawnArgs } from "./windows-cmd-quote";
 import { commandForSpawn, isAbsolutePathEntry, resolveBareCommand, withNoCurrentDirectoryExeSearch } from "./safe-executable";
@@ -437,7 +438,57 @@ export function spawnCli(
   // arguments) for the crash-recovery ledger; an npm shim started directly
   // records the executable that really runs, which is what the OS reports.
   rememberSpawnedRunChildCommand(child, identity);
+  if (typeof options.cwd === "string" && options.cwd) spawnedIn.set(child, { cwd: options.cwd, at: Date.now() });
   return child;
+}
+
+/** Where a CLI was started and when: the folder its agent's left-behind processes are looked for in (sweepOrphansLeftByTurn). */
+const spawnedIn = new WeakMap<ChildProcess, { cwd: string; at: number }>();
+/** Servers a turn left running on purpose (pid -> command line): spared by every end of a turn or of a CLI, ended only when the app quits (endKeptServers). */
+const keptServers = new Map<number, string>();
+/** At most this many are remembered (kept servers); past it the ones that already ended are forgotten first. */
+const KEPT_SERVERS_MAX = 32;
+function rememberKeptServer(pid: number, command: string): void {
+  if (keptServers.size >= KEPT_SERVERS_MAX) keptServerList();
+  if (keptServers.size < KEPT_SERVERS_MAX) keptServers.set(pid, command);
+}
+/** True from the moment the host is quitting: only then is a server ended with the CLI whose agent started it. */
+let hostQuitting = false;
+function endKeptServers(): void {
+  hostQuitting = true;
+  const listed = [...keptServers].map(([pid, command]) => ({ pid, command }));
+  keptServers.clear();
+  endAgentStartedProcesses(listed, 500);
+}
+/** The servers still running that a turn kept (for a surface that lists them); forgets the ones that ended. */
+export function keptServerList(): Array<{ pid: number; command: string }> {
+  for (const [pid, command] of keptServers) if (commandOfProcessSync(pid) !== command) keptServers.delete(pid);
+  return [...keptServers].map(([pid, command]) => ({ pid, command }));
+}
+
+/** A process younger than the turn by up to this many seconds more still counts as the turn's (the poll that dates the turn is 1.5 s late). */
+const TURN_ORPHAN_MARGIN_S = 5;
+
+/**
+ * Ends what a turn started and left running: a server an agent started with `&` from a shell tool (`python -m http.server`) answers to PID 1 once its
+ * shell ended with the command, so it is in no process group of the run and the lineage poll (a read every 1.5 s) may never have seen it. It stays up
+ * after the turn, in the person's folder, until the CLI is closed (a resident CLI: hours) or never (.0.0.1:8765 and:8777 stayed
+ * after "open it and show me"). The same three facts find it with no list of names: started during the turn, orphaned, and working in the run's folder
+ * (process-table.ts orphansLeftInFolder). Called when a one-shot CLI exits and when a resident CLI finishes a turn. POSIX only (Windows: taskkill /T walks
+ * the live chain when the CLI is ended; there is no orphan read there).
+ */
+async function sweepOrphansLeftByTurn(child: ChildProcess, sinceMs: number): Promise<void> {
+  const where = spawnedIn.get(child);
+  if (!where || process.platform === "win32") return;
+  const ended = await orphansLeftInFolder(where.cwd, Math.max(1, Math.ceil((Date.now() - sinceMs) / 1000) + TURN_ORPHAN_MARGIN_S)).catch(() => []);
+  if (ended.length === 0) return;
+  // A process that listens on a port is a server, not a leftover: an agent started it to be used (the person may have asked for it to stay on),
+  // and the answer names its address. It is kept (until the app quits) and never ended by this sweep.
+  const servers = await listeningProcesses(ended.map((row) => row.pid)).catch(() => new Set<number>());
+  for (const row of ended) if (servers.has(row.pid)) rememberKeptServer(row.pid, row.command);
+  const leftovers = ended.filter((row) => !servers.has(row.pid));
+  if (leftovers.length > 0) endAgentStartedProcesses(leftovers.map((row) => ({ pid: row.pid, command: row.command })), 1_000);
+  console.info("[runtime-turn-orphans]", JSON.stringify({ ended: leftovers.length, kept: servers.size, cliPid: child.pid ?? null }));
 }
 
 /**
@@ -867,16 +918,103 @@ function forceKillWindowsTree(child: ChildProcess): void {
   killer.unref?.();
 }
 
+/**
+ * What an agent started under a CLI that the CLI's process group does not hold: a server started with `&` from the CLI's shell tool runs in the shell's own
+ * group, and once that shell has exited it answers to PID 1, so nothing links it to the run any more (macOS `ps` shows no other process's environment).
+ * The only link is the parent chain while it still exists. So while a CLI is working, the chain is read now and then (agentStartedLineage) and every
+ * descendant seen is kept with its command line (the identity check for a late signal, never a recycled PID). Ending the CLI ends those too.
+ * POSIX only: Windows `taskkill /T` walks the live parent chain itself.
+ */
+const AGENT_LINEAGE_POLL_MS = 1_500;
+const agentStartedLineage = new WeakMap<ChildProcess, Map<number, string>>();
+
+function startAgentLineage(child: ChildProcess): void {
+  if (process.platform === "win32" || !child.pid) return;
+  const seen = new Map<number, string>();
+  agentStartedLineage.set(child, seen);
+  let reading = false;
+  // A resident CLI: when it was last seen waiting (a turn that starts is no older than the next read) and whether it has worked since.
+  let lastIdleAt = Date.now();
+  let workedSinceIdle = false;
+  const timer = setInterval(() => {
+    // A resident CLI that waits for its next turn starts nothing; one read per busy interval, never overlapping, and nothing when the CLI is gone.
+    if (reading || child.exitCode !== null || child.signalCode !== null) return;
+    if (idleResidentProbes.get(child)?.() === true) {
+      // The turn ended: what its agent left running in the person's folder ends with it.
+      if (workedSinceIdle) { workedSinceIdle = false; void sweepOrphansLeftByTurn(child, lastIdleAt); }
+      lastIdleAt = Date.now();
+      return;
+    }
+    if (idleResidentProbes.has(child)) workedSinceIdle = true;
+    reading = true;
+    void readProcessTable().then((table) => {
+      if (!table || !child.pid) return;
+      const live = new Map(table.map((row) => [row.pid, row.command]));
+      for (const row of agentStartedDescendants(table, child.pid)) if (!seen.has(row.pid)) seen.set(row.pid, row.command);
+      // What ended (or whose PID was reused by another program) is forgotten: the map holds only what this CLI's agent still has running.
+      for (const [pid, command] of seen) if (live.get(pid) !== command) seen.delete(pid);
+    }).catch(() => undefined).finally(() => { reading = false; });
+  }, AGENT_LINEAGE_POLL_MS);
+  timer.unref?.();
+  child.once("close", () => {
+    clearInterval(timer);
+    // The CLI ended by itself: what its agent left running goes with it (the same end as Stop and app quit).
+    endAgentStartedProcesses([...seen].map(([pid, command]) => ({ pid, command })), 1_000);
+    agentStartedLineage.delete(child);
+    // And what it started and no poll saw: for a one-shot CLI the turn is its whole life; a resident one ending mid-turn counts from its last idle moment.
+    void sweepOrphansLeftByTurn(child, idleResidentProbes.has(child) ? lastIdleAt : spawnedIn.get(child)?.at ?? Date.now());
+  });
+  child.once("error", () => clearInterval(timer));
+}
+
+/** The processes to end with this CLI: those the lineage kept plus a fresh read while the leader is still alive. */
+function snapshotAgentStartedProcesses(child: ChildProcess): Array<{ pid: number; command: string }> {
+  if (process.platform === "win32" || !child.pid) return [];
+  const merged = new Map<number, string>(agentStartedLineage.get(child) ?? []);
+  if (child.exitCode === null && child.signalCode === null) {
+    const table = readProcessTableSync();
+    if (table) for (const row of agentStartedDescendants(table, child.pid)) merged.set(row.pid, row.command);
+  }
+  return [...merged].map(([pid, command]) => ({ pid, command }));
+}
+
+/** Ends what snapshotAgentStartedProcesses listed: TERM at once, KILL after the grace for any that still has the same command line. Never touches a recycled PID. */
+function endAgentStartedProcesses(listed: ReadonlyArray<{ pid: number; command: string }>, graceMs: number): void {
+  if (listed.length === 0) return;
+  // Stop, a closing CLI and the turn-end sweep end what the agent left running, but not a server it is serving from (it listens on a port): that goes with the app.
+  // A server still in the CLI's own process group goes with the group (killpg below); one started detached (`nohup`, `setsid`, `&` from a finished shell) stays.
+  if (!hostQuitting) {
+    const servers = listeningProcessesSync(listed.map((item) => item.pid));
+    if (servers.size > 0) {
+      for (const item of listed) if (servers.has(item.pid)) rememberKeptServer(item.pid, item.command);
+      listed = listed.filter((item) => !servers.has(item.pid));
+      if (listed.length === 0) return;
+    }
+  }
+  for (const item of listed) {
+    if (commandOfProcessSync(item.pid) !== item.command) continue;
+    try { process.kill(item.pid, "SIGTERM"); } catch { /* already gone */ }
+  }
+  scheduleCliTreeEscalation(() => {
+    for (const item of listed) {
+      if (commandOfProcessSync(item.pid) !== item.command) continue;
+      try { process.kill(item.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }, graceMs);
+}
+
 export function killCliTree(child: ChildProcess, graceMs = 4000): void {
   markChildHostKilled(child);   // this app ends it: the ending is never "the system killed it" (runtime/child-death.ts)
   if (process.platform === "win32" && child.pid) {
     forceKillWindowsTree(child);
     return;
   }
+  const agentStarted = snapshotAgentStartedProcesses(child);
   if (process.platform !== "win32" && child.pid) {
     try {
       const processGroupId = child.pid;
       process.kill(-processGroupId, "SIGTERM");
+      endAgentStartedProcesses(agentStarted, graceMs);
       const cancelEscalation = scheduleCliTreeEscalation(() => {
         try {
           process.kill(-processGroupId, "SIGKILL");
@@ -901,6 +1039,7 @@ export function killCliTree(child: ChildProcess, graceMs = 4000): void {
       // fall through to direct child kill
     }
   }
+  endAgentStartedProcesses(agentStarted, graceMs);
   try {
     if (!child.kill()) return;
     scheduleCliTreeEscalation(() => {
@@ -947,6 +1086,7 @@ export async function drainRunChildrenForHostShutdown(
   additionalChildren: readonly ChildProcess[] = [],
   timeoutMs = 6_000,
 ): Promise<{ timedOut: boolean; remaining: number; pendingEscalations: number }> {
+  endKeptServers();
   const children = [...new Set([...liveRunChildren, ...additionalChildren])].map((child) => {
     let groupId: number | null = null;
     if (process.platform !== "win32" && child.pid) {
@@ -1029,6 +1169,7 @@ export function trackRunChild(child: ChildProcess): void {
   child.once("close", () => liveRunChildren.delete(child));
   child.once("error", () => liveRunChildren.delete(child));
   recordSpawnedRunChild(child);
+  startAgentLineage(child);
   // Desktop R part 2: the child's ending (code, signal, whether this app sent it, the kernel's memory-kill count) is kept for the runner that reads it (runtime/child-death.ts).
   observeChildDeath(child);
   if (child.pid != null) {
@@ -1049,6 +1190,7 @@ export function trackRunChild(child: ChildProcess): void {
      * 데몬은 SIGTERM/SIGINT 에서 같은 함수를 부른다(electron/host-lifecycle.ts).
      */
     onHostShutdown(() => {
+      endKeptServers();
       for (const c of liveRunChildren) killCliTree(c, 500);
       liveRunChildren.clear();
     });

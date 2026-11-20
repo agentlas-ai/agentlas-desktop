@@ -19,3 +19,26 @@ export function automaticGoalClosesWhenIdle(input: {
 }): boolean {
   return input.idleYield && input.lifecycle === "finite" && isAutoMessageGoalId(input.goalId);
 }
+
+/**
+ * (a default that may be reverted): a Goal the host opened by itself from a plain
+ * sentence whose FIRST turn ended on a question to the person with nothing done (no tool step, no artifact, no pending effect: the sealed effect boundary
+ * says so) is closed quietly, so no Goal strip with delete buttons appears for a request the person never framed as a goal. The conversation goes on as
+ * a conversation; if it later does real multi-step work the existing intake opens a Goal again. Typed facts only: the auto-message id, the finite
+ * lifecycle, the host's own pending-question flag and the effect boundary. No wording is read.
+ */
+export function automaticGoalClosesOnFirstQuestion(input: {
+  goalId: string | null | undefined;
+  lifecycle: string | null | undefined;
+  pendingQuestion: boolean;
+  boundary: { effects: string; artifactRefs: readonly string[]; sourceRefs?: readonly string[]; pendingEffectRefs: readonly string[] } | null | undefined;
+}): boolean {
+  const b = input.boundary;
+  return input.pendingQuestion
+    && input.lifecycle === "finite"
+    && isAutoMessageGoalId(input.goalId)
+    && Boolean(b)
+    && b!.effects === "settled"
+    && b!.artifactRefs.length === 0
+    && b!.pendingEffectRefs.length === 0;
+}

@@ -716,6 +716,15 @@ export function listPendingConfirmations(): PendingConfirmation[] {
 }
 
 /**
+ * the open questions of the conversations a surface may see. Each one is a conversation's own last message, so it is stamped from its
+ * conversation (scope-gate.scopeOfChat) and judged by the same door as every other object; a conversation pane gets its own and no other.
+ */
+export function listPendingConfirmationsFor(viewer: import("../../shared/scope-stamp").ScopeViewer): PendingConfirmation[] {
+  const gate = require("../scope/scope-gate") as typeof import("../scope/scope-gate"); // eslint-disable-line @typescript-eslint/no-require-imports
+  return listPendingConfirmations().filter((item) => gate.admitView(gate.scopeOfChat(item.chatId), viewer).ok);
+}
+
+/**
  * Atomically claims the exact latest question before Mobile starts/steers an
  * answer. The returned rollback is used only when the synchronous invocation
  * admission itself fails. Accepted answers remain claimed so two phones cannot

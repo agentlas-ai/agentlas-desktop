@@ -1,22 +1,6 @@
-/*
- * The one quiet line a conversation keeps where an approval card was (Agentlas 2.0 AL; pictures desktop-impl-gaps-9 AL-1..AL-4).
- * Pure: the words, the order, the grouping and the slot of each line come from the stored record and closed values only. No model, no
- * timer, no stored value of its own.
- *
- * Where each value comes from (the durable ledger row `one_supervisor_tool_approvals`, read by `listSettledToolApprovals`):
- *   result      <- status + decision (resolved + deny = declined, resolved + allow_* = approved, expired = expired)
- *   kind        <- the request's `capability` when it is money | delete | send (the approval rule's three cards); any other value draws no kind word
- *   target      <- the redacted `detail` of the request (the tool's display name when there is none)
- *   time        <- `decided_at`
- *   asked by    <- the request's `agentId`, named by the caller (nothing when the caller cannot name it)
- *   choice      <- the decision (Yes / Yes, don't ask again during this task / Yes, always allow / No: the card's own words)
- *   device      <- `device` (desktop | phone), written on the ledger row by the path the answer came in through (BB-1a). Absent = not said: the line draws no device (an expired card, an answer
- *                  relayed through the personal agent, a row written before the ledger kept it)
- *   auto        <- `auto` (always_allow | full_access | unattended): a delete / send call that went through with no card, one settled row per call (BB-1a; `unattended` BB-1c). It reads as the "auto-approved" result, its right
- *                  side says the basis ("Always allow" / "Full access" / "Unattended run"), and it has no answer row
- * Still not in any record, so never drawn: the device of an answer that does not say it, and an auto-approval of any kind but delete and send (those are not recorded).
- */
+// One quiet line where an approval card was: words, order, grouping and slot come from the stored record and closed values only (no model, no timer, no stored value of its own).
 import type { SettledToolApproval } from "@shared/types";
+import { toolLabel } from "@/lib/tool-labels";
 
 export type ApprovalLineOutcome = SettledToolApproval["outcome"] | "auto";
 export type ApprovalLineDevice = "desktop" | "phone";
@@ -68,11 +52,10 @@ export interface ApprovalLineContext {
   agentName?: (agentId: string) => string | undefined;
 }
 
-/** The words of a question of a hand-off Work (WORK-1117.md E): no clock, so a closed one is "request cancelled", never "expired". */
 const REMOTE_RESULT_WORDS: Record<ApprovalLineOutcome, [string, string]> = {
   approved: ["허용됨", "Allowed"],
   declined: ["거절됨", "Denied"],
-  expired: ["확인 요청 취소", "Request cancelled"],
+  expired: ["취소됨", "Cancelled"],
   auto: ["자동 승인", "Auto-approved"],
 };
 const REMOTE_KIND_WORDS: Record<string, [string, string]> = { send: ["전송", "Send"] };
@@ -82,6 +65,10 @@ const RESULT_WORDS: Record<ApprovalLineOutcome, [string, string]> = {
   expired: ["만료됨", "Expired"],
   auto: ["자동 승인", "Auto-approved"],
 };
+const CLOSE_REASON_WORDS: Record<"cancelled" | "restarted", [string, string]> = {
+  cancelled: ["멈춰서 닫힘", "Closed: stopped"],
+  restarted: ["재시작으로 닫힘", "Closed: restart"],
+};
 const KIND_WORDS: Record<string, [string, string]> = {
   delete: ["삭제", "Delete"],
   send: ["외부 전송", "Send outside"],
@@ -89,18 +76,17 @@ const KIND_WORDS: Record<string, [string, string]> = {
 };
 const CHOICE_WORDS: Record<string, [string, string]> = {
   allow_once: ["예", "Yes"],
-  allow_session: ["예, 이 작업 동안 다시 묻지 않기", "Yes, and don't ask again during this task"],
-  allow_always: ["예, 항상 허용", "Yes, always allow"],
+  allow_session: ["예 · 이번 작업 내내", "Yes · for this task"],
+  allow_always: ["예 · 항상", "Yes · always"],
   deny: ["아니오", "No"],
 };
 const DEVICE_WORDS: Record<ApprovalLineDevice | "always" | "full" | "unattended", [string, string]> = {
-  desktop: ["이 데스크탑", "This desktop"],
+  desktop: ["데스크탑", "Desktop"],
   phone: ["폰", "Phone"],
   always: ["항상 허용", "Always allow"],
   full: ["전체 액세스", "Full access"],
-  unattended: ["무인 실행", "Unattended run"],
+  unattended: ["무인", "Unattended"],
 };
-/** The right-side word of an automatic approval, by its basis. */
 const BASIS_KEY: Record<ApprovalBasis, "always" | "full" | "unattended"> = { always_allow: "always", full_access: "full", unattended: "unattended" };
 const DETAIL_LABELS: Record<"by" | "target" | "answer", [string, string]> = {
   by: ["요청", "Asked by"],
@@ -115,19 +101,30 @@ export function approvalKindWord(capability: string | undefined, lang: Lang): st
   return pair ? pick(pair, lang) : null;
 }
 
-/** The tool as a person reads it (an MCP call arrives as mcp__<server>__<tool>). Same rule as ToolApprovalInline.toolDisplayName. */
-export function approvalToolName(tool: string): string {
-  const mcp = /^mcp__(.+?)__(.+)$/.exec(tool.trim());
-  const name = (mcp ? mcp[2]! : tool).replace(/_+/g, " ").replace(/\s+/g, " ").trim();
-  return name || tool.trim();
+/** The tool as a person reads it: the one table (lib/tool-labels.ts) — an MCP call's own name, else a named row, else "permission request"; never the raw id. */
+export function approvalToolName(tool: string, lang: Lang = "ko"): string {
+  return toolLabel(tool, lang);
 }
 
-/** What the card was about, on one line: the first non-empty line of the redacted target, else the tool's name. */
-export function approvalTarget(record: Pick<SettledToolApproval, "detail" | "tool">): { short: string; full: string } {
-  const full = (record.detail ?? "").trim();
+/** The area of an app operation as a person names it. An area not listed is "the app" (never the operation's own id). */
+const APP_AREA_WORDS: Record<string, [string, string]> = {
+  automations: ["예약", "schedule"], chats: ["대화", "conversation"], projects: ["프로젝트", "project"], agent: ["에이전트", "agent"], agents: ["에이전트", "agent"],
+  team: ["팀", "team"], oneMemory: ["기억", "memory"], memory: ["기억", "memory"], mail: ["메일", "mail"], files: ["파일", "file"],
+};
+/** An app operation's id ("automations.remove") is the app's wiring, not words for a person: it reads as the thing it acts on. */
+const OPERATION_ID = /^[a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)+$/;
+export function approvalTarget(record: Pick<SettledToolApproval, "detail" | "tool">, lang: Lang = "ko"): { short: string; full: string } {
+  const rawDetail = (record.detail ?? "").trim();
+  const detail = rawDetail === record.tool.trim() && toolLabel(rawDetail, lang) !== rawDetail && !OPERATION_ID.test(rawDetail) ? "" : rawDetail;
+  if (OPERATION_ID.test(detail) && (record.tool.startsWith("app_call.") || record.tool === detail || !detail.includes(" "))) {
+    const area = APP_AREA_WORDS[detail.split(".")[0]!];
+    const word = area ? pick(area, lang) : lang === "ko" ? "앱 설정" : "App setting";
+    return { short: word, full: "" };
+  }
+  const full = detail;
   const first = full.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
   if (first) return { short: first.length > 160 ? `${first.slice(0, 160)}…` : first, full };
-  const tool = approvalToolName(record.tool);
+  const tool = approvalToolName(record.tool, lang);
   return { short: tool, full: "" };
 }
 
@@ -146,7 +143,7 @@ export function approvalTimeWord(iso: string, ctx: Pick<ApprovalLineContext, "la
 }
 
 export function approvalLineOf(record: ApprovalLineRecord, ctx: ApprovalLineContext): ApprovalLine {
-  const target = approvalTarget(record);
+  const target = approvalTarget(record, ctx.lang);
   const outcome = outcomeOf(record);
   const device: ApprovalLine["device"] = outcome === "auto" ? "always" : outcome === "expired" ? null : record.device ?? null;
   const details: ApprovalLineDetail[] = [];
@@ -158,7 +155,7 @@ export function approvalLineOf(record: ApprovalLineRecord, ctx: ApprovalLineCont
   return {
     id: record.id,
     icon: outcome,
-    result: pick((record.remote ? REMOTE_RESULT_WORDS : RESULT_WORDS)[outcome], ctx.lang),
+    result: pick(!record.remote && outcome === "expired" && (record.closeReason === "cancelled" || record.closeReason === "restarted") ? CLOSE_REASON_WORDS[record.closeReason] : (record.remote ? REMOTE_RESULT_WORDS : RESULT_WORDS)[outcome], ctx.lang),
     kind: record.remote && record.capability && REMOTE_KIND_WORDS[record.capability] ? pick(REMOTE_KIND_WORDS[record.capability]!, ctx.lang) : approvalKindWord(record.capability, ctx.lang),
     target: target.short,
     side: outcome === "auto" ? pick(DEVICE_WORDS[BASIS_KEY[basisOf(record)]], ctx.lang) : device ? pick(DEVICE_WORDS[device], ctx.lang) : null,
@@ -190,7 +187,7 @@ export function planApprovalLines(records: readonly ApprovalLineRecord[], ctx: A
       const count = run.length;
       items.push({ type: "group", group: {
         id: `group:${run[0]!.id}`,
-        title: ctx.lang === "ko" ? `자동 승인 ${count}건` : `${count} auto-approved`,
+        title: ctx.lang === "ko" ? `자동 승인 ${count}` : `${count} auto-approved`,
         kind, side: pick(DEVICE_WORDS[BASIS_KEY[basisOf(run[0]!)]], ctx.lang), time: timeRange(run, ctx), lines,
       } });
     }
@@ -209,7 +206,7 @@ export function planApprovalLines(records: readonly ApprovalLineRecord[], ctx: A
 
 /** "N more": the rows a group keeps behind its button after the first three. */
 export const APPROVAL_GROUP_PREVIEW = 3;
-export function approvalMoreWord(count: number, lang: Lang): string { return lang === "ko" ? `${count}건 더 보기` : `${count} more`; }
+export function approvalMoreWord(count: number, lang: Lang): string { return lang === "ko" ? `+${count}` : `+${count}`; }
 
 /**
  * Where each record sits among the conversation's messages: after the last message made at or before the card was asked (the card

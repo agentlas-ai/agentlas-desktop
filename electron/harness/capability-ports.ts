@@ -1285,13 +1285,25 @@ const PORTS: PortDefinition[] = [
           return nested.status === "ok" ? ok(nested.data)
             : { status: nested.status, reason: nested.reason ?? nested.status, ...(nested.next ? { next: nested.next } : {}), ...(nested.data !== undefined ? { data: nested.data } : {}) };
         }
+        // An automation a model saves from a conversation inside a project belongs to that project (harness/automation-chat-project.ts).
+        read.resolved.push(...(await import("./automation-chat-project")).defaultAutomationFromChat(read.operation, read.args, ctx.chatId));
         // Who may reach what (harness/tool-isolation.ts, one table) and the card for a delete or a send (harness/app-call-approval.ts,).
         if (typeof read.operation === "string") {
           const isolation = await import("./tool-isolation");
           const denied = await isolation.gateAppOperation({ chatId: ctx.chatId, runId: ctx.runId }, read.operation, read.args && typeof read.args === "object" && !Array.isArray(read.args) ? read.args as Record<string, unknown> : {});
           if (denied) return refused(denied.reason!, isolation.ISOLATION_REFUSAL_NEXT[denied.reason!]);
           if (ctx.chatId !== "ui") {
-            const approval = await (await import("./app-call-approval")).approveAppOperation({ operation: read.operation, chatId: ctx.chatId, permission: ctx.permission ?? "read", unattended: ctx.unattended === true, ...(ctx.signal ? { signal: ctx.signal } : {}) });
+            // The card waits for the owner for as long as the owner takes; the caller (the turn gateway) gives up at 30 s with "Turn tool request timed out.", which left the
+            // model with an unclassified failure, no receipt and a card that then closed "expired" (automations.remove x2). So the wait answers inside the call window:
+            // still waiting = the pending notice (the same call asked again joins this card, it never opens a second one); answered = the card's own verdict, as before.
+            const pendingModule = await import("../app-control/pending-calls");
+            const approvalArgs = read.args && typeof read.args === "object" ? read.args : {};
+            const approvalWait = Symbol("approval-pending");
+            const approval = await pendingModule.answerAppCallWithin<Awaited<ReturnType<typeof import("./app-call-approval").approveAppOperation>> | typeof approvalWait>(
+              pendingModule.appCallKey({ via: "harness-approval", chatId: ctx.chatId, operation: read.operation, args: approvalArgs, permission: ctx.permission ?? "read" }),
+              async () => (await import("./app-call-approval")).approveAppOperation({ operation: read.operation as string, chatId: ctx.chatId, permission: ctx.permission ?? "read", unattended: ctx.unattended === true, ...(ctx.signal ? { signal: ctx.signal } : {}) }),
+              pendingModule.APP_CALL_ANSWER_WINDOW_MS, () => approvalWait);
+            if (approval === approvalWait) return ok(pendingModule.appCallPendingNotice(read.operation));
             if (!approval.ok) return refused(approval.reason, approval.text);
           }
         }
@@ -1708,7 +1720,10 @@ async function callHarnessPortUnworded(operationId: string, rawArgs: Record<stri
     if (denied) return { ...base, status: "refused", reason: denied.reason!, next: isolation.ISOLATION_REFUSAL_NEXT[denied.reason!], receiptId: `hr_${randomUUID()}` };
     // A port that deletes an agent with its memory store and folder asks the same delete card an app operation of that kind asks (; harness/app-call-approval.ts).
     if (PORTS_ASKING_A_CARD.has(operationId) && ctx.chatId !== "ui" && !ctx.dryRun) {
-      const approval = await (await import("./app-call-approval")).approveAppOperation({ operation: operationId, chatId: ctx.chatId, permission: ctx.permission ?? "read", unattended: ctx.unattended === true, ...(ctx.signal ? { signal: ctx.signal } : {}) });
+      const approvalModule = await import("./app-call-approval");
+      const approval = await approvalModule.approvalWithinCallWindow({ chatId: ctx.chatId, operation: operationId, args, permission: ctx.permission ?? "read" },
+        () => approvalModule.approveAppOperation({ operation: operationId, chatId: ctx.chatId, permission: ctx.permission ?? "read", unattended: ctx.unattended === true, ...(ctx.signal ? { signal: ctx.signal } : {}) }));
+      if (!approval.ok && approval.reason === "approval_pending") return { ...base, status: "ok", data: (await import("../app-control/pending-calls")).appCallPendingNotice(operationId), receiptId: `hr_${randomUUID()}` };
       if (!approval.ok) return { ...base, status: "refused", reason: approval.reason, next: approval.text, receiptId: `hr_${randomUUID()}` };
     }
   }
@@ -1730,6 +1745,9 @@ async function callHarnessPortUnworded(operationId: string, rawArgs: Record<stri
   // A file this call wrote waits for the run's invocation, which seals it into One Outputs at its next tool completion
   // (A/B 2026-10-18: document.save and media.image.generate paths never reached the rail). The result keeps its shape.
   if (outcome.status === "ok" && outcome.produced?.length && !ctx.dryRun) recordRunProducedFiles(ctx.runId, operationId, outcome.produced);
+  // a request the person is told about leaves ONE receipt in its conversation, from the handler's own
+  // result and never from the model's words; the same door for every runtime (CLI, API, local) and for Main and the daemon (harness/turn-receipts.ts).
+  if (!ctx.dryRun && port.kind !== "query") await (await import("./turn-receipts")).recordPortReceipts({ operationId, args, outcome, chatId: ctx.chatId, runId: ctx.runId });
   return outcome.status === "ok"
     ? { ...base, status: "ok", ...(outcome.financeReceipt ? { financeReceipt: outcome.financeReceipt } : {}), ...(outcome.nativeUi ? { nativeUi: outcome.nativeUi } : {}), data: outcome.data, receiptId }
     : { ...base, status: outcome.status, reason: outcome.reason, ...(outcome.next ? { next: outcome.next } : {}), ...(outcome.data !== undefined ? { data: outcome.data } : {}), receiptId };

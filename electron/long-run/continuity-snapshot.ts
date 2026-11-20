@@ -47,6 +47,24 @@ function selectedModel(row: EventRow | undefined, runId: string): { kind: string
   } catch { return null; }
 }
 
+/**
+ * The runtime a turn moved to after its first one failed (the `runtime-fallback-attempt` notice of a Work turn and the `runtime-fallback` notice of a One turn name it in `details.to`). The
+ * `runtime_selection` row only records the choice made before the turn started, so without this the chip kept saying the turn ran on
+ * the runtime that had just refused it. The newest fallback notice after that choice wins; none means the choice stands.
+ */
+function movedToModel(db: ReturnType<typeof getDb>, runId: string, afterSeq: number): { kind: string; backend: string | null; model: string | null } | null {
+  try {
+    const row = db.prepare(`SELECT payload_json FROM run_events WHERE run_id=? AND kind='mcp_notice' AND seq>?
+      AND (payload_json LIKE '%"noticeCode":"runtime-fallback-attempt"%' OR payload_json LIKE '%"noticeCode":"runtime-fallback"%') ORDER BY seq DESC LIMIT 1`).get(runId, afterSeq) as { payload_json: string } | undefined;
+    if (!row) return null;
+    const payload = JSON.parse(row.payload_json) as { noticeDetails?: unknown };
+    const details = typeof payload.noticeDetails === "string" ? JSON.parse(payload.noticeDetails) as { to?: { kind?: unknown; backend?: unknown; model?: unknown } } : null;
+    const to = details?.to;
+    if (!to || typeof to.kind !== "string" || !to.kind.trim()) return null;
+    return { kind: to.kind, backend: typeof to.backend === "string" ? to.backend : null, model: typeof to.model === "string" ? to.model : null };
+  } catch { return null; }
+}
+
 function phase(kind: string, terminal: boolean): NonNullable<ChatContinuitySnapshot["invocation"]>["phase"] {
   if (terminal) return "terminal";
   if (kind === "invoke_started") return "started";
@@ -109,7 +127,8 @@ export function getChatContinuitySnapshot(chatId: string, hostActiveRunId: strin
       invocation = { runId: start.run_id, state: isTerminal ? "terminal" : hostActiveRunId === start.run_id ? "active" : "unconfirmed",
         relationship: exactGoalAttempt ? "goal-bound" : "unverified",
         phase: phase(last.kind, isTerminal), startedAt: start.ts, phaseAt: last.ts,
-        lastEventSeq: last.seq, model: selectedModel(modelEvent, start.run_id) };
+        lastEventSeq: last.seq,
+        model: (modelEvent && movedToModel(db, start.run_id, modelEvent.seq)) ?? selectedModel(modelEvent, start.run_id) };
       lastDurableAt = last.ts;
     }
 

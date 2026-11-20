@@ -1,5 +1,5 @@
 /*
- * The computer's half of the mirror (Agentlas 2.0 TG; contracts/one-home-mirror.md, §0.4 R3-R6, §5.3).
+ * The computer's half of the mirror.
  * The home computer (and only the home) puts what changed in the personal agent's memory lines, conversation words and profile on the server, and takes what the server
  * wrote or deleted while it was away. This file is the ORDER and the RULES; the stores and the signed transport are ports (home-mirror-real.ts, home.ts), so a gate can drive it
  * with a fake server and a scratch store.

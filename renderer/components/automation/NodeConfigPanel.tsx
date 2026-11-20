@@ -213,7 +213,11 @@ export function NodeConfigPanel({
         <Field label={t("auto.sched.title")}>
           <ScheduleBuilder
             value={triggerSpec}
-            onChange={({ spec, legacyToken }) => onPatch({ scheduleSpec: spec, schedule: legacyToken })}
+            // 저장할 수 없는 상태(비운 칸·틀린 cron·지난 시각)의 어림값은 노드에 싣지 않는다 — 이전 일정이 그대로 남는다.
+            onChange={({ spec, legacyToken, problem }) => {
+              if (problem) return;
+              onPatch({ scheduleSpec: spec, schedule: legacyToken });
+            }}
           />
         </Field>
       )}

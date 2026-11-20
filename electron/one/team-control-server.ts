@@ -153,13 +153,19 @@ async function dispatchOneSupervisorToolUnrecorded(binding: Pick<OneTeamCapabili
         (require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input));
     const observation = terminalAppCall || name === "one_supervisor_status" || name === "one_app_operations" || name === "one_approvals_list"
       || (name === "one_supervisor_checkin" && (input.action === "list" || input.action === "cancel"))
-      || (name === "one_supervisor_control" && input.action === "cancel");
+      || (name === "one_supervisor_control" && input.action === "cancel")
+      // Reading where the hand-offs stand changes nothing; a cancel takes one back (and is an action the owner's turn allows, like the card's own button).
+      || (name === "hand_off" && input.action === "list");
     if (!observation) {
       if(!binding.supervisorReplyRunId)throw supervisorError('supervisor_handoff_origin_invalid');
       await service.assertAutomaticWriteAllowed(binding.supervisorReplyRunId);
     }
     if (name === "one_app_call") await checkedScienceAppOperation(input.operation,binding.supervisorReplyRunId,service,
       (require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input));
+    // An automation saved from this conversation takes its agent, its project and its report destination from the call's own conversation, whichever
+    // process hosts One (harness/automation-chat-project.ts; the harness app.call path does the same).
+    if (name === "one_app_call") (await import("../harness/automation-chat-project")).defaultAutomationFromChat(input.operation,
+      (require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input), binding.chatId);
     // Who may reach what, the owner's turn for a destructive or consent action, and the card for a delete or a send (D1 and D2).
     if (name === "one_app_call") await (await import("../harness/one-app-call-guard")).guardOneAppCall(binding as Parameters<typeof import("../harness/one-app-call-guard").guardOneAppCall>[0],
       input.operation, (require("../app-control/call-aliases") as typeof import("../app-control/call-aliases")).appCallInputOf(input));
@@ -175,7 +181,9 @@ async function dispatchOneSupervisorToolUnrecorded(binding: Pick<OneTeamCapabili
         // A Work task's own delegated sessions (status, child chat and run, result excerpt), so One reads them instead of relaying what
         // the Work AI said about them. Read-only and bounded; only for the task One asked about.
         const { workSessionChildrenOf } = require("../work/session-dispatch") as typeof import("../work/session-dispatch");
-        return { one_id: snapshot.oneId, executor: snapshot.executor, observed_at: snapshot.observedAt, science_error: snapshot.scienceError,
+        // The hand-offs to the person's other agents with their real state (asked to cancel one, the model read only this status and said it could not).
+        const handoffs = (await import("./plural-handoff-cards")).listHandOffStates(binding.chatId, (await import("./plural-handoff-send")).pluralSender().cards(), 8);
+        return { one_id: snapshot.oneId, executor: snapshot.executor, observed_at: snapshot.observedAt, science_error: snapshot.scienceError, handoffs,
           science_projects:snapshot.scienceProjects,
           tasks: snapshot.tasks.filter(task => !input.task_id || task.taskId === input.task_id).map(task=>input.task_id
             ? { ...task, ...(task.surface === "work" && task.chatId ? { delegated_work: workSessionChildrenOf(task.chatId) } : {}) }
@@ -186,10 +194,18 @@ async function dispatchOneSupervisorToolUnrecorded(binding: Pick<OneTeamCapabili
         ...(input.project_id ? {projectId:String(input.project_id)} : {}),...(input.done_when!==undefined ? {doneWhen:input.done_when as string[]} : {}),permissions:"full"},binding.supervisorReplyRunId);
       // the hand-off to another of the person's agents. The key is this reply's own run id, so a turn that runs again finds its own row (`existing`); a conversation that is itself a received Work has no lineage-free origin and is refused.
       case "hand_off": {
+        // the model reads the real typed state of its hand-offs (one record: the sender's live rows over the cards of this conversation) and may take an open one back; it never answers from an earlier result.
+        if (input.action === "list" || input.action === "cancel") return (await import("./plural-handoff-cards")).handOffToolAction({ action: input.action, ...(input.id !== undefined ? { id: String(input.id) } : {}) }, binding.chatId);
         const sender = await import("./plural-handoff-send");
+        // The consent chip is the server's rule, not this process's: a hand-off is never sent before the person answers. `away` = the person is not in this turn (a scheduled or confirmed task), so the phone is told once that a chip is waiting.
+        let away = false;
+        try { away = !service.ownerTurn(binding.supervisorReplyRunId); } catch { away = true; }
         const outcome = await sender.pluralSender().handOff({key:String(binding.supervisorReplyRunId ?? ""),brief:String(input.brief ?? ""),
+          ...(away ? {away:true} : {}),
           ...(input.to!==undefined ? {to:String(input.to)} : {}),...(input.done_when!==undefined ? {doneWhen:String(input.done_when)} : {}),
-          ...(input.replaces!==undefined ? {replaces:String(input.replaces)} : {}),origin:sender.pluralOriginOfChat(binding.chatId)});
+          ...(input.replaces!==undefined ? {replaces:String(input.replaces)} : {}),origin:sender.pluralOriginOfChat(binding.chatId),
+          // the conversation and project the work was handed over from (the stamp the gate computes); the receiving desktop may read it, the server decides nothing by it.
+          originScope:(() => { try { const stamp = (require("../scope/scope-gate") as typeof import("../scope/scope-gate")).scopeOfChat(binding.chatId); return stamp ? { chatRef: stamp.chat, projectRef: stamp.project } : undefined; } catch { return undefined; } })()});
         // The card of a NEW row is written here, in this reply's own conversation, with the person's words of the work: the server's open / done rows carry no brief and the process that hears them may not be this one
         // (prod test: the ended card went to another conversation and had no words, so it was never drawn). `existing` = the row's card is already there and may be further along.
         if (outcome.ok && outcome.id && outcome.state !== "existing") {
@@ -197,7 +213,7 @@ async function dispatchOneSupervisorToolUnrecorded(binding: Pick<OneTeamCapabili
             const cards = await import("./plural-handoff-cards");
             const to = typeof input.to === "string" && /^(phone|host_[a-f0-9]{32})$/.test(input.to.trim()) ? input.to.trim() : "";
             cards.recordSentCard({ id: outcome.id, to, toName: outcome.place ?? "", brief: String(input.brief ?? "").trim().slice(0, 600),
-              state: outcome.state === "waiting" ? (outcome.need === "phone_app" ? "waiting_phone_app" : "waiting_desktop_off") : "reserved", approvals: [] }, { chatId: binding.chatId });
+              state: outcome.state === "asking" ? "asking" : outcome.state === "waiting" ? (outcome.need === "phone_app" ? "waiting_phone_app" : "waiting_desktop_off") : "reserved", approvals: [] }, { chatId: binding.chatId });
           } catch { /* a card never changes the hand-off */ }
         }
         return outcome;
@@ -413,8 +429,19 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
     if (!binding.chatId || !senderRunId || !binding.tools?.includes("message_send")) throw new Error("one-team-message-scope");
     const text = typeof request.text === "string" ? request.text : "";
     const to = typeof request.to === "string" ? request.to : "";
-    return (await import("../harness/deliver-runtime")).sendPeerMessageTo({ fromChatId: binding.chatId, fromRunId: senderRunId, to, text,
-      ...(typeof request.replyTo === "string" && request.replyTo ? { replyTo: request.replyTo } : {}), attended: binding.unattended !== true, permission: binding.permission });
+    // `await_reply: true` registers a peer-reply wait (harness/peer-reply-wait.ts); every delivered message also ends the waits its sender had on the receiver.
+    const deliverRuntime = await import("../harness/deliver-runtime");
+    const waits = await import("../harness/peer-reply-wait");
+    const window = await import("../harness/peer-send-window");
+    const chatId = binding.chatId;
+    // The call answers inside a window: a card the owner has not answered is a typed "waiting", never a generic timeout. The card belongs to the send, not to this run: it stays until answered.
+    return window.answerPeerSendWithin({ capabilityId: binding.capabilityId, chatId, runId: senderRunId, to, text, awaitReply: request.await_reply === true,
+      ...(typeof request.replyTo === "string" && request.replyTo ? { replyTo: request.replyTo } : {}) }, {
+      run: ({ signal, progress, receiptKey }) => waits.sendPeerMessageWithWait({ fromChatId: chatId, fromRunId: senderRunId, to, text, awaitReply: request.await_reply === true,
+        ...(typeof request.replyTo === "string" && request.replyTo ? { replyTo: request.replyTo } : {}), attended: binding.unattended !== true, permission: binding.permission, signal, progress, receiptKey },
+      { ports: waits.productionPeerReplyWaitPorts(), sendPeerMessageTo: deliverRuntime.sendPeerMessageTo, sendPeerMessage: deliverRuntime.sendPeerMessage, intentId: deliverRuntime.peerIntentId }),
+      receipt: (value) => { (require("../harness/turn-receipts") as typeof import("../harness/turn-receipts")).recordMessageReceipt(value); },
+    });
   }
   if (binding.scope === "work-session") {
     if (request.operation === "work") {
@@ -710,6 +737,8 @@ function personalSupervisorConversation(chatId: string | null | undefined): bool
 
 export function removeOneTeamCapability(configKey: string, capabilityId: string): void {
   const binding = capabilities.get(capabilityId);
+  // The turn is over. A card one of its sends still has open stays (the card belongs to the send, harness/peer-send-window.ts); closePeerSendsOf is a no-op kept for this call.
+  try { (require("../harness/peer-send-window") as typeof import("../harness/peer-send-window")).closePeerSendsOf(capabilityId); } catch { /* the card's own expiry still closes it */ }
   try { if (binding) forgetOneToolchainNativeCapability(binding); }
   finally {
     capabilities.delete(capabilityId);

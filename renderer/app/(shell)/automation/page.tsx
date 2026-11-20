@@ -2,7 +2,7 @@
 "use client";
 
 import { confirmPopup } from "@/lib/popup";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
@@ -14,7 +14,9 @@ import { GraphControl } from "@/components/automation/GraphControl";
 import styles from "@/components/automation/GraphWorkspace.module.css";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
 import { OneAutomationTable } from "@/components/automation/OneAutomationTable";
+import { KeptRequestsList } from "@/components/automation/KeptRequestsList";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+import { isEndedOneShot } from "@/lib/automation-schedule-state";
 
 function runtimeSelectionLabel(selection: RuntimeSelection | null | undefined, locale: string): string {
   if (!selection) return locale === "en" ? "follows active runtime" : "활성 런타임 따라가기";
@@ -56,7 +58,10 @@ export default function AutomationListPage() {
   /* 캔버스에서 만든 그래프와 One 이 대화에서 만든 job 은 사는 곳도 고치는 길도 다르다.
      가르는 기준은 monitor.originChatId — 이 값이 있어야 "어느 대화" 열을 채울 수 있으므로
      탭 구분자와 표의 열이 같은 사실 위에 선다. */
-  const [tab, setTab] = useState<"graph" | "one">("graph");
+  const [tab, setTabState] = useState<"graph" | "one">("graph");
+  // A person who picked a tab keeps it; until then the first load opens the one that has something in it.
+  const tabChosen = useRef(false);
+  const setTab = (next: "graph" | "one") => { tabChosen.current = true; setTabState(next); };
   const oneItems = items.filter((a) => a.monitor?.originChatId);
   const graphItems = items.filter((a) => !a.monitor?.originChatId);
 
@@ -76,6 +81,8 @@ export default function AutomationListPage() {
         api.firms.list(),
       ]);
       setItems(list);
+      // What the chat said it made lives under "One automations"; opening on an empty "Graphs" tab hid it.
+      if (!tabChosen.current && list.length > 0 && list.every((a) => Boolean(a.monitor?.originChatId))) setTabState("one");
       // 라벨 해석은 전체 목록으로 — 오케스트레이터 등 시스템 에이전트를 타깃으로 한 자동화가
       // "(삭제된 에이전트)"로 잘못 표시되던 버그(visibleAgents는 픽커용 필터).
       setAgents(ag);
@@ -241,14 +248,14 @@ export default function AutomationListPage() {
           }}
         >
           <IconPlus size={14} />
-          <span aria-label={t("auto.new")} title={t("auto.new")}/>
+          <span>{t("auto.new")}</span>
         </Link>
       </header>
 
       <section className={styles.list} data-tour-id="automation.list">
         <div className={styles.listTools}>
-          <GraphControl label={locale === "en" ? "Graphs" : "그래프"} icon={<IconLayers size={17}/>} aria-pressed={tab === "graph"} onClick={()=>setTab("graph")}/>
-          <GraphControl label={locale === "en" ? "One automations" : "One 자동화"} icon={<IconChat size={17}/>} aria-pressed={tab === "one"} onClick={()=>setTab("one")}/>
+          <GraphControl label={`${locale === "en" ? "Graphs" : "그래프"} ${graphItems.length}`} icon={<IconLayers size={17}/>} aria-pressed={tab === "graph"} onClick={()=>setTab("graph")}/>
+          <GraphControl label={`${locale === "en" ? "One automations" : "One 자동화"} ${oneItems.length}`} icon={<IconChat size={17}/>} aria-pressed={tab === "one"} onClick={()=>setTab("one")}/>
           <details className={styles.menu}><summary title={locale === "en" ? "Describe a graph" : "말로 만들기"} aria-label={locale === "en" ? "Describe a graph" : "말로 만들기"}><IconPlus size={17}/></summary><div className={styles.menuContent} style={{left:0,right:"auto",width:420,maxWidth:"80vw", background:"var(--popup-card-bg)", boxShadow:"var(--popup-shadow)", borderRadius:"var(--popup-radius)"}}><DescribeAutomation locale={locale} onCreated={()=>void refresh()}/></div></details>
           <details className={styles.menu}><summary title={locale === "en" ? "Install from Hub" : "Hub에서 받기"} aria-label={locale === "en" ? "Install from Hub" : "Hub에서 받기"}><IconDownload size={17}/></summary><div className={styles.menuContent} style={{left:0,right:"auto", background:"var(--popup-card-bg)", boxShadow:"var(--popup-shadow)", borderRadius:"var(--popup-radius)"}}>
             <input value={hubSlug} onChange={e=>setHubSlug(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")void installFromHub();}} placeholder={locale === "en" ? "Graph name" : "그래프 이름"} aria-label={locale === "en" ? "Graph name" : "그래프 이름"}/>
@@ -256,13 +263,14 @@ export default function AutomationListPage() {
           </div></details>
         </div>
         {message ? <div role="status">{message}</div> : null}
-        {loading ? <LoadingEstimate locale={locale} operationKey="automation-list" expectedSeconds={[1,8]} compact/> : tab === "one" ? <OneAutomationTable items={oneItems} locale={locale} onToggle={(id,enabled)=>void toggle(id,enabled)} onRemove={id=>void remove(id)}/> : graphItems.length===0 ? <div>{t("auto.empty")}</div> : <ul style={{listStyle:"none",padding:0,margin:0}}>
+        <KeptRequestsList locale={locale} />
+        {loading ? <LoadingEstimate locale={locale} operationKey="automation-list" expectedSeconds={[1,8]} compact/> : tab === "one" ? <OneAutomationTable items={oneItems} locale={locale} onToggle={(id,enabled)=>void toggle(id,enabled)} onRemove={id=>void remove(id)}/> : graphItems.length===0 ? <div>{t("auto.empty")}{oneItems.length>0 ? <> <button type="button" onClick={()=>setTab("one")}>{locale === "en" ? `Schedules made in chat (${oneItems.length})` : `대화로 만든 예약 ${oneItems.length}개 보기`}</button></> : null}</div> : <ul style={{listStyle:"none",padding:0,margin:0}}>
           {graphItems.map(a=><li className={styles.row} key={a.id}>
             <span className={styles.state} data-active={a.enabled} title={a.enabled ? (locale === "en" ? "Enabled" : "켜짐") : (locale === "en" ? "Paused" : "정지")}/>
             <Link className={styles.rowTitle} href={`/automation/flow?id=${encodeURIComponent(a.id)}`} title={`${humanSchedule(a.scheduleHuman,locale)} · ${targetLabel(a).name} · ${runtimeSelectionLabel(a.runtimeSelection,locale)}`}>{a.name}</Link>
             <span className={styles.miniGraph} aria-hidden="true"><IconBolt size={16}/><i/><IconBuilding size={16}/><i/><IconLayers size={16}/></span>
             {waiting[a.id] ? <GraphControl data-testid={`automation-waiting-${a.id}`} primary label={locale === "en" ? "Needs your call" : "내가 정해야 함"} icon={<IconKey size={16}/>} onClick={()=>router.push(`/automation/flow?id=${encodeURIComponent(a.id)}`)}/> : <GraphControl label={t("auto.list.run")} icon={<IconBolt size={16}/>} onClick={()=>runNow(a.id)}/>}
-            {!a.enabled && a.scheduleSpec?.kind==="once" && a.nextRunAt==null ? <span title={locale === "en" ? "Ended" : "종료됨"}>—</span> : <GraphControl label={a.enabled ? t("auto.action.disable") : t("auto.action.enable")} icon={<IconPower size={16}/>} aria-pressed={a.enabled} onClick={()=>void toggle(a.id,!a.enabled)}/>}
+            {isEndedOneShot(a) ? <span title={t("auto.list.ended.hint")} style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap" }}>{t("auto.list.ended")}</span> : <GraphControl label={a.enabled ? t("auto.action.disable") : t("auto.action.enable")} icon={<IconPower size={16}/>} aria-pressed={a.enabled} onClick={()=>void toggle(a.id,!a.enabled)}/>}
             <GraphControl label={t("auto.list.edit")} icon={<IconEdit size={16}/>} onClick={()=>router.push(`/automation/new?id=${encodeURIComponent(a.id)}`)}/>
             <GraphControl label={t("common.delete")} icon={<IconTrash size={16}/>} onClick={()=>void remove(a.id)}/>
           </li>)}

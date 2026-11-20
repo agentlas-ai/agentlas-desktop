@@ -4,9 +4,11 @@ import { mergeConsecutiveThoughts } from "@shared/turn-activity-rows";
 import { parseShellCommand, stripShellWrapper } from "@shared/exploratory-shell";
 import { toolFailureCopy, type ToolFailureCode } from "@shared/tool-failure";
 import type { ToolInvocationOrigin } from "@shared/tool-invocation-origin";
+import { redactSecrets } from "@shared/secret-patterns";
 import { BUILTIN_ONE_AGENT_ID, BUILTIN_ORCHESTRATOR_AGENT_ID } from "@shared/builtin-agent-ids";
 import type { InvocationPlanEntry } from "@shared/invocation-plan";
 import { toolObservationAction } from "./tool-observation";
+import { mcpToolLeafLabel, screenToolLabelLang } from "./tool-labels";
 import {
   ownerActivityText,
   ownerAgentLabel,
@@ -41,6 +43,8 @@ export interface OneWorkExploreEntry {
   toolName?: string;
   origin?: ToolInvocationOrigin;
   callId?: string;
+  /** Why this one call failed (the tool's own error, first line): a failed Read/List/Search row names its reason instead of a bare "Failed". */
+  failure?: string;
 }
 
 export interface OneWorkEditFile {
@@ -72,7 +76,7 @@ interface CellBase {
 export type OneWorkCell =
   | (CellBase & { kind: "thought"; headline?: string; body?: string; durationMs?: number })
   | (CellBase & { kind: "explore"; entries: OneWorkExploreEntry[] })
-  | (CellBase & { kind: "run"; command: string; output?: string; exitCode?: number | null; summary?: string })
+  | (CellBase & { kind: "run"; command: string; output?: string; exitCode?: number | null; summary?: string; failureCode?: ToolFailureCode })
   | (CellBase & { kind: "edit"; files: OneWorkEditFile[]; diff?: string })
   | (CellBase & { kind: "web_search"; query: string })
   | (CellBase & { kind: "fetch"; url: string; statusCode?: number })
@@ -317,7 +321,9 @@ function classifyTool(item: OneActivityItem, workspacePath: string | null): Clas
       }
       const server = mcpServerName(tool.name);
       const leaf = server ? tool.name.split("__").slice(2).join("__").replace(/[-_]+/g, " ").trim() : "";
-      return { cell: "call", label: server ? (leaf ? `${server} · ${leaf}` : server) : tool.name };
+      // The leaf is named by the one tool-label table when it has a row for it ("one team · message send" in a Korean screen).
+      const named = server ? mcpToolLeafLabel(tool.name, screenToolLabelLang()) : null;
+      return { cell: "call", label: server ? (named ? named : leaf ? `${server} · ${leaf}` : server) : tool.name };
     }
   }
 }
@@ -414,10 +420,21 @@ export function groupOneWorkerWork(cells: readonly OneWorkCell[]): OneWorkerWork
   return [...groups.values()];
 }
 
+/** The first line of a failed call's own error, bounded; empty when the call carried none. */
+export function failedCallReason(item: OneActivityItem): string {
+  if (item.status !== "failed") return "";
+  const raw = [item.tool?.result, item.detail].find((text) => typeof text === "string" && text.trim()) ?? "";
+  const line = raw.split(/\r?\n/).map((part) => part.trim()).find(Boolean) ?? "";
+  const flat = redactSecrets(line.replace(/^(?:error|failed)\s*[:-]\s*/i, "").replace(/\s+/g, " "));
+  return flat.length > 200 ? `${flat.slice(0, 199)}…` : flat;
+}
+
 function pushExplore(cells: OneWorkCell[], item: OneActivityItem, entries: OneWorkExploreEntry[]) {
   const status = itemStatus(item);
+  const failure = failedCallReason(item);
   const observedEntries = entries.map((entry) => ({
     ...entry,
+    ...(failure ? { failure } : {}),
     ...(item.tool?.name ? { toolName: item.tool.name } : {}),
     ...(item.tool?.origin ? { origin: item.tool.origin } : {}),
     ...(item.tool?.id ? { callId: item.tool.id } : {}),
@@ -601,6 +618,7 @@ export function buildOneWorkPresentation(
               ...(classified.output ? { output: classified.output } : {}),
               ...(classified.exitCode !== undefined ? { exitCode: classified.exitCode } : {}),
               ...(classified.summary ? { summary: classified.summary } : {}),
+              ...(item.tool.failureCode ? { failureCode: item.tool.failureCode } : {}),
               ...(agent ? { agent } : {}),
             });
             break;
@@ -815,4 +833,50 @@ function liveHeadline(cells: OneWorkCell[], state: OneActivityState, locale: "ko
     return cellHeadline(cell, locale);
   }
   return ko ? "작업 중" : "Working";
+}
+
+/**
+ * A command the approval gate stopped (declined, expired or still unanswered) never ran. The typed failure code decides, never the
+ * output text: the work line counted it as "ran 1 command" with a warning mark, which said nothing about whether `rm` had happened.
+ */
+export function runWasRefused(cell: OneWorkCell): boolean {
+  return cell.kind === "run"
+    && (cell.failureCode === "approval_declined" || cell.failureCode === "approval_expired" || cell.failureCode === "approval_required");
+}
+
+/**
+ * a step that failed and was then done by a LATER step of the same turn is history, not the turn's state. Typed facts only: the same kind of cell with the
+ * same target (a command's text, an edit's file set, a call's label + arguments), the earlier one failed, a later one completed (a command's exit code 0 or none).
+ * Returns the ids of the failed cells that were recovered; the others still count.
+ */
+export function recoveredFailedCellIds(cells: readonly OneWorkCell[]): Set<string> {
+  const identity = (cell: OneWorkCell): string | null => {
+    if (cell.kind === "run") return `run:${cell.command.trim()}`;
+    if (cell.kind === "edit") return cell.files.length ? `edit:${cell.files.map((file) => file.path).sort().join("|")}` : null;
+    if (cell.kind === "call") return `call:${cell.label}:${cell.args ?? ""}`;
+    return null;
+  };
+  const failed = (cell: OneWorkCell): boolean => cell.status === "failed" || (cell.kind === "run" && cell.exitCode != null && cell.exitCode !== 0);
+  const succeeded = (cell: OneWorkCell): boolean => cell.status === "completed" && !failed(cell);
+  const out = new Set<string>();
+  cells.forEach((cell, index) => {
+    const key = identity(cell);
+    if (key === null || !failed(cell)) return;
+    for (let later = index + 1; later < cells.length; later += 1) {
+      if (identity(cells[later]!) === key && succeeded(cells[later]!)) { out.add(cell.id); break; }
+    }
+  });
+  return out;
+}
+
+/** The command part of a turn's one-line summary, or null when the turn ran none. */
+export function commandWorkLabel(cells: readonly OneWorkCell[], locale: "ko" | "en"): string | null {
+  const runs = cells.filter((cell) => cell.kind === "run");
+  if (runs.length === 0) return null;
+  const refused = runs.filter(runWasRefused).length;
+  const ran = runs.length - refused;
+  const ko = locale === "ko";
+  if (ran === 0) return ko ? `명령 ${refused}개 · 승인되지 않아 실행 안 함` : `${refused} command${refused === 1 ? "" : "s"} not run: not approved`;
+  const head = ko ? `명령 ${ran}개 실행함` : `Ran ${ran} command${ran === 1 ? "" : "s"}`;
+  return refused > 0 ? `${head}${ko ? ` · ${refused}개는 승인되지 않아 실행 안 함` : ` · ${refused} not run: not approved`}` : head;
 }

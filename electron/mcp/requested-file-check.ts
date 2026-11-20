@@ -48,6 +48,11 @@ export interface RequestedFileCheckInput {
   cwd?: string | null;
   /** Names, arguments and results of the tool calls of this run that completed without error. */
   successfulToolText?: string;
+  /**
+   * the paths this run's FILE receipts say it wrote (harness/turn-receipts.ts receiptsOfRun, wroteThisTurn). A name one of them carries was acted on by a typed
+   * write event, so it is not "missing"; this is the proof of a write, where the tool text above only says a name was mentioned (a read mentions it too).
+   */
+  receiptedPaths?: readonly string[];
   platform?: NodeJS.Platform;
   homeDir?: string;
   /** Injected for tests; default: a regular file exists at the path. */
@@ -96,6 +101,7 @@ export function missingRequestedFiles(input: RequestedFileCheckInput): MissingRe
   if (!asked.names.length || !answered.names.length) return [];
   const answeredNames = new Set(answered.names.map(key));
   const toolText = key(input.successfulToolText ?? "");
+  const receipted = new Set((input.receiptedPaths ?? []).map((written) => key(p.basename(platform === "win32" ? written.replace(/\//g, "\\") : written))));
   const cwd = input.cwd && p.isAbsolute(input.cwd) ? input.cwd : undefined;
   // Folders the request or the answer point at: absolute tokens without a file extension.
   const folders = [...asked.absolute, ...answered.absolute].filter((token) => !HAS_EXTENSION.test(p.basename(token)));
@@ -106,7 +112,7 @@ export function missingRequestedFiles(input: RequestedFileCheckInput): MissingRe
     if (seen.has(k) || !answeredNames.has(k)) continue;
     seen.add(k);
     // A successful tool call that mentions the name acted on it (wrote, moved, deleted): the run did something real.
-    if (toolText.includes(k)) continue;
+    if (toolText.includes(k) || receipted.has(k)) continue;
     const candidates = new Set<string>();
     for (const token of [...asked.absolute, ...answered.absolute]) if (key(p.basename(token)) === k) candidates.add(p.normalize(token));
     for (const token of [...asked.relative, ...answered.relative]) if (cwd && key(p.basename(token)) === k) candidates.add(p.resolve(cwd, token));

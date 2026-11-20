@@ -15,7 +15,7 @@ import { installDurableToolApprovalLedger } from "../one/supervisor-approval-led
 import { recordApprovalClosure } from "./approval-closure-notice";
 import { mainToolConsentResource } from "./tool-consent";
 import { NOT_OWNER_ANSWER_SOURCES, classifyApprovalAction, type ApprovalRefusalCause } from "./approval-rule";
-import { scopedAlwaysAllowBinding } from "./approval-scope";
+import { appWideScopeStamp, scopedAlwaysAllowBinding, scopeStampOfChat, setScopeAccountReader } from "./approval-scope";
 import {
   announceToolDenied,
   capabilityClassFor,
@@ -26,6 +26,7 @@ import {
   requestToolApproval,
   setAlwaysAllowedReader,
   setApprovalClosureRecorder,
+  setApprovalScopeStamper,
   setCapabilityGrantPersister,
   setRuntimeToolPermissionArbiter,
   type CapabilityGrantPersister,
@@ -54,6 +55,21 @@ export interface HostToolPermissionPolicyPorts extends HostToolPermissionIdentit
   now?: () => number;
   /** The binding one "always allow" is kept under (approval-scope.ts: the project, else the conversation). Default: the store. */
   scopedAlwaysAllowBinding?: typeof scopedAlwaysAllowBinding;
+  /** Did the owner write in this conversation after `sinceMs`? Default: a user row of the conversation in the store. */
+  ownerSpokeSince?: (chatId: string | undefined, sinceMs: number) => boolean;
+}
+
+/**
+ * The owner's own message after a refusal ends the memory of that refusal. The memory (recentUserDenials / recentExpiries) stops one run from asking
+ * the same card again and again; it is not the owner's standing "no". A person who says "this time yes" in the chat after a no must meet the card
+ * again (three requests after one "no" were refused with no card and the model said the owner declined each time).
+ * A read that fails answers false: the memory stays, which is the older behaviour.
+ */
+function ownerSpokeSinceInStore(chatId: string | undefined, sinceMs: number): boolean {
+  if (!chatId || !Number.isFinite(sinceMs)) return false;
+  try {
+    return Boolean(getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1").get(chatId, new Date(sinceMs).toISOString()));
+  } catch { return false; }
 }
 
 const opaqueConsentIdentity = (label: string, value: string): string => {
@@ -105,6 +121,16 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
   // owner is away), but the refusal stays typed as an expiry, never as the owner's denial.
   const recentExpiries = new Map<string, number>();
   const USER_DENIAL_TTL_MS = 5 * 60_000;
+  const ownerSpokeSince = ports.ownerSpokeSince ?? ownerSpokeSinceInStore;
+  /** A remembered refusal still in force: inside the TTL and no message of the owner since; one that the owner has spoken after is dropped. */
+  const rememberedRefusal = (memory: Map<string, number>, ask: { sessionKey: string; tool: string; detail?: string; chatId?: string }): boolean => {
+    const key = denialKey(ask);
+    const at = memory.get(key);
+    if (!at) return false;
+    if (now() - at >= USER_DENIAL_TTL_MS) return false;
+    if (ownerSpokeSince(ask.chatId, at)) { memory.delete(key); return false; }
+    return true;
+  };
   const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${mainToolConsentResource(ask) ?? ask.detail ?? ""}`;
 
 
@@ -327,16 +353,17 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
     if (ask.catalogId == null || ask.catalogId === "one-team") {
       if (!askOverDeny && ask.tool.startsWith("mcp__one-team__")) return "allow_session";
     }
+    // The memory tools of the app's own turn server write the app's memory through its ticket admission, not the person's files or the outside world:
+    // "remember this" must not wait for a full-access answer. Exact tool names; the tickets' own admission and the run's read-only memory boundary still decide what is kept.
+    if (!askOverDeny && (ask.catalogId == null || ask.catalogId === "agentlas-turn") && /^mcp__agentlas-turn__memory_(ticket|search|get)$/.test(ask.tool)) return "allow_session";
     if (!askOverDeny && !ask.mutating) return "allow_once";
     // BB-1c: the same pass, now on the ledger. Write mode with nobody to ask (an unattended run) lets a delete / send call through with no card, as before; it is recorded as `unattended`. A payment never gets here (refused above).
     if (!askOverDeny && ask.permission === "write" && !asking) { if (rememberable) passedWithoutCard("unattended"); return "allow_session"; }
     // The gateway tool of a tool.call: its port asks the connector tool's own rule next, in every mode - a second generic card for the same act is not asked. Only for a run that can be
     // asked at all (a conversation, attended); every other run falls through to the refusals below exactly as it did.
     if (!askOverDeny && ask.portAsksItsOwnRule === true && !asking && ask.chatId && !ask.unattended) return "allow_once";
-    const deniedAt = recentUserDenials.get(denialKey(ask));
-    if (deniedAt && now() - deniedAt < USER_DENIAL_TTL_MS) return refuse("owner_denied");
-    const expiredAt = recentExpiries.get(denialKey(ask));
-    if (expiredAt && now() - expiredAt < USER_DENIAL_TTL_MS) { markToolApprovalExpired(ask); return refuse("no_answer"); }
+    if (rememberedRefusal(recentUserDenials, ask)) return refuse("owner_denied");
+    if (rememberedRefusal(recentExpiries, ask)) { markToolApprovalExpired(ask); return refuse("no_answer"); }
     /*
      * 대화가 붙어 있지 않은 실행(자동화/그래프/헤드리스)은 답할 사람이 없다 — 5분을
      * 매달아 두었다가 거부하는 대신 즉시 거부하고 사실만 남긴다(08-09 결정: 실행 중
@@ -402,6 +429,20 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
   return { consentBindingForAsk, persistGrant, arbiter, alwaysAllowed };
 }
 
+/**
+ * the host's one stamper. The account is the signed-in account's opaque id (never the raw user id: a stamp travels into approval events), read the
+ * same way the consent binding reads it (a native run's scoped actor first, else the host's own session); the project and conversation come from the one
+ * function that also feeds "always allow" (approval-scope.ts). A request with no conversation is stamped app-wide: it goes to the app-wide sheet only.
+ */
+export function installScopeStamping(getAuthenticatedActorIds: () => { workspaceId: string; userId: string } | null): void {
+  setScopeAccountReader(() => {
+    const scoped = nativeApprovalActorSnapshot();
+    const actor = scoped ? scoped.actor : getAuthenticatedActorIds();
+    return actor ? opaqueConsentIdentity("account", `account:${actor.userId}`) : null;
+  });
+  setApprovalScopeStamper((chatId) => (chatId ? scopeStampOfChat(chatId) : appWideScopeStamp()));
+}
+
 /** Install the actual store-backed host policy without importing GUI authentication surfaces. */
 export function installHostToolPermissionPolicy(identity: HostToolPermissionIdentityPorts): void {
   if (identity.hostKind !== "main" && identity.hostKind !== "daemon") {
@@ -416,6 +457,7 @@ export function installHostToolPermissionPolicy(identity: HostToolPermissionIden
     requestToolApproval,
     announceToolDenied,
   });
+  installScopeStamping(identity.getAuthenticatedActorIds);
   setCapabilityGrantPersister(policy.persistGrant);
   setAlwaysAllowedReader(policy.alwaysAllowed);
   // live 승인 결정의 영속 장부 — 결정은 여기 먼저 기록되고 그다음 실행이 듣는다. 장부를 못 열면 예전처럼 메모리로만 기다린다.

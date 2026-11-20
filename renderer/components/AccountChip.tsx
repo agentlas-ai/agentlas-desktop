@@ -82,6 +82,7 @@ export function AccountChip({ collapsed = false }: { collapsed?: boolean }) {
     open: popoverOpen,
     roots: [rootRef],
     restoreFocusRef: triggerRef,
+    dismissOnFocusLeave: true,
     onDismiss: () => setPopoverOpen(false),
   });
 

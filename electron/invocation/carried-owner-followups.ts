@@ -3,6 +3,7 @@ import type { McpInvocationRequest } from "../../shared/types";
 import { getDb } from "../store/db";
 import { persistQueuedSteer, type DurableQueuedSteer } from "../store/invocation-steers";
 import { OWNER_INTAKE_STEER_PREFIX } from "./owner-intake";
+import { isPermissionEscalationContinuation } from "./permission-escalation-continuation";
 
 /**
  * What the owner wrote into a running turn and the turn never took, carried to the chat's next turn.
@@ -26,14 +27,17 @@ export const CARRIED_FOLLOWUP_CODE = "owner_control_next_turn";
 
 /** The ended run's own execution choices, never its one-off flags (goalMode, attachments, targets, runtime pin). */
 export function carriedFollowupRequest(source: McpInvocationRequest, text: string): McpInvocationRequest {
+  // the escalation card said "full access for this resumed run only". A direction typed during that run is the next turn, and the next turn does not
+  // inherit the run's full access: it takes the conversation's own permission (none carried here), so the permission the person gave never outlives its label.
+  const runOnlyFull = isPermissionEscalationContinuation(source) && source.permissions === "full";
   return {
     chatId: source.chatId,
     userPrompt: text,
     taskIntent: "conversation",
     sessionRouting: false,
     ...(source.oneMode === true ? { oneMode: true } : {}),
-    ...(source.onePermissionMode ? { onePermissionMode: source.onePermissionMode } : {}),
-    ...(source.permissions ? { permissions: source.permissions } : {}),
+    ...(source.onePermissionMode && !runOnlyFull ? { onePermissionMode: source.onePermissionMode } : {}),
+    ...(source.permissions && !runOnlyFull ? { permissions: source.permissions } : {}),
     ...(source.planMode === true ? { planMode: true } : {}),
     ...(source.locale ? { locale: source.locale } : {}),
   };

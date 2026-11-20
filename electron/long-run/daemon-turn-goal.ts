@@ -49,6 +49,7 @@ import { getChatGoalRevision } from "../store/chat-goals";
 import { closeGoal } from "../store/goal-close";
 import { desktopAppInstanceId } from "./app-runtime-coordinator";
 import { getChat } from "../store/chats";
+import { ownerStoppedSince } from "../chat/chat-stop";
 import { getDb } from "../store/db";
 import { createRuntimeRetryStore } from "../store/runtime-retry";
 import {
@@ -169,6 +170,14 @@ function selfRecoverableTeamFailure(report: unknown): { selfRecoverable: boolean
     wait = Math.max(wait, ms);
   }
   return { selfRecoverable: true, retryAfterMs: wait > 0 ? wait : null };
+}
+
+/** When the service turn began (its first ledger line), ISO; the epoch start when it left no line. */
+function serviceRunStartedAt(runId: string): string {
+  try {
+    const row = getDb().prepare("SELECT MIN(ts) AS ts FROM run_events WHERE run_id = ?").get(runId) as { ts: string | null } | undefined;
+    return row?.ts ?? new Date(0).toISOString();
+  } catch { return new Date(0).toISOString(); }
 }
 
 function terminalOf(runId: string): DaemonTurnTerminal | null {
@@ -338,8 +347,15 @@ function followDaemonTurnGoalInTransaction(goalId: string): DaemonTurnGoalResult
     if (run.status === "queued") { step("running", "daemon-turn-started"); return result(goalId, "started", source.runId); }
     return result(goalId, "unchanged", "turn_live");
   }
-  const terminal = terminalOf(source.runId);
-  if (!terminal) return result(goalId, "skipped", "no_terminal_event");
+  const settledTerminal = terminalOf(source.runId);
+  if (!settledTerminal) return result(goalId, "skipped", "no_terminal_event");
+  // The person's Stop of this chat came after the service turn began and they have said nothing since, yet the turn's own end reads as
+  // completed / failed (the Stop reached a verification wait, not the turn): it is an owner stop all the same, so the Goal rests paused
+  // instead of scheduling the next cycle or closing as completed (invoke_cancelled already takes this path below).
+  const terminal = settledTerminal.kind !== "invoke_cancelled" && settledTerminal.kind !== "invoke_interrupted"
+    && ownerStoppedSince(chatId, serviceRunStartedAt(source.runId), { longRunId: run.id })
+    ? { ...settledTerminal, kind: "invoke_cancelled", budgetClosed: false, retryAfterMs: null, decisionRequested: false, selfRecoverable: false }
+    : settledTerminal;
   if (terminal.budgetClosed) {
     // The connection kept failing: the Goal rests on a host retry (one probe after the retry store's reopen window), it is not paused.
     const reopen = scheduleGoalRuntimeRetryReopen(run.id, source.runId);

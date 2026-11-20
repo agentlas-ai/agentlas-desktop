@@ -3,9 +3,10 @@ import { bridgeTools, SERVER_APPS_CONFIG_KEY, SERVER_APPS_STATUS_TOOL, type Brid
 import { SERVER_APPS_CAPABILITY_TOOLS, SERVER_APPS_CONTROL_ENV, SERVER_APPS_STATUS_DESCRIPTION, SERVER_APPS_STATUS_INPUT_SCHEMA, serverAppsMcpLaunchArgs } from "../turn-tools/server-apps-mcp";
 import { consumeHostCall, declareHostCostHosts, declareHostReadTools, declareHostToolMarks, hostCallMarks, releaseHostReadTools, releaseHostToolMarks, HOST_CALL_SERVER_KEY } from "../harness/host-call-ticket";
 import { gateServerAppsCall } from "../harness/tool-isolation";
-import { approveHostServerCall } from "../harness/app-call-approval";
+import { approvalWithinCallWindow, approveHostServerCall } from "../harness/app-call-approval";
 import { redactToolJson } from "../harness/tool-result-store";
 import { registerDeclaredPromptModule } from "../runtime/prompt-order";
+import { noteServerAppFailed, serverFirstConnectorIds } from "../connectors/route-gate";
 
 /*
  * Main's side of the bridge (contracts/desktop-server-tools.md sections 4 and 6). Two jobs, both thin:
@@ -118,7 +119,8 @@ export async function mintServerAppsHostToolServer(input: ServerAppsMintInput): 
   const { resolveToolCaller } = await import("../harness/tool-caller");
   const who = await resolveToolCaller({ chatId: input.chatId, runId: input.runId });
   if (who.kind !== "personal") return null;
-  const tools = bridgeTools(state, await apps.computerHas());
+  const computer = await apps.computerHas();
+  const tools = bridgeTools(state, computer, serverFirstConnectorIds(computer, input.chatId));
   if (!tools.length) return null;
   const control = await import("../turn-tools/control-server");
   const capability = await control.createServerAppsCapability({
@@ -171,7 +173,8 @@ export async function prepareServerAppsTurn(input: { chatId: string; runId: stri
   if (input.phoneOrigin) apps.signal("phone");
   const state = apps.snapshot();
   if (!state) return none;
-  const tools = bridgeTools(state, await apps.computerHas());
+  const computer = await apps.computerHas();
+  const tools = bridgeTools(state, computer, serverFirstConnectorIds(computer, input.chatId));
   const by = new Map<string, { id: string; name: string; n: number }>();
   for (const tool of tools) {
     const row = by.get(tool.connectorId) ?? { id: tool.connectorId, name: tool.appName, n: 0 };
@@ -216,7 +219,10 @@ export async function handleServerAppsOperation(binding: { capabilityId: string;
     approved = consumeHostCall(tool.name, callArgs);
     if (!approved) {
       const permission = binding.permission === "write" || binding.permission === "full" ? binding.permission : "read";
-      const asked = await approveHostServerCall({ tool: tool.name, chatId: binding.chatId, permission, unattended: binding.unattended === true, annotations: hostCallMarks(HOST_CALL_SERVER_KEY, tool.name, callArgs) ?? annotationsOf(tool), ...(callerGone ? { signal: callerGone } : {}) });
+      // The owner's card waits as long as the owner takes, the caller's gateway does not: answer inside the call window, the same call asked again joins the card.
+      const asked = await approvalWithinCallWindow({ chatId: binding.chatId, tool: tool.name, args: callArgs, permission },
+        () => approveHostServerCall({ tool: tool.name, chatId: binding.chatId, permission, unattended: binding.unattended === true, annotations: hostCallMarks(HOST_CALL_SERVER_KEY, tool.name, callArgs) ?? annotationsOf(tool), ...(callerGone ? { signal: callerGone } : {}) }));
+      if (!asked.ok && asked.reason === "approval_pending") return textResult({ state: "pending", next: "the owner's approval card is still open; repeat this same call to get the answer, and do not tell the owner it was done" });
       if (!asked.ok) return refusal("approval_required", { approval: asked.text.slice(0, 400) });
       approved = true;
     }
@@ -225,6 +231,8 @@ export async function handleServerAppsOperation(binding: { capabilityId: string;
   if (!current()) return refusal("tools_unavailable");
   if (callerGone?.aborted) return refusal("approval_required");
   const out = await apps.call({ connectorId: tool.connectorId, tool: tool.tool, args: callArgs, allowWrite, chatId: binding.chatId });
+  // The server road failed: the computer's own road to the same service is then not refused toward it (connectors/route-gate.ts; nothing installed = nothing happens).
+  if (!out.ok) noteServerAppFailed(binding.chatId, tool.connectorId);
   return outcomeToResult(out);
 }
 

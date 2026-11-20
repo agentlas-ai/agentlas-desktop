@@ -21,6 +21,7 @@ import {
   setCanonicalTaskStatus,
 } from "../store/tasks";
 import { hasInvocationRunReceipt } from "../store/run-events";
+import { agentDisplayName } from "../../shared/agent-display-name";
 import { getInvocationAdmission } from "../store/invocation-admissions";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { ensureOneGroupLocalStaff, oneOrgExecutionGuidance } from "./org";
@@ -518,11 +519,11 @@ function roleFromCandidate(
     .slice(0, 360 - specialistPrefix.length - specialistSuffix.length);
   return {
     roleId: shortRef(coordinator ? "role-coordinator" : "role-specialist", candidate.candidateRef),
-    label: agent.localDisplayName || agent.nameEn || agent.name || agent.slug,
+    label: agentDisplayName(agent, "en"),
     responsibility: coordinator ? "coordinate_and_synthesize" : "bounded_specialist_contribution",
     candidate: {
       candidateRef: candidate.candidateRef,
-      displayName: agent.localDisplayName || agent.nameEn || agent.name || agent.slug,
+      displayName: agentDisplayName(agent, "en"),
       slug: agent.slug,
       source: candidate.source,
       // 팀 패키지는 팀으로 적는다. 에이전트로 적으면 기록과 실행이 어긋난다.

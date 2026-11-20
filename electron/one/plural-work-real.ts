@@ -12,6 +12,7 @@ import { createPluralWorkReceiver, isPluralCommand, type PluralWorkPorts, type P
 import type { AskAnswer, FinishWhy, PluralEnd, RemoteAsk } from "./plural-handoff-wire";
 import { realCall } from "./shared-memory-real";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
+import type { ToolApprovalResolutionReceipt } from "../../shared/types";
 import type { PluralAnswer } from "../mobile-bridge/places-link";
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -146,7 +147,27 @@ export interface PluralIntakeDeps extends PluralRequestDeps {
  * a card Main holds is resolved in this process; a card the background service holds is resolved through the native approval port (a context this module mints). Not found = already closed: true when the closed decision is the same.
  */
 const nativeGrants = new WeakMap<object, { requestId: string; chatId: string }>();
-export async function realLocalApprovalAnswer(qid: string, decision: "allow_once" | "deny"): Promise<boolean> {
+
+/**
+ * A row's question the background service holds that this process has no record of (a card asked on a wire that carries no run signal, or raised before this window attached): the service itself settles it.
+ * Not the row's answer applied blindly - the question still asks the row first and the row's first answer is the answer (plural-remote-ask.ts), so this only tells the holder to look.
+ * Runs in the process that holds the question (the daemon's `approval.remote` op); a question that is not a row's is left alone.
+ */
+export function answerHeldRemoteApproval(qid: string, decision: "allow_once" | "deny"): ToolApprovalResolutionReceipt {
+  const approvals = req<typeof import("../runtime/tool-approval")>("../runtime/tool-approval");
+  if (!approvals.isRemoteApprovalOpen(qid)) return approvals.getToolApprovalResolution(qid);
+  return approvals.resolveToolApproval(qid, decision, toolApprovalActionId(qid, decision), "phone");
+}
+/** Asks the background service (when it hosts the Work queue) to settle a row's question this process cannot find. null = no service to ask or it did not answer. */
+async function daemonRemoteApprovalAnswer(qid: string, decision: "allow_once" | "deny"): Promise<ToolApprovalResolutionReceipt | null> {
+  try {
+    const rt = req<typeof import("./supervisor-native-runtime")>("./supervisor-native-runtime");
+    if (rt.supervisorRuntimeMode() !== "daemon") return null;
+    const answer = await rt.callOneSupervisorRuntime("approval.remote", { requestId: qid, decision }) as ToolApprovalResolutionReceipt | null;
+    return answer && typeof answer === "object" && typeof answer.status === "string" ? answer : null;
+  } catch { return null; }
+}
+export async function realLocalApprovalAnswer(qid: string, decision: "allow_once" | "deny", daemonAnswer: typeof daemonRemoteApprovalAnswer = daemonRemoteApprovalAnswer): Promise<boolean> {
   const approvals = req<typeof import("../runtime/tool-approval")>("../runtime/tool-approval");
   const actionId = toolApprovalActionId(qid, decision);
   type Controls = { hasApproval(id: string): boolean; listAvailableApprovals(): Array<{ id: string; chatId?: string }>; mobileApprovalPort(authorize: (context: object, request: { id: string; chatId?: string }) => void): { select(id: string): { resolve(context: object, decision: "allow_once" | "deny", actionId: string): Promise<unknown> | unknown } | null } };
@@ -163,6 +184,8 @@ export async function realLocalApprovalAnswer(qid: string, decision: "allow_once
     // the row already has this answer: settle the waiting call with it (the local click path would post it to the row once more)
     receipt = (approvals.resolveRemoteApprovalFromRow(qid, decision === "deny" ? "deny" : "allow") ?? approvals.getToolApprovalResolution(qid)) as Receipt;
   } else receipt = approvals.resolveToolApproval(qid, decision, actionId, "phone") as Receipt;
+  // nothing here holds it: the background service may (the card was asked in its process and never reached this window)
+  if (receipt.status === "not_found") receipt = (await daemonAnswer(qid, decision) ?? receipt) as Receipt;
   return (receipt.status === "resolved" || receipt.status === "replayed") && (receipt.resolvedDecision === undefined || receipt.resolvedDecision === decision);
 }
 

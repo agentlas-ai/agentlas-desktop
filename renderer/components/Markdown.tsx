@@ -223,6 +223,28 @@ export function StreamingMarkdown({
   return chatId ? <VisualChatScope.Provider value={chatId}>{interactiveBody}</VisualChatScope.Provider> : interactiveBody;
 }
 
+// ── 체크리스트 항목 ───────────────────────────────────────
+/** A list item that starts with `[ ]` / `[x]` is a task: drawn as a checkbox the person can tick, not as the literal brackets (a requested "체크박스" list showed "[ ] 우유"). */
+export function taskListMark(text: string): { checked: boolean; rest: string } | null {
+  const match = /^\[([ xX])\](?:\s+|$)/.exec(text);
+  return match ? { checked: match[1] !== " ", rest: text.slice(match[0].length) } : null;
+}
+
+/** The box keeps its own tick for as long as the answer is on screen; ticking never edits the message or any file. */
+function TaskCheckbox({ initial, label }: { initial: boolean; label: string }) {
+  const [checked, setChecked] = useState(initial);
+  return (
+    <input
+      type="checkbox"
+      checked={checked}
+      onChange={() => setChecked((value) => !value)}
+      aria-label={label}
+      data-md-task="true"
+      style={{ marginRight: 8, verticalAlign: "-1px", cursor: "pointer", accentColor: "var(--accent)" }}
+    />
+  );
+}
+
 // ── 파서 ─────────────────────────────────────────────────
 type TableAlign = "left" | "center" | "right" | "default";
 type Block =
@@ -573,11 +595,13 @@ function renderBlock(
     case "ul":
     case "ol": {
       const renderItem = (it: ListItem, j: number) => {
-        const media = chatMediaOfText(it.text, mediaBasePaths);
+        const task = taskListMark(it.text);
+        const media = chatMediaOfText(task ? task.rest : it.text, mediaBasePaths);
         const children = it.children;
         const ChildTag = children?.ordered ? "ol" : "ul";
         return (
-          <li key={j} style={{ marginBottom: 2 }}>
+          <li key={j} style={task ? { marginBottom: 2, listStyle: "none", marginLeft: -20 } : { marginBottom: 2 }}>
+            {task ? <TaskCheckbox initial={task.checked} label={media.text.split("\n")[0] || "task"} /> : null}
             {media.text ? media.text.split("\n").map((line, k, all) => (
               <span key={k}>
                 {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
@@ -587,10 +611,13 @@ function renderBlock(
             {media.items.length ? <ChatMediaGroup items={media.items} onOpen={onOpenLinkedFile ?? noLinkedFileOwner} /> : null}
             {children ? (
               <ChildTag style={{ paddingLeft: 20, margin: "2px 0" }}>
-                {children.items.map((child, k) => {
+                {children.items.map((rawChild, k) => {
+                  const childTask = taskListMark(rawChild);
+                  const child = childTask ? childTask.rest : rawChild;
                   const childLines = child.split("\n");
                   return (
-                    <li key={k} style={{ marginBottom: 2 }}>
+                    <li key={k} style={childTask ? { marginBottom: 2, listStyle: "none", marginLeft: -20 } : { marginBottom: 2 }}>
+                      {childTask ? <TaskCheckbox initial={childTask.checked} label={childLines[0] || "task"} /> : null}
                       {childLines.map((line, l) => (
                         <span key={l}>
                           {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}

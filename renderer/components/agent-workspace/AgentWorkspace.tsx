@@ -462,6 +462,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "timeline", 
       {!snapshot?.proposals.length && <div className={styles.empty}>{ko ? "변경안 없음" : "No proposals"}</div>}
     </div></aside>
     <div className={styles.reviewPane}>{reviewLoading ? <div className={styles.empty}><span className={styles.loading} />{ko ? "변경 파일 확인 중" : "Reading proposed files"}</div> : review ? <>
+      <div className={styles.reviewScroll} data-testid="review-scroll">
       <div className={styles.reviewSummary}><IconLayers size={16} /><div><strong>{review.summary}</strong><div className={styles.meta}><State value={review.status} ko={ko} /><span>{review.changes.length}{ko ? "개 파일" : " files"}</span></div></div><button className={styles.iconButton} disabled={Boolean(busy)} onClick={() => void openReview(review.id)} title={ko ? "변경 다시 확인" : "Reload diff"} aria-label={ko ? "변경 다시 확인" : "Reload diff"}><IconRefresh size={14} /></button></div>
       {review.lastError && <div className={`${styles.banner} ${styles.error}`}>{review.lastError}</div>}
       {review.status === "stale" && <div className={styles.banner}><span>{ko ? "원본이 바뀌었어요. 변경안을 다시 만들어 주세요." : "The source changed. Prepare a new proposal against the current files."}</span>{review.memoryEntryIds.length > 0 && <button className={styles.button} disabled={Boolean(busy) || dirty} onClick={() => void run("reprepare-memory", async () => { const next = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: review.memoryEntryIds }); await refresh(); await openReview(next.id); })}>{ko ? "다시 만들기" : "Prepare again"}</button>}</div>}
@@ -470,10 +471,11 @@ export function AgentWorkspace({ agent, name, locale, initialView = "timeline", 
       <ChangeSummaryView changes={review.changeSummary} ko={ko} />
       {review.status === "applied" && <OutcomeComparison before={snapshot?.history.find((revision) => revision.id === review.baseRevisionId)?.outcome} after={snapshot?.history.find((revision) => revision.id === review.appliedRevisionId)?.outcome} ko={ko} />}
       <AgentWorkspaceDiff files={review.changes} locale={locale} activePath={reviewPath} onPathChange={setReviewPath} />
+      </div>
+      {dirty && <div className={styles.banner}>{ko ? "파일 초안을 변경안으로 저장하거나 버린 뒤 승인해 주세요." : "Save or discard your open file draft before approving."}</div>}
       <div className={styles.reviewFooter}><span>{ko ? "전체 파일 변경 · 다음 실행부터 적용" : "Whole file changes · Used from the next run"}</span>
         {review.status === "review_ready" && <><button className={styles.button} disabled={Boolean(busy)} onClick={() => void run("reject", async () => { const result = await api().reject({ proposalId: review.id }); setReview({ ...result, reviewedHash: result.proposalDigest }); await refresh(); })}>{ko ? "거절" : "Reject"}</button><button className={`${styles.button} ${styles.primary}`} disabled={Boolean(busy) || !snapshot?.writable || !review.reviewToken || dirty || snapshot.activation === "recovery_required"} onClick={() => void approve()}>{busy === "apply" ? <span className={styles.loading} /> : <IconCheck size={13} />}{ko ? "승인·적용" : "Approve and apply"}</button></>}
       </div>
-      {dirty && <div className={styles.banner}>{ko ? "파일 초안을 변경안으로 저장하거나 버린 뒤 승인해 주세요." : "Save or discard your open file draft before approving."}</div>}
     </> : <div className={styles.empty}><IconLayers size={35} /><strong>{ko ? "검토할 변경을 선택하세요" : "Select a change to review"}</strong></div>}</div>
   </>;
   const tabs: Array<{ key: AgentTab; label: string; icon: JSX.Element; count?: number | null }> = [

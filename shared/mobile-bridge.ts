@@ -308,6 +308,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "build2.preview.send",
   "build2.preview.restart",
   "build2.preview.read",
+  // a question card closed with X on the phone is the conversation's state on this computer (chat/phone-question-close.ts). Appended: older apps never call it.
+  "chat.question.close",
 ] as const;
 
 /**
@@ -355,6 +357,11 @@ export const MOBILE_CLIENT_CAPABILITIES = [
    * A phone that does not say it (172) is given the line, as a quiet notice, and never a state it cannot update.
    */
   "handoff.card.v1",
+  /**
+   * The phone draws a receipt card (shared/receipt-card.ts): the system row of a host receipt (a schedule saved, a message sent, a run that did not finish) arrives as the marker
+   * `<<agentlas-receipt>>` + the closed value with the host's `line` inside. A phone that does not say it (172~) is given one plain `[기록] ...` / `[Record] ...` line.
+   */
+  "receipt.card.v1",
 ] as const;
 export type MobileClientCapability = (typeof MOBILE_CLIENT_CAPABILITIES)[number];
 
@@ -608,6 +615,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "workspace2.command",
   "build2.preview.send",
   "build2.preview.restart",
+  "chat.question.close",
   ...MOBILE_BRIDGE_MAIL_WRITE_METHODS,
 ]);
 
@@ -1648,6 +1656,8 @@ export interface MobileBridgeChatMessageDto {
   createdAt: string;
   /** Exact prompt-owning run from invoke_prompt_bound; absent on older Desktop builds. */
   runId?: string;
+  /** The id a phone sent with this message (its idempotency key), stored on the saved row; absent on older Desktop builds and on rows no phone sent. */
+  clientIntentId?: string;
   /** Bounded references; bytes are fetched only for an exact chat/message binding. */
   images?: MobileBridgeChatImageDto[];
   /** Bounded generic-file metadata; raw paths, URLs, bytes, and manifests stay on Desktop. */
@@ -2201,6 +2211,17 @@ export interface MobileBridgeOneDecisionClarifyReceiptDto {
 }
 
 /** A reconnect-safe, secret-free view of one live irreversible browser action. */
+/**
+ * where a card was made, computed once by Desktop Main (runtime/approval-scope.ts) and only compared by the phone (mobile core/scope/approval_scope.dart).
+ * Ids of this Desktop's own store; any may be null. `chat: null` = the host's own object (it belongs to no conversation). Absent = an older Desktop.
+ */
+export interface MobileBridgeScopeDto {
+  account: string | null;
+  project: string | null;
+  chat: string | null;
+  run: string | null;
+}
+
 export interface MobileBridgeBrowserApprovalDto {
   status: "pending";
   requestId: string;
@@ -2209,6 +2230,8 @@ export interface MobileBridgeBrowserApprovalDto {
    * in that conversation's sheet; without this field no browser approval could be found there (2026-10-05).
    */
   chatId: string | null;
+  /** the stamp of the conversation that asked. */
+  scope?: MobileBridgeScopeDto;
   site: string;
   actionType: string;
   summary: string;
@@ -2234,6 +2257,8 @@ export interface MobileBridgeToolApprovalDto {
   /** 능력 클래스(execute|edit|delete|network|other) — "항상 허용"이 무엇을 여는지 카드가 말한다. */
   capability?: string;
   agentId?: string;
+  /** where this request was made; the phone draws it only in that conversation and returns the chat with its answer. */
+  scope?: MobileBridgeScopeDto;
 }
 
 /** Exact historical receipt, distinct from the automation's current live run. */
@@ -4243,6 +4268,10 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             params.retryCommitted === true && params.reply === undefined ? null : requiredString(params,"reply",12000), validateEnum(params,"locale",["ko","en"],true),
             params.retryCommitted === undefined || typeof params.retryCommitted === "boolean" ? null : "retryCommitted must be boolean")
         : "one.dispatch.answerQuestion accepts only exact delegation and question fields";
+    case "chat.question.close":
+      return hasOnlyKeys(params, ["chatId", "sourceMessageId", "scope"])
+        ? firstError(requiredString(params, "chatId", 256), requiredString(params, "sourceMessageId", 200))
+        : "chat.question.close accepts only chatId, sourceMessageId and scope";
     case "runtime.submitUserInput":
       return hasOnlyKeys(params, ["requestId", "answer"])
         ? firstError(

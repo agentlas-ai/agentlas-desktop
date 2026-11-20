@@ -24,6 +24,9 @@
  * A tool with no mark and no telling name is not asked (three kinds of card only, no new blocker). A shell command line is read by
  * the program it runs (shellCommandDeletes, below: the delete card only;); a network call a CLI makes with its own tools is not
  * classified here: see docs/Agentlas2.0/evidence/d8/fact-table.md.
+ * One thing is refused, not asked, in every mode (full access included): registering a job in an OS scheduler from a run (shellCommandRegistersScheduler,
+ * below). Agentlas owns scheduling (runtime-builtin-egress-policy.ts, category "schedule"): an app automation is listed, paused and deleted in the
+ * app, an OS job is none of that, and a card would let "allow" create exactly that invisible job.
  */
 export type ApprovalActionClass = "money" | "delete" | "send" | "other";
 
@@ -442,8 +445,85 @@ function simpleCommandDeletes(words: string[], depth: number): boolean {
   return false;
 }
 
-function shellLineDeletes(line: string, depth: number): boolean {
-  if (depth > 3 || !line) return false;
+/**
+ * A here-document body is data handed to a program (a file the model writes, a script it prints), not commands the shell runs: `cat > f.py <<'EOF' ... os.remove ... EOF`
+ * writes a file. The body is cut out of the line before it is read. The one thing a body can still run is a `$( )` / backtick substitution, and only when the
+ * delimiter is unquoted (the shell expands the body then); those pieces are returned to be read as commands. Quote-aware at the operator (`echo "<<EOF"` is text;
+ * `<<<` is a here-string, whose word stays on the line). An unterminated body runs to the end of the text, as the shell reads it.
+ */
+function stripHeredocs(line: string): { line: string; substitutions: string[] } {
+  if (!line.includes("<<")) return { line, substitutions: [] };
+  let out = "";
+  const substitutions: string[] = [];
+  const pending: Array<{ delimiter: string; tabs: boolean; expands: boolean; runsBody: boolean }> = [];
+  let quote: "" | "'" | '"' = "";
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i]!;
+    if (quote === "'") { out += ch; if (ch === "'") quote = ""; i += 1; continue; }
+    if (quote === '"') {
+      if (ch === "\\" && i + 1 < line.length) { out += ch + line[i + 1]; i += 2; continue; }
+      out += ch; if (ch === '"') quote = ""; i += 1; continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; out += ch; i += 1; continue; }
+    if (ch === "\\" && i + 1 < line.length) { out += ch + line[i + 1]; i += 2; continue; }
+    if (ch === "<" && line[i + 1] === "<" && line[i + 2] !== "<" && line[i - 1] !== "<") {
+      let j = i + 2;
+      const tabs = line[j] === "-";
+      if (tabs) j += 1;
+      while (line[j] === " " || line[j] === "\t") j += 1;
+      let delimiter = "", expands = true;
+      while (j < line.length && !/[\s;&|()<>]/.test(line[j]!)) {
+        const c = line[j]!;
+        if (c === "'" || c === '"') {
+          expands = false;
+          const end = line.indexOf(c, j + 1);
+          const stop = end < 0 ? line.length : end;
+          delimiter += line.slice(j + 1, stop);
+          j = end < 0 ? line.length : end + 1;
+        } else if (c === "\\") { expands = false; delimiter += line[j + 1] ?? ""; j += 2; }
+        else { delimiter += c; j += 1; }
+      }
+      if (delimiter) {
+        // A shell that reads its commands from the here-document (`bash <<EOF`, `cat <<EOF | sh`) runs the body: that body stays on the line.
+        const eol = line.indexOf("\n", j);
+        const tail = line.slice(j, eol < 0 ? line.length : eol);
+        const receiver = shellWords((out.split(/&&|\|\||[;|&(){}\n]/).pop() ?? "")).filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) && !SHELL_WRAPPERS.has(baseProgram(w)) && !w.startsWith("-"))[0];
+        const runsBody = (receiver !== undefined && SHELL_INTERPRETERS.has(baseProgram(receiver)))
+          || /\|\s*(?:(?:sudo|doas|env|exec|command)\s+)*(?:\S*\/)?(?:ba|z|da|k|a)?sh(?:\s|$)/.test(tail);
+        pending.push({ delimiter, tabs, expands, runsBody });
+        out += line.slice(i, j); i = j; continue;
+      }
+    }
+    if (ch === "\n" && pending.length > 0) {
+      out += "\n";
+      i += 1;
+      for (const doc of pending) {
+        let body = "";
+        while (i < line.length) {
+          const eol = line.indexOf("\n", i);
+          const text = line.slice(i, eol < 0 ? line.length : eol);
+          i = eol < 0 ? line.length : eol + 1;
+          if ((doc.tabs ? text.replace(/^\t+/, "") : text) === doc.delimiter) break;
+          body += text + "\n";
+        }
+        if (doc.runsBody) out += body + doc.delimiter + "\n";
+        else if (doc.expands) {
+          for (const match of body.matchAll(/\$\(([^()]*)\)|`([^`]*)`/g)) substitutions.push(match[1] ?? match[2] ?? "");
+        }
+      }
+      pending.length = 0;
+      continue;
+    }
+    out += ch; i += 1;
+  }
+  return { line: out, substitutions };
+}
+
+function shellLineDeletes(rawLine: string, depth: number): boolean {
+  if (depth > 3 || !rawLine) return false;
+  const { line, substitutions } = stripHeredocs(rawLine);
+  if (substitutions.some((inner) => shellLineDeletes(inner, depth + 1))) return true;
   // `$( ... )` and backticks run a command wherever they stand, quoted or not.
   // (A single-quoted `$(...)` is text, not a command.)
   for (const match of line.replace(/'[^']*'/g, "''").matchAll(/\$\(([^()]*)\)|`([^`]*)`/g)) {
@@ -473,22 +553,321 @@ export const NOT_OWNER_ANSWER_SOURCES: readonly string[] = ["one-delegation"];
 /* ── What the model is told when a card ends without a "yes" (item 5) ─────────────────────────────────────────────── */
 
 /** Why a call the rule asks about did not run. */
-export type ApprovalRefusalCause = "owner_denied" | "no_answer" | "nobody_to_ask";
-export interface ApprovalRefusal { action: Exclude<ApprovalActionClass, "other">; cause: ApprovalRefusalCause }
+export type ApprovalRefusalCause = "owner_denied" | "no_answer" | "nobody_to_ask" | "app_owns_schedules";
+/** `os_scheduler` is not a card: it is refused outright in every mode, so no one is asked (shellCommandRegistersScheduler, below). */
+export interface ApprovalRefusal { action: Exclude<ApprovalActionClass, "other"> | "os_scheduler"; cause: ApprovalRefusalCause }
 
 /**
  * Registered prompt module (docs/PROMPT-COMPOSITION-POLICY.md; ledger formula desktop.approval-rule.refusal-result, channel tool-result).
  * One fixed `key: value` line per fact, closed vocabularies only: nothing of the call, the owner or the machine is in it.
  */
 export const APPROVAL_REFUSAL_RESULT_MODULE: { readonly id: string; readonly revision: number; readonly stability: "fixed-policy"; readonly changeTriggers: readonly "release"[]; readonly order: number } = {
-  id: "approval.refusal.result", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
+  id: "approval.refusal.result", revision: 2, stability: "fixed-policy", changeTriggers: ["release"], order: 0,
 };
 const REFUSAL_NEXT: Readonly<Record<ApprovalRefusalCause, string>> = {
   owner_denied: "the owner said no to this call; do not repeat it; continue without it or ask the owner in your reply what they want instead",
   no_answer: "nobody answered the approval card before it closed (not a refusal); say in your reply what is waiting for approval, or continue another way; do not repeat this exact call now",
   nobody_to_ask: "this run has nobody to approve it (unattended); leave the payment undone and report it so the owner can do it in a conversation",
+  app_owns_schedules: "OS schedulers (launchd, cron, at, systemd timers, Windows tasks) are not set up from a run; make the schedule as an app automation (read_automation_protocol, then the ## Automation block) so the owner can see and pause it, or give the owner the exact command to run themselves",
 };
 /** The line appended to a refused tool result. The same text on every surface that can return text to the model. */
 export function approvalRefusalResultText(refusal: ApprovalRefusal): string {
   return `approval_refused: action=${refusal.action}; cause=${refusal.cause}; next=${REFUSAL_NEXT[refusal.cause]}`;
+}
+
+/* ── what a shell command line REGISTERS in an OS scheduler ─────────────────────────────────────────────────────────────────────────
+ * Agentlas owns scheduling: a recurring or one-time job is an app automation, which the app lists, pauses, edits and deletes. A job a run puts in
+ * launchd, cron, at, a systemd timer or the Windows Task Scheduler is none of that - the app cannot see or stop it (a "remind me at 14:00" turned into a
+ * LaunchAgent in the person's home that the app never listed). Full access does not make it the owner's choice: the person asked for a reminder, not for a
+ * system job, and One runs at full access by default. So this is refused in every mode, with a line that sends the model to the app automation.
+ *
+ * Read like the delete rule (shellCommandDeletes): the line is split at the unquoted separators, each simple command's PROGRAM is taken after env
+ * assignments, redirections and wrappers, `sh -c '...'` / `cmd /c` / `powershell -Command` / `-EncodedCommand` / `$( )` / backticks / `eval` / `osascript do
+ * shell script` are opened, and the program and its arguments decide - never a word of the text (`echo "launchctl load"`, `man crontab`, `launchctl list`,
+ * `crontab -l` and `launchctl bootout` are not registrations). A file that puts a job in place counts too: a redirection, `cp`/`mv`/`tee`/`install`/`ln`,
+ * `sed -i`, `plutil -convert`, `defaults write` or an interpreter's inline code that names a scheduler folder (LaunchAgents / LaunchDaemons, cron folders,
+ * systemd unit folders - anchored at the root or the person's home, so a repository's own `Library/LaunchAgents` is not one). A script FILE the model wrote and
+ * then runs, or `python -c` that spawns launchctl, is not visible here; the model is not an adversary, the aim is the accidental job. Pure; no imports. */
+export type OsSchedulerKind = "launchd" | "cron" | "at" | "systemd" | "windows-task";
+
+const LAUNCHCTL_REGISTERING = new Set(["load", "bootstrap", "enable", "kickstart", "submit"]);
+const SYSTEMCTL_ENABLING = new Set(["enable", "reenable", "link", "preset", "preset-all"]);
+const SYSTEMCTL_STARTING = new Set(["start", "restart", "reload-or-restart", "try-restart", "try-reload-or-restart"]);
+const SYSTEMD_RUN_TIMER_FLAG = /^--(?:on-(?:active|boot|startup|unit-active|unit-inactive|calendar|clock-change|timezone-change)|timer-property)(?:=|$)/i;
+const POWERSHELL_SCHEDULER_CMDLETS = new Set([
+  "register-scheduledtask", "set-scheduledtask", "enable-scheduledtask", "register-scheduledjob", "set-scheduledjob", "enable-scheduledjob",
+]);
+/** Wrapper flags that take the next word as their value (`sudo -u me launchctl load x`). */
+const WRAPPER_VALUE_FLAGS = new Set(["-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "-R", "-T"]);
+const CODE_INTERPRETERS = new Set(["python", "python2", "python3", "node", "nodejs", "deno", "bun", "perl", "ruby", "php", "lua", "osascript", "jxa"]);
+/** Programs that put a file at their LAST operand (`cp a b`, `mv a b`, `ln -s a b`, `install -m 644 a b`, `rsync a b`, `ditto a b`). */
+const DEST_LAST_WRITERS = new Set(["cp", "mv", "install", "ln", "rsync", "ditto", "gcp", "gmv", "ginstall", "gln"]);
+/** Programs whose every operand is a file they write. */
+const ALL_OPERAND_WRITERS = new Set(["tee", "touch", "truncate", "gtee", "gtouch"]);
+const PLUTIL_WRITING_FLAGS = new Set(["-convert", "-insert", "-replace", "-remove", "-create"]);
+const DEFAULTS_WRITING_SUBCOMMANDS = new Set(["write", "delete", "remove", "rename", "import"]);
+const PLISTBUDDY_WRITING_VERB = /^(?:add|set|delete|merge|import|save|copy|clear)\b/i;
+const AT_TIME_WORD = /^(?:now|noon|midnight|teatime|today|tomorrow|\d)/i;
+
+/** The person's home written the ways a shell line spells it, or nothing (an absolute path from the root). */
+const HOME_FORMS = String.raw`(?:~|\$HOME|\$\{HOME\}|\/Users\/[^/\s]+|\/home\/[^/\s]+|\/var\/root|\/root)?`;
+/** The folders a scheduler reads its jobs from, anchored (the kind each belongs to is the index's second part). */
+const SCHEDULER_FOLDERS: ReadonlyArray<readonly [RegExp, OsSchedulerKind]> = [
+  [new RegExp(`^${HOME_FORMS}\\/Library\\/Launch(?:Agents|Daemons)(?:\\/|$)`, "i"), "launchd"],
+  [/^\/etc\/(?:crontab|cron\.(?:d|daily|hourly|weekly|monthly))(?:\/|$)/i, "cron"],
+  [/^\/var\/spool\/cron(?:\/|$)/i, "cron"],
+  [/^\/var\/(?:spool\/)?at(?:\/|$)/i, "at"],
+  [new RegExp(`^${HOME_FORMS}\\/\\.config\\/systemd\\/user(?:\\/|$)`, "i"), "systemd"],
+  [/^\/(?:etc|usr\/lib|lib)\/systemd\/(?:system|user)(?:\/|$)/i, "systemd"],
+];
+/** The same folders named inside an interpreter's code (a quoted path: not anchored). */
+const SCHEDULER_FOLDERS_IN_CODE: ReadonlyArray<readonly [RegExp, OsSchedulerKind]> = [
+  [/\/Library\/Launch(?:Agents|Daemons)\b/i, "launchd"],
+  [/\/etc\/cron(?:tab|\.(?:d|daily|hourly|weekly|monthly))\b|\/var\/spool\/cron\b/i, "cron"],
+  [/\.config\/systemd\/user\b|\/etc\/systemd\/(?:system|user)\b/i, "systemd"],
+];
+
+const normalizedPath = (word: string): string => word.replace(/\/{2,}/g, "/").replace(/\/\.(?=\/)/g, "");
+
+/** The scheduler a path (an operand or a redirection target) puts a job in, or null. */
+function schedulerFolderKind(word: string): OsSchedulerKind | null {
+  const path = normalizedPath(word);
+  for (const [folder, kind] of SCHEDULER_FOLDERS) if (folder.test(path)) return kind;
+  return null;
+}
+
+/** Does a file tool's path (Write / Edit / an ACP edit / a patch) put a file in a scheduler folder? Anchored: a repository's own `Library/LaunchAgents` is not one. */
+export function osSchedulerFilePath(path: string): boolean {
+  return typeof path === "string" && path.length > 0 && path.length <= 4096 && schedulerFolderKind(path) !== null;
+}
+
+function schedulerFolderKindInCode(code: string): OsSchedulerKind | null {
+  for (const [folder, kind] of SCHEDULER_FOLDERS_IN_CODE) if (folder.test(code)) return kind;
+  return null;
+}
+
+/** `schtasks.exe` and `schtasks` are one program; `.cmd` / `.bat` / `.com` likewise. */
+const programName = (word: string): string => baseProgram(word).replace(/\.(?:exe|cmd|bat|com)$/, "");
+const operandsOf = (rest: string[]): string[] => rest.filter((word) => word === "-" || !word.startsWith("-"));
+const isRelativeOperand = (word: string): boolean => !/^[/~$-]/.test(word) && !/^[A-Za-z]:[\\/]/.test(word);
+
+/** Words that follow a heredoc operator's receiver: the body of one the receiving program does not run as shell is data (or code for an interpreter), not commands. */
+function splitHeredocs(text: string): { text: string; interpreterBodies: string[] } {
+  const lines = text.split("\n");
+  const bodies: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const opener = /<<(?!<)-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(lines[index]!);
+    if (!opener) continue;
+    const before = lines[index]!.slice(0, opener.index).split(/&&|\|\||[;|&(){}]/).pop() ?? "";
+    const words = shellWords(before);
+    let head = 0;
+    while (head < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[head]!) || SHELL_WRAPPERS.has(programName(words[head]!)) || words[head]!.startsWith("-"))) head += 1;
+    const receiver = programName(words[head] ?? "");
+    let end = index + 1;
+    while (end < lines.length && lines[end]!.trim() !== opener[2]) end += 1;
+    if (!SHELL_INTERPRETERS.has(receiver)) {
+      if (CODE_INTERPRETERS.has(receiver) || /^python[0-9.]*$/.test(receiver)) bodies.push(lines.slice(index + 1, end).join("\n"));
+      for (let body = index + 1; body < end && body < lines.length; body += 1) lines[body] = "";
+    }
+    index = end;
+  }
+  return { text: lines.join("\n"), interpreterBodies: bodies };
+}
+
+/** The file operands a known writer program puts a file at, for the programs that can put a job file in place. */
+function writerTargets(program: string, rest: string[]): string[] {
+  const operands = operandsOf(rest);
+  if (DEST_LAST_WRITERS.has(program)) {
+    const dirFlag = rest.findIndex((word) => word === "-t" || word === "--target-directory");
+    if (dirFlag >= 0 && rest[dirFlag + 1]) return [rest[dirFlag + 1]!];
+    const attached = rest.find((word) => word.startsWith("--target-directory="));
+    if (attached) return [attached.slice("--target-directory=".length)];
+    return operands.length >= 2 ? [operands[operands.length - 1]!] : [];
+  }
+  if (ALL_OPERAND_WRITERS.has(program)) return operands;
+  if (program === "dd") return rest.filter((word) => word.startsWith("of=")).map((word) => word.slice(3));
+  if (program === "curl") {
+    const out: string[] = [];
+    for (let k = 0; k < rest.length; k += 1) {
+      if ((rest[k] === "-o" || rest[k] === "--output") && rest[k + 1]) out.push(rest[k + 1]!);
+      else if (rest[k]!.startsWith("--output=")) out.push(rest[k]!.slice("--output=".length));
+    }
+    return out;
+  }
+  if (program === "wget") {
+    const out: string[] = [];
+    for (let k = 0; k < rest.length; k += 1) {
+      if ((rest[k] === "-O" || rest[k] === "--output-document" || rest[k] === "-P" || rest[k] === "--directory-prefix") && rest[k + 1]) out.push(rest[k + 1]!);
+      else if (rest[k]!.startsWith("--output-document=") || rest[k]!.startsWith("--directory-prefix=")) out.push(rest[k]!.slice(rest[k]!.indexOf("=") + 1));
+    }
+    return out;
+  }
+  if (program === "sed" || program === "gsed" || program === "perl") {
+    return rest.some((word) => /^-[A-Za-z]*i/.test(word) || word.startsWith("--in-place")) ? operands : [];
+  }
+  if (program === "plutil") return rest.some((word) => PLUTIL_WRITING_FLAGS.has(word)) ? operands : [];
+  if (program === "defaults") {
+    const sub = operands[0];
+    return sub !== undefined && DEFAULTS_WRITING_SUBCOMMANDS.has(sub) ? operands.slice(1) : [];
+  }
+  if (program === "plistbuddy") return rest.some((word) => PLISTBUDDY_WRITING_VERB.test(word)) ? operands : [];
+  return [];
+}
+
+interface SchedulerWalkState { cdKind: OsSchedulerKind | null }
+
+function schedulerOfSimpleCommand(words: string[], depth: number, state: SchedulerWalkState): OsSchedulerKind | null {
+  // Redirection targets anywhere in the command (`cat > ~/Library/LaunchAgents/x.plist`, `echo x >> /etc/crontab`).
+  for (let k = 0; k < words.length; k += 1) {
+    const word = words[k]!;
+    let target: string | undefined;
+    const bare = /^\d*>>?\|?$|^&>>?$/.exec(word);
+    if (bare) target = words[k + 1];
+    else { const attached = /^(?:\d*>>?\|?|&>>?)(.+)$/.exec(word); if (attached) target = attached[1]; }
+    if (target) {
+      const kind = schedulerFolderKind(target) ?? (state.cdKind && isRelativeOperand(target) ? state.cdKind : null);
+      if (kind) return kind;
+    }
+  }
+  let i = 0;
+  let queryOnly = false;
+  while (i < words.length) {
+    const w = words[i]!;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || /^\d*[<>]/.test(w) || /^&>/.test(w)) { i += 1; continue; }
+    const wrapper = programName(w);
+    if (SHELL_WRAPPERS.has(wrapper)) {
+      i += 1;
+      while (i < words.length && (words[i]!.startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i]!) || /^\d+(\.\d+)?[smhd]?$/.test(words[i]!))) {
+        // `command -v x` / `command -V x` look a program up; they do not run it.
+        if ((wrapper === "command" || wrapper === "builtin") && /^-[vV]$/.test(words[i]!)) queryOnly = true;
+        if ((wrapper === "sudo" || wrapper === "doas") && WRAPPER_VALUE_FLAGS.has(words[i]!)) i += 1;
+        i += 1;
+      }
+      continue;
+    }
+    break;
+  }
+  const head = words[i];
+  if (!head || queryOnly) return null;
+  const program = programName(head);
+  const rest = words.slice(i + 1);
+  const operands = operandsOf(rest);
+
+  if (program === "cd" || program === "pushd") {
+    const kind = operands[0] ? schedulerFolderKind(operands[0]) : null;
+    state.cdKind = kind;
+    return null;
+  }
+  if (program === "launchctl") {
+    const sub = operands[0];
+    if (sub !== undefined && LAUNCHCTL_REGISTERING.has(sub)) return "launchd";
+    // `launchctl asuser <uid> launchctl load x`: what follows the uid runs as that user.
+    if (sub === "asuser" && depth < 3 && operands.length > 2) return schedulerOfSimpleCommand(rest.slice(rest.indexOf(operands[1]!) + 1), depth + 1, state);
+    return null;
+  }
+  if (program === "crontab") return rest.some((word) => /^-[A-Za-z]*[lr][A-Za-z]*$/.test(word)) ? null : "cron";
+  if (program === "batch") return "at";
+  if (program === "at") {
+    if (rest.some((word) => /^-[A-Za-z]*[lrdcV][A-Za-z]*$/.test(word))) return null;
+    return rest.some((word) => AT_TIME_WORD.test(word) || word === "-f" || word === "-t") ? "at" : null;
+  }
+  if (program === "systemctl") {
+    const sub = operands.find((word) => SYSTEMCTL_ENABLING.has(word) || SYSTEMCTL_STARTING.has(word));
+    if (sub === undefined) return null;
+    const timer = operands.some((word) => /\.timer$/i.test(word));
+    if (SYSTEMCTL_STARTING.has(sub)) return timer ? "systemd" : null;
+    return timer || rest.includes("--user") ? "systemd" : null;
+  }
+  if (program === "systemd-run") return rest.some((word) => SYSTEMD_RUN_TIMER_FLAG.test(word)) ? "systemd" : null;
+  // A Windows path in double quotes loses its backslashes in shellWords ("C:\\Windows\\System32\\schtasks.exe" -> one word), so these two are matched by the end of the word.
+  const nameEnds = (name: string): boolean => program === name || program.endsWith(name);
+  if (nameEnds("schtasks")) return rest.some((word) => /^\/(?:create|change)$/i.test(word)) ? "windows-task" : null;
+  if ([...POWERSHELL_SCHEDULER_CMDLETS].some(nameEnds)) return "windows-task";
+
+  // Files that put a job in place.
+  for (const target of writerTargets(program, rest)) {
+    const kind = schedulerFolderKind(target) ?? (state.cdKind && isRelativeOperand(target) ? state.cdKind : null);
+    if (kind) return kind;
+  }
+
+  if (depth >= 3) return null;
+  // `eval "launchctl load x"`: its words are a command line.
+  if (program === "eval") return schedulerOfLine(rest.join(" "), depth + 1, state);
+  // `sh -c '...'`, `bash -lc "..."`, `su -c '...'`: the script is the word after the flag cluster that carries `c`.
+  if (SHELL_INTERPRETERS.has(program) || program === "su") {
+    const flag = rest.findIndex((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word));
+    return flag >= 0 && rest[flag + 1] !== undefined ? schedulerOfLine(rest[flag + 1]!, depth + 1, state) : null;
+  }
+  if (program === "cmd") {
+    const flag = rest.findIndex((word) => /^\/[ck]$/i.test(word));
+    return flag >= 0 ? schedulerOfLine(rest.slice(flag + 1).join(" "), depth + 1, state) : null;
+  }
+  if (program === "pwsh" || program === "powershell") {
+    const flag = rest.findIndex((word) => /^-(?:c|command)$/i.test(word));
+    if (flag >= 0) return schedulerOfLine(rest.slice(flag + 1).join(" "), depth + 1, state);
+    const encoded = rest.findIndex((word) => /^-e(?:nc(?:odedcommand)?)?$/i.test(word));
+    if (encoded >= 0 && rest[encoded + 1]) {
+      try { return schedulerOfLine(Buffer.from(rest[encoded + 1]!, "base64").toString("utf16le"), depth + 1, state); } catch { return null; }
+    }
+    return null;
+  }
+  if (program === "osascript" || program === "jxa") {
+    // AppleScript: `do shell script "launchctl load x"` runs the quoted text as a shell line.
+    for (const word of rest) {
+      for (const match of word.matchAll(/do shell script\s+"((?:[^"\\]|\\.)*)"/gi)) {
+        const inner = schedulerOfLine(match[1]!.replace(/\\(["\\])/g, "$1"), depth + 1, state);
+        if (inner) return inner;
+      }
+    }
+  }
+  // An interpreter's inline code that names a scheduler folder (`python3 -c "open('/Users/me/Library/LaunchAgents/x.plist','w')..."`).
+  if (CODE_INTERPRETERS.has(program) || /^python[0-9.]*$/.test(program)) {
+    for (const word of rest) { const kind = schedulerFolderKindInCode(word); if (kind) return kind; }
+  }
+  return null;
+}
+
+function schedulerOfLine(line: string, depth: number, state: SchedulerWalkState = { cdKind: null }): OsSchedulerKind | null {
+  if (depth > 3 || !line) return null;
+  const { text, interpreterBodies } = splitHeredocs(line);
+  // `$( ... )` and backticks run a command wherever they stand, quoted or not (a single-quoted `$(...)` is text).
+  for (const match of text.replace(/'[^']*'/g, "''").matchAll(/\$\(([^()]*)\)|`([^`]*)`/g)) {
+    const inner = schedulerOfLine(match[1] ?? match[2] ?? "", depth + 1, state);
+    if (inner) return inner;
+  }
+  let current: string[] = [];
+  for (const word of shellWords(text)) {
+    if (SHELL_SEPARATORS.has(word)) {
+      if (current.length > 0) { const kind = schedulerOfSimpleCommand(current, depth, state); if (kind) return kind; }
+      current = [];
+    } else current.push(word);
+  }
+  if (current.length > 0) { const kind = schedulerOfSimpleCommand(current, depth, state); if (kind) return kind; }
+  for (const body of interpreterBodies) { const kind = schedulerFolderKindInCode(body); if (kind) return kind; }
+  return null;
+}
+
+/** Which OS scheduler does this shell command line register a job in (launchctl load / bootstrap / enable / kickstart / submit, crontab install, at, systemctl enable of a timer or a user unit, schtasks /create, Register-ScheduledTask, a file put in a scheduler folder)? null when it registers none. */
+export function shellCommandRegistersScheduler(command: string): OsSchedulerKind | null {
+  return typeof command === "string" && command ? schedulerOfLine(command.slice(0, 20_000), 0) : null;
+}
+
+/**
+ * The ask-shaped question the arbiter and the hooks share: a shell command line, or a file tool's path (an ACP / builtin edit, a patch), that puts a job in an OS scheduler.
+ * `detail` is read for an edit only (it is the path there); a shell ask is read by its `command`, never by its display detail.
+ */
+export function askRegistersOsScheduler(ask: { command?: unknown; kind?: unknown; detail?: unknown; arguments?: unknown }): OsSchedulerKind | null {
+  if (typeof ask.command === "string" && ask.command) { const kind = shellCommandRegistersScheduler(ask.command); if (kind) return kind; }
+  if (ask.kind === "edit") {
+    const paths: unknown[] = [ask.detail];
+    if (ask.arguments && typeof ask.arguments === "object" && !Array.isArray(ask.arguments)) {
+      const args = ask.arguments as Record<string, unknown>;
+      for (const key of ["path", "file_path", "filePath", "file", "target", "destination", "notebook_path"]) paths.push(args[key]);
+    }
+    for (const value of paths) {
+      const kind = typeof value === "string" && value.length <= 4096 ? schedulerFolderKind(value.trim()) : null;
+      if (kind) return kind;
+    }
+  }
+  return null;
 }

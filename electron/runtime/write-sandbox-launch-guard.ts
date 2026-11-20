@@ -39,3 +39,22 @@ export function shellDeleteGateHook(): PreToolUseHookEntry | null {
   const handler = nodeHookHandler(script);
   return { matcher: writeSandboxLaunchGuardMatcher(), hooks: [{ ...handler, timeout: 340 }] };
 }
+
+export function osSchedulerGateScriptPath(): string {
+  return path.join(__dirname, "os-scheduler-gate-hook.js");
+}
+
+/**
+ * The OS scheduler gate (os-scheduler-gate-hook.ts) watches the shell tools and the file-edit tools: a job put in launchd / cron / systemd folders by a file write
+ * is a registration like the command that loads it. The tool names are Claude Code's (and codex's shell); on Windows the PowerShell tool is a shell too.
+ */
+export function osSchedulerGateMatcher(platform: NodeJS.Platform = process.platform): string {
+  return `${writeSandboxLaunchGuardMatcher(platform)}|Write|Edit|MultiEdit|NotebookEdit`;
+}
+
+/** Null when the script is missing: the run then does not start (never a gate that is only said to be there). */
+export function osSchedulerGateHook(): PreToolUseHookEntry | null {
+  const script = osSchedulerGateScriptPath();
+  if (!fs.existsSync(script)) return null;
+  return { matcher: osSchedulerGateMatcher(), hooks: [nodeHookHandler(script)] };
+}

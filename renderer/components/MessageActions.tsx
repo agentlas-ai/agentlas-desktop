@@ -31,7 +31,8 @@ export function MessageActions({ messageId, author, text, locale, onReply, child
   const longPressed = useRef(false);
   const cancelPress = () => { if (timer.current) clearTimeout(timer.current); timer.current = null; };
   const open = (x: number, y: number) => { setStatus(null); setMenu({ x: Math.max(8, Math.min(x, window.innerWidth - 240)), y: Math.max(8, Math.min(y, window.innerHeight - 210)) }); };
-  const dismiss = () => { setMenu(null); setSelecting(false); triggerRef.current?.focus(); };
+  // The selection dialog holds the rest of the page inert while it is open, so the button is focused after the dialog has gone.
+  const dismiss = () => { setMenu(null); setSelecting(false); window.requestAnimationFrame(() => triggerRef.current?.focus()); };
   useEffect(() => () => cancelPress(), []);
   useEffect(() => {
     if (!menu && !selecting) return;

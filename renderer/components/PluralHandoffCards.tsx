@@ -5,16 +5,18 @@
  *   HandoffCard       the card of one piece of work in the personal agent's conversation - the work this desktop's agent handed to another (sent) or the work another handed to it (received).
  *                     It is drawn from the card row only; its buttons carry ids to Main (`pluralHandoffAct`). Confirmations waiting for THIS desktop's answer sit under it, one prompt each; what was answered here is a quiet line.
  *   RemoteAskPrompt   the numbered confirmation (BP): delete / send = Allow, Allow for this task, Deny; payment = Allow, Deny. It has no clock.
+ * ConsentChip the chip of a hand-off between agents: Allow, Always allow, Deny. On the sending card while its row is `asking` (nothing was sent), and on the receiving desktop's screen
+ *                     (components/one/PluralConsentPrompts.tsx). It carries the row id only; the server alone sends, so whichever screen answers first is the answer. It has no clock.
  */
-import { Fragment, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { IconCheck, IconClose, IconMonitor, IconSmartphone } from "@/components/Icon";
 import { ApprovalPrompt, type ApprovalPromptDeck } from "@/components/ApprovalPrompt";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import {
-  handoffCardView, handoffTimeWord, remoteAskCopy,
-  type HandoffAction, type HandoffAnswerLine, type HandoffCardValue, type HandoffIcon, type RemoteAskChoice, type RemoteAskCopy,
+  consentCopy, handoffCardView, handoffTimeWord, remoteAskCopy,
+  type ConsentChipCopy, type ConsentChoice, type HandoffAction, type HandoffAnswerLine, type HandoffCardValue, type HandoffIcon, type RemoteAskChoice, type RemoteAskCopy,
 } from "@shared/plural-handoff-card";
 import s from "./PluralHandoffCards.module.css";
 import r from "./one/OneApprovalRecords.module.css";
@@ -56,6 +58,36 @@ export function RemoteAskPrompt({ copy, locked = false, onChoose, deck, testId =
       testId={testId}
     />
   );
+}
+
+/** The consent chip: the question line, the work in one line (and its end condition), then Allow / Always allow / Deny. `brief` is left out where the card above already shows the work. */
+export function ConsentChip({ copy, showBrief = true, locked = false, onChoose, deck, testId = "plural-consent-chip" }: {
+  copy: ConsentChipCopy; showBrief?: boolean; locked?: boolean; onChoose: (choice: ConsentChoice) => void; deck?: ApprovalPromptDeck; testId?: string;
+}) {
+  return (
+    <ApprovalPrompt
+      question={copy.header}
+      meta={showBrief ? <><div>{copy.brief}</div>{copy.doneWhen ? <div>{copy.doneWhen}</div> : null}</> : null}
+      options={copy.choices.map((choice) => ({ id: choice.id, title: choice.label, ...(choice.note ? { note: choice.note, showNote: true } : {}), ...(choice.role ? { role: choice.role } : {}), disabled: locked }))}
+      locked={locked}
+      onChoose={(id) => onChoose(id as ConsentChoice)}
+      {...(deck ? { deck } : {})}
+      testId={testId}
+    />
+  );
+}
+
+/** The name of this desktop's own personal agent (the "A" of the chip). Read when a chip is on screen, never kept. */
+export function useOwnAgentName(enabled: boolean): string {
+  const [name, setName] = useState("");
+  useEffect(() => {
+    if (!enabled) return;
+    let live = true;
+    const profiles = ipc()?.oneProfile;
+    if (profiles && typeof profiles.get === "function") void Promise.resolve(profiles.get()).then((profile) => { if (live) setName(typeof profile?.displayName === "string" ? profile.displayName.trim() : ""); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [enabled]);
+  return name;
 }
 
 function AnswerLine({ line, ko, now }: { line: HandoffAnswerLine; ko: boolean; now: number }) {
@@ -102,14 +134,26 @@ export function HandoffCard({ value }: { value: HandoffCardValue }) {
     if (action === "plan" || action === "login") { router.push("/settings"); return; }
     if (!api?.pluralHandoffAct) return;
     setBusy(true);
-    try { await api.pluralHandoffAct({ op: action, id: value.id }); } catch { /* the card stays as it is; the next read shows the truth */ } finally { setBusy(false); }
+    // Dismiss is the card's cancel once the work is over (Main reads the card row; plural-handoff-cards.ts actOnHandoffCard).
+    try { await api.pluralHandoffAct({ op: action === "dismiss" ? "cancel" : action, id: value.id }); } catch { /* the card stays as it is; the next read shows the truth */ } finally { setBusy(false); }
+  };
+  const asking = value.state === "asking" && value.k === "sent";
+  const ownName = useOwnAgentName(asking);
+  const [consentLocked, setConsentLocked] = useState(false);
+  const consent = async (choice: ConsentChoice): Promise<void> => {
+    const api = ipc();
+    if (!api?.pluralHandoffAct || consentLocked) return;
+    setConsentLocked(true);
+    let settled = false;
+    try { settled = (await api.pluralHandoffAct({ op: "consent", id: value.id, answer: choice })).ok; } catch { /* the chip stays; the same answer again is the same request */ }
+    if (!settled) setConsentLocked(false);
   };
   const answer = async (qid: string, choice: RemoteAskChoice): Promise<void> => {
     const api = ipc();
     if (!api?.pluralHandoffAct) return;
     try { await api.pluralHandoffAct({ op: "answer", id: value.id, qid, answer: choice === "deny" ? "deny" : choice === "allow_session" ? "allow_task" : "allow" }); } catch { /* the chip stays */ }
   };
-  const actionLabel = (a: HandoffAction): string => a === "cancel" ? (ko ? "취소" : "Cancel") : a === "retry" ? (ko ? "재시도" : "Retry") : a === "plan" ? (ko ? "요금제" : "Plan") : (ko ? "로그인" : "Sign in");
+  const actionLabel = (a: HandoffAction): string => a === "cancel" ? (ko ? "취소" : "Cancel") : a === "retry" ? (value.consent === "unanswered" ? (ko ? "다시 묻기" : "Ask again") : (ko ? "재시도" : "Retry")) : a === "plan" ? (ko ? "요금제" : "Plan") : a === "dismiss" ? (ko ? "지우기" : "Dismiss") : (ko ? "로그인" : "Sign in");
   return (
     <section className={s.card} data-testid="handoff-card" data-handoff-state={value.state} data-handoff-kind={value.k} aria-label={view.header}>
       <div className={s.head}>
@@ -127,6 +171,12 @@ export function HandoffCard({ value }: { value: HandoffCardValue }) {
       </div>
       {view.result && <p ref={resultRef} className={s.result} data-clamped={expanded ? "false" : "true"}>{view.result}</p>}
       {view.result && longResult && !expanded && <button type="button" className={s.more} onClick={() => setExpanded(true)}>{ko ? "전체 보기" : "Show all"}</button>}
+      {asking && (
+        <div className={s.asks}>
+          <ConsentChip showBrief={false} locked={consentLocked} onChoose={(choice) => { void consent(choice); }}
+            copy={consentCopy({ fromName: ownName, toName: [value.agent, value.phone ? (ko ? "폰" : "Phone") : value.place].filter(Boolean).join(" · "), brief: value.brief }, ko)} />
+        </div>
+      )}
       {view.note && <div className={s.note}><IconMonitor size={13} /><span>{view.note}</span></div>}
       {value.q && value.q.length > 0 && (
         <div className={s.asks}>

@@ -49,7 +49,14 @@ export function idleGoalPassStep(input: {
    * not a second pass of the same words.
    */
   planFinished?: boolean;
+  /**
+   * A Goal the host opened from one owner message (auto-message): an earlier pass of this invocation carried out something (a host receipt) and the pass that just ended
+   * carried out nothing new. It was only kept alive by the ledger, so its answer is "nothing changed": the invocation ends at once and Main verifies the finished work, instead of
+   * two more calls that say the same thing (three "nothing changed" passes after the file was made).
+   */
+  settledEffects?: boolean;
 }): { idlePasses: number; yieldNow: boolean } {
+  if (input.settledEffects && input.continuousMode && input.goalDrivenPass && input.passShouldContinue) return { idlePasses: input.idlePasses + 1, yieldNow: true };
   const idle = input.lastPassToolCalls === 0 || (input.lastPassToolCalls !== null && input.lastPassNovelObservations === 0);
   if (input.continuousMode && input.goalDrivenPass && input.passShouldContinue && idle) {
     const idlePasses = input.idlePasses + 1;

@@ -20,6 +20,37 @@ export interface AutomationNotificationInput {
  */
 export const AUTOMATION_REPORT_SPACING_MS = 6 * 60 * 60_000;
 
+interface BudgetRow { enabled: number; max_runs: number | null; run_count: number | null; end_at: string | null; schedule_json: string | null }
+function budgetRow(automationId: string): BudgetRow | undefined {
+  // A store that cannot be read answers "no budget known": the old rules (a paused monitor is silent, a quiet run stays quiet) then stand.
+  try { return getDb().prepare("SELECT enabled, max_runs, run_count, end_at, schedule_json FROM automations WHERE id = ?").get(automationId) as BudgetRow | undefined; } catch { return undefined; }
+}
+function scheduleKind(json: string | null): string | null {
+  try { const kind = (JSON.parse(json ?? "null") as { kind?: unknown } | null)?.kind; return typeof kind === "string" ? kind : null; } catch { return null; }
+}
+/**
+ * True when the automation ran as often as it was ever allowed to: max_runs reached, a one-time schedule that has run, or its end time passed
+ * (the conditions store/automations.ts markAutomationRun disables it on). Read from the stored row, never from words. An owner who paused a
+ * schedule before it used its budget stays silenced.
+ */
+export function automationUsedItsOwnBudget(automationId: string): boolean {
+  const row = budgetRow(automationId);
+  if (!row) return false;
+  const ran = row.run_count ?? 0;
+  return (row.max_runs != null && ran >= row.max_runs) || (scheduleKind(row.schedule_json) === "once" && ran >= 1)
+    || (row.end_at != null && Date.parse(row.end_at) <= Date.now());
+}
+/**
+ * True when a run's answer is itself what the person asked to receive, so it is never "nothing to report":
+ *  - a schedule that runs once (a single run the person asked for is not hourly noise), or one allowed a single run;
+ *  - an automation whose monitor says so (monitor.deliverAnswer, set by the model or the owner for a repeating reminder or briefing).
+ * Structural only: no keyword or prompt-text matching decides it.
+ */
+export function automationAnswerIsDeliverable(automation: { id: string; monitor?: { deliverAnswer?: boolean } | null }): boolean {
+  if (automation.monitor?.deliverAnswer === true) return true;
+  const row = budgetRow(automation.id);
+  return !!row && (scheduleKind(row.schedule_json) === "once" || row.max_runs === 1);
+}
 function repeatsLastReport(last: { status?: string; outcome?: string | null; observationDigest?: string }, input: AutomationNotificationInput, digest: string): boolean {
   if (last.status !== input.status || (last.outcome ?? null) !== (input.outcome ?? null)) return false;
   // A model words the same question differently each run, so the judge's answer identifies it, not the text.
@@ -32,7 +63,9 @@ export function claimAutomationNotification(input: AutomationNotificationInput):
   return getDb().transaction(() => {
     const automation = getAutomation(input.automationId);
     if (!automation || input.status === "skipped" || input.unchanged === true) return false;
-    if (automation.monitor && !automation.enabled) return false;
+    // Only an owner-paused monitor is silent. A schedule that was switched off because it used its own budget (its last allowed run
+    // finished, a one-shot ran, the end time passed) still reports that last run: that report is what the person was promised.
+    if (automation.monitor && !automation.enabled && !automationUsedItsOwnBudget(automation.id)) return false;
     const existing = getDb().prepare("SELECT 1 FROM run_events WHERE run_id = ? AND kind IN ('automation_notification_attempt','automation_notification_suppressed') AND automation_id = ? LIMIT 1")
       .get(input.runId, automation.id);
     if (existing) return false;

@@ -11,7 +11,7 @@ import styles from "./PanelOverview.module.css";
  */
 export type OverviewRowState = "running" | "done" | "failed" | "waiting";
 export interface OverviewRow { id: string; label: string; state: OverviewRowState; meta?: string; mono?: boolean }
-export interface OverviewOutput { id: string; name: string; kind: "file" | "image"; onOpen: () => void }
+export interface OverviewOutput { id: string; name: string; kind: "file" | "image"; onOpen: () => void; /** Shown on hover when the name alone does not say which file it is (a path). */ title?: string }
 
 export function PanelOverview({ locale, environment, onEnvironmentSettings, goal, onOpenGoal, subagents, commands, outputs, earlier, children, onOpenTerminal }: {
   locale: "ko" | "en";
@@ -78,7 +78,7 @@ export function PanelOverview({ locale, environment, onEnvironmentSettings, goal
         <h4>{ko ? "산출물" : "Outputs"}{earlier ? <button type="button" className={styles.earlier} aria-expanded={open.earlier} onClick={() => setOpen((current) => ({ ...current, earlier: !current.earlier }))}>{ko ? "이전" : "Earlier"}</button> : null}</h4>
         {outputs.length === 0 ? <p className={styles.empty}>{ko ? "생성한 파일과 사이트가 여기에 표시돼요" : "Files or sites you create appear here"}</p>
           : outputs.map((item) => <button key={item.id} type="button" className={`${styles.row} ${styles.press}`} onClick={item.onOpen} data-overview-output={item.kind}>
-            {item.kind === "image" ? <IconImage size={15} aria-hidden="true" /> : <IconFileText size={15} aria-hidden="true" />}<span className={styles.grow} title={item.name}>{item.name}</span>
+            {item.kind === "image" ? <IconImage size={15} aria-hidden="true" /> : <IconFileText size={15} aria-hidden="true" />}<span className={styles.grow} title={item.title ?? item.name}>{item.name}</span>
           </button>)}
         {earlier && open.earlier ? <div className={styles.earlierBody}>{earlier}</div> : null}
       </section>

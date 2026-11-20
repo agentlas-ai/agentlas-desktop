@@ -15,7 +15,7 @@
 
 export type QuitPlan =
   | { kind: "quit"; daemon: "stop" | "detach" }
-  | { kind: "ask"; activeWork: number }
+  | { kind: "ask"; activeWork: number; scheduledWork?: number }
   | { kind: "background"; activeWork: number; autoQuitWhenIdle: boolean };
 
 export interface QuitPolicyInput {
@@ -38,6 +38,12 @@ export interface QuitPolicyInput {
    * tray: that would abort the owner's logout.
    */
   userQuit: boolean;
+  /**
+   * Enabled reminders/automations and pending Goal waits that quitting stops from firing (scheduled-work-census.ts). Only the caller
+   * that closed the LAST WINDOW on Windows/Linux fills it: an X there reads as "put it away", not "stop everything" — macOS never gets
+   * here (closing the window is not a quit), and an explicit Cmd-Q / menu Quit is the person's own choice and stays unasked.
+   */
+  scheduledWork?: number;
 }
 
 export function planGuiQuit(input: QuitPolicyInput): QuitPlan {
@@ -49,7 +55,8 @@ export function planGuiQuit(input: QuitPolicyInput): QuitPlan {
       ? { kind: "background", activeWork: input.activeWork, autoQuitWhenIdle: false }
       : { kind: "quit", daemon: "detach" };
   }
-  if (input.activeWork > 0) return { kind: "ask", activeWork: input.activeWork };
+  const scheduledWork = input.userQuit ? Math.max(0, input.scheduledWork ?? 0) : 0;
+  if (input.activeWork > 0 || scheduledWork > 0) return { kind: "ask", activeWork: input.activeWork, ...(scheduledWork > 0 ? { scheduledWork } : {}) };
   return { kind: "quit", daemon: "stop" };
 }
 
@@ -98,18 +105,45 @@ export function backgroundHoldShouldQuit(hold: { autoQuitWhenIdle: boolean; cont
   return hold.autoQuitWhenIdle && !hold.continuity && activeWork === 0;
 }
 
-export function quitPromptText(locale: "ko" | "en", activeWork: number) {
+export function quitPromptText(locale: "ko" | "en", activeWork: number, scheduledWork = 0) {
+  if (activeWork === 0 && scheduledWork > 0) {
+    // Nothing is running; the question is about what would never fire. "Keep in background" holds until the last one has passed.
+    return locale === "ko"
+      ? {
+          message: `알림·예약 ${scheduledWork}개`,
+          detail: "앱을 끄면 울리지 않아요.",
+          buttons: ["끄기", "백그라운드로 두기", "취소"],
+        }
+      : {
+          message: `${scheduledWork} reminder${scheduledWork === 1 ? "" : "s"} or schedule${scheduledWork === 1 ? "" : "s"}`,
+          detail: "They will not fire while the app is off.",
+          buttons: ["Quit", "Keep in background", "Cancel"],
+        };
+  }
+  const base = quitPromptBase(locale, activeWork);
+  if (scheduledWork <= 0) return base;
+  return { ...base, detail: `${base.detail} ${locale === "ko" ? `알림·예약 ${scheduledWork}개도 멈춰요.` : `${scheduledWork} reminder(s) stop too.`}` };
+}
+
+function quitPromptBase(locale: "ko" | "en", activeWork: number) {
   return locale === "ko"
     ? {
-        message: `작업 ${activeWork}개가 실행 중이에요`,
-        detail: "종료하면 실행 중인 작업이 멈춥니다. 백그라운드에서 계속하면 작업이 끝난 뒤 Agentlas가 스스로 종료돼요.",
+        message: `작업 ${activeWork}개 실행 중`,
+        detail: "종료하면 멈춰요.",
         buttons: ["작업 멈추고 종료", "백그라운드에서 계속", "취소"],
       }
     : {
-        message: `${activeWork} task${activeWork === 1 ? " is" : "s are"} running`,
-        detail: "Quitting stops the running work. If you keep it running in the background, Agentlas quits by itself when the work is done.",
+        message: `${activeWork} task${activeWork === 1 ? "" : "s"} running`,
+        detail: "Quitting stops them.",
         buttons: ["Stop work and quit", "Keep running in background", "Cancel"],
       };
+}
+
+/** What the one notice says when the window is closed and the app goes on in the background (the tray / menu-bar icon is the way back or out). */
+export function backgroundHoldNoticeText(locale: "ko" | "en") {
+  return locale === "ko"
+    ? { title: "Agentlas는 계속 실행 중이에요", body: "창만 닫았어요. 알림 영역(트레이)·메뉴 막대의 Agentlas 아이콘에서 다시 열거나 완전히 종료할 수 있어요." }
+    : { title: "Agentlas is still running", body: "Only the window closed. Use the Agentlas icon in the tray or menu bar to open it again or quit completely." };
 }
 
 export function backgroundTrayText(locale: "ko" | "en", activeWork: number) {

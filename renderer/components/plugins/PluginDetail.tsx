@@ -2,10 +2,8 @@
 
 // Plugin (Hub package) detail — the package and what it bundles: 커넥터 N and
 // 스킬 N, like the ChatGPT plugin page (앱 N / 스킬 N).
-import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
-import { IconSettings } from "@/components/Icon";
 import { ToolLogo } from "./ToolLogo";
 import { startChatWithPrompt } from "@/components/PromptPickerDialog";
 import type { InstalledMcpServer, MarketplaceListing, McpServerStatus, PluginBrandAsset } from "@/lib/types";
@@ -13,7 +11,7 @@ import { categoryLabel } from "./PluginPickerCore";
 import { bundledSetupFor, executionCommand, usesLiveSetup } from "./PluginSetupReview";
 import { Breadcrumb, CollapsedRows, DetailHeader, GlyphSkill, InfoRows, MoreMenu, PromptCard, Section } from "./DetailParts";
 import {
-  bundledPluginFacts, hostOf, connectionLabel, connectionState, factsFromPreview, listingName, listingTagline, oneLine, transportLabel,
+  bundledPluginFacts, hostOf, connectionLabel, connectionProof, connectionState, factsFromPreview, listingName, listingTagline, oneLine, transportLabel,
   type ManifestConnector, type SkillRef,
 } from "./toolsModel";
 import styles from "./ToolsUi.module.css";
@@ -75,7 +73,7 @@ export function PluginDetail({
       return {
         key: `connector-${row.name}`, icon: <ToolLogo slug={listing.slug} name={listing.nameEn || listing.name} frame="bare" size={20} brandColor={listing.brandColor} brandMap={brandMap} />, name: row.name,
         sub: `${transportLabel(row.transport, ko)} · ${row.transport === "stdio" ? executionCommand(row.command, row.args) : row.url ?? ""}`,
-        meta: state ? connectionLabel(state, ko) : undefined,
+        meta: state ? [connectionLabel(state, ko), state === "ready" ? connectionProof(statuses[server!.id], ko) : ""].filter(Boolean).join(" · ") : undefined,
         onClick: server ? () => onOpenConnector(server) : undefined,
       };
     }),
@@ -96,10 +94,17 @@ export function PluginDetail({
     : toolChips.slice(0, 3).map(({ server, tool }) => ({ key: `${server.id}-${tool.name}`, text: oneLine(tool.description, 150), onGo: () => onOpenConnector(server), goLabel: tool.name }));
 
   const firstUnready = connectors.find((server) => connectionState(server, statuses[server.id], loadFailed) !== "ready");
+  const allReady = connectors.length > 0 && !firstUnready;
+  const readyTools = connectors.reduce((total, server) => total + (statuses[server.id]?.tools.length ?? 0), 0);
+  // Connected is shown as a result, not as a button: the dark "Verify" stayed after a good connection and read as "not done yet". A recheck is in the menu;
+  // the dark button appears only when the owner has something to do. (No Manage button: it opened the vault of every key, not this plugin's.)
   const headerActions = installed ? <>
-    {connectors.length > 0 && <MoreMenu label={ko ? "더 보기" : "More"} items={[{ label: ko ? "제거" : "Remove", danger: true, onClick: onRemove }]} />}
-    <Link href="/library/env" className={styles.lightButton}><IconSettings size={14} />{ko ? "관리" : "Manage"}</Link>
-    {connectors.length > 0 && <button type="button" className={styles.darkButton} onClick={() => onVerify(firstUnready ?? connectors[0])}>{firstUnready ? ko ? "연결" : "Connect" : ko ? "연결 확인" : "Verify"}</button>}
+    {connectors.length > 0 && <MoreMenu label={ko ? "더 보기" : "More"} items={[
+      ...(allReady ? [{ label: ko ? "연결 다시 확인" : "Check the connection again", onClick: () => onVerify(connectors[0]) }] : []),
+      { label: ko ? "제거" : "Remove", danger: true, onClick: onRemove },
+    ]} />}
+    {allReady && <span className={styles.statusChip} data-tone="ready" role="status" data-plugin-connected="true">{ko ? "연결됨" : "Connected"}{readyTools > 0 ? ` · ${ko ? `도구 ${readyTools}개` : `${readyTools} tools`}` : ""}</span>}
+    {connectors.length > 0 && !allReady && <button type="button" className={styles.darkButton} onClick={() => onVerify(firstUnready ?? connectors[0])}>{ko ? "연결" : "Connect"}</button>}
   </> : guidedOnly
     ? <button type="button" className={styles.darkButton} onClick={onCustomSetup}>{ko ? "직접 연결" : "Connect manually"}</button>
     : <button type="button" className={styles.darkButton} disabled={installing} onClick={onAdd}>{installing ? ko ? "추가하는 중…" : "Adding…" : ko ? "추가" : "Add"}</button>;

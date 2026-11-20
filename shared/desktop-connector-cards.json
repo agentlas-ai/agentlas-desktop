@@ -1,0 +1,46 @@
+{
+ "schema": "agentlas.desktop-connector-cards.v1",
+ "note": "The roads only a computer has: the computer's own app scripting, a synced folder, the signed-in Agentlas browser. DECLARED facts with a source (G-1: `facts` are the facts the web placement rules read, and the road's runsOn must equal what they give; the web generator reads `paths` of a copy of this file and refuses a mismatch). READY is never declared here: electron/connectors/desktop-paths.ts reports a road only after measuring it (G-5). `identity` lists the web hosts of a service (a fact of the service, used to find which service a web address belongs to: G-3 applies, no public suffix, no host of ours); it is read by this computer only until the server's own cards list the hosts. A road id is `<server card id>/<short>`; the server drops an id its card set does not have. No road is declared for the screen (computer use): a call to an app by screen has no service identity, so it is not enforced.",
+ "identity": {
+  "google-calendar": { "hosts": ["calendar.google.com"] },
+  "google-drive": { "hosts": ["drive.google.com", "docs.google.com"] }
+ },
+ "paths": [
+  {
+   "card": "google-calendar",
+   "facts": { "transport": "desktop-feature", "auth": "os-permission", "needs": ["local-app"] },
+   "path": {
+    "id": "google-calendar/mac", "how": "local-app", "runsOn": "desktop", "os": ["macos"], "needs": ["computer", "os-permission"], "effects": ["read", "write", "delete"],
+    "review": "none", "completes": "host", "verify": "read_back",
+    "source": "agentlas_desktop/electron/reach/explore-policy.ts PUBLISHED_ALLOWED_BUNDLES (com.apple.iCal: published scripting dictionary, read and write classified by the run's permission)"
+   }
+  },
+  {
+   "card": "google-calendar",
+   "facts": { "transport": "desktop-feature", "auth": "none", "needs": ["browser"] },
+   "path": {
+    "id": "google-calendar/web", "how": "browser", "runsOn": "desktop", "needs": ["computer", "account"], "effects": ["read", "write"],
+    "review": "none", "completes": "host", "verify": "status",
+    "source": "agentlas_desktop/electron/browser/profile-import.ts + native-session-cookie-import.ts: the Agentlas browser can hold the person's imported login"
+   }
+  },
+  {
+   "card": "google-drive",
+   "facts": { "transport": "desktop-feature", "auth": "none", "needs": ["filesystem"] },
+   "path": {
+    "id": "google-drive/folder", "how": "local-file", "runsOn": "desktop", "os": ["macos", "windows"], "needs": ["computer"], "effects": ["read", "write", "delete"],
+    "review": "none", "completes": "host", "verify": "read_back",
+    "source": "agentlas_desktop/electron/reach/explore-policy.ts:23 (Drive for desktop `com.google.drivefs` has its screen off limits; the FILES of its sync folder are plain files); Drive for desktop exists for macOS and Windows only"
+   }
+  },
+  {
+   "card": "google-drive",
+   "facts": { "transport": "desktop-feature", "auth": "none", "needs": ["browser"] },
+   "path": {
+    "id": "google-drive/web", "how": "browser", "runsOn": "desktop", "needs": ["computer", "account"], "effects": ["read", "write"],
+    "review": "none", "completes": "host", "verify": "status",
+    "source": "agentlas_desktop/electron/browser/profile-import.ts: the Agentlas browser can hold the person's imported login"
+   }
+  }
+ ]
+}

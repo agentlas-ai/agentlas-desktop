@@ -144,15 +144,17 @@ export function bridgeNameFits(name: string): boolean {
 
 export interface BridgeTool { name: string; connectorId: string; tool: string; appName: string; description: string; inputSchema: Record<string, unknown>; readOnly: boolean; destructive: boolean; costsMoney?: true; costsMoneyHosts?: string[] }
 /**
- * The tools a turn gets from a stored list: apps the computer also has itself are left out whole (the computer's wins, one line only), a tool whose name does not fit
+ * The tools a turn gets from a stored list: apps the computer also has itself are left out whole (the computer's wins unless `serverFirst` names it, one line only), a tool whose name does not fit
  * is left out alone, order is fixed (connector id, then tool name: the same bytes every turn while `rev` does not change). No app gives no tools.
  */
-export function bridgeTools(state: ServerAppsState, computerHas: ReadonlySet<string>): BridgeTool[] {
+export function bridgeTools(state: ServerAppsState, computerHas: ReadonlySet<string>, serverFirst: ReadonlySet<string> = new Set()): BridgeTool[] {
   const out: BridgeTool[] = [];
   const names = new Set<string>();
   for (const app of [...state.apps].sort((a, b) => (a.connectorId < b.connectorId ? -1 : a.connectorId > b.connectorId ? 1 : 0))) {
     // The same app on the computer under either id (the server's, or the one its catalog row declares for the desktop): the computer's wins, one line only.
-    if (computerHas.has(app.connectorId) || (app.desktopId !== undefined && computerHas.has(app.desktopId))) continue;
+    // (API first: when the computer's road to this service is LOWER than the server's and the server's is ready, the app stays in the list - `serverFirst`, connectors/route-gate.ts - because the computer's call
+    // is refused toward it. Empty = what it always was.)
+    if ((computerHas.has(app.connectorId) || (app.desktopId !== undefined && computerHas.has(app.desktopId))) && !serverFirst.has(app.connectorId)) continue;
     for (const tool of [...app.tools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
       const name = bridgeToolName(app.connectorId, tool.name);
       if (!bridgeNameFits(name) || names.has(name)) continue;

@@ -15,7 +15,8 @@
  * 쓰기 경로는 새로 만들지 않는다: running → blocked 뒤 기존 scheduleBlockedGoalRetry(막힌 목표 스윕의 예약)를
  * 그대로 쓴다. 시각이 되면 스윕이 원래 사유로 되돌려 관찰/재개를 한다(blocked-goal-sweep.ts).
  */
-import { appendChatMessage } from "../store/chats";
+
+import { writeAssistantUnlessStopped } from "../chat/chat-stop";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getDb } from "../store/db";
 import { createRuntimeRetryStore } from "../store/runtime-retry";
@@ -32,6 +33,7 @@ import {
 import { listPersistenceDecisionEvents, recordPersistenceDecisionEvent } from "../store/run-events";
 import { desktopAppInstanceId } from "./app-runtime-coordinator";
 import { currentUiLocale } from "../ui-locale";
+import { formatRuntimeQuotaReset } from "../../shared/runtime-quota";
 import {
   decidePersistenceMove,
   jitteredDelayMs,
@@ -194,7 +196,8 @@ function notifyRuntimeRetryReopen(chatId: string, longRunId: string, nextAtMs: n
     ? `모델 연결이 계속 실패해 ${time}에 다시 시도합니다.`
     : `The model connection kept failing, so the app will try again at ${time}.`;
   try {
-    appendChatMessage(chatId, "assistant", text, { hostNotice: { purpose: "host-status", runId: longRunId, status: "goal-paused" } });
+    // no new line in a chat the person stopped
+    writeAssistantUnlessStopped(chatId, text, { hostNotice: { purpose: "host-status", runId: longRunId, status: "goal-paused" } }, { longRunId });
   } catch (error) {
     console.warn("[goal-pass-stop] chat notice failed:", error);
   }
@@ -210,9 +213,12 @@ function notifyOnce(input: { chatId: string; stop: GoalPassStop }, longRunId: st
       ? "이 목표를 이어갈 모델이 모두 로그인이 필요한 상태예요. 연결된 모델 하나에 다시 로그인해 주시면 이어갑니다. 그동안에도 앱이 주기적으로 다시 확인합니다."
       : "Every model that could continue this goal needs a sign-in. Sign in to one connected model and it will continue; the app keeps checking on its own meanwhile.";
   } else if (decision.cause.kind === "quota") {
+    // One source for the limit's time: the same reset line the run's own failure notice prints (shared/runtime-quota.ts), from the provider's stated
+    // time, else the time the app will look again. Two lines of one event never give two forms of the time.
+    const reset = formatRuntimeQuotaReset(input.stop.retryAfterAt ?? new Date(nextAtMs).toISOString(), ko ? "ko" : "en");
     text = ko
-      ? `사용 한도에 걸려 잠시 멈췄어요. 한도가 풀리는 시각에 맞춰 약 ${minutes}분 뒤 앱이 스스로 이어갑니다.`
-      : `Paused on a usage limit. The app continues on its own when the limit resets, in about ${minutes} min.`;
+      ? `사용 한도에 걸려 잠시 멈췄어요. ${reset ?? `약 ${minutes}분 뒤`} 앱이 스스로 이어갑니다.`
+      : `Paused on a usage limit. ${reset ?? `In about ${minutes} min`} The app continues on its own.`;
   } else if (move.kind === "replan") {
     text = ko
       ? "모델이 이 요청을 그대로는 받지 않았어요. 곧 방법을 바꿔 다시 이어갑니다."
@@ -228,8 +234,9 @@ function notifyOnce(input: { chatId: string; stop: GoalPassStop }, longRunId: st
   }
   try {
     // Typed marker: a sign-in only the owner can do vs. a stopped pass the app resumes itself — both stay prominent.
-    appendChatMessage(input.chatId, "assistant", text, { hostNotice: { purpose: "host-status", runId: longRunId,
-      status: move.kind === "escalate_boundary" ? "needs-owner" : "goal-paused" } });
+    // No new line in a chat the person stopped.
+    writeAssistantUnlessStopped(input.chatId, text, { hostNotice: { purpose: "host-status", runId: longRunId,
+      status: move.kind === "escalate_boundary" ? "needs-owner" : "goal-paused" } }, { longRunId });
   } catch (error) {
     console.warn("[goal-pass-stop] chat notice failed:", error);
   }

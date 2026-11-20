@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange, emitTaskStoreChange } from "../store/change-bus";
 import { parseDurableOneSurfaceJson } from "../../shared/one-surface-durable";
+import { maskLocalPathsForRemote } from "../../shared/remote-projection";
 import type { OneSurfaceManifestV1 } from "../../shared/one-surface";
 import {
   ONE_SEARCH_CONTRACT_VERSION,
@@ -228,14 +229,10 @@ function containsAll(text: string, terms: string[]): boolean {
   return terms.every((term) => lower.includes(term));
 }
 
-function redactPrivatePaths(value: string): string {
-  return value
-    .replace(/(?:file:\/\/)?\/(?:Users|home)\/[^\s/]+(?:\/[^\s]*)?/gi, "[local-path]")
-    .replace(/\b[A-Za-z]:\\(?:[^\\\s]+\\)*[^\\\s]*/g, "[local-path]");
-}
-
 function safeSnippet(value: string, terms: string[], limit = 180): string | null {
-  const redacted = redactPrivatePaths(redactSecrets(value)).replace(/\s+/g, " ").trim();
+  // the one path mask (shared/remote-projection.ts), not a private copy. A search hit is a snippet of stored text and may be handed to a remote surface
+  // by the app-control layer, so it keeps the mask (verify-one-search-runtime asserts it); the desktop's own answer text is what keeps real paths.
+  const redacted = maskLocalPathsForRemote(redactSecrets(value)).replace(/\s+/g, " ").trim();
   if (!redacted) return null;
   const lower = redacted.toLocaleLowerCase();
   const positions = terms.map((term) => lower.indexOf(term)).filter((position) => position >= 0);

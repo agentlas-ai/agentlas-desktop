@@ -1,6 +1,7 @@
 import { invocationService } from "../invocation/service";
 import { abandonWaitingRetries, chatOfRun } from "../invocation/pending-chat-sends";
 import { recordOwnerStop } from "../invocation/earlier-attempt";
+import { stopChatOwnerInputs } from "../chat/chat-stop";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
@@ -83,6 +84,15 @@ export const steerInvocationOwnerNextTurn = createInvocationOwnerNextTurnRouter(
   },
 });
 
+/** What the newest Stop of each chat took back, for the one reader that hands it to the window (takeStopWithdrawals): bounded, one entry per chat, read once. */
+const lastOwnerStopWithdrawals = new Map<string, import("../chat/chat-stop").WithdrawnOwnerInput[]>();
+const STOP_WITHDRAWAL_MEMORY = 64;
+export function takeStopWithdrawals(chatId: string): import("../chat/chat-stop").WithdrawnOwnerInput[] {
+  const taken = lastOwnerStopWithdrawals.get(chatId) ?? [];
+  lastOwnerStopWithdrawals.delete(chatId);
+  return taken;
+}
+
 /**
  * The owner's own Stop ends the messages of that chat that are waiting out an internal retry (a run that failed before any model call for the
  * app's own state, started again after a backoff): the retry would otherwise run them after the Stop. SQL on the shared store, so it does not
@@ -98,6 +108,16 @@ export function abandonOwnerWaitingRetries(runId: string): number {
     if (!chatId) return 0;
     // The marker is what a start that fails because of this Stop reads (a Stop of a run still being prepared writes no cancel event).
     recordOwnerStop(db, chatId);
+    // The rest of the Stop of the chat (chat/chat-stop.ts), first: the Stop counter run-less writers read, and every send that has
+    // not started taken back (queued sends, with their words handed to the window; a message being prepared) - not only the ones waiting out
+    // a retry. What it leaves (a custody-owned input) is not an ordinary retry either, so the call below finds what is left.
+    const stop = stopChatOwnerInputs(chatId);
+    // The newest Stop replaces the entry (an empty Stop clears it): a window that never read an older one cannot be handed it by a later Stop.
+    lastOwnerStopWithdrawals.delete(chatId);
+    if (stop.withdrawn.length > 0) {
+      if (lastOwnerStopWithdrawals.size >= STOP_WITHDRAWAL_MEMORY) lastOwnerStopWithdrawals.delete(lastOwnerStopWithdrawals.keys().next().value as string);
+      lastOwnerStopWithdrawals.set(chatId, stop.withdrawn);
+    }
     const abandoned = abandonWaitingRetries(db, chatId);
     // The composer's "sending again" bar reads the waiting count on this announcement (WaitingRetryStop); the window's own Stop
     // announces it too (invoke:stopWaitingRetries). A phone Stop reaches here with no live run to announce anything.

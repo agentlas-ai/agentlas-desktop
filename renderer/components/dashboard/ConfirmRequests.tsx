@@ -102,16 +102,18 @@ export function ConfirmRequests() {
               {it.optionCount > 0 ? ` · ${it.optionCount}${ko ? "개 선택지" : " options"}` : ""}
               {it.createdAt ? ` · ${stallLabel(it.createdAt, ko)}` : ""}
             </small>
-            <span className={s.detail}>
+            {/* The four lines that used to sit open under every question (who asks, that it is not authorized, the action the question already says, that scope and credit are
+                undeclared, when) are one fold: the row is the question, the chat it came from and how long it has waited. */}
+            <details className={s.detail}>
+              <summary>{ko ? "자세히" : "Details"}</summary>
               <span>{pick(ko, COPY.requester)}: {it.requesterLabel} · {pick(ko, COPY.notAuthorized)}</span>
-              <span>{pick(ko, COPY.intended)}: {it.header || it.question}</span>
               <span>{pick(ko, COPY.scopeUndeclared)}</span>
               {it.createdAt && (
                 <time dateTime={it.createdAt}>
                   {pick(ko, COPY.requested)}: {new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(it.createdAt))}
                 </time>
               )}
-            </span>
+            </details>
           </div>
           <button type="button" onClick={() => void openConfirmation(it)} className={s.open}>{ko ? "답하기" : "Respond"}</button>
         </div>

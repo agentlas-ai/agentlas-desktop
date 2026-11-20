@@ -1,0 +1,13 @@
+{
+  "schema": "agentlas.connector-route-rules.v1",
+  "rungs": ["api", "mcp", "desktop", "phone-ui"],
+  "within": {
+    "desktop": ["local-mcp", "local-file", "local-app", "browser", "screen"],
+    "phone-ui": ["deep-link", "macro", "browser"]
+  },
+  "stateOrder": ["ready", "queued", "connectable"],
+  "viaOrder": ["self", "server", "hand_off", "person"],
+  "altMax": 2,
+  "whyOrder": ["needs_person", "hop_limit", "not_yet", "needs_computer", "os", "no_phone", "phone_cannot"],
+  "note": "The one order data of routeConnector (companion-connector-route.mjs, and every port of it: the desktop and the phone read the same connector-route-vectors.json). The ladder is read from the rungs here, never written per service. Order inside a rung: less power first (files and scripts, then a signed-in browser, then the whole screen; on the phone the standard system screens, then a routine the person made, then a web page driven inside the app). altMax: one better road that is one step away plus one lower road that works now; the third is not told. whyOrder: the order in which a blocked reason is told when no road is left (a reason not in the list is told as 'unavailable'). If the owner wants another order, only this file changes."
+}

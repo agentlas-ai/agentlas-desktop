@@ -23,6 +23,7 @@
  */
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
+import { rememberFocus, trapTabWithin } from "@/lib/focus-trap";
 import { APPROVAL_NOTE_MAX_CHARS, cleanApprovalNote, readApprovalNoteDraft, writeApprovalNoteDraft } from "@/lib/approval-note-drafts";
 
 export interface ApprovalPromptOption {
@@ -105,11 +106,14 @@ export function ApprovalPrompt({
   const noteLabel = ko ? "아니오, 대신 이렇게 하세요" : "No, and tell the personal agent what to do instead";
 
   // 카드가 뜰 때: 아무 곳에도 포커스가 없을 때만 카드로 가져온다 (작성창에서 글을 쓰는 중이면 그대로 둔다).
+  // the card is an alertdialog — Tab stays inside it, and when it closes focus goes back to where it was (if it was still on the card).
   useEffect(() => {
+    const memory = rememberFocus(rootRef.current);
     const active = document.activeElement;
     if (!active || active === document.body || active === document.documentElement) {
       rootRef.current?.focus({ preventScroll: true });
     }
+    return () => memory.restore();
   }, []);
 
   useLayoutEffect(() => {
@@ -170,7 +174,8 @@ export function ApprovalPrompt({
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
     const target = event.target as HTMLElement;
-    if (target.closest("input, textarea, select, [contenteditable='true']")) return;
+    const root = event.currentTarget;
+    if (target.closest("input, textarea, select, [contenteditable='true']")) { trapTabWithin(event, root); return; }
     // Tab on the refusal row (selected, or the card itself with it selected) opens "No, and do this instead".
     if (event.key === "Tab" && !event.shiftKey && denyNote && denyIndex >= 0 && !noteOpen && usable(denyIndex)) {
       const row = target.closest("[data-approval-row]");
@@ -181,6 +186,7 @@ export function ApprovalPrompt({
         return;
       }
     }
+    if (trapTabWithin(event, root)) return;
     if (/^[1-9]$/.test(event.key)) { pick(event, Number(event.key) - 1); return; }
     if (event.key === "Escape") { pick(event, options.findIndex((o) => o.role === "deny")); return; }
     // 한글 입력 상태에서도 같은 자리 키가 듣도록 key 가 아니라 물리 키(code)로 본다.

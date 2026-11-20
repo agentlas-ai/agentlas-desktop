@@ -120,3 +120,8 @@
 .details p { font-size: 11px; }
 .screenReaderOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px !important; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 .panel > button { width: 100%; background: var(--ink); color: var(--paper); border-color: var(--ink); }
+
+/* the hint floats over whatever sits above the composer (a question card's buttons). A press that lands on the hint's body goes through to what is under it
+   (the outside press then closes the hint); only the hint's own button and summary take presses. */
+.panel { pointer-events: none; }
+.panel button, .panel summary { pointer-events: auto; }

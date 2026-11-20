@@ -23,6 +23,20 @@ function koClock(hh: string, mm: string): string {
   return minute === 0 ? `${half} ${display}시` : `${half} ${display}시 ${minute}분`;
 }
 const EN_DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const EN_MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DOW_TOKENS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const MONTH_TOKENS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const DOW_NAME = /\b(?:sun|mon|tue|wed|thu|fri|sat)\b/gi;
+const MONTH_NAME = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b/gi;
+/** croner 가 받는 별칭 — 같은 뜻의 5칸 식. */
+const CRON_NICKNAMES: Record<string, string> = {
+  "@yearly": "0 0 1 1 *",
+  "@annually": "0 0 1 1 *",
+  "@monthly": "0 0 1 * *",
+  "@weekly": "0 0 * * 0",
+  "@daily": "0 0 * * *",
+  "@hourly": "0 * * * *",
+};
 
 /** 사람이 읽을 스케줄 설명(표시 전용, 파싱 아님). locale=ko|en. */
 export function describeSchedule(spec: ScheduleSpec, locale: "ko" | "en" = "en"): string {
@@ -57,9 +71,17 @@ export function describeSchedule(spec: ScheduleSpec, locale: "ko" | "en" = "en")
       const expr = typeof spec.expr === "string" ? spec.expr : "";
       if (!expr.trim()) return ko ? "알 수 없음" : "Unknown";
       const described = describeCronExpression(expr, locale);
-      if (described) return described;
       // 해석하지 못하면 원문을 보여준다 — 지어내는 것보다 낫다.
-      return `cron ${expr} (${typeof spec.tz === "string" ? spec.tz : "?"})`;
+      const base = described ?? `cron ${expr} (${typeof spec.tz === "string" ? spec.tz : "?"})`;
+      // The filters change what runs; words without them would promise more runs than the scheduler makes.
+      const weeks = spec.everyWeeks && Number.isFinite(Number(spec.everyWeeks.every)) ? spec.everyWeeks : null;
+      const skip = Array.isArray(spec.skipDates) ? spec.skipDates.filter((d) => typeof d === "string") : [];
+      const until = typeof spec.until === "string" && /^\d{4}-\d{2}-\d{2}$/.test(spec.until) ? spec.until : null;
+      const parts: string[] = [];
+      if (weeks) parts.push(ko ? `${weeks.every}주마다 (${weeks.from} 주부터)` : `every ${weeks.every} weeks (from the week of ${weeks.from})`);
+      if (skip.length) parts.push(ko ? `제외: ${skip.join(", ")}` : `except ${skip.join(", ")}`);
+      if (until) parts.push(ko ? `${until}까지` : `until ${until}`);
+      return parts.length ? `${base} · ${parts.join(" · ")}` : base;
     }
     default:
       return ko ? "알 수 없음" : "Unknown";
@@ -79,21 +101,45 @@ export function describeCronExpression(
 ): string | null {
   const ko = locale === "ko";
   if (typeof expression !== "string") return null;
-  const fields = expression.trim().split(/\s+/);
+  const trimmed = expression.trim();
+  // `@daily` 같은 별칭과 `MON-FRI` 같은 이름은 croner 가 받는 정식 식이다 — 같은 뜻의 숫자 식으로 읽는다.
+  const fields = (CRON_NICKNAMES[trimmed.toLowerCase()] ?? trimmed).split(/\s+/);
   if (fields.length !== 5) return null;
-  const [mm, hh, dom, month, rawDow] = fields;
+  const [mm, hh, dom, rawMonth, rawDowField] = fields;
+  const month = rawMonth.replace(MONTH_NAME, (name) => String(MONTH_TOKENS.indexOf(name.toLowerCase()) + 1));
+  const rawDow = rawDowField.replace(DOW_NAME, (name) => String(DOW_TOKENS.indexOf(name.toLowerCase())));
   // cron accepts 7 as Sunday. Indexing a 7-element table with it produced the
   // literal word "undefined" in the user-visible sentence.
   const dow = rawDow === "7" ? "0" : rawDow;
-  // Anything month-scoped is NOT the recurrence these branches describe.
-  // Claiming "매일 09:00" for `0 9 * 3 *` states a schedule the automation does
-  // not have; say nothing rather than something false.
-  if (month !== "*") return null;
   const time = /^\d+$/.test(hh) && /^\d+$/.test(mm)
     ? `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}`
     : null;
   // 같은 시각의 한국어 표기. 영어는 기존 `HH:MM` 그대로 쓴다.
   const koAt = time ? koClock(hh, mm) : null;
+  // Anything month-scoped is NOT the recurrence the branches below describe.
+  // Claiming "매일 09:00" for `0 9 * 3 *` states a schedule the automation does
+  // not have; say nothing rather than something false. The one month-scoped shape
+  // with a plain sentence is the yearly date (`0 9 5 3 *` = every March 5).
+  if (month !== "*") {
+    const monthNumber = /^\d{1,2}$/.test(month) ? Number(month) : 0;
+    if (time && monthNumber >= 1 && monthNumber <= 12 && /^\d{1,2}$/.test(dom) && dow === "*") {
+      return ko
+        ? `매년 ${monthNumber}월 ${Number(dom)}일 ${koAt}`
+        : `Every year on ${EN_MONTH[monthNumber - 1]} ${Number(dom)} at ${time}`;
+    }
+    return null;
+  }
+
+  // ── 그 달의 N번째·마지막 요일, 그 달의 마지막 날 ─────────────────────────
+  const nthDow = /^([0-7])#(L|[1-5])$/.exec(dow);
+  if (time && dom === "*" && nthDow) {
+    const day = Number(nthDow[1]) % 7;
+    const nth = nthDow[2];
+    return ko
+      ? `매월 ${nth === "L" ? "마지막" : `${nth}번째`} ${KO_DOW[day]}요일 ${koAt}`
+      : `Monthly on the ${nth === "L" ? "last" : `${nth}${nth === "1" ? "st" : nth === "2" ? "nd" : nth === "3" ? "rd" : "th"}`} ${EN_DOW[day]} at ${time}`;
+  }
+  if (time && dom === "L" && dow === "*") return ko ? `매월 마지막 날 ${koAt}` : `Monthly on the last day at ${time}`;
 
   // ── 간격형 (*/N) ────────────────────────────────────────────────────────
   const everyMinutes = /^\*\/(\d+)$/.exec(mm);
@@ -182,6 +228,12 @@ export function humanizeScheduleLabel(
   const described = describeCronExpression(cronToken, locale);
   if (described) return described;
   const ko = locale === "ko";
+  // `once:<ISO instant>` is the stored token of a one-time schedule (automation-emitter resolveSchedule); the person reads the moment, not the token.
+  const once = /^once:(\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2}))$/.exec(raw);
+  if (once && Number.isFinite(Date.parse(once[1]))) {
+    return new Intl.DateTimeFormat(ko ? "ko-KR" : "en-US", { month: "long", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short" })
+      .format(new Date(once[1]));
+  }
   const daily = /^daily-(\d{1,2}):(\d{2})$/.exec(raw);
   if (daily) {
     const time = `${daily[1].padStart(2, "0")}:${daily[2]}`;

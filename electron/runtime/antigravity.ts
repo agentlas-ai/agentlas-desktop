@@ -50,6 +50,8 @@ import { cumulativeSurfaceGateText, childExitReason, ensureChildCloseAfterExit, 
 import { announceToolDenied, toolApprovalSessionKey } from "./tool-approval";
 import { SHELL_GATE_CONTROL_ENV, SHELL_GATE_HANDLE_ENV, openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
 import { installAgyDeleteGatePlugin } from "./antigravity-delete-gate";
+import { confinementNotice } from "../../shared/runtime-confinement";
+import { AGY_WRITE_ROOTS_ENV } from "./agy-write-boundary";
 import { remoteRowShellGateWanted } from "../one/plural-remote-ask";
 import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
 import { mcpProxyControlInfoPath } from "../mcp-tools/proxy-channel";
@@ -2573,19 +2575,29 @@ async function runPreparedAntigravityAttempt(
   // A write run's shell asks the owner's card before it deletes (shell-delete-gate.ts): a plugin hook in the product mirror (antigravity-delete-gate.ts), the wire and handle in the environment.
   const agyRemoteRowShell = remoteRowShellGateWanted(req);   // a full-access run of a Work handed over by a hand-off row: its shell deletes are asked on the row
   const agyShellGateWanted = (req.permission === "write" && !req.browserOnly && !req.untrustedNoTools) || agyRemoteRowShell;
+  // on Windows the write-boundary hook is not installed (agy runs hooks through cmd.exe, unverified), so a write run is not kept inside its folder: typed notice, never silent.
+  { const unconfined = confinementNotice("antigravity", req.permission, req.locale); if (unconfined) events.onNotice?.(unconfined); }
   const agyShellGateKey = `${ANTIGRAVITY_KIND}\0${req.chatId ?? ""}\0${req.cwd ?? agentRunCwd()}\0${req.runtimeSessionOwnerId ?? req.agentId ?? ""}`;
   if (agyShellGateWanted) { try { await ensureMcpProxyApprovalServer(); } catch { /* the hook refuses a delete it cannot ask about */ } }
+  // A full-access run has no delete gate but its shell still refuses a job in an OS scheduler: the same plugin hook (it acts on schedulers in every mode, on deletes only when REQUIRED is set).
+  const agySchedulerGateWanted = req.permission === "full" && !req.browserOnly && !req.untrustedNoTools && !agyShellGateWanted;
   const agyGatedEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
     const out = agyProductEnv(env);
+    if (agySchedulerGateWanted) {
+      if (agySpawnsInPersonalHome(out) || !installAgyDeleteGatePlugin(agySpawnHome(out))) events.onStatus("[os-scheduler-gate] runtime=antigravity unavailable (no product mirror or script): an OS scheduler job is not refused here");
+      return out;
+    }
     if (!agyShellGateWanted) return out;
     if (!agySpawnsInPersonalHome(out) && installAgyDeleteGatePlugin(agySpawnHome(out))) {
       out[SHELL_GATE_CONTROL_ENV] = mcpProxyControlInfoPath();
       out[SHELL_GATE_HANDLE_ENV] = shellDeleteGateHandle(agyShellGateKey);
       out.AGENTLAS_SHELL_GATE_REQUIRED = "1";
+      // A write run's file tools stay inside its working folder and the folders registered with it (agy-write-boundary.ts): agy's own sandbox limits the terminal only.
+      if (req.permission === "write") out[AGY_WRITE_ROOTS_ENV] = JSON.stringify(agyReadDirs);
     } else if (agyRemoteRowShell) {
       // A remote Work whose shell deletes cannot be asked about does not run (the sender was promised the question): the end is `no_runner`.
       throw new Error("remote_ask_shell_gate_unavailable");
-    } else events.onStatus("[shell-delete-gate] runtime=antigravity unavailable (no product mirror or script): shell deletes are not asked about");
+    } else events.onStatus("[shell-delete-gate] runtime=antigravity unavailable (no product mirror or script): shell deletes are not asked about; file writes are not kept inside the working folder");
     return out;
   };
   const agyRunEnv = agyProductEnv({ ...(req.env ?? process.env) });

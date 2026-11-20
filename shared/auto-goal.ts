@@ -182,6 +182,14 @@ export function goalObjectiveText(text: string): string {
   return visible === text ? objective : objective.trim();
 }
 
+/**
+ * The goal as a person reads it on a line: `goalObjectiveText` without the host's amendment markers ("[Owner update 16.014Z]" is written by the amendment
+ * path, electron/long-run/goal-owner-amendment.ts, and is wiring, not words). The stored objective keeps them; an editor must keep using `goalObjectiveText`.
+ */
+export function goalObjectiveDisplay(text: string): string {
+  return goalObjectiveText(text).replace(/\[Owner update [^\]\n]{1,64}\]\s*/g, " ").replace(/\s+/g, " ").trim();
+}
+
 /** Conservative admission: uncertainty never arms a background campaign. */
 export function admitsAutomaticGoal(source: GoalSourceMessage, decision: GoalIntakeDecision): boolean {
   validateSource(source);

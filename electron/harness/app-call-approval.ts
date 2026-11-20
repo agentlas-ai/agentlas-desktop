@@ -15,6 +15,19 @@ import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, toolAppr
  * The class is read from the operation's own name (approval-rule.ts classifyHostOperation), never from the server it travels through.
  */
 export type AppCallApproval = { ok: true } | { ok: false; reason: "approval_refused"; text: string };
+/** The owner's card is still open when the call window ends: not a refusal and not an answer. */
+export type AppCallApprovalWithin = AppCallApproval | { ok: false; reason: "approval_pending"; text: string; pending: true };
+
+/**
+ * The card waits for the owner as long as the owner takes; the caller (the turn gateway) gives up at 30 s with an unclassified timeout, no receipt and a card that then closes
+ * "expired". So the wait answers inside the call window: still waiting = `approval_pending` (the same call asked again joins this card, it never opens a second one);
+ * answered = the card's own verdict, as before. One helper for every road that raises an approval card for a call (harness port, connector tool, host server tool).
+ */
+export async function approvalWithinCallWindow(keyParts: Record<string, unknown>, ask: () => Promise<AppCallApproval>): Promise<AppCallApprovalWithin> {
+  const pendingModule = await import("../app-control/pending-calls");
+  return pendingModule.answerAppCallWithin<AppCallApprovalWithin>(pendingModule.appCallKey({ via: "approval-card", ...keyParts }), ask, pendingModule.APP_CALL_ANSWER_WINDOW_MS,
+    () => ({ ok: false, reason: "approval_pending", pending: true, text: "The owner's approval card is still open. Repeat this same call to get the answer; do not start a different one and do not tell the owner it was done." }));
+}
 
 export async function approveAppOperation(input: {
   operation: string; chatId: string; permission: "read" | "write" | "full"; unattended: boolean; signal?: AbortSignal;

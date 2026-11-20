@@ -1,4 +1,5 @@
 "use client";
+import { usageExhaustedSuffix } from "@/lib/usage-copy";
 import { Suspense, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import Link from "next/link";
@@ -881,7 +882,10 @@ export default function BuildPage() {
 
 
               <details className={styles.progress} open={busy}>
-                <summary>{ko ? "제작 진행" : "Build progress"}</summary>
+                {/* Not a button: before a build starts it only previews the steps; the start button is "Start build" in the action row. */}
+                <summary>{phase === "idle"
+                  ? (ko ? "제작 단계 · 시작하면 진행이 여기에 보여요" : "Build steps · progress shows here once you start")
+                  : (ko ? "제작 진행" : "Build progress")}</summary>
 {showPipeline && (
               <div className="build-card build-pipeline-card" data-tour-id="build.pipeline">
                 <div className="build-card-head">
@@ -1289,7 +1293,7 @@ export default function BuildPage() {
                   {runtimes.flatMap((r) => {
                     const key = `${r.kind}:${r.source}`;
                     const blocked = runtimeUsageBlocked(r, usage);
-                    const suffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${blocked ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}`;
+                    const suffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${blocked ? usageExhaustedSuffix(ko) : ""}`;
                     const models = modelsByRuntime[key] ?? [];
                     // 모델을 아는 런타임은 모델까지 고르게 한다. 모르는 런타임은
                     // 종전처럼 런타임 한 줄로 남긴다(없는 선택지를 지어내지 않는다).
@@ -1302,7 +1306,7 @@ export default function BuildPage() {
                     }
                     return models.map((m) => {
                       const modelBlocked = runtimeUsageBlocked(r, usage, m.id);
-                      const modelSuffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${modelBlocked ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}`;
+                      const modelSuffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${modelBlocked ? usageExhaustedSuffix(ko) : ""}`;
                       return (
                         <option key={`${key}::${m.id}`} value={`${key}::${m.id}`} disabled={modelBlocked}>
                           {engineLabel(r, ko)} · {m.label}{modelSuffix}

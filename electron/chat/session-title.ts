@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { composeDeclaredPrompt } from "../runtime/prompt-order";
 import { redactSecrets, looksSecret } from "../../shared/secret-patterns";
 import { autoTitleValue } from "../store/chats";
+import { PERMISSION_ESCALATION_CONTINUATION_PROMPT } from "../invocation/permission-escalation-continuation";
 
 /*
  * A short title for a Work session, asked once after its first answer (Agentlas 2.0; owner: "do not use the first message as the title, make
@@ -94,7 +95,13 @@ export function sessionTitleSubject(db: Db, chatId: string): { title: string; fi
     .get(chatId) as { title: string | null; kind: string | null; surface: string | null; pack: string | null; parent: string | null; archived: string | null } | undefined;
   if (!chat || chat.archived || chat.surface !== "work" || (chat.kind !== "user" && chat.kind !== null) || chat.parent || chat.pack) return null;
   const line = (role: "user" | "assistant") => (db.prepare("SELECT text FROM chat_messages WHERE chat_id = ? AND role = ? ORDER BY created_at ASC, rowid ASC LIMIT 1").get(chatId, role) as { text: string } | undefined)?.text;
-  const firstMessage = line("user"), firstAnswer = line("assistant");
+  const firstMessage = line("user");
+  // an answer that ended by asking for full access ("could not write") is a blocked step. When the chat has the host's continuation turn
+  // (the system row the escalation writes), the title is read from the first answer AFTER it: the answer that carries the work's real outcome.
+  const resumed = db.prepare("SELECT created_at, rowid AS at FROM chat_messages WHERE chat_id = ? AND role = 'system' AND text = ? ORDER BY created_at ASC, rowid ASC LIMIT 1").get(chatId, PERMISSION_ESCALATION_CONTINUATION_PROMPT) as { created_at: string; at: number } | undefined;
+  const firstAnswer = resumed
+    ? (db.prepare("SELECT text FROM chat_messages WHERE chat_id = ? AND role = 'assistant' AND rowid > ? ORDER BY created_at ASC, rowid ASC LIMIT 1").get(chatId, resumed.at) as { text: string } | undefined)?.text
+    : line("assistant");
   if (!firstMessage?.trim() || !firstAnswer?.trim()) return null;
   const title = chat.title ?? "";
   // Only the automatic cut (or nothing yet) may be replaced; a title the owner chose or edited stays.
@@ -121,7 +128,7 @@ export interface SessionTitleDeps {
 }
 
 export type SessionRuntime = Pick<import("../../shared/types").RuntimeSelection, "kind" | "backend" | "source" | "model" | "acpAgentId" | "label">;
-export interface SettledLike { runId?: string; chatId: string; receipt?: { status?: string } | null; pendingQuestion?: boolean }
+export interface SettledLike { runId?: string; chatId: string; receipt?: { status?: string } | null; pendingQuestion?: boolean; permissionEscalationOffered?: boolean }
 export interface SessionTitler {
   /** A run of this chat settled: decide (cheap reads), then ask once. */
   onSettled(envelope: SettledLike): void;
@@ -156,6 +163,8 @@ export function createSessionTitler(deps: SessionTitleDeps): SessionTitler {
         const chatId = envelope?.chatId;
         if (typeof chatId !== "string" || !chatId || decided.has(chatId)) return;
         if (envelope.receipt?.status !== "completed" || envelope.pendingQuestion === true) return;
+        // A turn that ended on the full-access chip is not the conversation's answer yet: the continuation run's settlement titles it (not remembered here).
+        if (envelope.permissionEscalationOffered === true) return;
         // Cheap reads first; nothing is asked and nothing is written for a chat this does not apply to or one that was already tried.
         const db = deps.db();
         if (db.prepare("SELECT 1 FROM meta WHERE key = ?").get(`${SESSION_TITLE_MARK_PREFIX}${chatId}`)) { remember(chatId); return; }

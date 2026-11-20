@@ -8,6 +8,8 @@ import { subscribeStoreChanges } from "@/lib/store-change-bus";
 import { childOfRoom, useRoomChildren } from "@/lib/room-children";
 import { homeBridge } from "@/lib/home-tree";
 import styles from "../one/OneShell.module.css";
+import { UsageMeter } from "@/components/usage/UsageMeter";
+import { usageLimitRetryLine } from "@/lib/usage-copy";
 
 /*
  * What only a team-lead room has (Agentlas 2.0): who is working, who is lined up behind an earlier turn, who waits out a provider
@@ -130,9 +132,7 @@ export function RoomPaneWorking({ roomChatId, locale, childIds: runningChildren 
       {(workingNames.length || askingNames.length) && waitingNames.length ? " · " : ""}
       {waitingNames.length ? <span data-room-pane-waiting-slot="true">{ko ? `${waitingNames.join(", ")} 대기 중` : `${waitingNames.join(", ")} waiting for a turn`}</span> : null}
       {queuedNames.length ? <span data-room-pane-waiting-turn="true">{(workingNames.length || waitingNames.length ? " · " : "")}{ko ? `${queuedNames.join(", ")} 앞선 차례를 기다리는 중` : `${queuedNames.join(", ")} waiting for an earlier turn`}</span> : null}
-      {limitNames.length ? <span data-room-pane-waiting-limit="true">{(workingNames.length || waitingNames.length || queuedNames.length ? " · " : "")}{limitClock
-        ? (ko ? `${limitNames.join(", ")}는 한도에 걸려 ${limitClock}쯤 다시 시도해요` : `${limitNames.join(", ")} hit a usage limit and try again around ${limitClock}`)
-        : (ko ? `${limitNames.join(", ")} 사용 한도 때문에 잠시 뒤 다시 시도해요` : `${limitNames.join(", ")} will try again shortly (usage limit)`)}</span> : null}
+      {limitNames.length ? <span data-room-pane-waiting-limit="true">{(workingNames.length || waitingNames.length || queuedNames.length ? " · " : "")}<UsageMeter variant="note" ko={ko} note={usageLimitRetryLine(limitNames, limitClock, ko)} /></span> : null}
       {stop ? <>{" "}<button type="button" className={styles.splitPaneRailToggle} data-room-pane-stop={roomChatId} onClick={() => { void stop(roomChatId).catch(() => undefined); }}>{ko ? "중단" : "Stop"}</button></> : null}
     </p>
   );

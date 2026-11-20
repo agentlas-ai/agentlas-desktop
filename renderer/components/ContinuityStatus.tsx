@@ -42,15 +42,29 @@ function goalStatus(snapshot: ChatContinuitySnapshot, ko: boolean, observationSt
 function invocationStatus(snapshot: ChatContinuitySnapshot, ko: boolean, observationStale: boolean): string | null {
   const run = snapshot.invocation;
   if (!run) return null;
-  const relation = run.relationship === "goal-bound"
-    ? (ko ? "Goal 실행" : "Goal run")
-    : (ko ? "Goal 연결 확인 안 된 실행" : "Goal link unverified");
   const state = run.state === "active" && !observationStale
     ? (ko ? "실행 중 확인됨" : "Confirmed running")
     : run.state === "unconfirmed"
       ? (ko ? "실행 여부 재확인 필요" : "Run status needs recheck")
-      : (ko ? "모델 호출 종료" : "Model call ended");
+      : (ko ? "실행이 끝났어요" : "The run has ended");
+  // Whether the run counts toward a Goal is said only where there is a Goal to count toward: in a chat with none, "link unverified" is a
+  // sentence about something the person never set up.
+  if (!snapshot.goal) return state;
+  const relation = run.relationship === "goal-bound"
+    ? (ko ? "Goal 실행" : "Goal run")
+    : (ko ? "Goal 연결 확인 안 된 실행" : "Goal link unverified");
   return `${relation} · ${state}`;
+}
+
+/** The run's phase in the words a person uses; the raw phase name ("terminal", "tool_activity") is the host's bookkeeping, not theirs. */
+function runPhaseWords(phase: NonNullable<ChatContinuitySnapshot["invocation"]>["phase"], ko: boolean): string {
+  switch (phase) {
+    case "started": case "runtime_selected": return ko ? "시작하는 중" : "Starting";
+    case "model_activity": return ko ? "답을 쓰는 중" : "Writing the answer";
+    case "tool_activity": return ko ? "도구를 쓰는 중" : "Using tools";
+    case "terminal": return ko ? "끝남" : "Finished";
+    default: return ko ? "작업 중" : "Working";
+  }
 }
 
 function nextActionLabel(value: NonNullable<NonNullable<ChatContinuitySnapshot["goal"]>["episodeStrategy"]>["nextAction"], ko: boolean): string {
@@ -171,6 +185,10 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
     modelStatus && <span key="model">{modelStatus} · {model?.requested.model ?? model?.requested.kind}</span>,
     strategy?.state === "changed" && <span key="strategy">{ko ? "검증 결과에 따라 다음 행동 변경" : "Next action changed after verification"} · {nextActionLabel(strategy.nextAction, ko)}</span>,
   ].filter(Boolean);
+  // The Overview's detail view says only what a person can act on or wait for: a Goal, a schedule, a run in progress. A chat with none of them
+  // (the usual one) drew "No linked Goal" and the host's bookkeeping under every file list.
+  if (detail && !embedded && !snapshot.goal && !snapshot.automations.length && !scheduleLine.length
+    && !(snapshot.invocation && snapshot.invocation.state !== "terminal")) return null;
   if (embedded) {
     // The Goal bar already says what the Goal is doing and when it is next checked; only what it cannot say is here.
     if (!scheduleLine.length && !(!error && claimedWaitNeedsReview) && !snapshot.automations.length) return null;
@@ -220,7 +238,7 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
           : "Next safe step: inspect the previous execution in this conversation's Activity and check its actual result. Do not send the same request again until you know whether it ran. Automatic replay is stopped; the Goal and work history are preserved.")}
     </p>}
     {detail && <div className={styles.detailRows}>
-      {snapshot.invocation && <p>{ko ? "이번 실행 단계" : "Current run phase"} · {snapshot.invocation.phase}
+      {snapshot.invocation && <p>{ko ? "이번 실행" : "This run"} · {runPhaseWords(snapshot.invocation.phase, ko)}
         {snapshot.invocation.model?.model && ` · ${ko ? "실행 선택 모델" : "Selected run model"} ${snapshot.invocation.model.model}`}
         {when(snapshot.invocation.phaseAt, locale) && ` · ${when(snapshot.invocation.phaseAt, locale)}`}</p>}
       {snapshot.automations.map((row) => <p key={row.automationId} data-automation-id={row.automationId}>
@@ -238,12 +256,12 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
         ? (ko ? "다음 행동 변경" : "next action changed") : strategy.state === "unknown" ? (ko ? "증거 미확정 · 자동 변경 없음" : "evidence inconclusive · no automatic change") : (ko ? "기존 행동 유지" : "existing action retained")}
         {` · ${nextActionLabel(strategy.nextAction, ko)} · ${ko ? "통과" : "passed"} ${strategy.metrics.passed}, ${ko ? "증거 미확정" : "inconclusive"} ${strategy.metrics.inconclusive}`}
         {strategy.nextWakeAt && ` · ${ko ? "다음 확인" : "next check"} ${when(strategy.nextWakeAt, locale)}`}</p>}
-      {latestProgress && <p>{ko ? "마지막으로 기록된 활동" : "Last durable activity"} · {latestProgress}</p>}
+      {latestProgress && <p>{ko ? "마지막 활동" : "Last activity"} · {latestProgress}</p>}
     </div>}
     {snapshot.automations.map((row) => <AutomationStrategyPanel key={row.automationId} automationId={row.automationId} locale={locale} />)}
     {/* A "checked at" timestamp is noise in One's compact bubble; keep it only when stale or in the detail view. */}
     {(detail || error) && <small className={styles.observation}>{error ? (ko ? "상태 재확인 중 · 마지막 확인 " : "Rechecking status · last confirmed ")
-      : (ko ? "Main 상태 확인 " : "Main state checked ")}{observedAt ?? lastConfirmedAt ?? "—"}</small>}
+      : (ko ? "상태 확인 " : "Status checked ")}{observedAt ?? lastConfirmedAt ?? "—"}</small>}
     </div>
   </details>;
 }

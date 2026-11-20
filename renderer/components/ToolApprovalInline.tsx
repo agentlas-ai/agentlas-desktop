@@ -14,6 +14,7 @@
  * components/ApprovalPrompt 한 곳 — 질문 한 줄, 실제 실행될 명령·경로(코드 블록), 번호 선택지, 단축키 힌트,
  * 여러 건이면 한 장씩 "1/3 · 다음". 선택지의 뜻과 저장·전송은 그대로다.
  */
+import { toolLabel } from "@/lib/tool-labels";
 import { redactSecrets } from "@shared/secret-patterns";
 import { approvalIsMoney } from "@shared/approval-card";
 import { useEffect, useState } from "react";
@@ -22,6 +23,7 @@ import { IconShield, IconFolder } from "./Icon";
 import { ApprovalPrompt, type ApprovalPromptDeck, type ApprovalPromptOption } from "./ApprovalPrompt";
 import { useT } from "@/lib/i18n";
 import { useOnePersonaName } from "@/lib/one-persona-name";
+import { plainFolderTail } from "@/lib/managed-folder-label";
 import { RemoteAskPrompt } from "@/components/PluralHandoffCards";
 import { remoteAskCopy, type RemoteAskKind } from "@shared/plural-handoff-card";
 import type { ToolApprovalRequestEvent } from "@/lib/types";
@@ -32,6 +34,7 @@ import {
   markChatVisible,
   refreshToolApprovalDecision,
   useApprovalDeck,
+  toolApprovalIsForChat,
   useToolApprovals,
 } from "@/lib/tool-approvals";
 
@@ -52,12 +55,8 @@ const RUNTIME_LABEL: Record<string, string> = {
  * A tool as a person reads it. MCP calls arrive as "mcp__<server>__<tool>" (owner 2026-10-04 screenshot:
  * "mcp__one-team__one_supervi…" in an approval chip); the server prefix and underscores are machine spelling.
  */
-export function toolDisplayName(tool: string): string {
-  // The server part may itself contain underscores ("claude_ai_Notion"): it ends at the next "__" (mobile
-  // tool_approval_presentation.dart toolApprovalDisplayName is the same rule).
-  const mcp = /^mcp__(.+?)__(.+)$/.exec(tool.trim());
-  const name = (mcp ? mcp[2] : tool).replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
-  return name || tool;
+export function toolDisplayName(tool: string, lang: "ko" | "en" = "ko"): string {
+  return toolLabel(tool, lang);
 }
 
 export function ToolApprovalCard({
@@ -113,7 +112,7 @@ export function ToolApprovalCard({
   const folderAccess = request.tool === "folder-access";
   const folderWrite = folderAccess && request.capability === "edit";
   const folderLabel = folderAccess
-    ? (request.detail || request.cwd || "").replace(/[\x00-\x1f\x7f]/g, "").split(/[\\/]+/).filter(Boolean).slice(-2).join("/")
+    ? plainFolderTail(request.detail || request.cwd || "")
       || (ko ? "요청한 폴더" : "the requested folder")
     : "";
   /*
@@ -144,12 +143,18 @@ export function ToolApprovalCard({
     : alwaysUnit === "chat"
       ? (ko ? "이 대화에서는 이 도구를 더 묻지 않아요. 설정에서 끌 수 있어요." : "This tool is not asked again in this conversation. You can turn it off in Settings.")
       : (ko ? "이 도구를 더 묻지 않아요. 설정에서 끌 수 있어요." : "This tool is not asked again. You can turn it off in Settings.");
+  // A delete card whose tool is not itself named for deleting and carries a command line (Bash, a shell runner, ACP exec).
+  const shellCommandCard = deleteCard && !/^mcp__/.test(request.tool) && !/delet|remov|trash|unlink|(^|[_\W])rm($|[_\W])/i.test(request.tool) && Boolean(request.detail?.trim());
   const askTitle = moneyCard
-    ? (ko ? `결제·송금을 허용할까요? · ${toolDisplayName(request.tool)}` : `Allow this payment or transfer? · ${toolDisplayName(request.tool)}`)
+    ? (ko ? `결제·송금을 허용할까요? · ${toolDisplayName(request.tool, ko ? "ko" : "en")}` : `Allow this payment or transfer? · ${toolDisplayName(request.tool, ko ? "ko" : "en")}`)
     : deleteCard
-      ? (ko ? `${toolDisplayName(request.tool)}로 삭제할까요?` : `Allow deleting with ${toolDisplayName(request.tool)}?`)
+      ? (shellCommandCard
+        // A command runner is not a delete tool: the command may only create a file and remove it again. The card says it contains
+        // a delete and shows the command, instead of announcing that the tool deletes.
+        ? (ko ? "삭제가 들어 있는 명령을 실행할까요?" : "Run this command? It includes a delete.")
+        : (ko ? `${toolDisplayName(request.tool, ko ? "ko" : "en")}로 삭제할까요?` : `Allow deleting with ${toolDisplayName(request.tool, ko ? "ko" : "en")}?`))
       : sendCard
-        ? (ko ? `${toolDisplayName(request.tool)}로 밖으로 보낼까요?` : `Allow sending out with ${toolDisplayName(request.tool)}?`)
+        ? (ko ? `${toolDisplayName(request.tool, ko ? "ko" : "en")}로 밖으로 보낼까요?` : `Allow sending out with ${toolDisplayName(request.tool, ko ? "ko" : "en")}?`)
         : escalation
     ? (ko ? "전체 액세스로 진행할까요?" : "Continue with full access?")
     : folderAccess
@@ -158,7 +163,7 @@ export function ToolApprovalCard({
         : (ko ? `“${folderLabel}” 폴더를 읽을까요?` : `Allow reading the “${folderLabel}” folder?`)
     : imageTool
       ? (ko ? "이미지 생성을 허용할까요?" : "Allow image generation?")
-      : (ko ? `${toolDisplayName(request.tool)} 사용을 허용할까요?` : `Allow ${toolDisplayName(request.tool)}?`);
+      : (ko ? `${toolDisplayName(request.tool, ko ? "ko" : "en")} 사용을 허용할까요?` : `Allow ${toolDisplayName(request.tool, ko ? "ko" : "en")}?`);
   /*
    * 오너 2026-10-27: Claude Code·Codex 의 승인 프롬프트 문구를 따른다 — 예 / 이 작업 동안 다시 묻지 않기 / 항상 허용 / 아니오.
    * 선택지의 뜻과 저장·전송(allow_once·allow_session·allow_always·deny)은 그대로다. "항상 허용"은 실제로 저장되는 범위만 말한다:
@@ -382,7 +387,7 @@ export function ToolApprovalCard({
   if (compact && chip) {
     // The app's own work folder is not the owner's (Main says so: cwdIsAppFolder): no folder is named for it.
     const folder = request.cwd && !request.cwdIsAppFolder
-      ? redactSecrets(request.cwd).replace(/[\x00-\x1f\x7f]/g, "").split(/[\\/]+/).filter(Boolean).slice(-2).join("/")
+      ? plainFolderTail(redactSecrets(request.cwd))
       : "";
     return (
       <ApprovalPrompt
@@ -467,7 +472,7 @@ export function ToolApprovalInline({
 }) {
   const { queue } = useToolApprovals();
   useEffect(() => markChatVisible(chatId), [chatId]);
-  const all = chatId ? queue.filter((item) => item.chatId === chatId) : [];
+  const all = chatId ? queue.filter((item) => toolApprovalIsForChat(item, chatId)) : [];
   // Full access asks money only: it settles the cards left over from before the switch, delete / send cards
   // included, and draws nothing for them. A payment / transfer card is never settled for the owner (shared/approval-card.ts): it is
   // drawn in full access too. Before, full access answered every card "allow" and drew nothing, so a new install (full access by
@@ -479,7 +484,8 @@ export function ToolApprovalInline({
   const staleKey = stale.map((item) => item.id).join(",");
   useEffect(() => {
     if (!staleKey) return;
-    for (const id of staleKey.split(",")) void decideToolApproval(id, "allow_session");
+    // an automatic answer is the narrowest one: this call only. "allow_session" would make a grant that outlives what the owner chose (the label says "this run").
+    for (const id of staleKey.split(",")) void decideToolApproval(id, "allow_once");
   }, [staleKey]);
   if (!chatId) return null;
   if (mine.length === 0) return null;

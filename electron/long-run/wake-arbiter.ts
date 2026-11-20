@@ -19,10 +19,10 @@
  * the run version that resume and observation paths fence on.
  */
 import { getDb } from "../store/db";
-import { appendChatMessage } from "../store/chats";
 import { recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
 import { currentUiLocale } from "../ui-locale";
+import { ownerStopHoldsWriters, writeAssistantUnlessStopped } from "../chat/chat-stop";
 import { decideLastTurn, ladderDelayMs, turnEndFromTerminalEvent, type TurnEnd } from "../harness/cause";
 
 export const GOAL_WAKE_DAILY_BUDGET = 48;
@@ -46,7 +46,7 @@ export interface GoalWakeGate {
 
 export type GoalWakeVerdict =
   | { start: true }
-  | { start: false; reason: "chat_busy" | "owner_request_queued"; retryAt?: string }
+  | { start: false; reason: "chat_busy" | "owner_request_queued" | "owner_stopped"; retryAt?: string }
   | { start: false; reason: "wake_budget_reached"; retryAt: string };
 
 /** The owner's own request is waiting to start in this room (a queued steer, or a reserved start in preflight). */
@@ -82,16 +82,17 @@ function tellBudgetOnce(runId: string, chatId: string, window: { count: number; 
   const told = getDb().prepare(`SELECT 1 FROM run_events WHERE chat_id = ? AND kind = ? AND ts > ?
     AND json_extract(payload_json, '$.longRunId') = ? LIMIT 1`).get(chatId, BUDGET_EVENT_KIND, window.since, runId);
   if (told) return;
+  if (ownerStopHoldsWriters(chatId, { longRunId: runId })) return; // a stopped chat gets no new line from a wake
   const noticeRunId = `goal-wake-budget:${runId}:${window.since}`;
   tryRecordRunEvent({ runId: noticeRunId, chatId, kind: BUDGET_EVENT_KIND,
     payload: { longRunId: runId, count: window.count, budget: GOAL_WAKE_DAILY_BUDGET, retryAt } });
   const at = new Date(retryAt);
   const clock = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
   try {
-    appendChatMessage(chatId, "assistant", currentUiLocale() === "ko"
+    writeAssistantUnlessStopped(chatId, currentUiLocale() === "ko"
       ? `이 목표를 지난 24시간 동안 직접 입력 없이 ${window.count}번 깨웠습니다. ${clock}까지 더 깨우지 않습니다. 말을 걸거나 목표에서 이어가기를 누르면 바로 이어갑니다.`
       : `This goal was woken ${window.count} times in the last 24 hours without your input. It will not be woken again before ${clock}. Send a message or resume the goal to continue now.`,
-    { hostNotice: { purpose: "host-status", runId: noticeRunId, status: "goal-paused" } });
+    { hostNotice: { purpose: "host-status", runId: noticeRunId, status: "goal-paused" } }, { longRunId: runId });
   } catch (error) { console.warn("[wake-arbiter] budget notice failed:", error); }
 }
 
@@ -252,6 +253,9 @@ export function decideGoalWake(input: {
   requireIdleChat?: boolean; now?: number;
 }): GoalWakeVerdict {
   const now = input.now ?? Date.now();
+  // The person's Stop is newer than anything they said or did since: no wake starts a turn in this chat until they speak or press a
+  // Goal control. Asked before anything else, so a stopped chat is never counted, deferred or told about.
+  if (ownerStopHoldsWriters(input.chatId, { longRunId: input.runId })) return { start: false, reason: "owner_stopped" };
   if (input.requireIdleChat !== false
     && (input.gate?.activeChatIds?.().includes(input.chatId) || input.gate?.isChatBusy?.(input.chatId))) {
     return { start: false, reason: "chat_busy" };
@@ -309,7 +313,7 @@ export function recordGoalWake(input: { runId: string; chatId: string; source: G
 }
 
 export interface HostGoalWakeDeferral {
-  reason: "chat_busy" | "owner_request_queued" | "wake_budget_reached";
+  reason: "chat_busy" | "owner_request_queued" | "owner_stopped" | "wake_budget_reached";
   retryAt: string;
   deferredAt: string;
 }
@@ -323,7 +327,7 @@ export function readHostGoalWakeDeferral(input: { runId: string; chatId: string;
   if (!row || row.kind !== GOAL_WAKE_DEFERRED_EVENT_KIND) return null;
   let payload: { reason?: unknown; retryAt?: unknown };
   try { payload = JSON.parse(row.payload_json); } catch { return null; }
-  if (!["chat_busy", "owner_request_queued", "wake_budget_reached"].includes(String(payload.reason))
+  if (!["chat_busy", "owner_request_queued", "owner_stopped", "wake_budget_reached"].includes(String(payload.reason))
     || typeof payload.retryAt !== "string" || !Number.isFinite(Date.parse(payload.retryAt))) return null;
   const floor = windowFloor(input.runId, input.chatId, now);
   if (!Number.isFinite(Date.parse(row.ts))) return null;

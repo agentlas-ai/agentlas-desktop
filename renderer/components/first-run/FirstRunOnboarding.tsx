@@ -321,6 +321,10 @@ export function FirstRunOnboarding({
 
   const rootRef = useRef<HTMLDivElement>(null);
   useDismissibleLayer({ open: !importOpen && connectFor === null, roots: [rootRef], onDismiss: () => onClose() });
+  // Reopened from Settings, the page it covered gets its keyboard back where the person left it; a first run has no such place and leaves the focus alone.
+  // (Read while rendering: by the first effect the wizard's own first field may already hold the focus.)
+  const [opener] = useState<HTMLElement | null>(() => typeof document !== "undefined" && document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null);
+  useEffect(() => () => { if (opener) window.requestAnimationFrame(() => { if (opener.isConnected) opener.focus(); }); }, [opener]);
 
   // Preferences
   const [prefText, setPrefText] = useState("");

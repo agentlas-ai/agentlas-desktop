@@ -29,6 +29,7 @@ export function parseHephaestusUpdateJournal(value: unknown): HephaestusUpdateJo
     status: str("status"),
     ...(typeof parsed.errorCode === "string" && /^[a-z][a-z0-9_]{0,79}$/.test(parsed.errorCode)
       ? { errorCode: parsed.errorCode } : {}),
+    targetVersion: str("targetVersion"),
     reason: str("reason"),
     current: str("current"),
     latest: str("latest"),
@@ -39,6 +40,32 @@ export function parseHephaestusUpdateJournal(value: unknown): HephaestusUpdateJo
     pendingHosts: stringList(parsed.pendingHosts),
     activation,
   };
+}
+
+function releaseCore(value: string | null | undefined): [number, number, number] | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec((value ?? "").trim());
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+/**
+ * A failed update record names the release it failed to reach. When the runtime the updater tracks already is that release (or a
+ * newer one), the failure is history, not a state: nothing is left to retry, yet the record stays on disk until the next successful
+ * check and every screen kept saying "the engine update failed". Such a record reads as `current`. A failure whose target is
+ * ahead of the runtime, or whose target or current is not readable, stays a failure.
+ */
+export function settleStaleHephaestusUpdateFailure(
+  journal: HephaestusUpdateJournal | null,
+): HephaestusUpdateJournal | null {
+  if (!journal || journal.status !== "failed") return journal;
+  const target = releaseCore(journal.targetVersion);
+  const have = releaseCore(journal.current);
+  if (!target || !have) return journal;
+  for (let index = 0; index < 3; index += 1) {
+    if (have[index] > target[index]) break;
+    if (have[index] < target[index]) return journal;
+  }
+  const { errorCode: _failure, ...rest } = journal;
+  return { ...rest, status: "current", reason: "failed_target_already_installed" };
 }
 
 function activationRecord(journal: HephaestusUpdateJournal | null): Record<string, unknown> | null {

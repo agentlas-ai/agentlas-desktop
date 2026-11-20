@@ -17,6 +17,7 @@ import type { AskUserRequestEvent } from "../../shared/types";
 import { reportOwnerAsk } from "../owner-ask-alerts";
 import { waitingForPerson } from "../runtime/run-slot-lease";
 import { nativeApprovalSignalChain } from "../runtime/native-approval-provenance";
+import { admitScopeAnswer, admitScopeView, type ScopeAnswerer, type ScopeStamp, type ScopeViewer } from "../../shared/scope-stamp";
 
 export interface AskUserOption {
   label: string;
@@ -49,6 +50,18 @@ interface PendingAsk {
 
 const ASK_CHANNEL = "agentlas:ask-user";
 const pending = new Map<string, PendingAsk>();
+/**
+ * where each open question was made (shared/scope-stamp.ts). A question with no conversation (`chatId` null: an API-key request, a strategy
+ * question) is stamped app-wide and goes to the app-wide sheet only; one with a conversation goes to that conversation's pane only. Kept beside `pending`
+ * and dropped with it - no table, no copy on disk. The store is read lazily so the background service's import graph is unchanged.
+ */
+const stamps = new Map<string, ScopeStamp>();
+function stampOfAsk(chatId: string | undefined): ScopeStamp | null {
+  try {
+    const gate = require("../scope/scope-gate") as typeof import("../scope/scope-gate"); // eslint-disable-line @typescript-eslint/no-require-imports
+    return chatId ? gate.scopeOfChat(chatId) : gate.appWideScopeStamp();
+  } catch { return null; }
+}
 const lifecycleListeners = new Set<(event: AskUserRequestEvent) => boolean>();
 
 /** 사람이 카드를 보고 답할 시간. 넘으면 timeout — 추측한 답을 만들지 않는다. */
@@ -150,6 +163,7 @@ export function askUser(
       if (!entry) return;
       clearTimeout(entry.timer);
       pending.delete(requestId);
+      stamps.delete(requestId);
       if (abortListener) opts.signal?.removeEventListener("abort", abortListener);
       emitToQuestionSurfaces({ ...entry.payload, expiresAt: 0 });
       resolve(outcome);
@@ -159,6 +173,7 @@ export function askUser(
       settle({ status: "timeout" });
     }, ASK_TIMEOUT_MS);
     pending.set(requestId, { resolve: settle, timer, payload });
+    { const stamp = stampOfAsk(req.chatId); if (stamp) stamps.set(requestId, stamp); }
 
     if (!emitToQuestionSurfaces(payload)) {
       // 그릴 창이 없다 — 플러그인·헤드리스 표면이다. 기다리면 그냥 멈춘 실행이 된다.
@@ -191,6 +206,36 @@ export function submitAskUserAnswer(requestId: string, answer: string | null): b
       : { status: "declined" },
   );
   return true;
+}
+
+/**
+ * Closes the open questions one asker has in one conversation (a message_send card whose intent is gone: harness/peer-send-window.ts). Each settles as declined and
+ * is drawn closed everywhere it showed (window and paired phone, `expiresAt: 0`). Returns how many.
+ */
+export function closePendingAskUserOf(match: { chatId: string; askedBy: string }): number {
+  let n = 0;
+  for (const [id, entry] of [...pending]) {
+    if (entry.payload.chatId === match.chatId && entry.payload.askedBy === match.askedBy) { entry.resolve({ status: "declined" }); n += 1; void id; }
+  }
+  return n;
+}
+
+/**
+ * an answer from a surface (a window, a paired phone) passes the gate first. A question this surface may not answer is left open and the surface is
+ * told "not taken" (the same as an id that does not exist). A question with no stamp (a restored or relayed one) is answered as before.
+ */
+export function submitAskUserAnswerFrom(requestId: string, answer: string | null, answerer: ScopeAnswerer): boolean {
+  const stamp = stamps.get(requestId);
+  if (stamp && !admitScopeAnswer(stamp, answerer).ok) return false;
+  return submitAskUserAnswer(requestId, answer);
+}
+
+/** The open questions a surface may see (the IPC list, the window broadcast, the phone snapshot). A conversation pane never gets an app-wide question. */
+export function listPendingAskUserRequestsFor(viewer: ScopeViewer): AskUserRequestEvent[] {
+  return listPendingAskUserRequests().filter((row) => {
+    const stamp = stamps.get(row.requestId);
+    return stamp ? admitScopeView(stamp, viewer).ok : viewer.surface !== "draft-pane";
+  });
 }
 
 /** 대기 중인 질문 수 — 테스트와 진단용. */

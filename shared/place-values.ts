@@ -29,7 +29,14 @@ export function faceIsDefault(avatarIcon: string | undefined): boolean {
   return avatarIcon === undefined || avatarIcon === `character:${DEFAULT_PLACE_PRESET}`;
 }
 
-export interface PlaceValues { machine: string; agent: string; preset: string; style: string; reach: string[]; runnable: boolean; v: number }
+export interface PlaceValues {
+  machine: string; agent: string; preset: string; style: string; reach: string[]; runnable: boolean; v: number;
+  /**
+   * Connector roads this computer has MEASURED as ready (ids of the server's connector cards, electron/connectors/desktop-paths.ts; decision: the phone and each computer decide by data which road a task takes).
+   * Absent / empty = none reported (an older desktop looks the same). Read by the server's route (phone agent turns, hand-off to the computer that has the road); dropped when the person disconnects this computer.
+   */
+  paths?: string[];
+}
 
 const clean = (value: string): string => value.replace(/[\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim();
 

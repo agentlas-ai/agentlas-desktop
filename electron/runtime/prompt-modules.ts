@@ -146,22 +146,22 @@ registerPromptModule({
 });
 
 registerPromptModule({
-  id: "core.allowlist", revision: 1, kind: "core", layer: "S1", profiles: ["ordinary"],
+  id: "core.allowlist", revision: 2, kind: "core", layer: "S1", profiles: ["ordinary"],
   stability: "configuration", changeTriggers: ["release", "profile", "permission"], order: 0,
   render: (ctx) => ctx.permission === "full"
     ? "allowlist: full access (god mode, no stop)"
     : ctx.permission === "write"
-      ? "allowlist: read, edit, shell inside the working folder; network, browser, approved MCP"
+      ? "allowlist: read, edit, shell inside the working folder; network, browser, approved MCP; a write to an owner-named path outside it is refused: say why in one sentence and end with the line [[NEEDS-FULL-ACCESS]], never leave the result in a temp folder for the owner to copy"
       : "allowlist: read the working folder only; if writing or running is truly needed, say why and end with the line [[NEEDS-FULL-ACCESS]] (agent_mail_* tools still send mail)",
 });
 
 registerPromptModule({
-  id: "core.loop", revision: 3, kind: "core", layer: "S1", profiles: ["ordinary"],
+  id: "core.loop", revision: 4, kind: "core", layer: "S1", profiles: ["ordinary"],
   stability: "configuration", changeTriggers: ["release", "profile", "permission"], order: 0,
   // Measured 2026-10-14: without "any topic" qwen3 refused a tweet and a science question as outside a Motion agent's
   // specialty (the old prompt said "everything else the user asks for, you complete"); with it 4/4 on qwen3 and gpt-oss.
   render: (ctx) => ctx.permission === "read" ? null
-    : "loop: do what the user asks (any topic, not only your specialty) → verify → report how; failed → another tool; stop only at a named outside blocker; no leaks or attacks",
+    : "loop: do what the user asks (any topic, not only your specialty) → verify → report how; failed → another tool; stop only at a named outside blocker; a step the app cannot do: say so in one sentence, never hand the person shell, AppleScript or terminal steps; no leaks or attacks",
 });
 
 registerPromptModule({

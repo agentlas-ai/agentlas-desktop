@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.0.7 — 2026-11-21
+
+- Reminders: a reminder you asked for now reaches you in the conversation where you asked, instead of staying in the hidden automation chat. Reminders you set from your phone keep their skipped dates, and an automation can end on a date you pick. Closing the window while reminders are waiting now asks first, and a conversation that only reads says plainly that it cannot schedule.
+- Group rooms: "@" keeps typing in the box and adds the agent you pick; agents with the same name are told apart in the list. Stop in a group room now stops every member's run, and an answer that arrives late is dropped. A schedule a member makes reports into the room and can be paused there, and members can message another conversation of the project.
+- Conversations: the list opens a chat even while "New chat" is open, and each pane keeps its own unsent words. A message from another conversation reads as one plain line, and a group keeps the name you gave it.
+- Approvals and dialogs: change-review buttons, approval cards and dialogs now fit the screen, Tab stays inside an open card or dialog, and approval lines name the file or thing they are about. An approval nobody answered no longer leaves a call hanging.
+- Safety: writes outside the project folder need your approval, a Claude write run no longer owns all of the temp folder, and a delete that only appears inside a script's text is no longer treated as a delete. A receipt shows the file's full path.
+- Question cards: a question you closed stays closed, also after a restart, an 8-question card can be closed, and a question closed on your phone stays closed here.
+- Phone link: the Dashboard, Settings and the pairing card now agree on whether your phone is connected, and "connected" needs evidence.
+- Goals: pausing a Goal also closes the request the app kept for it, and an automatic Goal that only asked a question is closed quietly.
+- Usage: AI usage is shown as a percent or in plain words everywhere, never as raw credit numbers.
+- Wording: many labels, banners and notices were rewritten to say what happens and what to do next, including Settings, Connections, Science and the schedule form.
+- Messages to other conversations: a send now waits for your choice and goes out once when you answer, even after the turn that asked has ended. A reply you are waiting for survives a restart, a card is either live or closed, and a conversation that is waiting on a reply or a card no longer starts its Goal's next turn.
+- Messages: when the other conversation stops, the sender is told. An empty message is refused before any card appears, and the cards of an ended send close.
+- Personal agent: its own messages never wait in silence, and it can list and cancel its hand-offs. A failed hand-off card can be retried or dismissed, and cards sit in time order.
+- Files: a file written by a shell command now shows up as a receipt, and a schedule receipt on your phone reads in your computer's time zone.
+- Clearing: clearing a conversation's history now asks first and says what goes. An approval that expired is no longer counted as waiting, and the built-in browser says when a page failed or is slow and no longer drops a link click.
+- Cards: cards and lines say their fact in a few words with an icon; the whole sentence is the hover.
+- Engine: the app ships Agentlas OS 1.2.99.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.6 — 2026-11-18
 
 - Work panel: the composer now shows its stop button while a run is going; the send arrow no longer covers it.

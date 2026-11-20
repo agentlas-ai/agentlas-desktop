@@ -22,6 +22,7 @@ import { AGENT_ASK_OPEN } from "../../shared/agent-control-blocks";
 import { isHostCheckinInstruction } from "./host-checkin-instructions";
 import { OneSupervisorStore, supervisorHash, supervisorWorkForWorkerChat, type SupervisorRequestRow } from "./supervisor-store";
 import { supervisorExactResult } from "./supervisor-presentation";
+import { noteStalledOwnerReply, ownerReplyStoppedLine, sweepSilentOwnerRow, SILENT_OWNER_SWEEP_EVERY_MS } from "./owner-reply-stall";
 import { AGENT_CONTROL_HEADINGS } from "../../shared/agent-control-blocks";
 import { ensurePersonalAgentRooms, markPersonalAgentRoom, personalAgentRoomReleased, PERSONAL_AGENT_ROOM_RELEASED } from "./personal-agent-rooms";
 import { parseGraphResultDetail } from "./graph-review";
@@ -423,7 +424,31 @@ export class OneSupervisorService {
       this.deps.store.update(row, {state: "stored", acknowledgement: "stored", reason: code});
       return delay;
     }).immediate();
+    this.noteStalledReply(row, now);
     if (row.kind === "chat-send" || row.kind === "follow-up") this.armChatSendDrain(delayMs); else this.armDrain(delayMs);
+  }
+  /** The owner's message that waits for its next try says so once in the conversation, after a short wait (owner-reply-stall.ts): a held message never sits in silence. */
+  private noteStalledReply(row: SupervisorRequestRow, now: number): void {
+    if (row.kind !== "reply" || isReview(row) || !row.user_message_id || !row.run_id) return;
+    try {
+      const retry = supervisorDispatchRetry(this.deps.store.get(row.command_id)!);
+      if (!retry) return;
+      noteStalledOwnerReply(this.deps.store.db, (chatId, marker, text, kind) => this.deps.noticeOwner?.(chatId, marker, text, kind),
+        {chatId: row.origin_chat_id, runId: row.run_id, firstAt: retry.firstAt, now, locale: this.deps.locale()});
+    } catch { /* the line is best effort; the retry goes on */ }
+  }
+  /** A Stop that takes a reply back before it ran leaves its own line: the owner reads that the message was not sent. */
+  private noteStoppedReply(reply: SupervisorRequestRow): void {
+    if (isReview(reply)) return;
+    try { this.deps.noticeOwner?.(reply.origin_chat_id, reply.run_id ?? reply.command_id, ownerReplyStoppedLine(this.deps.locale()), "info"); } catch { /* best effort */ }
+  }
+  private lastSilentSweep = 0;
+  /** The host check: the newest owner message with no run, no command and no queue entry after SILENT_OWNER_ROW_MS gets one line (owner-reply-stall.ts). At most once per SILENT_OWNER_SWEEP_EVERY_MS. */
+  private sweepSilentOwner(chatId: string): void {
+    const now = Date.now();
+    if (!this.deps.noticeOwner || now - this.lastSilentSweep < SILENT_OWNER_SWEEP_EVERY_MS) return;
+    this.lastSilentSweep = now;
+    sweepSilentOwnerRow(this.deps.store.db, (id, marker, text, kind) => this.deps.noticeOwner?.(id, marker, text, kind), {chatId, now, locale: this.deps.locale()});
   }
   /** New review claims wait out the same backoff, so a refusal cannot burn a result's three attempts in three ticks. */
   private holdOffReviews(reviewRunId: string): void {
@@ -1941,6 +1966,26 @@ export class OneSupervisorService {
    * starts that conversation's next turn with full access, as everything One hands off does (owner 2026-10-04).
    */
   sendToChat(raw: {commandId:string;chatId:string;text:string;oneId?:string}, originReplyRunId?: string): SupervisorCommandReceipt {
+    // (rule 4): the receipt names the receiving conversation's project, and says when it is not the personal agent's own project (the personal agent may cross projects of its own account; the owner and the model see which one it went to).
+    return this.withTargetProject(this.sendToChatUnstamped(raw, originReplyRunId), raw.chatId);
+  }
+  private withTargetProject(receipt: SupervisorCommandReceipt, toChatId: string): SupervisorCommandReceipt {
+    try {
+      const gate = require("../scope/scope-gate") as typeof import("../scope/scope-gate"); // eslint-disable-line @typescript-eslint/no-require-imports
+      const stamp = gate.scopeOfChat(String(toChatId));
+      const name = stamp?.project ? (require("../store/projects") as typeof import("../store/projects")).getProject(stamp.project)?.name ?? "" : ""; // eslint-disable-line @typescript-eslint/no-require-imports
+      return name ? { ...receipt, targetProject: name } as SupervisorCommandReceipt : receipt;
+    } catch { return receipt; }
+  }
+  /** the personal agent writes only into a conversation of its own account (the gate's `personal` mode); another account's is refused with a typed reason. */
+  private chatSendScopeRefusal(fromChatId:string,toChatId:string):string|null {
+    try {
+      const gate = require("../scope/scope-gate") as typeof import("../scope/scope-gate"); // eslint-disable-line @typescript-eslint/no-require-imports
+      const verdict = gate.admitDeliver(gate.scopeOfChat(fromChatId), gate.scopeOfChat(toChatId), "personal");
+      return verdict.ok ? null : `supervisor_chat_${verdict.code}`;
+    } catch { return null; }
+  }
+  private sendToChatUnstamped(raw: {commandId:string;chatId:string;text:string;oneId?:string}, originReplyRunId?: string): SupervisorCommandReceipt {
     this.assertAutomaticWriteAllowed(originReplyRunId);
     const value=supervisorObject(raw,["commandId","chatId","text","oneId"]);
     const input={commandId:supervisorIdentifier(value.commandId),chatId:supervisorIdentifier(value.chatId),text:supervisorText(value.text)};
@@ -1954,7 +1999,7 @@ export class OneSupervisorService {
     const exists=this.deps.store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='chats'").get()
       && this.deps.store.db.prepare("SELECT 1 FROM chats WHERE id=?").get(input.chatId);
     const rejected=input.chatId===chatId ? "supervisor_chat_is_personal" : !exists ? "supervisor_chat_missing"
-      : personalAgentRoomReleased(input.chatId,this.deps.store.db) ? PERSONAL_AGENT_ROOM_RELEASED : this.chatSendRefusal(input.chatId);
+      : personalAgentRoomReleased(input.chatId,this.deps.store.db) ? PERSONAL_AGENT_ROOM_RELEASED : (this.chatSendRefusal(input.chatId) ?? this.chatSendScopeRefusal(chatId,input.chatId));
     const runId=randomUUID();
     const row=this.deps.store.db.transaction(()=>{
       const saved=this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId});
@@ -2360,6 +2405,7 @@ export class OneSupervisorService {
     if (waiting) {
       this.lateProof.delete(waiting.command_id);
       this.deps.store.update(waiting,{state:"cancelled",acknowledgement:"settled",reason:"owner_stopped"});
+      this.noteStoppedReply(waiting);
       return this.deps.store.update(row,{state:"completed",acknowledgement:"settled",reason:"retry_withdrawn"});
     }
     if (this.deps.runtime.attach(chatId)?.runId !== input.runId) {
@@ -2433,6 +2479,7 @@ export class OneSupervisorService {
       for (const stop of stops) this.deps.store.update(stop, {state: "completed", acknowledgement: "settled", reason: "retry_withdrawn"});
     }).immediate();
     for (const stop of stops) this.dispatchInFlight.delete(stop.command_id);
+    if (stops.length) this.noteStoppedReply(reply);
     if (isReview(reply)) this.deps.store.closeReview(reply.run_id!, "review_stopped_by_owner");
   }
   /**
@@ -2546,6 +2593,7 @@ export class OneSupervisorService {
     if(!scienceError)science=science.concat(await this.maskedScienceTurns(binding.oneId,science));
     if(ownerToken)this.deps.owner!.assertToken(ownerToken);
     this.assertConversation(binding.chatId);
+    this.sweepSilentOwner(binding.chatId);
     const tasks=this.deps.tasks().filter(task=>task.chatId!==binding.chatId).concat(science).filter(task=>this.taskInIdentity(task,binding.oneId));
     for (const job of this.deps.workQueue?.list(binding.oneId) ?? []) {
       const task = tasks.find(item => item.taskId === job.task_id && item.chatId === job.chat_id);

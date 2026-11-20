@@ -732,6 +732,9 @@ const api: AgentlasIpc = {
     listCatalog: () => ipcRenderer.invoke("skills:listCatalog"),
     readCatalog: (slug: string) => ipcRenderer.invoke("skills:readCatalog", slug),
   },
+  connectors: {
+    routeView: () => ipcRenderer.invoke("connectors:routeView"),
+  },
   mcpTools: {
     listCatalog: () => ipcRenderer.invoke("mcpTools:listCatalog"),
     brandMap: () => ipcRenderer.invoke("mcpTools:brandMap"),
@@ -847,6 +850,9 @@ const api: AgentlasIpc = {
   listToolApprovals: () => ipcRenderer.invoke("runtime:listToolApprovals"),
   listSettledToolApprovals: (chatIds: string[]) => ipcRenderer.invoke("runtime:listSettledToolApprovals", chatIds),
   pluralHandoffAct: (input: unknown) => ipcRenderer.invoke("pluralHandoff:act", input),
+  pluralConsentAsks: () => ipcRenderer.invoke("pluralConsent:asks"),
+  pluralAllows: () => ipcRenderer.invoke("pluralConsent:allows"),
+  pluralAllowOff: (from: string, to: string) => ipcRenderer.invoke("pluralConsent:allowOff", from, to),
   // 데몬 자동 시작(로그인 기동) — 기본 off. 값 변경 시 main 이 부팅 항목까지 정합시킨다.
   getDaemonAutostart: () => ipcRenderer.invoke("daemon:getAutostart"),
   setDaemonAutostart: (enabled: boolean) => ipcRenderer.invoke("daemon:setAutostart", enabled),
@@ -947,6 +953,18 @@ const api: AgentlasIpc = {
     addSource: (projectId, absPath, scope, kind) =>
       ipcRenderer.invoke("ontology:addSource", projectId, absPath, scope, kind),
     openInbox: (projectId: string) => ipcRenderer.invoke("ontology:openInbox", projectId),
+  },
+  // the one Stop of a conversation and the read model of the sends that are not a transcript row yet.
+  chat: {
+    stop: (chatId: string) => ipcRenderer.invoke("chat:stop", chatId),
+    ownerInputs: (chatId: string) => ipcRenderer.invoke("chat:ownerInputs", chatId),
+    pendingPromises: (chatId: string) => ipcRenderer.invoke("chat:pendingPromises", chatId),
+    receiptLive: (chatId: string) => ipcRenderer.invoke("chat:receiptLive", chatId),
+    closedQuestions: (chatId: string) => ipcRenderer.invoke("chat:closedQuestions", chatId),
+    closeQuestion: (input: { chatId: string; key: string; count?: number }) => ipcRenderer.invoke("chat:closeQuestion", input),
+    reopenQuestion: (input: { chatId: string; key: string }) => ipcRenderer.invoke("chat:reopenQuestion", input),
+    pruneQuestions: (input: { chatId: string; liveKeys: string[] }) => ipcRenderer.invoke("chat:pruneQuestions", input),
+    importClosedQuestions: (legacy: Record<string, unknown>) => ipcRenderer.invoke("chat:importClosedQuestions", legacy),
   },
   chats: {
     messagesPage: (input) => ipcRenderer.invoke("chats:messagesPage", input),
@@ -1376,6 +1394,8 @@ const api: AgentlasIpc = {
     latestRun: (automationId: string) => ipcRenderer.invoke("automations:latestRun", automationId),
     chatActivity: (scope: { chatId?: string | null; projectId?: string | null; includeProject?: boolean }) =>
       ipcRenderer.invoke("automations:chatActivity", scope),
+    keptRequests: () => ipcRenderer.invoke("automations:keptRequests"),
+    cancelKeptRequest: (id: string) => ipcRenderer.invoke("automations:cancelKeptRequest", id),
     runDigest: (runId: string) => ipcRenderer.invoke("automations:runDigest", runId),
     runPage: (automationId: string, options?: { before?: string | null; limit?: number }) =>
       ipcRenderer.invoke("automations:runPage", automationId, options),
@@ -1818,6 +1838,12 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, chatIds: string[]) => handler(chatIds);
     ipcRenderer.on("invoke:activeChats", wrapped);
     return () => ipcRenderer.removeListener("invoke:activeChats", wrapped);
+  },
+  // The chips waiting on this desktop changed (a signal with no data; the screen re-reads pluralConsentAsks).
+  onPluralConsentChanged: (handler: () => void) => {
+    const wrapped = () => handler();
+    ipcRenderer.on("pluralConsent:changed", wrapped);
+    return () => ipcRenderer.removeListener("pluralConsent:changed", wrapped);
   },
   // Agent mail: ids and counts only; the mailbox screen re-reads what it shows.
   onAgentMailChanged: (handler: (event: import("../shared/agent-mail").AgentMailChangedEvent) => void) => {

@@ -200,6 +200,11 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
       authority(); service.assertHostWriteAuthority(identity!.oneId);
       return (await import('../one/personal-data-runtime')).dispatchOnePersonalDataNative(raw.input.method,raw.input.args);
     }
+    // A handed-over Work's question this daemon holds, answered by the row (Main reads the row and has no card of it): the holder settles it, row first (plural-work-real.ts answerHeldRemoteApproval).
+    if(raw.op==="approval.remote"){
+      if(!exact(raw.input,["requestId","decision"]) || typeof raw.input.requestId!=="string" || !raw.input.requestId || raw.input.requestId.length>256 || (raw.input.decision!=="allow_once" && raw.input.decision!=="deny"))fail("supervisor_remote_approval_invalid");
+      return (await import("../one/plural-work-real")).answerHeldRemoteApproval(raw.input.requestId,raw.input.decision);
+    }
     if(raw.op==="questions.list")return [...questions.values()].map(row=>row.event).filter(row=>row.expiresAt>Date.now());
     if(raw.op==="questions.answer"){
       if(!exact(raw.input,["requestId","answer"]) || typeof raw.input.requestId!=="string" || !(raw.input.answer===null || typeof raw.input.answer==="string"&&raw.input.answer.length<=100000))fail("supervisor_question_answer_invalid");

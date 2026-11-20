@@ -31,6 +31,7 @@ import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { sanitizeMobileBridgeText } from "./sanitize";
 import type { AgentWorkspaceMemoryCandidate, AgentWorkspaceProposal, AgentWorkspaceRevision } from "../../shared/agent-workspace";
 import type { AgentFolderState } from "../../shared/agent-root";
+import { agentDisplayName } from "../../shared/agent-display-name";
 import {
   MOBILE_WORKSPACE_V2_COMMAND_OPERATIONS, MOBILE_WORKSPACE_V2_LIMITS as LIMITS, MOBILE_WORKSPACE_V2_READ_OPERATIONS, MOBILE_WORKSPACE_V2_SCHEMA,
   validateMobileWorkspaceV2Args,
@@ -187,7 +188,7 @@ function folderOf(agentId: string): AgentFolderState | null {
 }
 function agentHead(agent: Installed): Json {
   return {
-    id: agent.id, handle: text(agent.slug, 80), name: text(agent.localDisplayName || agent.name, 80), tagline: text(agent.tagline, 140), tone: text(agent.tone, 40),
+    id: agent.id, handle: text(agent.slug, 80), name: text(agentDisplayName(agent), 80), tagline: text(agent.tagline, 140), tone: text(agent.tone, 40),
     portrait: portraitOf(agent.id), kind: agent.kind === "team" ? "team" : "agent", source: sourceOf(agent), folder: folderOf(agent.id),
   };
 }
@@ -195,7 +196,7 @@ function agentHead(agent: Installed): Json {
 function readAgents(args: Json): Json {
   const filter = str(args.filter);
   const all = visibleAgents().filter((agent) => !filter || sourceOf(agent) === filter)
-    .sort((a, b) => (a.localDisplayName || a.name).localeCompare(b.localDisplayName || b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
+    .sort((a, b) => agentDisplayName(a).localeCompare(agentDisplayName(b), undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
   // The revision covers the whole list (faces and folder states included), never one page of it.
   const heads = all.map(agentHead);
   const revision = digest(heads);

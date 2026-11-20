@@ -1,19 +1,7 @@
 import type { ChatContinuitySnapshot } from "@shared/types";
 import { goalDisplayState } from "@shared/goal-display-state";
 
-/**
- * Renderer-only projection of the Main continuity snapshot.
- *
- * A durable `running` row is not enough to say that a worker is alive: the
- * exact Goal-bound invocation must also be active. Likewise, a timer wait is
- * a schedule, not a stopped Goal. Keeping this decision in one pure helper
- * prevents the One chip and the Work continuity rail from drifting apart.
- *
- * Owner correction 2026-09-28 ("명시적 멈춤이 멈춤 아니냐"): a goal between turns — waiting for its next
- * scheduled/continuation run, a host-owned retry, or a pause the app took by itself — is `active_idle` and looks
- * exactly like a running goal. Only an explicit owner pause is `paused`; only explicit owner-needed states are
- * `needs_owner`; only an explicit blocked status is blocked. See shared/goal-display-state.ts.
- */
+// Renderer-only projection of the Main continuity snapshot: a running row alone does not say a worker is alive, and a timer wait is a schedule, not a stopped Goal. Only an explicit owner pause is `paused` (shared/goal-display-state.ts).
 export type GoalSurfaceState =
   | "unknown"
   | "active_run"
@@ -134,20 +122,20 @@ export function classifyGoalSurfaceStatus(input: GoalSurfaceStatusInput): GoalSu
 export function goalSurfaceStatusLabel(state: GoalSurfaceState, locale: "ko" | "en"): string {
   const ko = locale === "ko";
   switch (state) {
-    case "active_run": return ko ? "이 Goal 실행 중 · 실행 확인됨" : "This Goal is running · confirmed";
-    case "active_unconfirmed": return ko ? "Goal 실행 기록 있음 · 실제 실행을 재확인하는 중" : "Goal run recorded · rechecking the live invocation";
-    case "active_idle": return ko ? "이 Goal 작동 중 · 다음 실행에서 이어집니다" : "This Goal is running · it continues on its next run";
-    case "needs_owner": return ko ? "이 Goal이 답변이나 승인을 기다려요" : "This Goal needs your answer or approval";
-    case "queued": return ko ? "이 Goal의 다음 실행 준비 중" : "Preparing this Goal's next run";
-    case "waiting_confirmation": return ko ? "다음 Goal 판단 주기 확인 대기" : "The next Goal decision cycle awaits confirmation";
-    case "blocked_uncertain": return ko ? "이전 호출·효과 경계 불확실 · 자동 재실행 중단 · 확인 필요" : "Previous dispatch/effect boundary uncertain · automatic replay stopped · review needed";
-    case "checking_effects": return ko ? "이전 작업이 반영됐는지 직접 확인하는 중" : "Checking whether the earlier action went through";
-    case "blocked": return ko ? "Goal이 실제로 차단됨 · 조치 필요" : "Goal is actually blocked · action needed";
-    case "paused": return ko ? "일시정지 · 기록 보존" : "Paused · history preserved";
-    case "verifying": return ko ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria";
+    case "active_run": return ko ? "목표 진행 중" : "Goal running";
+    case "active_unconfirmed": return ko ? "진행 확인 중" : "Checking progress";
+    case "active_idle": return ko ? "목표 대기 중 · 곧 이어감" : "Goal waiting · continues";
+    case "needs_owner": return ko ? "답이나 승인 필요" : "Needs your answer";
+    case "queued": return ko ? "다음 실행 준비 중" : "Next run getting ready";
+    case "waiting_confirmation": return ko ? "다음 확인 대기" : "Next check pending";
+    case "blocked_uncertain": return ko ? "확인 필요 · 자동 재실행 멈춤" : "Check needed · replay stopped";
+    case "checking_effects": return ko ? "반영 여부 확인 중" : "Checking if it went through";
+    case "blocked": return ko ? "막힘 · 조치 필요" : "Blocked";
+    case "paused": return ko ? "일시정지" : "Paused";
+    case "verifying": return ko ? "결과 확인 중" : "Checking result";
     case "completed": return ko ? "완료" : "Completed";
     case "failed": return ko ? "실패" : "Failed";
     case "cancelled": return ko ? "중지됨" : "Stopped";
-    case "unknown": return ko ? "Goal 상태 확인 중" : "Checking Goal state";
+    case "unknown": return ko ? "상태 확인 중" : "Checking";
   }
 }

@@ -1,4 +1,5 @@
 import { isPrimarilyKorean } from "./detect-language";
+import { maskLocalPathsForRemote } from "./remote-projection";
 import { redactSecrets } from "./secret-patterns";
 import type {
   AgentlasSurfaceDataSet,
@@ -420,9 +421,6 @@ export interface OneSurfaceManifestV1 {
 
 const EXECUTABLE_RE = /(?:<\s*(?:script|iframe|object|embed|style|svg)\b|javascript\s*:|data\s*:\s*text\/html|dangerouslySetInnerHTML|\bon(?:error|load|click)\s*=)/i;
 const URL_RE = /\b(?:https?:\/\/|file:)[^\s]+/gi;
-const POSIX_PATH_RE = /(^|[\s("'=:\[{])\/[^\s,;:"'`<>|}\]]+/gm;
-const WINDOWS_PATH_RE = /\b[A-Za-z]:\\(?:[^\\,\r\n"'`<>|}\]]+\\)*[^\s\\,\r\n"'`<>|}\]]+/g;
-const UNC_PATH_RE = /\\\\[^\\\s,;:"'`<>|}\]]+(?:\\[^\\\s,;:"'`<>|}\]]+)+/g;
 const SENSITIVE_ID_TRANSPORT_RE = /(?:\b(?:https?:\/\/|file:|data:)|^\/|^[A-Za-z]:\\|^\\\\)/i;
 
 /**
@@ -948,15 +946,14 @@ function safeId(value: unknown, fallback: string): string {
 }
 
 function clean(value: string, max: number): string {
-  const output = redactSecrets(value)
+  const linked = redactSecrets(value)
     .replace(/\[([^\]\r\n]{1,240})\]\((?:https?:\/\/|file:)[^)\s]+\)/gi, "$1")
     .replace(URL_RE, "[link omitted]")
     .replace(/\[([^\]\r\n]{1,240})\]\(\s*\[?link omitted\]?\s*\)?/gi, "$1")
     .replace(/\(\s*\[?link omitted\]?\s*\)?/gi, "")
-    .replace(/\[link omitted\]/gi, "")
-    .replace(POSIX_PATH_RE, (_match, prefix: string) => `${prefix}[local path]`)
-    .replace(WINDOWS_PATH_RE, "[local path]")
-    .replace(UNC_PATH_RE, "[local path]")
+    .replace(/\[link omitted\]/gi, "");
+  // The manifest is the durable/remote boundary (isDurableOneSurfaceManifestV1 refuses a path), not the owner's desktop view: the one remote mask function, one word.
+  const output = maskLocalPathsForRemote(linked, { structured: true })
     .replace(/data:[^,\s]{1,128},[^\s]+/gi, "[embedded data omitted]")
     .replace(/</g, "‹")
     .trim()

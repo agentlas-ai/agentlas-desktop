@@ -7,7 +7,7 @@
  * words did not change writes nothing. Pure of Electron: the daemon loads it.
  */
 import type { SentCard } from "./plural-handoff-wire";
-import { HANDOFF_RECV_ROW_PREFIX, HANDOFF_SENT_ROW_PREFIX, HANDOFF_RESULT_CHARS, decodeHandoffCard, encodeHandoffCard, type HandoffAnswerLine, type HandoffCardState, type HandoffCardValue } from "../../shared/plural-handoff-card";
+import { HANDOFF_RECV_ROW_PREFIX, HANDOFF_SENT_ROW_PREFIX, HANDOFF_RESULT_CHARS, decodeHandoffCard, encodeHandoffCard, type HandoffAnswerLine, type HandoffCardState, type HandoffCardValue, type HandoffConsentEnd } from "../../shared/plural-handoff-card";
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const req = <T>(id: string): T => require(id) as T;
@@ -52,6 +52,7 @@ export function valueOfSentCard(card: SentCard & { placeName?: string }, ctx: { 
     ...(result && [...result].length >= HANDOFF_RESULT_CHARS ? { more: true as const } : {}),
     ...(card.endedAt ? { at: card.endedAt } : {}),
     ...(card.lateEnd ? { late: true as const } : {}),
+    ...(card.consent ? { consent: card.consent } : {}),
     ...(ctx.here ? { here: true as const } : {}),
     ...(card.to ? { to: card.to } : {}),
     ...(card.state === "approval" && card.approvals.length ? { q: card.approvals.slice(0, 8).map((a) => ({ qid: a.qid, kind: a.kind, target: a.target, ...(a.preview ? { preview: a.preview } : {}) })) } : {}),
@@ -155,8 +156,10 @@ export function startSentCardsIntake(): { stop(): void } {
 export type HandoffActInput =
   | { op: "cancel"; id: string }
   | { op: "retry"; id: string }
-  | { op: "answer"; id: string; qid: string; answer: "allow" | "allow_task" | "deny" };
-export interface HandoffActResult { ok: boolean; state?: string }
+  | { op: "answer"; id: string; qid: string; answer: "allow" | "allow_task" | "deny" }
+  /** The consent chip: the button carries the row id only; the same op answers a chip on the sending card and one on the receiving desktop's screen. */
+  | { op: "consent"; id: string; answer: "allow" | "always" | "deny" };
+export interface HandoffActResult { ok: boolean; state?: string; answer?: string }
 
 const ROW = /^h_[a-f0-9]{64}$/;
 const QIDRE = /^[A-Za-z0-9_.:@-]{1,128}$/;
@@ -165,6 +168,7 @@ export function parseHandoffAct(raw: unknown): HandoffActInput | null {
   const r = raw as Record<string, unknown>;
   if (typeof r.id !== "string" || !ROW.test(r.id)) return null;
   if (r.op === "cancel" || r.op === "retry") return Object.keys(r).length === 2 ? { op: r.op, id: r.id } : null;
+  if (r.op === "consent" && (r.answer === "allow" || r.answer === "always" || r.answer === "deny") && Object.keys(r).length === 3) return { op: "consent", id: r.id, answer: r.answer };
   if (r.op === "answer" && typeof r.qid === "string" && QIDRE.test(r.qid) && (r.answer === "allow" || r.answer === "allow_task" || r.answer === "deny") && Object.keys(r).length === 4) return { op: "answer", id: r.id, qid: r.qid, answer: r.answer };
   return null;
 }
@@ -178,8 +182,33 @@ export async function actOnHandoffCard(raw: unknown): Promise<HandoffActResult> 
   const rowKey = `${HANDOFF_SENT_ROW_PREFIX}${input.id}`;
   const c = chats();
   const value = decodeHandoffCard(c.getViewRowText(rowKey));
+  if (input.op === "consent") {
+    // Before the card lookup: a chip on the RECEIVING desktop has no card row of its own. The server writes the first answer and sends; this side only reports what the server said.
+    const got = await sender.consent(input.id, input.answer);
+    if (!got) return { ok: false, state: "unreachable" };
+    if (got.status !== "answered" && got.status !== "existing") return { ok: false, state: got.status };
+    const first = got.answer ?? (got.status === "answered" ? input.answer : undefined);
+    // The sending card (when this desktop sent the row) reads the server's word at once; the next answer replaces it with the server's own row.
+    if (first && value && value.k === "sent" && value.state === "asking") {
+      const chatId = c.chatOfViewRow(rowKey);
+      if (chatId) {
+        const next: HandoffCardValue = first === "deny" ? { ...value, state: "cancelled", consent: "deny" }
+          : { ...value, state: got.state === "waiting" ? (got.need === "phone_app" ? "waiting_phone_app" : "waiting_desktop_off") : "reserved" };
+        c.upsertViewNoticeRow({ id: rowKey, chatId, text: encodeHandoffCard(next), createdAt: new Date().toISOString() });
+      }
+    }
+    return { ok: true, state: got.status, ...(first ? { answer: first } : {}) };
+  }
   if (!value || value.k !== "sent") return { ok: false, state: "unknown_card" };
-  if (input.op === "cancel") return { ok: (await sender.cancel(input.id)) === "ok" };
+  if (input.op === "cancel") {
+    // "Cancel" on a card that is already OVER is the card's Dismiss (a failed card had no way off the screen): its record row goes and the server's row is taken. An open card is cancelled, never hidden:
+    // the person does not lose sight of work that is still running. One op for both keeps the bridge's closed op list as it was (older phones and the app-control schema).
+    if (!OPEN_STATES.has(value.state)) {
+      void sender.take(input.id).catch(() => false);
+      return { ok: c.deleteHandoffCardRow(rowKey), state: "dismissed" };
+    }
+    return { ok: (await sender.cancel(input.id)) === "ok" };
+  }
   if (input.op === "retry") {
     // only a card that still has its place can be retried; once the same words were handed over again the card loses it (one retry, one new row)
     if (!value.to || (value.state !== "failed" && value.state !== "expired")) return { ok: false, state: "not_retryable" };
@@ -203,6 +232,27 @@ export async function actOnHandoffCard(raw: unknown): Promise<HandoffActResult> 
 }
 
 /**
+ * A chip of a row THIS desktop handed over opened while the person was not in the turn (a scheduled or confirmed task): told once per row, for the sender's phone (the server sends none for a row a desktop sent). The in-process sender
+ * view is the only source (`away` is set when the hand-off is made), so a chip that opened with the person present, or one read back after a restart, tells nothing. `stillAsking` lets the push sender drop it if it was answered first.
+ */
+export function onSentConsent(listener: (q: { rowId: string; chatId: string | null }, stillAsking: () => boolean) => void): () => void {
+  const send = req<typeof import("./plural-handoff-send")>("./plural-handoff-send");
+  const sender = send.pluralSender();
+  const seen = new Set<string>();
+  return sender.onCards((cards) => {
+    for (const card of cards) {
+      if (card.state !== "asking" || card.away !== true || seen.has(card.id)) continue;
+      seen.add(card.id);
+      while (seen.size > 400) seen.delete(seen.values().next().value as string);
+      const rowId = card.id;
+      let chatId: string | null = null;
+      try { chatId = chats().chatOfViewRow(`${HANDOFF_SENT_ROW_PREFIX}${rowId}`); } catch { /* no card row yet */ }
+      listener({ rowId, chatId }, () => sender.cards().some((c) => c.id === rowId && c.state === "asking"));
+    }
+  });
+}
+
+/**
  * A question of a row THIS desktop sent appears (or is seen for the first time in this process): told once per question (the bridge's approval push for the sender's phone; the server sends none for a row a desktop sent).
  * `stillWaiting` lets the push sender drop it if the question was answered before it went out. The seen set is bounded (400 ids): a repeat only costs a push that the push sender's dedupe key drops.
  */
@@ -223,4 +273,112 @@ export function onSentQuestion(listener: (q: { rowId: string; qid: string; chatI
       }
     }
   });
+}
+
+/* ------------------------------------------------------------------------------------------------ the model's read of the hand-offs */
+/**
+ * One hand-off as the model reads it: closed words, no prose. `state` is the card's own state; `open` = it can still change or be taken back; `sent` = the other agent was handed it (false for
+ * asking, denied and unanswered: nothing reached it). The model used to answer "still waiting" from its earlier `asking` result after the person denied or allowed; this is
+ * the one record it reads instead: the sender's live rows (the server's word) over the card rows of this conversation (what the person sees).
+ */
+export interface HandOffStateView { id: string; state: HandoffCardState; open: boolean; sent: boolean; place?: string; consent?: HandoffConsentEnd; brief: string; at?: string }
+const OPEN_STATES: ReadonlySet<string> = new Set(["asking", "reserved", "waiting_desktop_off", "waiting_phone_app", "claimed", "claimed_desktop_off", "approval"]);
+const BRIEF_FOR_MODEL = 80;
+
+function stateViewOf(value: HandoffCardValue): HandOffStateView {
+  const neverSent = value.state === "asking" || (value.state === "cancelled" && value.consent === "deny") || (value.state === "expired" && value.consent === "unanswered");
+  const place = value.phone ? "phone" : value.place;
+  return { id: value.id, state: value.state, open: OPEN_STATES.has(value.state), sent: !neverSent,
+    ...(place ? { place } : {}), ...(value.consent ? { consent: value.consent } : {}),
+    brief: [...value.brief.replace(/\s+/g, " ").trim()].slice(0, BRIEF_FOR_MODEL).join(""), ...(value.at ? { at: value.at } : {}) };
+}
+
+/** What the model's read and cancel need from the world; production wires the sender and the store, a test hands its own. */
+export interface HandOffToolPorts {
+  cards(): readonly SentCard[];
+  cancel(id: string): Promise<"ok" | "unavailable">;
+  db(): { prepare(sql: string): { all(...args: unknown[]): unknown[] } };
+  getViewRowText(id: string): string | null;
+  chatOfViewRow(id: string): string | null;
+  upsertViewNoticeRow(input: { id: string; chatId: string; text: string; createdAt: string }): unknown;
+}
+function productionToolPorts(): HandOffToolPorts {
+  const sender = req<typeof import("./plural-handoff-send")>("./plural-handoff-send").pluralSender();
+  const c = chats();
+  return { cards: () => sender.cards(), cancel: (id) => sender.cancel(id), db: () => req<typeof import("../store/db")>("../store/db").getDb() as never,
+    getViewRowText: (id) => c.getViewRowText(id), chatOfViewRow: (id) => c.chatOfViewRow(id), upsertViewNoticeRow: (input) => c.upsertViewNoticeRow(input) };
+}
+
+/** The hand-offs of one conversation, newest first: its card rows, each replaced by the sender's live row when the sender holds one (the server's word is newer than the last card write). */
+export function listHandOffStates(chatId: string, live: readonly SentCard[] = [], limit = 12, db: HandOffToolPorts["db"] = productionToolPorts().db): HandOffStateView[] {
+  const out: HandOffStateView[] = [];
+  try {
+    const rows = db().prepare("SELECT id, text FROM chat_messages WHERE chat_id = ? AND row_scope = 'view' AND id LIKE ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
+      .all(chatId, `${HANDOFF_SENT_ROW_PREFIX}%`, limit) as Array<{ id: string; text: string }>;
+    for (const row of rows) {
+      const value = decodeHandoffCard(row.text);
+      if (!value || value.k !== "sent") continue;
+      const card = live.find((c) => c.id === value.id);
+      out.push(stateViewOf(card ? { ...value, ...valueOfSentCard({ ...card, brief: value.brief || card.brief }) } : value));
+    }
+  } catch { /* an unreadable store leaves the list short; the model is told what is known */ }
+  return out;
+}
+
+export type HandOffToolActionResult =
+  | { ok: true; state: "list"; handoffs: HandOffStateView[] }
+  | { ok: true; state: "cancelled"; id: string }
+  | { ok: false; reason: "unknown_id" | "not_open" | "unavailable" | "bad_input" };
+
+/** The model's `hand_off` with action list | cancel. A cancel names an id of THIS conversation's own list (never another conversation's row) that is still open. */
+export async function handOffToolAction(input: { action: "list" | "cancel"; id?: string }, chatId: string, ports: HandOffToolPorts = productionToolPorts()): Promise<HandOffToolActionResult> {
+  const list = listHandOffStates(chatId, ports.cards(), 12, ports.db);
+  if (input.action === "list") return { ok: true, state: "list", handoffs: list };
+  if (typeof input.id !== "string" || !ROW.test(input.id)) return { ok: false, reason: "bad_input" };
+  const found = list.find((h) => h.id === input.id);
+  if (!found) return { ok: false, reason: "unknown_id" };
+  if (!found.open) return { ok: false, reason: "not_open" };
+  if ((await ports.cancel(input.id)) !== "ok") return { ok: false, reason: "unavailable" };
+  // A row nobody started ends at once on the server: the card says so now (a started one ends with what the running side reports, and the next answer writes it).
+  if (found.state === "asking" || found.state === "reserved" || found.state === "waiting_desktop_off" || found.state === "waiting_phone_app") {
+    try {
+      const key = `${HANDOFF_SENT_ROW_PREFIX}${input.id}`;
+      const value = decodeHandoffCard(ports.getViewRowText(key));
+      const cardChat = ports.chatOfViewRow(key);
+      if (value && cardChat) { const { q: _q, ...rest } = value; ports.upsertViewNoticeRow({ id: key, chatId: cardChat, text: encodeHandoffCard({ ...rest, state: "cancelled" }), createdAt: new Date().toISOString() }); }
+    } catch { /* the card follows the server's next answer */ }
+  }
+  return { ok: true, state: "cancelled", id: input.id };
+}
+
+/** The state words of the facts block: closed English words the model reads (not screen text). */
+function factWord(h: HandOffStateView): string {
+  if (h.state === "asking") return "asking (a chip waits for the person; nothing sent)";
+  if (h.state === "cancelled" && h.consent === "deny") return "denied by the person (nothing sent)";
+  if (h.state === "expired" && h.consent === "unanswered") return "never answered (nothing sent)";
+  if (h.state === "cancelled") return "cancelled";
+  if (h.state === "reserved") return "sent (the other agent has it)";
+  if (h.state === "waiting_desktop_off" || h.state === "waiting_phone_app") return "sent (waiting for the other side to open)";
+  if (h.state === "claimed" || h.state === "claimed_desktop_off") return "in progress";
+  if (h.state === "approval") return "in progress (a question waits)";
+  if (h.state === "done") return "done";
+  return h.state;
+}
+/** Hand-offs shown to the model each turn: the open ones and the ones that ended in the last day; at most this many. */
+export const HANDOFF_FACTS_MAX = 5;
+const HANDOFF_FACTS_WINDOW_MS = 24 * 3_600_000;
+
+/**
+ * The host's current record of this conversation's hand-offs, for the next turn. A chip's answer (allow, always, deny) rewrites the card row, and this block is read from those rows at every turn:
+ * the model cannot answer "waiting" after an allow or "already pending" after a deny from an old tool result, and a duplicate claim has the row id to point at. Null when there is nothing recent (no words spent).
+ * Reads card rows only (no sender, no network): the card rows follow the server's answers and the person's chip.
+ */
+export function handOffFactsSection(chatId: string | null | undefined, now = Date.now(), db: HandOffToolPorts["db"] = () => req<typeof import("../store/db")>("../store/db").getDb() as never): string | null {
+  if (!chatId) return null;
+  try {
+    const recent = listHandOffStates(chatId, [], 12, db).filter((h) => h.open || !h.at || now - Date.parse(h.at) < HANDOFF_FACTS_WINDOW_MS).slice(0, HANDOFF_FACTS_MAX);
+    if (!recent.length) return null;
+    const lines = recent.map((h) => `- ${h.id} -> ${h.place ?? "another agent"}: ${factWord(h)}; "${h.brief.slice(0, 50)}"`);
+    return ["Hand-offs of this conversation, the host's record right now (newer than anything said earlier, tool results included). Ask or cancel through hand_off; call a request a duplicate only when a row below has the same words, and name its id.", ...lines].join("\n");
+  } catch { return null; }
 }

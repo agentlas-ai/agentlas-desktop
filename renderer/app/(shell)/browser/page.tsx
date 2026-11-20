@@ -164,7 +164,7 @@ export default function BrowserPage() {
                 </>
               ) : (
                 <>
-                  Sign-in happens on the provider’s own page. Enter them directly on the <b>provider&apos;s sign-in
+                  Sign-in happens on the provider’s own page. Enter your credentials directly on the <b>provider&apos;s sign-in
                   page</b>; only the dedicated profile&apos;s signed-in session is reused afterward.
                 </>
               )}
@@ -235,12 +235,12 @@ export default function BrowserPage() {
                 </strong>
                 <span>
                   {ko
-                    ? "가져오면 에이전트가 그 로그인으로 일합니다. 이후에는 자동으로 최신 상태를 유지합니다."
-                    : "Import them and agents work with those logins. They are kept fresh automatically afterwards."}
+                    ? "가져올 항목을 고르면 그 로그인 상태를 에이전트 전용 프로필로 복사해요. 고르기 전에는 아무것도 옮기지 않아요."
+                    : "Choose what to import and those sign-ins are copied into the agents' dedicated profile. Nothing is copied before you choose."}
                 </span>
               </div>
               <button className="browser-btn accent" onClick={() => setImporting(true)}>
-                {ko ? "연결" : "Connect"}
+                {ko ? "가져올 항목 고르기" : "Choose what to import"}
               </button>
             </div>
           )}

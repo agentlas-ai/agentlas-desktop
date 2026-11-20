@@ -25,7 +25,7 @@ import { agentlasHomeEnvForChildren } from "../agents/home";
 import { currentUiLocale } from "../ui-locale";
 import { compareHephaestusVersions, hephaestusRoot, hephaestusRootDetail, hephaestusRuntimeBases, readHephaestusVersion, resetHephaestusRootCache } from "./root";
 import type { HephaestusStatus, HephaestusUpdateJournal } from "../../shared/types";
-import { classifyHephaestusUpdateJournal, parseHephaestusUpdateJournal } from "../../shared/hephaestus-update-contract";
+import { classifyHephaestusUpdateJournal, parseHephaestusUpdateJournal, settleStaleHephaestusUpdateFailure } from "../../shared/hephaestus-update-contract";
 import { retainTrustedMemoryOwnerEnvironment, trustedMemoryOwnerEnvironment } from "../memory/trusted-owner-binding";
 
 export { hephaestusRoot, hephaestusRootDetail, readHephaestusVersion } from "./root";
@@ -634,7 +634,7 @@ export function resetHephaestusUpdaterStateForTests(): void {
 function readHephaestusUpdateJournalAt(base: string): HephaestusUpdateJournal | null {
   try {
     const raw = fs.readFileSync(path.join(base, "auto-update.json"), "utf8");
-    return parseHephaestusUpdateJournal(JSON.parse(raw));
+    return settleStaleHephaestusUpdateFailure(parseHephaestusUpdateJournal(JSON.parse(raw)));
   } catch {
     // No journal yet (fresh install, bundled-only, or an updater that never
     // got to run). Absent is a distinct answer from failed — return null and

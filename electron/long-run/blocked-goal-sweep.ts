@@ -8,7 +8,8 @@ import { randomUUID } from "node:crypto";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { getDb } from "../store/db";
 import { adoptExplicitGoalGrant } from "./explicit-goal-authority";
-import { appendChatMessage, getChat } from "../store/chats";
+import { getChat } from "../store/chats";
+import { writeAssistantUnlessStopped } from "../chat/chat-stop";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import {
@@ -25,6 +26,7 @@ import {
   failDesktopLongRunResumeDispatch,
 } from "./app-runtime-coordinator";
 import { latestGoalWaitSubscription } from "./wait-subscriptions";
+import { chatWaitsOnPeer } from "../harness/peer-reply-wait";
 import { settleNoProgressRest } from "./goal-no-progress-wait";
 import { settleDaemonTurnGoals } from "./daemon-turn-goal";
 import { reconcileGoalTree } from "./goal-tree-reconcile";
@@ -92,9 +94,10 @@ export function staleQaGoalMarker(text: string | null | undefined): string | nul
  */
 function notify(run: LongRunRecord, status: "goal-closed" | "effect-retrying", ko: string, en: string, runId: string = run.id): void {
   if (!run.rootChatId) return;
+  // A host notice is a new assistant line: none after the person's Stop until they speak or press a Goal control.
   try {
-    appendChatMessage(run.rootChatId, "assistant", currentUiLocale() === "ko" ? ko : en,
-      { hostNotice: { purpose: "host-status", runId, status } });
+    writeAssistantUnlessStopped(run.rootChatId, currentUiLocale() === "ko" ? ko : en,
+      { hostNotice: { purpose: "host-status", runId, status } }, { longRunId: run.id });
   } catch (error) {
     console.warn("[blocked-goal-sweep] chat notice failed:", error);
   }
@@ -837,7 +840,8 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   // The Goal's state, once, through the cause table (harness/cause.ts decideGoalState). What it answers is acted on here; "no row
   // decides" falls through to the arbiter and the resume below, which carry the last-turn ladders.
   const wait = latestGoalWaitSubscription(run.goalId);
-  const registeredWait = Boolean(wait && (wait.state === "pending" || wait.state === "claimed"));
+  // A conversation waiting on a peer's answer (or on the owner's card for a message_send) rests too: the reply, the answer or the end of the wait is the signal.
+  const registeredWait = Boolean(wait && (wait.state === "pending" || wait.state === "claimed")) || chatWaitsOnPeer(run.rootChatId);
   const turnLive = goalTurnLive(run, dispatcher);
   const replayBarrierCode = turnLive || registeredWait ? null : automaticGoalReplayBlockerCode(run.id);
   const stateDecision = decideGoalState({ status: run.status, pauseReason: run.pauseReason ?? null, chatGone: false, ownerHold: false,

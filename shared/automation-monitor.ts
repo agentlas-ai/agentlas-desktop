@@ -5,6 +5,12 @@ export interface AutomationMonitorContract {
   originChatId: string;
   originMessageId: string | null;
   deadline: string | null;
+  /**
+   * True when each run's answer is itself what the person asked to receive (a repeating reminder, a daily briefing): the answer is
+   * delivered to the conversation even when the run did nothing outside the app. Absent or false keeps the quiet rule: a run that
+   * only checked something and changed nothing stays in the automation's own timeline.
+   */
+  deliverAnswer?: boolean;
 }
 export interface AutomationPollState {
   schemaVersion: "agentlas.poll-state.v1";
@@ -24,7 +30,8 @@ export function decodeAutomationMonitor(value: unknown): AutomationMonitorContra
     || !(row.originMessageId === null || typeof row.originMessageId === "string" && row.originMessageId.length > 0 && row.originMessageId.length <= 512)
     || !(row.deadline === null || typeof row.deadline === "string" && Number.isFinite(Date.parse(row.deadline)))) return null;
   return { schemaVersion: "agentlas.automation-monitor.v1", notificationPolicy: row.notificationPolicy as AutomationMonitorContract["notificationPolicy"],
-    originChatId: row.originChatId, originMessageId: row.originMessageId as string | null, deadline: row.deadline as string | null };
+    originChatId: row.originChatId, originMessageId: row.originMessageId as string | null, deadline: row.deadline as string | null,
+    ...(row.deliverAnswer === true ? { deliverAnswer: true } : {}) };
 }
 export function decodeAutomationPollState(value: unknown): AutomationPollState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;

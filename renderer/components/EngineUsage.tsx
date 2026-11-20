@@ -8,7 +8,8 @@
 // Reads: usage on a signal (runtime change, a run settling, the window coming back), never an idle timer; credits and the local model on the same signals.
 "use client";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { usageLine } from "@/lib/usage-copy";
+import { usageLine, usedPercentOf } from "@/lib/usage-copy";
+import { UsageMeter } from "@/components/usage/UsageMeter";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
@@ -19,6 +20,7 @@ import s from "@/components/dashboard/Dashboard.module.css";
 import type { LocalModelHubSnapshot } from "@shared/local-model-hub";
 import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 import { manualSetupFor, manualSetupShellLabel, manualSetupText, setupOsFromNavigator, type ManualSetupRuntime } from "@shared/runtime-manual-setup";
+import { engineConnection, type EngineConnectionState } from "@shared/runtime-connection";
 import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow } from "@shared/runtime-quota";
 import type { ByokBackend } from "@shared/models";
 import type {
@@ -40,7 +42,6 @@ const USAGE_STALE_MS = 15_000;
 // without a push unless the update succeeded. Only then the card looks again, this often and at most this many times.
 const UPDATE_FOLLOW_UP_MS = 15_000;
 const UPDATE_FOLLOW_UP_MAX = 20;
-const WARN_PCT = 80;
 type EngineAuth = "cli" | "apikey" | "local";
 interface EngineDef {
   id: string; // usage provider id와 일치(구독형)
@@ -335,15 +336,19 @@ export function EngineUsage() {
     }[version.state];
     return `${installed}${target} · ${state}`;
   }
+  /**
+   * What the evidence says about this CLI (shared/runtime-connection.ts, the same rule the model panel and Settings read): a runtime row only says the command
+   * was found, a sign-in probe only says the account is signed in, and a refusal the runtime itself reported (401/403) beats both. An ACP seat with no probe
+   * (GitHub Copilot) used to be "connected" from its row alone while the model panel beside it said the list could not be read.
+   */
+  function connectionOf(e: EngineDef): EngineConnectionState {
+    const kind = e.cliKind ?? e.detectKind;
+    return engineConnection({ runtime: runtimeFor(e), hasProbe: Boolean(kind), probe: kind ? runtimeAuth[kind]?.state : undefined });
+  }
   function isConnected(e: EngineDef): boolean {
     // 사용량/오류 영수증은 runtime 설치 증거가 아니다. 오래된 receipt가 Connect를 숨기면 안 된다.
-    if (e.auth === "cli") {
-      const runtime = runtimeFor(e);
-      if (!runtime) return false;
-      const kind = e.cliKind ?? e.detectKind;
-      // Installing an executable does not prove that its account is signed in.
-      return kind ? runtimeAuth[kind]?.state === "signed-in" : true;
-    }
+    // Installing an executable does not prove that its account is signed in, nor that the runtime accepts it.
+    if (e.auth === "cli") return connectionOf(e) === "connected";
     if (e.auth === "local") return runtimes.some((r) => r.kind === "agentlas-local");
     if (e.apiBackend) return runtimeFor(e)?.credentialAccess?.status === "available";
     return !!e.keyEnv && envKeys.has(e.keyEnv);
@@ -501,37 +506,37 @@ export function EngineUsage() {
     const visibleWindows = u?.windows.filter((window) => isSupportedProviderUsageWindow(window, e.id)) ?? [];
     const subscriptionWindows = visibleWindows.filter((window) => !isPaidOverageUsageWindow(window, e.id));
     const connected = isConnected(e);
-    const rt = runtimeFor(e);
     const isApi = e.auth === "apikey";
+    const conn: EngineConnectionState | null = isApi ? null : connectionOf(e);
     const terminalError = connected && !isApi && isTerminalProviderError(u);
     const retryableError = connected && !isApi && u?.status === "error" && !isRateLimited(u);
     const problem = connected && !isApi && (terminalError || u?.status === "error" || u?.error === "keychain_blocked");
-    const authKind = e.cliKind ?? e.detectKind;
-    const authState = authKind ? runtimeAuth[authKind]?.state : undefined;
-    // Sign in again: the CLI is there but not signed in, or Main saw a login failure on it that has not been followed by a success (RuntimeStatus.signInRequired).
-    const installedNotSignedIn = !isApi && !!rt && (!connected || !!rt.signInRequired);
+    // Sign in again: the CLI is there but not signed in (or Main saw a login failure on it that no success has cleared, or its own listing said so), or the sign-in is not confirmed.
+    const installedNotSignedIn = conn === "signed-out" || conn === "unverified";
+    // The runtime is there and answered that this account may not use it.
+    const refused = conn === "refused";
     const best = connected && !problem && !isApi && !installedNotSignedIn ? mostUsed(subscriptionWindows) : null;
     const tipParts = [
       runtimeVersionText(runtimeVersionFor(e)),
       ...subscriptionWindows.map((w) => `${windowLabel(w, ko)} ${Math.round(w.usedPercent)}%${w.resetAt ? ` · ${formatReset(w.resetAt, ko)}` : ""}`),
       u ? `${ko ? "마지막 확인" : "Last checked"} ${new Date(u.fetchedAt).toLocaleString(ko ? "ko-KR" : "en-US")}` : "",
     ].filter(Boolean);
-    const dotTone = problem || installedNotSignedIn ? "warn" : connected ? "ok" : "idle";
+    const dotTone = problem || installedNotSignedIn || refused ? "warn" : connected ? "ok" : "idle";
     const setUpAction = () => (e.apiBackend === "custom" ? navigate("/settings") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e));
     let mid: ReactNode;
     if (connected && isApi) mid = <span className={s.cstate}>{pick(ko, COPY.keyBilled)}</span>;
     else if (problem) mid = <span className={s.cstate} data-tone={u?.status === "error" ? "error" : "warn"} title={tipParts.join(" · ")}>{statusText(e, u)}</span>;
-    else if (installedNotSignedIn) mid = <span className={s.cstate} data-tone="warn"><IconAlertTriangle size={14} />{pick(ko, authState === "unknown" && !rt?.signInRequired ? COPY.statusUnknown : COPY.signInAgain)}</span>;
+    else if (refused) mid = <span className={s.cstate} data-tone="warn" title={pick(ko, COPY.accessRefusedTip)}><IconAlertTriangle size={14} />{pick(ko, COPY.accessRefused)}</span>;
+    else if (installedNotSignedIn) mid = <span className={s.cstate} data-tone="warn"><IconAlertTriangle size={14} />{pick(ko, conn === "unverified" ? COPY.statusUnknown : COPY.signInAgain)}</span>;
     else if (best) {
       const pct = Math.max(0, Math.min(100, Math.round(best.usedPercent)));
-      mid = <div className={s.cmid} title={tipParts.join("\n")}>
-        <div className={s.bar} role="progressbar" aria-label={`${windowLabel(best, ko)} ${ko ? "사용량" : "usage"}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} data-hot={pct >= WARN_PCT ? "true" : "false"}><i style={{ width: `${pct}%` }} /></div>
-        <span className={s.num} data-warn={pct >= WARN_PCT ? "true" : "false"}>{usageText(best)}</span>
-      </div>;
+      // The one meter: the same bar, percent and tones as the sidebar. `usageText` is the row's own words beside it (a window's percent and reset).
+      mid = <UsageMeter variant="row" ko={ko} percent={best.usedPercent} label={`${windowLabel(best, ko)} ${ko ? "사용량" : "usage"}`} detail={usageText(best)} className={s.cmid} numClassName={s.num} title={tipParts.join("\n")} />;
     } else if (connected) mid = <span className={s.cstate} title={tipParts.join(" · ")}>{statusText(e, u)}</span>;
-    else if (installedNotSignedIn) mid = <span className={s.cstate} data-tone="warn"><IconAlertTriangle size={14} />{pick(ko, authState === "unknown" ? COPY.statusUnknown : COPY.signInAgain)}</span>;
-    else mid = <span className={s.cstate}>{pick(ko, COPY.notSetUp)}</span>;
-    const act = terminalError ? (
+    else mid = <span className={s.cstate}>{pick(ko, e.auth === "cli" ? COPY.notInstalled : COPY.notSetUp)}</span>;
+    const act = refused ? (
+      <button type="button" className={s.cact} disabled={busy === e.id} onClick={() => { setBusy(e.id); void loadConnections(true).finally(() => setBusy(null)); }}>{pick(ko, COPY.checkAgain)}</button>
+    ) : terminalError ? (
       <button type="button" className={s.cact} onClick={() => openProviderHelp(e)}>{e.id === "grok" ? pick(ko, COPY.openUsage) : "Antigravity"}</button>
     ) : retryableError ? (
       <span className={s.cacts}>
@@ -591,6 +596,9 @@ export function EngineUsage() {
   }
 
   const creditsKnown = credits?.authenticated === true && typeof credits.remainingCredits === "number";
+  // AI usage is one measure, in percent USED, in every place. Credit numbers are internal: with no percent to show, the row says so in words.
+  const creditsUsedPercent = creditsKnown ? usedPercentOf(credits?.usage, credits?.remainingCredits, credits?.limitCredits ?? credits?.planCreditLimit) : null;
+  const creditsUsedDetail = creditsUsedPercent === null ? undefined : credits?.usage ? usageLine(credits.usage, ko) : ko ? `사용량 ${creditsUsedPercent}%` : `Usage ${creditsUsedPercent}%`;
   const unconnectedApi = apiEngines.filter((e) => !isConnected(e));
   const connectedApi = apiEngines.filter((e) => isConnected(e));
   // A key "needs a look" when its runtime says the stored key could not be read back (keychain unavailable / read failed): it is in the count, never silently "not set".
@@ -641,7 +649,7 @@ export function EngineUsage() {
       <div className={s.toggleRow} data-testid="credits-row">
         <IconCircleDollar size={16} />
         {creditsKnown
-          ? <span><b>{(credits?.remainingCredits ?? 0).toLocaleString()}</b> {pick(ko, COPY.aiCredits)}{credits?.usage ? ` · ${usageLine(credits.usage, ko)}` : ""}</span>
+          ? <UsageMeter variant="inline" ko={ko} percent={creditsUsedPercent} label={pick(ko, COPY.aiCredits)} detail={creditsUsedDetail} testId="credits-usage" />
           : creditsFailed
             ? <span>{pick(ko, COPY.creditsUnread)} <button type="button" className={s.cact} onClick={() => void loadCredits(true)}>{pick(ko, COPY.retry)}</button></span>
             : credits && !credits.authenticated

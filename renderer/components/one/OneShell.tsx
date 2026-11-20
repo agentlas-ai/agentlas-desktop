@@ -58,7 +58,10 @@ import { hasIntellectUiFence, IntellectUiActions } from "@/lib/intellect-ui-acti
 import { InlineUiInstances, useInlineUiInstances, inlineUiForReply } from "@/components/UiInstances";
 import { AnswerCardsForTurns } from "@/components/AnswerCards";
 import { mapInlineVisualProse } from "@shared/inline-visual";
-import { AskCard, type AskCardOption } from "@/components/AskCard";
+import { ClosedQuestionLine, QuestionCardHost } from "@/components/decision/QuestionCardHost";
+import { useQuestionCards } from "@/components/decision/useQuestionCards";
+import { closeQuestionCard, reopenQuestionCard } from "@/lib/question-cards";
+import { DecisionApprovalCard } from "@/components/decision/DecisionApprovalCard";
 import {
   ASK_ACTION_COPY,
   askActionBarState,
@@ -70,7 +73,7 @@ import {
 } from "@shared/ask-action-bar";
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
 import { runtimeModelDisplayLabel } from "@/components/dashboard/RuntimeModelPicker";
-import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, useRunningComposerModel } from "@/lib/one-runtime-chip";
+import { assertOneExplicitEffort, chipRuntimeFor, composerModelLabel, readOrchestratorPoolPick, useRunningComposerModel } from "@/lib/one-runtime-chip";
 import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
 import { beginChatSelection, useChatSelectionIntent, readChatSelectionIntent, invalidateChatSelectionIntent, reconcileChatSelectionIntent } from "@/lib/chat-selection-intent";
 import { goalReceiptIsQueued, goalRuntimeRefusalNotice, isOvertakenSelectionCode } from "@/lib/goal-runtime-refusal";
@@ -175,7 +178,7 @@ import type {
   OneSurfaceManifestV1,
   OneSurfaceSemanticAction,
 } from "@shared/one-surface";
-import { toCustomerSafeText } from "@shared/one-customer-safe";
+import { withoutRuntimeEnvelopes } from "@shared/one-customer-safe";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "@shared/agent-control-blocks";
 import { isInterruptedPartial, isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
@@ -197,7 +200,19 @@ import { alwaysApprovedChatIds, grantAlwaysApproval, readChatAlwaysApproval, sub
 import { useChatAlwaysApproval } from "@/lib/use-chat-always-approval";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { seatEventLine } from "@shared/one-seat-events";
+import { parsePeerArrivals, peerArrivalLine } from "@shared/peer-envelope-marker";
+import { readComposerDraft, removeComposerDraft, writeComposerDraft } from "@/lib/composer-draft-storage";
+import { isMentionOpen, pickAgent, pickAgentIntoComposer, trailingMention } from "@/lib/composer-agent-pick";
+import { chatStopAccepted, withdrawnWords } from "@/lib/chat-stop";
+import { registerComposerControls } from "@/lib/composer-control-bus";
+import { CHAT_SIGNAL_SAFETY_MS, watchChat } from "@/lib/chat-signal";
+import { applySendRules } from "@/lib/chat-transcript-model";
+import { useOwnerInputs } from "@/lib/owner-inputs";
 import { decodeHandoffCard, handoffPlainLine } from "@shared/plural-handoff-card";
+import { isReceiptRowId } from "@shared/receipt-card";
+import { receiptRowLine } from "@/lib/receipt-card-model";
+import { ReceiptRowCard } from "@/components/ReceiptCard";
+import { PendingPromisesStrip } from "@/components/PendingPromisesStrip";
 import { HandoffCard } from "@/components/PluralHandoffCards";
 import { decodeMemoryRoomCard, memoryRoomPlainLine } from "@shared/memory-room-card";
 import { MemoryRoomCard } from "@/components/MemoryRoomCard";
@@ -269,8 +284,8 @@ import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
 import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
 import { ApprovalRecordLines } from "./OneApprovalRecords";
-import { OneTurnFiles } from "./OneTurnFiles";
-import { turnFilesOfActivity, type TurnFile } from "@/lib/turn-files";
+import { OneTurnFiles, linkedFileOfTurnFile } from "./OneTurnFiles";
+import { distinctTurnFiles, settleTurnFileOps, turnFilesOfActivity, type TurnFile } from "@/lib/turn-files";
 import { approvalClosedRowIds, placeApprovalRecords } from "@/lib/approval-record-lines";
 import { useSettledApprovals } from "@/lib/use-settled-approvals";
 import { useRoomChildren } from "@/lib/room-children";
@@ -706,6 +721,10 @@ type UiMessage = {
   intellectUiMessageId?: string;
   /** Exact Main-issued transcript identity for a settled assistant row. */
   durableMessageId?: string;
+  /** The id the composer made for this person's send (Main stores it on the row): one send is one bubble under it. */
+  clientIntentId?: string;
+  /** Main's state of a send that is not (yet) delivered: the line under the bubble. */
+  ownerInputState?: "accepted" | "waiting" | "starting" | "delivered" | "held" | "uncertain" | "withdrawn";
   /** Installed agent that wrote this assistant row (group-room discussion speakers). */
   speakerAgentId?: string;
   role: "user" | "assistant" | "system";
@@ -928,18 +947,8 @@ const oneComposerDraftCache = new Map<string, OneComposerDraftCache>();
 function readOneComposerDraft(key: string): OneComposerDraftCache {
   const cached = oneComposerDraftCache.get(key);
   if (cached) return cached;
-  let composer = "";
-  try {
-    if (typeof window !== "undefined") {
-      const raw = window.sessionStorage.getItem(`${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}${key}`);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { composer?: unknown };
-        if (typeof parsed.composer === "string") composer = parsed.composer;
-      }
-    }
-  } catch {
-    // In-memory continuity still works when Web Storage is unavailable.
-  }
+  // Local storage, not session storage: a window closed to the tray and opened again must still hold the unsent words.
+  const composer = readComposerDraft(`${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}${key}`, "composer");
   const restored = { composer, stagedSteer: null };
   oneComposerDraftCache.set(key, restored);
   return restored;
@@ -948,14 +957,7 @@ function readOneComposerDraft(key: string): OneComposerDraftCache {
 function writeOneComposerDraft(key: string, patch: Partial<OneComposerDraftCache>) {
   const next = { ...readOneComposerDraft(key), ...patch };
   oneComposerDraftCache.set(key, next);
-  try {
-    if (typeof window === "undefined") return;
-    const storageKey = `${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}${key}`;
-    if (next.composer) window.sessionStorage.setItem(storageKey, JSON.stringify({ composer: next.composer }));
-    else window.sessionStorage.removeItem(storageKey);
-  } catch {
-    // Draft persistence is best-effort and must never block typing.
-  }
+  writeComposerDraft(`${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}${key}`, "composer", next.composer);
 }
 
 function readOneComposerInputDraft(key: string): string { return readOneComposerDraft(key).composer; }
@@ -1084,10 +1086,13 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       hostNotice: normalizeChatHostNotice(entry.role, entry.hostNotice),
       id: entry.id,
       durableMessageId: entry.durableMessageId ?? entry.id,
+      ...(entry.role === "user" && entry.clientIntentId ? { clientIntentId: entry.clientIntentId } : {}),
       ...(entry.role === "assistant" && entry.speakerAgentId ? { speakerAgentId: entry.speakerAgentId } : {}),
       ...(entry.goalResult ? { goalResult: entry.goalResult } : {}),
       role: entry.role === "assistant" ? "assistant" : entry.role,
       text: normalizeChatHostNotice(entry.role, entry.hostNotice) ? entry.text : parsedFiles.visibleText,
+      // Main's answer start (the text before it is progress between tool calls), only when the text was not changed on the way (an edit shifts the offsets).
+      ...(entry.answerStart && entry.answerStart > 0 && entry.answerStart < parsedFiles.visibleText.length && parsedFiles.visibleText === entry.text ? { answerStart: entry.answerStart } : {}),
       images: entry.imageDataUrls?.length ? entry.imageDataUrls : undefined,
       chatFileGroupIds: parsedFiles.groupIds,
       createdAt: entry.createdAt,
@@ -1161,6 +1166,11 @@ function interruptedPartialLine(text: string, locale: string): string {
   const clipped = first.length > 140 ? `${first.slice(0, 139)}…` : first;
   const label = locale === "ko" ? "중단됨" : "Interrupted";
   return clipped ? `${label} · ${clipped}` : label;
+}
+
+/** The paths an answer's turn-file chips already draw: a text-derived card would repeat them. */
+function turnFilePathSet(files: readonly { path: string }[] | undefined): ReadonlySet<string> | undefined {
+  return files && files.length > 0 ? new Set(files.map((file) => file.path)) : undefined;
 }
 
 function oneSystemPromptLabel(message: UiMessage): string | null {
@@ -1272,6 +1282,12 @@ function projectVisibleOneMessageText(message: UiMessage): string {
   if (message.role === "system") {
     const seatLine = seatEventLine(message.text);
     if (seatLine) return seatLine;
+    // A host receipt: drawn as the one receipt card; the line is only what lets it pass the visible-row checks.
+    const receiptLine = receiptRowLine(message, currentLocale() === "ko" ? "ko" : "en");
+    if (receiptLine) return receiptLine;
+    // A message another conversation of the project sent here: the row is the model's input, but the person must see that it arrived.
+    const peerArrivals = parsePeerArrivals(message.text);
+    if (peerArrivals) return peerArrivalLine(peerArrivals, currentLocale() === "ko");
     // A hand-off card (shared/plural-handoff-card.ts): the row is drawn as the card; the line is only what lets it pass the visible-row checks.
     const handoff = decodeHandoffCard(message.text);
     if (handoff) return handoffPlainLine(handoff, { ko: currentLocale() === "ko", now: Date.now() });
@@ -1300,13 +1316,13 @@ function projectVisibleOneMessageText(message: UiMessage): string {
     : banded);
   const readableJson = readableOneJson(customerAnswer);
   if (readableJson) {
-    return toCustomerSafeText(readableJson, detectOneTextLocale(readableJson) === "ko" ? "ko" : "en");
+    return withoutRuntimeEnvelopes(readableJson, detectOneTextLocale(readableJson) === "ko" ? "ko" : "en");
   }
   if (message.streaming && /^[{[]/.test(customerAnswer)) return "";
   // Final customer-safe pass: a leaked result-schema line ("structured result",
   // "safe One Surface", a CLI/session token) must never reach the reader even
   // when it arrives through a model or legacy synthesis path.
-  return toCustomerSafeText(customerAnswer, detectOneTextLocale(customerAnswer) === "ko" ? "ko" : "en");
+  return withoutRuntimeEnvelopes(customerAnswer, detectOneTextLocale(customerAnswer) === "ko" ? "ko" : "en");
 }
 
 /** Drops local rows that belong to a different room than the one on screen. */
@@ -1570,7 +1586,7 @@ export interface OneEmbed {
 export function forgetOneComposerDrafts(chatIds: Iterable<string>): void {
   for (const id of chatIds) {
     oneComposerDraftCache.delete(`chat:${id}`);
-    try { window.sessionStorage.removeItem(`${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}chat:${id}`); } catch { /* best effort */ }
+    removeComposerDraft(`${ONE_COMPOSER_DRAFT_STORAGE_PREFIX}chat:${id}`);
   }
 }
 
@@ -1629,7 +1645,6 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
   // 사이드바 실행 신호(실시간 방송, 오너 대기 제외): 작은 점 = 지금 실행, 혜성 = 실행 + 살아 있는 목표.
   const { running: liveRunningChatIds, spinning: spinningChatIds } = useOneRunSignals(activeChatIds, confirmations);
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
-  const [dismissedDecisionId, setDismissedDecisionId] = useState<string | null>(null);
   const [committedAnswers, setCommittedAnswers] = useState<CommittedQuestionAnswer[]>([]);
   /**
    * "항상 승인"을 받은 대화들. 저장소는 승인 채널 셋이 공유한다 — 결정 시트에서 준
@@ -1801,6 +1816,8 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
   const [preflightFenceStatus, setPreflightFenceStatus] = useState<OnePreflightFenceStatus | null>(null);
   const preflightSubmissionRef = useRef<{ submissionId: string; chatId: string; ready?: Promise<void> } | null>(null);
   const preflightSubmissionGenerationRef = useRef(0);
+  // cancelActiveRun is declared before showFirstSends: it reads it through this ref.
+  const showFirstSendsRef = useRef<(chatId: string | null) => void>(() => undefined);
   const [localFollowupIntents, setLocalFollowupIntents] = useState<OneFollowupIntent[]>([]);
   const unconfirmedFollowupCapturesRef = useRef(new Map<string, OneFollowupIntent>());
   function readLocalFollowupIntents(chatId: string): OneFollowupIntent[] {
@@ -1884,7 +1901,10 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     composerValueRef.current = next;
     composerDraftKeyRef.current = key;
     setComposerHasText(Boolean(next.trim()));
-    setAgentPickerOpen(/(^|\s)@[^\s]*$/u.test(next));
+    // The "@" list opens from the person's typing only: a draft put back when a chat is reopened (the box has no focus) does not pop it open.
+    const mention = document.activeElement === composerInputRef.current ? trailingMention(next) : null;
+    setAgentPickerOpen(isMentionOpen(next) && mention !== null);
+    setMentionQuery((current) => (mention ? (current === mention.query ? current : mention.query) : (current === null ? current : null)));
   }, []);
   function setComposer(next: string | ((current: string) => string)) {
     if (composerHandleRef.current) {
@@ -2281,7 +2301,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
           quietUntil = Date.now() + Math.min(60_000, 1_000 * 2 ** failures);
           // Three unanswered reads in a row: stop asking. Main owns delivery of the message; the next change to the
           // conversation re-arms this effect. (No poll every few seconds after a refusal.)
-          if (failures >= 3) { disposed = true; window.clearInterval(timer); }
+          if (failures >= 3) { disposed = true; timer(); }
         } else failures = 0;
         if (disposed || activeThreadChatIdRef.current !== chatId) return;
         const changed = new Map(receipts.filter((item): item is NonNullable<typeof item> => Boolean(item))
@@ -2298,9 +2318,10 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
         });
       } finally { running = false; }
     };
-    const timer: number = window.setInterval(() => { void refresh(); }, 1_000);
+    // A send that waits to be delivered is re-read when this conversation's state changes (a store signal) and on one safety net, not every second.
+    const timer: () => void = watchChat(chatId, () => { void refresh(); });
     void refresh();
-    return () => { disposed = true; window.clearInterval(timer); };
+    return () => { disposed = true; timer(); };
   }, [currentTurnFollowups, selected?.chatId, conversation?.id]);
 
   useEffect(() => {
@@ -2382,6 +2403,64 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     });
   }
   const [turnAgentIds, setTurnAgentIds] = useState<string[]>([]);
+  /*
+   * The `@partial` the person is typing (null = the agents list was not opened by typing). While it is set the list filters by it, has no search box and never
+   * takes the keyboard focus; the "+" menu's Agents entry keeps its own search box (one implementation in lib/composer-agent-pick.ts).
+   */
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionActiveId, setMentionActiveId] = useState<string | null>(null);
+  const composerAgentOptions = () => availableAgents.map((candidate) => {
+    const localized = pickLocalized(candidate, appLocale);
+    return {
+      id: candidate.id,
+      name: seatDisplayName(candidate.id, oneOrgState?.members, localized.name),
+      tagline: localized.tagline,
+      selected: turnAgentIds.includes(candidate.id),
+    };
+  });
+  const mentionRows = () => {
+    if (composerMenu !== "agents" || mentionQuery === null) return [];
+    const wanted = mentionQuery.trim().toLocaleLowerCase();
+    return composerAgentOptions().filter((item) => !wanted || item.name.toLocaleLowerCase().includes(wanted));
+  };
+  /** Picking from the list: the full name goes into the words (the room reads who a line is for from it) and the agent into the turn's list; the person keeps typing in the box. */
+  const pickMentionedAgent = (agent: { id: string; name: string }) => {
+    const text = composerValueRef.current;
+    const at = trailingMention(text);
+    if (!at) {
+      // The "+" menu's list with no `@` being typed: a toggle of the turn's list, the words stay as they are.
+      const next = pickAgentIntoComposer(text, turnAgentIds, agent);
+      setTurnAgentIds(next.picked);
+      if (next.text !== text) setComposer(next.text);
+      return;
+    }
+    // A `@` being typed only ever adds: a roster member already in the list (the room's default) is not taken out again, and the words are never cut away.
+    const result = pickAgent(text, turnAgentIds, agent, { at, mode: "add" });
+    setTurnAgentIds(result.picked);
+    setMentionQuery(null);
+    setMentionActiveId(null);
+    setComposerMenu(null);
+    if (result.text !== text) setComposer(result.text);
+    requestAnimationFrame(() => {
+      const input = composerInputRef.current;
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(result.caret, result.caret);
+    });
+  };
+  /** First in the box's onKeyDown: while the typed-`@` list shows rows, Enter/Tab pick, arrows move, Escape closes; nothing sends under an open list. */
+  const handleMentionKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (composerMenu !== "agents" || mentionQuery === null) return;
+    const rows = mentionRows();
+    if (event.key === "Escape") { event.preventDefault(); setComposerMenu(null); setMentionQuery(null); return; }
+    if (!rows.length) return;
+    const index = Math.max(0, rows.findIndex((row) => row.id === mentionActiveId));
+    // An Enter that commits a Hangul syllable is not a pick and not a send: the pick is the plain Enter after it (or the next press).
+    if (event.nativeEvent.isComposing) { if (event.key === "Enter") event.preventDefault(); return; }
+    if (event.key === "ArrowDown") { event.preventDefault(); setMentionActiveId(rows[(index + 1) % rows.length]!.id); return; }
+    if (event.key === "ArrowUp") { event.preventDefault(); setMentionActiveId(rows[(index + rows.length - 1) % rows.length]!.id); return; }
+    if ((event.key === "Enter" && !event.shiftKey) || event.key === "Tab") { event.preventDefault(); pickMentionedAgent(rows[index]!); }
+  };
   const [turnOverrides, setTurnOverrides] = useState<OneTurnOverrides>({});
   const goalControlEpochRef = useRef(0);
   const [confirmedOneRuntime, setOneRuntime] = useState<RuntimeStatus | null>(null);
@@ -2540,7 +2619,9 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     });
     return () => { alive = false; settingsPickerGeneration.current += 1; unsubscribe?.(); };
   }, []);
-  const [contextRailOpen, setContextRailOpenState] = useState(() => readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, false));
+  // A pane of Space owns its rail: the stored "open" is one value, and every pane that read or listened to it opened its rail when any one was pressed
+  //. A pane the person is not working in starts closed and ignores another pane's write.
+  const [contextRailOpen, setContextRailOpenState] = useState(() => (embedded && !embedFocused ? false : readStoredBoolean(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, false)));
   /*
    * 홈 화면 기록 열도 접힌 채로 시작한다 (오너 결정 2026-08-25: "다 접힌 상태").
    * 첫 화면에서 오른쪽을 차지하던 패널은 둘이었다 — 결과 패널(위 v2)과 이 기록 열.
@@ -2570,7 +2651,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     const unsubscribe = [
       subscribeAppUiPreference("oneLeftRailCollapsed", setRailCollapsedState),
       subscribeAppUiPreference("oneRailMode", setRailModeState),
-      subscribeAppUiPreference("oneContextRailOpen", setContextRailOpenState),
+      subscribeAppUiPreference("oneContextRailOpen", (open) => { if (!embedRef.current || embedFocusedRef.current) setContextRailOpenState(open); }),
       subscribeAppUiPreference("oneHomeHistoryOpen", setHomeHistoryOpenState),
       subscribeAppUiPreference("oneContextRailWidth", (width) => {
         contextRailPreferredWidthRef.current = width;
@@ -3031,10 +3112,11 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
       }
     };
     void check();
-    const interval = window.setInterval(() => { void check(); }, 5_000);
+    // A run this window is not attached to is re-read when the conversation changes (a store signal) and on one safety net, not every 5 s.
+    const off = watchChat(chatId, () => { void check(); });
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
+      off();
     };
   }, [unattachedOpenRunKey]);
   const durableThreadBrowserUrl = useMemo(() => {
@@ -3132,8 +3214,26 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     const chatId = runChatIdRef.current ?? activeThreadChatIdRef.current;
     const localPauseFailed = chatId ? !pauseLocalFollowups(chatId) : false;
     const api = ipc();
-    const runId = runIdRef.current;
-    if (!runId) return;
+    const localRunId = runIdRef.current;
+    if (!localRunId) {
+      // Stop pressed while the message is still being prepared (no run yet): its open preflight row is the room's only open row and refuses every later
+      // send until it is released. Hold it now (the same call a model change makes) and drop the local handle, so a waiting send goes at the next look (A10).
+      const preparing = preflightSubmissionRef.current;
+      if (api && preparing && (!chatId || preparing.chatId === chatId)) {
+        preflightSubmissionGenerationRef.current += 1;
+        void api.invoke.preflightSubmissionHold(preparing.submissionId).catch(() => null).then(() => {
+          if (preflightSubmissionRef.current?.submissionId === preparing.submissionId) preflightSubmissionRef.current = null;
+          showFirstSendsRef.current(preparing.chatId);
+        });
+      }
+      // A run Main started by itself (an answered question's continuation, a Goal pass) has no id on this screen: Main names the chat's current turn
+      // and that turn is stopped like any other (lib/stop-run-target.ts).
+      // The conversation's one Stop finds that turn itself and takes back every send that has not started (api.chat.stop).
+      if (api && chatId) requestRunStop(`chat-stop:${chatId}`);
+      return;
+    }
+    requestRunStop(localRunId);
+    function requestRunStop(runId: string) {
     if (!api) {
       requestOneOperationalRecovery(reason, new Error("Desktop bridge unavailable"));
       setActionNotice(appLocale === "ko"
@@ -3148,17 +3248,24 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     cancelNoticeRunIdRef.current = runId;
     cancelNoticeTextRef.current = stopNotice;
     setActionNotice(stopNotice);
-    void api.invoke.cancel(runId).then((receipt) => {
-      if (
-        receipt?.runId !== runId
-        || (receipt.status !== "requested" && receipt.status !== "already-requested")
-      ) {
-        throw new Error("invoke_cancel_receipt_mismatch");
+    // The conversation's one Stop: the live run and every send that has not started. The words of the sends Main took back go into the input box.
+    const stopChatId = chatId ?? runChatIdRef.current ?? activeThreadChatIdRef.current;
+    void (stopChatId ? api.chat.stop(stopChatId) : Promise.reject(new Error("chat_stop_no_chat"))).then((receipt) => {
+      if (!chatStopAccepted(receipt)) throw new Error("chat_stop_receipt_refused");
+      const back = withdrawnWords(receipt);
+      if (back.length) {
+        if (activeThreadChatIdRef.current === stopChatId) setComposer((current) => [current, ...back].filter(Boolean).join("\n"));
+        else writeOneComposerDraft(`chat:${stopChatId}`, { composer: [readOneComposerDraft(`chat:${stopChatId}`).composer, ...back].filter(Boolean).join("\n") });
+      }
+      // Nothing was running: no terminal event will come, so the pending notice ends here.
+      if (!receipt.runId) {
+        if (cancelNoticeRunIdRef.current === runId) { const notice = cancelNoticeTextRef.current; cancelNoticeRunIdRef.current = null; cancelNoticeTextRef.current = null; setActionNotice((current) => (current === notice ? null : current)); }
+        return;
       }
       // Main accepted the terminal action. The run remains visibly busy until
       // its terminal event arrives, but directions Main just discarded leave
       // the queue now and go back to the composer.
-      if (runIdRef.current !== runId || cancelNoticeRunIdRef.current !== runId) return;
+      if ((runIdRef.current && runIdRef.current !== runId) || cancelNoticeRunIdRef.current !== runId) return;
       pendingSteersRef.current = [];
       if (runChatIdRef.current) returnQueuedSteersToComposer(runChatIdRef.current);
       else setQueuedSteers([]);
@@ -3174,6 +3281,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
         : "The stop request was rejected. The run and queued directions are unchanged; try again.";
       setActionNotice((current) => current === notice ? rejection : current);
     });
+    }
   }, [appLocale, pauseLocalFollowups, returnQueuedSteersToComposer]);
   /*
    * ★화면에 지금 떠 있는 메시지가 **어느 대화의 것인가**.
@@ -3955,8 +4063,9 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     const timer = window.setInterval(() => {
       // One Team is event-driven. The general shell refresh remains for
       // conversations/receipts, but it must not poll the org ledger.
+      // The store's signals below already re-read the conversation list and the open conversation; this is the one safety net, not a 5 s loop.
       if (document.visibilityState === "visible") void refreshAll({ includeOrg: false, poll: true });
-    }, 5_000);
+    }, CHAT_SIGNAL_SAFETY_MS);
     window.addEventListener("focus", onVisibility);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
@@ -4304,7 +4413,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
         setMessages((current) => ownsQueuedUpdate() ? current.filter((message) => message.id !== "one-live-response") : current);
       } else setMessages((current) => ownsQueuedUpdate() ? upsertLiveMessage(current, text, false, eventRunId).map((message) => (
         message.id === "one-live-response"
-          ? { ...message, ...(event.goalResult ? { goalResult: event.goalResult } : {}), id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}) }
+          ? { ...message, ...(event.goalResult ? { goalResult: event.goalResult } : {}), id: `one-answer:${settledRunId ?? uid()}`, createdAt: message.createdAt ?? new Date().toISOString(), ...(event.durableMessageId ? { durableMessageId: event.durableMessageId } : {}), ...(event.answerStart && event.answerStart > 0 && event.answerStart < message.text.length && message.text === text ? { answerStart: event.answerStart } : {}) }
           : message
       )) : current);
       setBusy(false);
@@ -4793,6 +4902,15 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  // A receipt card's "Send through another AI" / "Raise the permission" open this composer's menus (lib/composer-control-bus.ts).
+  useEffect(() => (activeThreadChatId ? registerComposerControls(activeThreadChatId, {
+    openRuntimePicker: () => setComposerMenu("model"),
+    openPermission: () => setComposerMenu("permission"),
+  }) : undefined), [activeThreadChatId]);
+  // A decision question the person closed with its X: the one closed state of every surface (lib/question-cards.ts); a Reopen line is drawn in the conversation.
+  const decisionCards = useQuestionCards(activeThreadChatId, { fence: null, sources: { askUser: false }, prune: false });
+  const decisionCardKey = (confirmation: PendingConfirmation): string => `decision:${confirmation.sourceMessageId}`;
+  const closeDecision = (confirmation: PendingConfirmation): void => closeQuestionCard(activeThreadChatId, decisionCardKey(confirmation), 1);
   const runningComposerModel = useRunningComposerModel(activeThreadChatId);
   const inlineUi = useInlineUiInstances(activeThreadChatId ?? undefined);
   const uiRunForMessage = (message: UiMessage): string | undefined => {
@@ -4892,6 +5010,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     const next = readFirstSends(window.localStorage, "one", chatId);
     setFirstSends(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
   }, []);
+  showFirstSendsRef.current = showFirstSends;
   /** Main took the send (or the exact text went back to the composer): the saved copy goes. */
   const settleFirstSend = useCallback((chatId: string | null, intentId: string) => {
     try { removeFirstSend(window.localStorage, "one", chatId, intentId); } catch { /* the next read retries */ }
@@ -5311,7 +5430,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     }).catch(() => { /* the seat still shows its own conversation */ });
     return () => { cancelled = true; };
   }, [seatRoomWorkAgentId, messages.length]);
-  const seatThreadMessages = useMemo((): Array<UiMessage & { room?: { chatId: string; title: string; sessionChatId: string } }> => {
+  const seatThreadMessagesBase = useMemo((): Array<UiMessage & { room?: { chatId: string; title: string; sessionChatId: string } }> => {
     const rows = seatRoomWorkAgentId && seatRoomWork?.agentId === seatRoomWorkAgentId ? seatRoomWork.rows : [];
     if (!rows.length) return visibleMessages;
     const firstOwn = visibleMessages.find((message) => message.createdAt)?.createdAt;
@@ -5340,7 +5459,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
   const approvalRoomChildren = useRoomChildren(activeThreadChatId ?? "", Boolean(activeTaskforce && activeThreadChatId));
   const settledApprovals = useSettledApprovals(activeThreadChatId ? [activeThreadChatId, ...approvalRoomChildren] : []);
   // AK: the files each finished run made or changed, under that run's last answer (the run's own answer ids; typed write / edit calls only).
-  const turnFilesByAnswer = useMemo(() => {
+  const turnFileLedger = useMemo(() => {
     const byAnswer = new Map<string, TurnFile[]>();
     for (const run of threadRuns) {
       const last = run.answerMessageIds?.at(-1);
@@ -5348,8 +5467,22 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
       const files = turnFilesOfActivity([run.state], appLocale === "ko" ? "ko" : "en", workspacePath);
       if (files.length) byAnswer.set(last, [...(byAnswer.get(last) ?? []), ...files]);
     }
-    return byAnswer;
+    // A path an earlier answer wrote reads "Edited" in a later one (lib/turn-files.ts settleTurnFileOps); the panel's Outputs list names the same files.
+    const entries = [...byAnswer.entries()];
+    const settled = settleTurnFileOps(entries.map(([, files]) => files));
+    const settledByAnswer = new Map<string, TurnFile[]>(entries.map(([id], index) => [id, settled[index]]));
+    return { byAnswer: settledByAnswer, chat: distinctTurnFiles(settled) };
   }, [threadRuns, appLocale, workspacePath]);
+  const turnFilesByAnswer = turnFileLedger.byAnswer;
+  /*
+   * The list this window draws: the transcript model's send rules over its rows (lib/chat-transcript-model.ts). One send is one bubble under its intent id
+   * (the optimistic copy goes the moment a stored row carries the id) and Main's state of a send that is not delivered yet rides on it as a line under the bubble.
+   */
+  const threadOwnerInputs = useOwnerInputs(activeThreadChatId);
+  const seatThreadMessages = useMemo(() => applySendRules(seatThreadMessagesBase, {
+    optimisticIntentOf: (row) => (!row.durableMessageId && row.clientIntentId ? row.clientIntentId : /^(?:followup|first-send):/.test(row.id) ? row.id.replace(/^[^:]+:/, "") : null),
+    ownerInputs: threadOwnerInputs,
+  }), [seatThreadMessagesBase, threadOwnerInputs]);
   // The stored "request closed" notice says what the line says: the line replaces it here.
   const approvalClosedIds = useMemo(() => approvalClosedRowIds(settledApprovals), [settledApprovals]);
   // A line sits after a message the thread really draws (a folded housekeeping row or an empty one cannot hold it).
@@ -5622,7 +5755,8 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     void Promise.all([
       api.runtime.detect(),
       chatRead,
-    ]).then(([runtimes, chat]) => {
+      readOrchestratorPoolPick(api),
+    ]).then(([runtimes, chat, poolPick]) => {
       if (!isCurrent()) return;
       if (activeThreadChatId && !chat) {
         // The room's pin is unknown, not an explicit choice of the default.
@@ -5635,7 +5769,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
       // default orchestrator runtime, never another room's last choice. The
       // current role setting initializes a room that does not exist yet.
       const selection = chat?.runtimeSelection ?? null;
-      setOneRuntime(chipRuntimeFor(runtimes, selection));
+      setOneRuntime(chipRuntimeFor(runtimes, selection ?? poolPick));
       setOneRuntimePinned(Boolean(selection));
       setOneRuntimeInventory(runtimes);
     }).catch(() => {
@@ -5693,20 +5827,30 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
      *   안 그러면 키보드로는 문서 맨 위부터 다시 Tab 해야 한다.
      */
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    let focusLeft = false;
     const dismiss = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest("[data-one-composer-popover], [data-one-composer-trigger]")) return;
+      setComposerMenu(null);
+    };
+    // Tab out of the menu closes it, and the focus stays where Tab put it.
+    const leave = (event: FocusEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-one-composer-popover], [data-one-composer-trigger]")) return;
+      focusLeft = true;
       setComposerMenu(null);
     };
     const escape = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") setComposerMenu(null);
     };
     document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("focusin", leave, true);
     document.addEventListener("keydown", escape);
     return () => {
       document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("focusin", leave, true);
       document.removeEventListener("keydown", escape);
-      if (opener && opener.isConnected && !opener.contains(document.activeElement)) {
+      if (!focusLeft && opener && opener.isConnected && !opener.contains(document.activeElement)) {
         opener.focus({ preventScroll: true });
       }
     };
@@ -5981,14 +6125,15 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
       }
     };
     const first = window.setTimeout(reconcile, 700);
-    const interval = window.setInterval(reconcile, 5_000);
+    // The run's end reaches this projection as a store signal of its conversation (the receipt row, the answer); one safety net, not every 5 s.
+    const stopWatching = watchChat(chatId, () => { void reconcile(); });
     // The timers above skip a hidden window; the moment it shows again is the signal to read once, not the next tick.
     const onVisible = () => { if (!document.hidden) void reconcile(); };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       window.clearTimeout(first);
-      window.clearInterval(interval);
+      stopWatching();
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [busy, settleRun]);
@@ -6718,6 +6863,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
             : [{
               id: optimisticUserMessageId!,
               chatId,
+              clientIntentId: runId,
               role: "user" as const,
               ...promptBubbleContent(text),
               createdAt: new Date().toISOString(),
@@ -6768,6 +6914,8 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     try {
       const startAnswer = await api.invoke.run({
         runId,
+        // The id of this send: Main stores it on the person's row, so the bubble is matched by id, never by its words.
+        clientIntentId: runId,
         chatId,
         userPrompt: text,
         ...(options?.preflightSubmissionId ? { preflightSubmissionId: options.preflightSubmissionId } : {}),
@@ -7715,6 +7863,11 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
               ...(resume ? { permissionMode: submissionPermission } : {}),
             },
           );
+          // The room's lead owns the run: no parent run is ever bound to this submission, and an open one refused every later send of the room
+          // ("one_preflight_chat_pending", the waiting row) until it went stale or the app restarted. Taking it back here is Main's hold.
+          if (runOutcome?.status === "started" || runOutcome?.status === "reconciled") {
+            await api.invoke.preflightSubmissionHold(preflightSubmissionId).catch(() => null);
+          }
           settleFirstSendOutcome(chatId, preflightSubmissionId, runPrompt, runOutcome);
           return;
         }
@@ -8365,17 +8518,18 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     if (hydratedThreadChatId !== activeThreadChatId || busy || teamPreflightBusy) return;
     const chatId = activeThreadChatId;
     void resumeFirstSendsRef.current(chatId);
-    // Main may still be admitting a recorded run; look again a few times instead of guessing.
-    let ticks = 0;
-    const timer = window.setInterval(() => {
-      // A send that waits for an earlier message keeps being looked at for as long as it may still be sent (the resume window, 10 minutes).
-      const waitingTicks = readFirstSends(window.localStorage, "one", chatId).some(entry => entry.waiting && !entry.notSent) ? 130 : 24;
-      if ((ticks += 1) > waitingTicks || activeThreadChatIdRef.current !== chatId) { window.clearInterval(timer); return; }
+    // Main may still be admitting a recorded run; look again when this conversation changes (a store signal) and on one safety net, for as long as the send may still go out
+    // (no 5 s loop). A send that waits for an earlier message keeps being looked at for the resume window (10 minutes), any other for 2.
+    const lookedSince = Date.now();
+    let timer: () => void = () => undefined;
+    timer = watchChat(chatId, () => {
+      const waitingWindowMs = readFirstSends(window.localStorage, "one", chatId).some(entry => entry.waiting && !entry.notSent) ? 10 * 60_000 : 2 * 60_000;
+      if (Date.now() - lookedSince > waitingWindowMs || activeThreadChatIdRef.current !== chatId) { timer(); return; }
       const pending = readFirstSends(window.localStorage, "one", chatId)
         .some(entry => !entry.notSent && !liveFirstSendIdsRef.current.has(entry.intentId));
-      if (!pending) { window.clearInterval(timer); return; }
+      if (!pending) { timer(); return; }
       void resumeFirstSendsRef.current(chatId);
-    }, 5_000);
+    });
     const onStorage = (event: StorageEvent) => {
       if (event.key?.startsWith("agentlas.first-send-outbox.v1:one:")) {
         showFirstSends(chatId);
@@ -8383,7 +8537,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
       }
     };
     window.addEventListener("storage", onStorage);
-    return () => { window.clearInterval(timer); window.removeEventListener("storage", onStorage); };
+    return () => { timer(); window.removeEventListener("storage", onStorage); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeThreadChatId, hydratedThreadChatId, busy, teamPreflightBusy, showFirstSends]);
   // A durable user row with the same words, written at or after the send, is that send: the saved copy goes.
@@ -8391,7 +8545,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     const chatId = activeThreadChatId;
     if (!chatId || hydratedThreadChatId !== chatId) return;
     for (const entry of firstSends) {
-      if (entry.chatId === chatId && !liveFirstSendIdsRef.current.has(entry.intentId) && firstSendEchoed(entry, messages)) {
+      if (entry.chatId === chatId && !liveFirstSendIdsRef.current.has(entry.intentId) && firstSendEchoed(entry, messages, firstSends)) {
         settleFirstSend(chatId, entry.intentId);
       }
     }
@@ -8448,7 +8602,18 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
       (intentId) => liveFirstSendIdsRef.current.has(intentId));
     showFirstSends(entry.chatId);
     if (outcome === "taken-back") {
-      setActionNotice(appLocale === "ko" ? "멈췄어요. 이 메시지는 보내지 않아요." : "Stopped. This message will not be sent.");
+      // The words come back to the input box (Stop returns unsent words), never lost with the removed waiting row.
+      const back = entry.userPrompt;
+      if (back.trim()) {
+        if (activeThreadChatIdRef.current === entry.chatId) {
+          setComposer((current) => (!current.trim() ? back : current === back || current.includes(back) ? current : `${back}\n${current}`));
+        } else {
+          const key = `chat:${entry.chatId}`;
+          const draft = readOneComposerDraft(key).composer;
+          if (!draft.includes(back)) writeOneComposerDraft(key, { composer: draft.trim() ? `${back}\n${draft}` : back });
+        }
+      }
+      setActionNotice(appLocale === "ko" ? "멈췄어요. 이 메시지는 보내지 않아요. 글은 작성창에 있어요." : "Stopped. This message will not be sent. Your words are back in the box.");
     } else if (outcome === "too-late") {
       setActionNotice(appLocale === "ko"
         ? "이미 보내는 중이라 되돌리지 못했어요. 답이 시작되면 중지를 눌러 멈출 수 있어요."
@@ -8597,7 +8762,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
         if (cancelled || admissionRecoveryFenceRef.current.has(chatId)) return;
         verificationSettled = true;
         if (!verification) return;
-        const safeDiagnosis = toCustomerSafeText(verification.diagnosis, appLocale);
+        const safeDiagnosis = withoutRuntimeEnvelopes(verification.diagnosis, appLocale);
         if (verification.verified) {
           setAutoRecovery(null);
           state.attemptsSpent = 0;
@@ -8684,7 +8849,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
         if (cancelled || !judgement || admissionRecoveryFenceRef.current.has(chatId)) return;
         judgementSettled = true;
         state.previousFingerprint = judgement.fingerprint;
-        const safeDiagnosis = toCustomerSafeText(judgement.diagnosis, appLocale);
+        const safeDiagnosis = withoutRuntimeEnvelopes(judgement.diagnosis, appLocale);
         if (!judgement.retry && oneRecoveryStopWaitsForChange(judgement.reason)) recoveryWaitRunsRef.current.set(chatId, receipt.runId);
         else recoveryWaitRunsRef.current.delete(chatId);
         if (!judgement.retry) {
@@ -9446,7 +9611,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
     });
   }, [activeSeat, activeThreadChatId, appLocale, conversations, createTaskforce, oneOrgState?.members]);
 
-  const updateTaskforce = useCallback(async (input: { id: string; title: string; description: string; memberAgentIds: string[]; expectedRevision: number }) => {
+  const updateTaskforce = useCallback(async (input: { id: string; title: string; expectedTitle: string; description: string; memberAgentIds: string[]; expectedRevision: number; expectedMemberAgentIds: string[] }) => {
     const api = ipc();
     if (!api?.oneTaskforces) throw new Error("Desktop bridge unavailable");
     setTaskforceBusy(true);
@@ -9623,7 +9788,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
   const selectedConfirmation = activeThreadChatId
     ? actionableConfirmations.find((item) => item.chatId === activeThreadChatId) ?? null
     : null;
-  const visibleSelectedConfirmation = selectedConfirmation?.sourceMessageId === dismissedDecisionId
+  const visibleSelectedConfirmation = selectedConfirmation && decisionCards.closed.some((item) => item.card.key === decisionCardKey(selectedConfirmation))
     ? null
     : selectedConfirmation;
   // One 첫 요청 카드(PLAN §5) — 홈·새 One 세션·단톡방이 같은 판정 하나를 쓴다.
@@ -9852,8 +10017,8 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
           if (!result?.accepted || result.automationId !== automationId || !result.status) {
             throw new Error(result?.error || "automation_run_receipt_incomplete");
           }
-          const safeOutput = toCustomerSafeText(result.output, appLocale).slice(0, 1_200);
-          const safeError = toCustomerSafeText(result.error, appLocale).slice(0, 600);
+          const safeOutput = withoutRuntimeEnvelopes(result.output, appLocale).slice(0, 1_200);
+          const safeError = withoutRuntimeEnvelopes(result.error, appLocale).slice(0, 600);
           const actualResult = [safeOutput, safeError && safeError !== safeOutput ? safeError : ""]
             .filter(Boolean)
             .join(" · ");
@@ -9876,7 +10041,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
               ? "이전 실행의 실제 결과를 먼저 확정해 주세요. 중복 동작을 막기 위해 새 실행은 시작하지 않았습니다."
               : "Confirm the previous run's actual result first. A new run was not started to prevent duplicate actions.");
           } else {
-            const detail = toCustomerSafeText(raw, appLocale);
+            const detail = withoutRuntimeEnvelopes(raw, appLocale);
             setActionNotice(detail || (appLocale === "ko"
               ? "자동화를 실행하지 못했습니다. 실행 기록과 연결 상태를 확인한 뒤 다시 시도해 주세요."
               : "The automation did not run. Check its run history and connections, then try again."));
@@ -10866,6 +11031,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                         interruptionCause={block.interruptionCause}
                         hostStopCause={block.hostStopCause}
                         supersededByRunId={block.supersededByRunId}
+                        supersededByCompleted={block.supersededByRunId ? threadRuns.some((run) => run.runId === block.supersededByRunId && run.status === "completed") : false}
                         startedAt={Date.parse(block.startedAt)}
                         locale={appLocale}
                         workspacePath={workspacePath}
@@ -10967,6 +11133,8 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                             : <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} chatId={activeThreadChatId} />)
                           : memoryRoomCard
                           ? <MemoryRoomCard rowId={message.id} value={memoryRoomCard} locale={appLocale === "ko" ? "ko" : "en"} />
+                          : message.role === "system" && isReceiptRowId(message.id)
+                          ? <ReceiptRowCard row={message} chatId={activeThreadChatId} />
                           : handoffCard
                           ? <HandoffCard value={handoffCard} />
                           : systemLabel
@@ -11075,7 +11243,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                                     ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={sourceMessageId} />
                                     : <Markdown text={markdownText} messageId={contentMessageId} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} mentionNames={message.role === "assistant" ? roomMentionNames : undefined} />;
                                 })())}
-                              {message.role === "assistant" && !message.streaming && message.continuationTail !== false && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
+                              {message.role === "assistant" && !message.streaming && message.continuationTail !== false && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} shownElsewhere={turnFilePathSet(turnFilesByAnswer.get(sourceMessageId))} />}
                               </GoalResultReport>
                               </AnswerCardsForTurns>
                               <IntellectUiActions.Provider value={oneUiActions}>
@@ -11090,6 +11258,12 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                                 {appLocale === "ko"
                                   ? "Goal 관련 지시 · 대화에 저장됨 · 실행되지 않음 · 목표 수정/재개는 위 Goal 상태에서 직접 선택"
                                   : "Goal direction saved in chat · not run · choose revision or resume in the Goal controls above"}
+                              </p>
+                            )}
+                            {/* Main's state of a send that is not delivered yet: one line under the bubble; a first send keeps its own line with its buttons below. */}
+                            {message.role === "user" && !sourceMessageId.startsWith("first-send:") && (message.ownerInputState === "waiting" || message.ownerInputState === "starting" || message.ownerInputState === "held" || message.ownerInputState === "uncertain") && (
+                              <p className={styles.firstSendStatus} role="status" data-owner-input-state={message.ownerInputState}>
+                                <span>{tFor(appLocale === "ko" ? "ko" : "en", message.ownerInputState === "held" ? "room.send.held" : message.ownerInputState === "uncertain" ? "room.send.uncertain" : "room.send.waiting")}</span>
                               </p>
                             )}
                             {message.role === "user" && sourceMessageId.startsWith("first-send:") && (() => {
@@ -11157,6 +11331,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                               interruptionCause={block.interruptionCause}
                               hostStopCause={block.hostStopCause}
                               supersededByRunId={block.supersededByRunId}
+                              supersededByCompleted={block.supersededByRunId ? threadRuns.some((run) => run.runId === block.supersededByRunId && run.status === "completed") : false}
                               {...(message.role === "user" && message.text.trim()
                                 ? { onRetry: () => retryUnansweredTurn(message.text, block.state.model), retryDisabled: busy }
                                 : {})}
@@ -11504,16 +11679,19 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                 onAnswer={answerConfirmation}
                 onResend={(confirmation, text) => {
                   // 답을 새 메시지로 — 작성창과 같은 길(submit)이라 실행 중이면 조향·대기열로 간다.
-                  setDismissedDecisionId(confirmation.sourceMessageId);
+                  closeDecision(confirmation);
                   void submit(text);
                 }}
                 onAlwaysApprove={(confirmation) => { void markChatAlwaysApproved(confirmation); }}
                 onClarify={clarifyConfirmation}
                 onSnooze={snoozeConfirmation}
-                onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
+                onDismiss={() => closeDecision(visibleSelectedConfirmation)}
               />
             )}
-            <ComposerDecisionSlot className={styles.composerDecisions} surface="one" />
+            {activeThreadChatId && selectedConfirmation && !visibleSelectedConfirmation && (
+              <ClosedQuestionLine count={1} onReopen={() => reopenQuestionCard(activeThreadChatId, decisionCardKey(selectedConfirmation))} />
+            )}
+            <ComposerDecisionSlot className={styles.composerDecisions} surface="one" chatId={activeThreadChatId} draft={!activeThreadChatId} />
             <ToolApprovalInline permission={onePermission} chatId={activeThreadChatId} compact chip composerWidth={ONE_COMPOSER_WIDTH_PX} composerInset={ONE_COMPOSER_INSET_PX} />
             {activeThreadChatId && (selectedTaskId
               ? selected?.taskId === selectedTaskId
@@ -11608,22 +11786,14 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                 contextChatId={activeThreadChatId}
                 runtime={oneRuntime}
                 models={oneModelOptions}
-                agents={availableAgents.map((candidate) => {
-                  const localized = pickLocalized(candidate, appLocale);
-                  return {
-                    id: candidate.id,
-                    name: seatDisplayName(candidate.id, oneOrgState?.members, localized.name),
-                    tagline: localized.tagline,
-                    selected: turnAgentIds.includes(candidate.id),
-                  };
-                })}
+                agents={composerAgentOptions()}
                 plugins={onePluginOptions}
                 permission={onePermission}
                 alwaysApproval={composerAlwaysApproval}
                 turnOptions={turnOverrides}
                 localFilesConnected={Boolean(workspacePath)}
                 paneShape={embedded}
-                onMenuChange={setComposerMenu}
+                onMenuChange={(menu) => { if (menu === "agents") setMentionQuery(null); setComposerMenu(menu); }}
                 onAttach={() => {
                   setComposerMenu(null);
                   attachmentInputRef.current?.click();
@@ -11746,7 +11916,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                       const raw = cause instanceof Error
                         ? cause.message.replace(/^Error invoking remote method '[^']+':\s*Error:\s*/, "")
                         : "";
-                      const detail = toCustomerSafeText(raw, appLocale);
+                      const detail = withoutRuntimeEnvelopes(raw, appLocale);
                       setActionNotice(detail || (appLocale === "ko"
                         ? "플러그인 상태를 바꾸지 못했습니다. 연결 설정을 확인한 뒤 다시 시도해 주세요."
                         : "The plugin setting did not change. Check its connection settings and try again."));
@@ -11755,15 +11925,12 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                       pluginMutationPendingRef.current.delete(pluginId);
                     });
                 }}
-                onToggleAgent={(agentId) => {
-                  setTurnAgentIds((current) => current.includes(agentId)
-                    ? current.filter((id) => id !== agentId)
-                    : [...current, agentId]);
-                  setComposer((current) => {
-                    const match = current.match(/(^|\s)@[^\s]*$/u);
-                    return match ? `${current.slice(0, match.index)}${match[1]}` : current;
-                  });
+                onToggleAgent={(agentId, agentName) => {
+                  // The picked name stays in the sent words (a group room reads who a sentence is for from the @name in it) - lib/composer-agent-pick.ts.
+                  pickMentionedAgent({ id: agentId, name: agentName });
                 }}
+                mentionQuery={mentionQuery}
+                activeAgentId={mentionQuery === null ? null : (mentionRows().find((row) => row.id === mentionActiveId) ?? mentionRows()[0])?.id ?? null}
                 onSelectModel={(runtime, model) => { void applyOneRuntimeSelection({ model }, runtime); }}
                 selectionIntentId={selectionChoice?.requestId}
                 onSelectEffort={(effort, displayed, intentId) => {
@@ -11870,7 +12037,9 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
               <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composerHasText} />
             )}
             <MessageReplyPreview reply={messageReply} locale={appLocale} onDismiss={() => setMessageReply(null)} />
-            {!activeSeatDissolved && !activePersonalAgentRoom && <WaitingRetryStop chatId={activeThreadChatId} locale={appLocale === "ko" ? "ko" : "en"} live={busy} />}
+            {!activeSeatDissolved && !activePersonalAgentRoom && <PendingPromisesStrip chatId={activeThreadChatId} />}
+            {!activeSeatDissolved && !activePersonalAgentRoom && <WaitingRetryStop chatId={activeThreadChatId} locale={appLocale === "ko" ? "ko" : "en"} live={busy}
+              onWithdrawn={(words) => setComposer((current) => [current, ...words].filter(Boolean).join("\n"))} />}
             <form className={styles.composer} data-one-composer="true" data-has-files={attachmentDrafts.length > 0 ? "true" : undefined} data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved || activePersonalAgentRoom || activeAgentDeleted ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
               if (activeSeatDissolved || activeDirectSessionUnavailable || activePersonalAgentRoom || activeAgentDeleted) return;
@@ -11914,6 +12083,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                 writeDraft={writeOneComposerInputDraft}
                 resolveScopeValue={resolveComposerScopeValue}
                 onValueChange={onComposerValueChange}
+                onKeyDown={handleMentionKey}
                 onSubmit={(submittedValue) => {
                   if (activeSeatDissolved || activeDirectSessionUnavailable) return;
                   // Enter never stops a run: an empty Enter (a second keydown after an IME commit, a cleared composer)
@@ -12212,15 +12382,6 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
               </div>
             </section>
           )}
-          {selectedConfirmation && !visibleSelectedConfirmation && (
-            <button
-              type="button"
-              className={styles.decisionResumeButton}
-              onClick={() => setDismissedDecisionId(null)}
-            >
-              {tFor(appLocale, "one.shell.decision.reopen")}
-            </button>
-          )}
         </main>
         {/*
           * 접힘이 기본이지만 **출구가 반드시 보인다** — 접힌 자리에 펴기 버튼 한 칸을 남긴다.
@@ -12292,6 +12453,8 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
         )}
         <TaskSidePanel
           items={outputStateIsCurrent ? runtimeArtifacts : []}
+          files={turnFileLedger.chat}
+          onOpenFile={(file) => openOneLinkedFile(linkedFileOfTurnFile(file))}
           earlierOutputs={earlierOutputs}
           onRequestOpen={presentRichOutputRail}
           activity={outputStateIsCurrent ? activity : undefined}
@@ -12477,6 +12640,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
       {keyRequestSheet && (
         <McpKeyRequestSheet
           request={keyRequestSheet}
+          chatId={activeThreadChatId}
           presentation="one"
           localeOverride={appLocale}
           onResolved={() => setKeyRequestSheet(null)}
@@ -12797,21 +12961,7 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
   const highRiskNotice = approvalBlocked;
   const [multiSelection, setMultiSelection] = useState<number[]>([]);
   const [chosenIndex, setChosenIndex] = useState<number | null>(null);
-  const [answerText, setAnswerText] = useState("");
-  // 접힌 질문 카드는 보기가 안 보인다 — 접힘 상태를 여기서 쥐어, 아래 document 키 처리가 접힌 동안 숫자·Enter 로 답하지 않게 한다.
-  const [questionFolded, setQuestionFolded] = useState(false);
-  useEffect(() => { setMultiSelection([]); setChosenIndex(null); setAnswerText(""); setQuestionFolded(false); }, [confirmation.sourceMessageId]);
-  // 숫자·Enter·Esc 는 document 에서 받는다(포커스를 못 받는 카드 div 의 onKeyDown 은 불리지 않는다 —
-  // ChatQuestionSheet 2026-09-03 실측과 같은 이유). 핸들러는 렌더마다 최신 상태로 갈아 끼운다.
-  const questionKeyRef = useRef<((event: KeyboardEvent) => void) | null>(null);
-  const questionCardRef = useRef<HTMLDivElement | null>(null);
-  const keysActiveRef = useRef(keysActive);
-  keysActiveRef.current = keysActive;
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => { if (keysActiveRef.current) questionKeyRef.current?.(event); };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  useEffect(() => { setMultiSelection([]); setChosenIndex(null); }, [confirmation.sourceMessageId]);
   const selectedMultiLabels = directOptions
     .filter((option) => multiSelection.includes(option.index))
     .map((option) => option.label);
@@ -12892,184 +13042,48 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
       lightweightChoice,
     }));
     const questionOptions = decision.options.filter((option) => questionIndexes.has(option.index));
+    // A question with choices is THE question card (components/decision/QuestionCardHost.tsx): the same card, keys, answer text, X and Skip as every
+    // surface. Main matches this reply to the decision's options by label, so the reply is plain (replyStyle).
     if (questionOptions.length > 0) {
-      const copy = ASK_ACTION_COPY[locale];
-      const multi = Boolean(confirmation.multiSelect);
-      const selectedLabels = questionOptions
-        .filter((option) => (multi ? multiSelection.includes(option.index) : chosenIndex === option.index))
-        .map((option) => option.label);
-      const bar = askActionBarState({
-        multiSelect: multi,
-        selectedCount: selectedLabels.length,
-        freeText: answerText,
-        block,
-      });
-      const questionText = confirmation.question?.trim() || compactTitle;
-      const currentAnswer = (typed: string) => composeAskAnswer(selectedLabels, typed);
-      const sendAnswer = (answer: string) => {
-        if (!answer) return;
-        if (bar.primary.action === "resend") {
-          onResend?.(confirmation, askResendMessage(locale, questionText, answer));
-          return;
-        }
-        onAnswer(confirmation, answer);
-      };
-      const runAction = (id: string, typed: string) => {
-        if (id === "skip") { onAnswer(confirmation, askSkipReply(locale, questionText)); return; }
-        if (id === "dismiss") { onDismiss?.(); return; }
-        if ((id === "submit" || id === "resend") && bar.primary.enabled) sendAnswer(currentAnswer(typed));
-      };
-      const pick = (index: number) => {
-        if (!bar.optionsEnabled) return;
-        if (multi) {
-          setMultiSelection((current) => current.includes(index)
-            ? current.filter((value) => value !== index)
-            : [...current, index]);
-          return;
-        }
-        setChosenIndex(index);
-        // 하나만 고르는 질문은 고르는 순간이 답이다 — 단, 바로 답할 수 있을 때만.
-        // 막혀 있으면 고른 상태로 남고, 주 단추("새 메시지로 보내기")가 그 답을 보낸다.
-        if (bar.singleClickSubmits) {
-          const option = questionOptions.find((item) => item.index === index);
-          if (option) onAnswer(confirmation, composeAskAnswer([option.label], ""));
-        }
-      };
-      questionKeyRef.current = (event: KeyboardEvent) => {
-        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
-        if (event.isComposing || event.keyCode === 229) return;
-        const target = event.target as HTMLElement | null;
-        const inCard = Boolean(target && questionCardRef.current?.contains(target));
-        const tag = target?.tagName?.toLowerCase();
-        const editable = tag === "input" || tag === "textarea" || tag === "select" || Boolean(target?.isContentEditable);
-        if (event.key === "Escape" && (inCard || !editable)) {
-          event.preventDefault();
-          onDismiss?.();
-          return;
-        }
-        // 작성창·다른 입력칸에서 친 숫자와 Enter 는 그 칸의 글이다.
-        if (editable) return;
-        // 접힌 카드는 보이지 않는 보기에 답을 보내지 않는다(Escape 는 위에서 이미 처리).
-        if (questionFolded) return;
-        const focused = document.activeElement as HTMLElement | null;
-        if (focused?.closest("[data-ask-card]") && !questionCardRef.current?.contains(focused)) return;
-        const n = Number(event.key);
-        if (Number.isInteger(n) && n >= 1 && n <= questionOptions.length) {
-          event.preventDefault();
-          pick(questionOptions[n - 1].index);
-          return;
-        }
-        if (n === questionOptions.length + 1) {
-          event.preventDefault();
-          questionCardRef.current?.querySelector("input")?.focus();
-          return;
-        }
-        if (event.key === "Enter") {
-          if (target?.closest("button")) return;
-          event.preventDefault();
-          runAction(bar.primary.action, answerText);
-        }
-      };
-      const primaryLabel = bar.primary.action === "resend"
-        ? copy.resend
-        : multi ? copy.submit(bar.primary.count) : copy.submitSingle;
       return (
-        <div ref={questionCardRef} data-one-question-block={block}>
-          <AskCard
-            title={compactTitle || questionText}
-            subtitle={questionText}
-            locale={locale}
-            collapsible
-            collapsed={questionFolded}
-            onCollapsedChange={setQuestionFolded}
-            onClose={onDismiss}
-            options={questionOptions.map((option) => ({
-              id: `pick:${option.index}`,
-              title: option.label,
-              note: option.description ?? undefined,
-              disabled: !bar.optionsEnabled,
-              active: multi ? multiSelection.includes(option.index) : chosenIndex === option.index,
-              ...(multi ? { checked: multiSelection.includes(option.index) } : {}),
-            }))}
-            onChoose={(id) => {
-              if (!id.startsWith("pick:")) return;
-              pick(Number(id.slice("pick:".length)));
-            }}
-            otherOption={bar.optionsEnabled ? { title: copy.other, note: copy.otherNote } : undefined}
-            freeText={answerText}
-            onFreeTextChange={setAnswerText}
-            footer={bar.optionsEnabled ? {
-              placeholder: copy.placeholder,
-              skipLabel: copy.skip,
-              submitLabel: primaryLabel,
-              hideButton: true,
-              hasSelection: selectedLabels.length > 0,
-              onSkip: (typed) => runAction(bar.primary.action, typed),
-            } : undefined}
-            actionRow={{
-              notice: bar.notice ? copy.notice[bar.notice] : null,
-              reason: bar.primary.reason ? copy.reason[bar.primary.reason] : null,
-              // 막힌 질문에서는 위 안내가 이유를 말한다 — "Enter로 제출" 같은 힌트는 거짓이 된다.
-              hint: bar.primary.action === "resend" ? null : multi ? copy.hint.multi : copy.hint.single,
-              secondary: {
-                id: bar.secondary.action,
-                label: bar.secondary.action === "skip" ? copy.skip : copy.dismiss,
-                disabled: !bar.secondary.enabled,
-              },
-              primary: { id: bar.primary.action, label: primaryLabel, disabled: !bar.primary.enabled },
-              onAction: runAction,
-            }}
-            data-testid="one-decision-ask-card"
-            statusLabel={copy.needsInput}
-          />
-        </div>
+        <QuestionCardHost
+          source="decision"
+          portal={false}
+          chatId={confirmation.chatId}
+          keysActive={keysActive}
+          replyStyle="plain"
+          block={block}
+          questions={[{
+            id: confirmation.sourceMessageId,
+            question: confirmation.question?.trim() || compactTitle,
+            header: compactTitle,
+            multiSelect: Boolean(confirmation.multiSelect),
+            options: questionOptions.map((option) => ({ label: option.label, ...(option.description ? { description: option.description } : {}) })),
+          }]}
+          onConfirm={(reply) => onAnswer(confirmation, reply)}
+          onResend={(text) => onResend?.(confirmation, text)}
+          onDismiss={() => onDismiss?.()}
+        />
       );
     }
-    questionKeyRef.current = null;
 
     // 고를 것이 없을 때만 승인·거절을 묻는다(위 질문 경로와 같은 주제가 아니다).
-    const askOptions: AskCardOption[] = [
-        {
-          id: "approve",
-          title: riskRank >= 2 ? tFor(locale, "one.shell.decision.approve") : (locale === "ko" ? "승인" : "Approve"),
-          note: approvalDescription ?? compactSummary,
-          disabled: disabled || approvalReply === null,
-          active: true,
-        },
-        // "Always approve" answers this card too, so it is offered only for a yes/no permission. A question whose
-        // other option is a real alternative ("편집 준비만 계속") is never answered by a grant (Yotube 2026-10-17:
-        // the grant chose "재인증 진행" for the owner). The chat-wide switch stays in the composer menu.
-        ...(isPermissionOnlyConfirmation(confirmation) ? [{
-          id: "always",
-          title: tFor(locale, "one.shell.decision.always_approve"),
-          note: tFor(locale, "one.shell.decision.always_approve_hint"),
-          disabled: disabled || approvalReply === null,
-        }] : []),
-        { id: "reject", title: rejectLabel, disabled },
-      ];
-
-    const chooseAsk = (id: string) => {
-      if (id === "reject") { onAnswer(confirmation, rejectReply, false); return; }
-      if (id === "always") {
-        if (approvalReply === null) return;
-        onAlwaysApprove(confirmation);
-        onAnswer(confirmation, approvalReply);
-        return;
-      }
-      if (id === "approve") {
-        if (approvalReply !== null) onAnswer(confirmation, approvalReply);
-        return;
-      }
-    };
-
     return (
-      <AskCard
-        title={compactTitle || compactSummary}
+      <DecisionApprovalCard
         locale={locale}
+        title={compactTitle || compactSummary}
+        riskRank={riskRank}
+        approveNote={approvalDescription ?? compactSummary}
+        approvalReply={approvalReply}
+        disabled={disabled}
+        rejectLabel={rejectLabel}
+        rejectReply={rejectReply}
+        // "Always approve" answers this card too, so it is offered only for a yes/no permission. A question whose other option is a real alternative
+        // ("편집 준비만 계속") is never answered by a grant (Yotube the grant chose "재인증 진행" for the owner). The chat-wide switch stays in the composer menu.
+        alwaysAllowed={isPermissionOnlyConfirmation(confirmation)}
+        onAnswer={(reply, shouldStart) => onAnswer(confirmation, reply, shouldStart)}
+        onAlways={() => onAlwaysApprove(confirmation)}
         onClose={onDismiss}
-        options={askOptions}
-        onChoose={chooseAsk}
-        data-testid="one-decision-ask-card"
       />
     );
   }

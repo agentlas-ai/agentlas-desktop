@@ -2,7 +2,8 @@
  * The words and shapes of the hand-off wire, desktop side. Types and closed words only - no logic, no imports - so the receiver, the sender, the host gate and the cards agree on one
  * spelling. A word here is the server's word; it is never renamed on this side.
  */
-export const PLURAL_PLACES_V = 2;
+/** 3 = this desktop draws the consent chip: a sender with v < 3 is refused `desktop_update` by the server, so work is never handed over without the person's answer. */
+export const PLURAL_PLACES_V = 3;
 
 /** What a question is about: only these three are ever asked. */
 export type AskKind = "money" | "delete" | "send";
@@ -32,10 +33,22 @@ export type RowDecision = { kind: "answered"; answer: AskAnswer } | { kind: "all
 export interface HeldEntry { id: string; run: string; approvals: Array<{ qid: string; answer: AskAnswer }>; taskAllow: AskKind[] }
 
 /** What the sender side keeps of a row this desktop sent (GET `open[]` / `done[]`), for the conversation's cards. Nothing here is a model word. */
-export type SentCardState = "reserved" | "waiting_desktop_off" | "waiting_phone_app" | "claimed" | "claimed_desktop_off" | "approval" | "done" | "failed" | "stopped" | "expired" | "cancelled";
+export type SentCardState = "asking" | "reserved" | "waiting_desktop_off" | "waiting_phone_app" | "claimed" | "claimed_desktop_off" | "approval" | "done" | "failed" | "stopped" | "expired" | "cancelled";
 export interface SentCard {
   id: string; to: string; toName: string; brief: string; state: SentCardState; why?: FinishWhy; started?: boolean;
   /** Questions waiting for an answer (state `approval`). */
   approvals: Array<{ qid: string; kind: AskKind; target: string; preview?: string }>;
   result?: string; endedAt?: string; lateEnd?: boolean;
+  /** Why the card reads the way it does when the row went through the consent chip (the server's `consent` of the row): sent by an Always-allow rule, denied, or never answered. */
+  consent?: ConsentEnd;
+  /** Local to this process (never on the wire): the person was not in the turn that handed this over, so the phone is told once. */
+  away?: true;
 }
+
+/** The person's answer to the chip. `always` also writes the server's rule for (from, to). */
+export type ConsentAnswer = "allow" | "always" | "deny";
+export type ConsentEnd = "rule" | "deny" | "unanswered";
+/** One chip waiting on THIS desktop's screen (GET `consent[]`): another agent wants to hand work to this desktop's agent. Nothing of it is sent before the person answers. */
+export interface ConsentAsk { id: string; from: string; fromName: string; brief: string; doneWhen?: string; createdAt?: string; expiresAt?: string }
+/** One standing rule of Always allow (`allows` op): from -> to, each `phone` or a host id; names only when the server knows them. */
+export interface ConsentRule { from: string; fromName?: string; to: string; toName?: string; at?: string }

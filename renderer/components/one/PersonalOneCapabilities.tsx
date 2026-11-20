@@ -7,6 +7,7 @@ import { createStoreChangeThrottle } from "@/lib/store-change-policy";
 import type { Automation, InstalledMcpServer, McpToolCatalogEntry } from "@/lib/types";
 import type { OneToolReadiness } from "@shared/one-harness";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
+import { KeptRequestsList } from "@/components/automation/KeptRequestsList";
 import { humanSchedule } from "@shared/graph-blueprint";
 import { runMcpOAuthAttempt, mcpOAuthAPI } from "@/components/plugins/McpOAuthAttempt";
 import { OneBottomSheet } from "./OneBottomSheet";
@@ -120,7 +121,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
           const label = ({ready:copy("사용 준비 확인됨","Readiness verified"),disabled:copy("꺼짐","Off"),"needs-auth":copy("로그인 필요","Sign-in required"),"needs-configuration":copy("설정 필요","Configuration required"),offline:copy("연결 안 됨","Offline"),unknown:copy("상태 확인 안 됨","Status unknown"),"not-installed":copy("설치 필요","Installation required")} as const)[status?.state ?? "unknown"];
           return <article className={styles.card} key={server.id} data-one-connection={server.id}>
             <header><strong>{ko ? server.name : server.nameEn || server.name}</strong><span>{label}</span></header>
-            {status?.observedAt && <small>{copy("관측","Observed")}: {new Date(status.observedAt).toLocaleTimeString()}</small>}
+            {status?.observedAt && <small>{copy("관측","Observed")}: {new Date(status.observedAt).toLocaleTimeString(ko ? "ko-KR" : "en-US")}</small>}
             <div className={styles.actions}>
               <button type="button" disabled={!!busy} onClick={() => void perform(server.id, () => ipc()!.mcpTools.setEnabled(server.id, !server.enabled))}>{server.enabled ? copy("끄기", "Turn off") : copy("켜기", "Turn on")}</button>
               <button type="button" disabled={!!busy || !server.enabled} onClick={() => void connect(server)}>{copy("로그인·연결 확인", "Sign in / verify")}</button>
@@ -149,10 +150,11 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
       {(embedded || open === "repeat") && <div hidden={open !== "repeat"}>
         <button type="button" onClick={() => setCreateRepeat(value => !value)}>{copy("새 반복 업무 준비", "Prepare recurring work")}</button>
         {createRepeat && <DescribeAutomation locale={locale} openAfterCreate={false} presentation="chat" persistenceKey={chatId ? `agentlas.one.companion.graph.${chatId}` : undefined} onCreated={() => { if (visibleRef.current) void loadRef.current(); }}/>}
+        <KeptRequestsList locale={locale} chatId={chatId} />
         {repeatItems.length === 0 && <p>{copy("이 대화에 연결된 반복 업무가 없습니다.", "No recurring work is bound to this conversation.")}</p>}
         {repeatItems.map(item => <article className={styles.card} key={item.id} data-one-repeat={item.id}>
           <header><strong>{item.name}</strong><span>{item.enabled ? copy("예약 켜짐", "Scheduled") : copy("일시 중지", "Paused")}</span></header>
-          <p>{humanSchedule(item.scheduleHuman, locale)}</p><small>{item.nextRunAt ? `${copy("다음", "Next")}: ${new Date(item.nextRunAt).toLocaleString()}` : copy("다음 실행 시각 알 수 없음", "Next run not confirmed")}</small>
+          <p>{humanSchedule(item.scheduleHuman, locale)}</p><small>{item.nextRunAt ? `${copy("다음", "Next")}: ${new Date(item.nextRunAt).toLocaleString(ko ? "ko-KR" : "en-US")}` : copy("다음 실행 시각 알 수 없음", "Next run not confirmed")}</small>
           <div className={styles.actions}>
             <button type="button" disabled={!!busy} onClick={() => void perform(item.id, () => ipc()!.automations.toggle(item.id, !item.enabled))}>{item.enabled ? copy("중지", "Pause") : copy("다시 켜기", "Resume")}</button>
             <button type="button" disabled={!!busy} onClick={() => void perform(item.id, () => ipc()!.automations.runNow(item.id))}>{copy("지금 실행", "Run now")}</button>

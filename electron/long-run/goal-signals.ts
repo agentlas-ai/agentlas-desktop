@@ -64,6 +64,7 @@ export const GOAL_LOOK_RESTS: ReadonlySet<string> = new Set([
   "wait_owns_next_step",          // a registered wait names the next step
   "no_progress_rest",             // the idle-spin rest: the next signal
   "owner_request_queued",         // an owner request is about to start and owns the chat
+  "owner_stopped",                // the person's Stop is newer than anything they said since: the next word or Goal control wakes it (chat/chat-stop.ts)
   "provider_retry_not_due",       // the provider named a time: the schedule line carries it
   "wake_budget_reached",          // the daily wall: the schedule line carries its end
   "owner_stopped_pausing", "paused_agent_domain", "draft_is_owners_start", "paused_budget", "paused_approval",
@@ -188,7 +189,12 @@ export function installGoalSignals(ports: GoalSignalsPorts): GoalSignalsHandle {
     try { (require("../invocation/deferred-system-relays") as typeof import("../invocation/deferred-system-relays")).reclaimUnreadDeferredSystemRelays(now()); }
     catch (error) { console.warn("[goal-signals] relay reclaim failed:", error instanceof Error ? error.message : error); }
   };
-  const timer = createDueTimer([goalLines, parkedRelays, ownerReviews], { now, setTimer, clearTimer,
+  // waits for a peer's answer (message_send await_reply): expiry, cancellation and the wake of a restart's undelivered answers. Rows are the state; nothing runs without one.
+  const peerReplyWaits = (require("../harness/peer-reply-wait") as typeof import("../harness/peer-reply-wait")).createPeerReplyWaitSource(
+    (require("../harness/peer-reply-wait") as typeof import("../harness/peer-reply-wait")).productionPeerReplyWaitPorts({ now }));
+  // The wait's receipt is one row in the sender's conversation (harness/turn-receipts.ts), the same one door the daemon uses.
+  (require("../harness/peer-reply-wait") as typeof import("../harness/peer-reply-wait")).setPeerReplyWaitReceiptSink((require("../harness/turn-receipts") as typeof import("../harness/turn-receipts")).recordPeerWaitReceipt);
+  const timer = createDueTimer([goalLines, parkedRelays, ownerReviews, peerReplyWaits], { now, setTimer, clearTimer,
     onError: (source, error) => console.warn(`[due-timer] ${source} failed:`, error instanceof Error ? error.message : error) });
 
   // ── per-chat looks (signals) ───────────────────────────────────────────────────────────────────────────────────────────

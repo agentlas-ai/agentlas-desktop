@@ -1,4 +1,4 @@
-// 사이드바 하단 AI 사용 크레딧 잔액. 공개 Hub 에이전트 호출과 무관하다.
+// 사이드바 하단 AI 사용량(사용한 %). 공개 Hub 에이전트 호출과 무관하다.
 // 과거 렌트 수익 및 잔액 전송 UI는 마켓플레이스 정산 영구 폐쇄로 제거했다.
 // 세션은 main이 보관하며 렌더러는 IPC로 잔액만 조회한다.
 "use client";
@@ -11,7 +11,8 @@ import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import { openPricing } from "./UpgradeCta";
 import { UsageResetInvitePanel } from "./UsageResetInvitePanel";
-import { usageLine, usageExhaustedLine, usageExtraLine } from "@/lib/usage-copy";
+import { UsageMeter } from "./usage/UsageMeter";
+import { usageExhaustedLine, usageExtraLine, usageHubFootnote, usagePeriodLine, usedPercentOf } from "@/lib/usage-copy";
 import type { HubCreditBalance, HubUsage } from "@/lib/types";
 
 // A balance older than this is refreshed when the window comes back (this was the old poll interval).
@@ -115,6 +116,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
     open,
     roots: [rootRef],
     restoreFocusRef: triggerRef,
+    dismissOnFocusLeave: true,
     onDismiss: () => setOpen(false),
   });
 
@@ -123,18 +125,19 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
   if (!bal || !bal.authenticated || typeof bal.remainingCredits !== "number") return null;
 
   const remaining = bal.remainingCredits;
-  // Energy = remaining over this period's allowance (plan + top-ups); a missing allowance shows a full bar, never an empty one.
+  // AI usage is one measure, in percent USED, everywhere ("usage unified in %"). The raw credit count and the "remaining / allowance" pair are not shown:
+  // beside "Usage 0%" a "33,531 / 40,743" read as "not fully reset", and the bar used to fill by what was LEFT while the percent counted what was USED.
   const limit = typeof bal.limitCredits === "number" && bal.limitCredits > 0 ? bal.limitCredits
     : typeof bal.planCreditLimit === "number" && bal.planCreditLimit > 0 ? bal.planCreditLimit : 0;
-  const energy = limit ? Math.min(1, Math.max(0, remaining / limit)) : remaining > 0 ? 1 : 0;
-  const energyColor = energy > 0.3 ? "linear-gradient(90deg, #34C77B, #1FA463)" : energy > 0.1 ? "linear-gradient(90deg, #F5B544, #E0921A)" : "linear-gradient(90deg, #F2706A, #D9443B)";
+  const used = usedPercentOf(bal.usage, remaining, limit);
+  const windowLine = bal.usage ? usagePeriodLine(bal.usage, ko) : "";
   return (
     <div ref={rootRef} style={{ position: "relative" }}>
       <button
         ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
-        title={ko ? "AI 사용 크레딧 잔액" : "AI usage credit balance"}
+        title={ko ? "AI 사용량" : "AI usage"}
         aria-expanded={open}
         style={{
           display: "flex",
@@ -152,30 +155,8 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
           justifyContent: collapsed ? "center" : "flex-start",
         }}
       >
-        {/* Owner 2026-09-25: the remaining balance as a small horizontal energy bar, the number smaller than the bar. */}
-        {/* A two-line card-shaped button (label and number over the meter): its block wrapper keeps it out of the one-line label-button rule (F-D2). */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, width: "100%", minWidth: 0 }}>
-          {!collapsed && (
-            <span style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 6, fontSize: 10.5, lineHeight: 1 }}>
-              <span style={{ color: "var(--muted-deep)" }}>{ko ? "AI 크레딧" : "AI credits"}</span>
-              <span style={{ color: "var(--muted-deep)", fontVariantNumeric: "tabular-nums" }}>{remaining.toLocaleString()}</span>
-            </span>
-          )}
-          {!collapsed && bal.usage && (
-            <span data-testid="usage-line" style={{ fontSize: 10.5, lineHeight: 1.2, color: "var(--muted-deep)" }}>{usageLine(bal.usage, ko)}</span>
-          )}
-          <span
-            role="meter"
-            aria-label={ko ? "AI 크레딧 잔여" : "AI credits remaining"}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Math.round(energy * 100)}
-            aria-valuetext={`${remaining.toLocaleString()}${limit ? ` / ${limit.toLocaleString()}` : ""}`}
-            style={{ display: "block", width: collapsed ? 24 : "100%", height: 4, margin: collapsed ? "0 auto" : 0, borderRadius: 999, background: "var(--fill-2, rgba(0,0,0,0.08))", overflow: "hidden" }}
-          >
-            <span style={{ display: "block", width: `${Math.max(energy > 0 ? 3 : 0, Math.round(energy * 100))}%`, height: "100%", borderRadius: 999, background: energyColor, transition: "width 400ms ease" }} />
-          </span>
-        </div>
+        {/* The usage as one percent and one bar that fills with what was USED; the reset time under it. No credit count. The one meter. */}
+        <UsageMeter variant="sidebar" ko={ko} percent={used} detail={windowLine} collapsed={collapsed} />
       </button>
 
       {/* 잔액 부족 CTA — 웹 결제 페이지(agentlas.cloud/pricing)를 외부 브라우저로 연다. */}
@@ -199,19 +180,19 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
             cursor: "pointer",
           }}
         >
-          {ko ? "AI 사용 잔액이 적어요 · 구독 플랜 보기 →" : "Low AI usage balance · View plans →"}
+          {ko ? "AI 사용량이 거의 찼어요 · 구독 플랜 보기 →" : "AI usage almost used up · View plans →"}
         </button>
       )}
 
       {open && (
         <div
-          className={popupMenu.panelPopover} role="dialog" aria-label={ko ? "AI 사용 잔액" : "AI usage balance"}
+          className={popupMenu.panelPopover} role="dialog" aria-label={ko ? "AI 사용량" : "AI usage"}
           style={{
             position: "absolute",
             bottom: "calc(100% + 8px)",
             left: 0,
             zIndex: 60,
-            width: 260,
+            width: 300,
             padding: 14,
             borderRadius: "var(--popup-radius)",
             background: "var(--popup-card-bg)",
@@ -221,21 +202,16 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
             color: "var(--ink)",
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
-            <span style={{ color: "var(--muted-deep)" }}>{ko ? "AI 사용 잔액" : "AI usage balance"}</span>
-            <strong style={{ fontVariantNumeric: "tabular-nums" }}>{remaining.toLocaleString()}{limit ? <span style={{ color: "var(--muted-deep)", fontWeight: 500 }}> / {limit.toLocaleString()}</span> : null}</strong>
-          </div>
-          {limit > 0 && <progress aria-label={ko ? "남은 AI 사용량" : "Remaining AI usage"} max={limit} value={Math.max(0, Math.min(remaining, limit))} style={{ width: "100%", height: 6, accentColor: "var(--accent)" }} />}
-          {bal.usage && (
-            <div style={{ margin: "8px 0 0", lineHeight: 1.45 }}>
-              <div>{usageLine(bal.usage, ko)}</div>
-              {usageExhaustedLine(bal.usage, ko) && <div style={{ color: "var(--amber-deep, var(--accent))" }}>{usageExhaustedLine(bal.usage, ko)}</div>}
-              {usageExtraLine(bal.usage, ko) && <div style={{ color: "var(--muted-deep)" }}>{usageExtraLine(bal.usage, ko)}</div>}
-            </div>
-          )}
-          <p style={{ margin: "8px 0 0", color: "var(--muted-deep)", lineHeight: 1.45 }}>
-            {ko ? "공개 Hub · 공유/호출 무료" : "Public Hub · Free sharing and invocation"}
-          </p>
+          <UsageMeter variant="popup" ko={ko} percent={used}>
+            {bal.usage && (
+              <div style={{ margin: "8px 0 0", lineHeight: 1.45 }}>
+                {windowLine && <div>{windowLine}</div>}
+                {usageExhaustedLine(bal.usage, ko) && <div style={{ color: "var(--amber-deep, var(--accent))" }}>{usageExhaustedLine(bal.usage, ko)}</div>}
+                {usageExtraLine(bal.usage, ko) && <div style={{ color: "var(--muted-deep)" }}>{usageExtraLine(bal.usage, ko)}</div>}
+              </div>
+            )}
+          </UsageMeter>
+          <p data-testid="usage-hub-note" style={{ margin: "8px 0 0", color: "var(--muted-deep)", lineHeight: 1.45, fontSize: 11.5 }}>{usageHubFootnote(ko)}</p>
           {bal.usage?.resetTickets && <UsageResetInvitePanel usage={bal.usage} ko={ko} onUsage={onUsage} />}
         </div>
       )}

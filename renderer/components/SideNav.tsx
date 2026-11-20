@@ -191,6 +191,9 @@ export function SideNav({
        * 만들어 두고 아무도 못 가는 것은 없는 것과 같다.
        */
       { label: t("nav.prompts"), href: "/prompts", icon: IconFileUp },
+      // Scheduled automations were only inside the Agent Forge group, which a collapsed or narrow rail draws as one link to /build: a person
+      // looking for "automation" found no door (Windows). It sits with the primary rows, which every rail width shows.
+      { label: t("nav.automations"), href: "/automation", icon: IconBolt },
     ],
     [t],
   );
@@ -208,7 +211,6 @@ export function SideNav({
           { label: t("nav.agent"), href: "/library/agents", icon: IconUsers },
           // "Upload agents" has no menu row in 2.0 (Manage agents' Sync tab takes its job); the /cloud screen stays until F-D9.
           { label: t("nav.agent_hub"), href: "/marketplace", icon: IconUsers },
-          { label: t("nav.automations"), href: "/automation", icon: IconBolt },
         ],
       },
       {

@@ -6,14 +6,15 @@
  * prompt" to the transcript like it always did. While the queue is starting a message, that one append is answered with
  * the row that is already there instead of inserting a second bubble.
  *
- * The claim is scoped to one start attempt and one chat, matches the exact prompt text, and is consumed once.
+ * The claim is scoped to one start attempt and one chat and is consumed once. It matches by the composer's intent id when both the claim
+ * and the append carry one (the id, not the text, says it is the same message:); otherwise by the exact prompt text, as before.
  */
-export interface PreparedUserRowClaim<Row> { chatId: string; text: string; row: Row; consumed: boolean }
+export interface PreparedUserRowClaim<Row> { chatId: string; text: string; row: Row; consumed: boolean; clientIntentId: string | null }
 
 const claims: PreparedUserRowClaim<unknown>[] = [];
 
-export async function withPreparedUserRow<Row, T>(chatId: string, text: string, row: Row, run: () => Promise<T>): Promise<T> {
-  const claim: PreparedUserRowClaim<unknown> = { chatId, text, row, consumed: false };
+export async function withPreparedUserRow<Row, T>(chatId: string, text: string, row: Row, run: () => Promise<T>, clientIntentId: string | null = null): Promise<T> {
+  const claim: PreparedUserRowClaim<unknown> = { chatId, text, row, consumed: false, clientIntentId };
   claims.push(claim);
   try { return await run(); }
   finally {
@@ -22,9 +23,10 @@ export async function withPreparedUserRow<Row, T>(chatId: string, text: string, 
   }
 }
 
-/** Consumes the claim for this chat and exact text, if one is active. */
-export function takePreparedUserRow<Row>(chatId: string, text: string): Row | null {
-  const claim = claims.find((item) => !item.consumed && item.chatId === chatId && item.text === text);
+/** Consumes the claim for this chat, if one is active: the same intent id when both sides have one, else the exact text. */
+export function takePreparedUserRow<Row>(chatId: string, text: string, clientIntentId: string | null = null): Row | null {
+  const claim = claims.find((item) => !item.consumed && item.chatId === chatId
+    && (item.clientIntentId && clientIntentId ? item.clientIntentId === clientIntentId : item.text === text));
   if (!claim) return null;
   claim.consumed = true;
   return claim.row as Row;

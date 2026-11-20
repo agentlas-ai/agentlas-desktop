@@ -28,14 +28,18 @@ import type {
 } from "@/lib/types";
 import { useRouter } from "next/navigation";
 import { CONTEXT_MANAGED_BY } from "@shared/models";
-import { goalObjectiveText } from "@shared/auto-goal";
+import { goalObjectiveDisplay } from "@shared/auto-goal";
+import { confinementChipText, platformOfNavigator, unconfinedWriteWarning } from "@shared/runtime-confinement";
 import { goalDisplayState, GOAL_OWNER_REVIEW_REASONS } from "@shared/goal-display-state";
 import { runtimeEffectiveModelId, runtimeModelDisplayLabel } from "./dashboard/RuntimeModelPicker";
 import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } from "@/lib/apps";
 import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { installedAgentMentionTarget } from "@/lib/mention-orchestration-target";
+import { mentionAtCaret, pickAgent } from "@/lib/composer-agent-pick";
+import { registerComposerControls } from "@/lib/composer-control-bus";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
+import { readComposerDraft, writeComposerDraft } from "@/lib/composer-draft-storage";
 import { loadChatSkillPluginMentions, matchingSkillPluginMentions, type SkillPluginMention } from "@/lib/skill-plugin-mentions";
 import { ipc, grantForDroppedFile, grantForPastedAttachment } from "@/lib/ipc";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
@@ -114,6 +118,7 @@ function effortOptionsForModel(runtime: RuntimeStatus): Array<{ id: string; labe
   return runtime.efforts ?? [];
 }
 import {
+  IconAlertTriangle,
   IconApps,
   IconArrowUp,
   IconAtSign,
@@ -188,7 +193,7 @@ interface ChatComposerDraftCache {
 
 // Route changes unmount TaskCockpit/ChatInput. Keep the full staged steering
 // payload in renderer memory for same-window navigation, and mirror plain text
-// to sessionStorage so a renderer refresh cannot silently eat an unfinished
+// to local storage (lib/composer-draft-storage.ts) so a renderer refresh or a closed window cannot silently eat an unfinished
 // sentence. Attachments stay memory-only: serialising multi-megabyte images to
 // Web Storage would block the renderer and recreate the typing jank this cache
 // is meant to remove.
@@ -200,18 +205,8 @@ function readChatComposerDraft(chatId: string | null): ChatComposerDraftCache {
   const cached = chatComposerDraftCache.get(chatId);
   if (cached) return cached;
 
-  let input = "";
-  try {
-    if (typeof window !== "undefined") {
-      const raw = window.sessionStorage.getItem(`${CHAT_COMPOSER_DRAFT_STORAGE_PREFIX}${chatId}`);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { input?: unknown };
-        if (typeof parsed.input === "string") input = parsed.input;
-      }
-    }
-  } catch {
-    // Storage is an optimisation. The in-memory cache remains authoritative.
-  }
+  // Local storage, not session storage: a window closed to the tray and opened again must still hold the unsent words.
+  const input = readComposerDraft(`${CHAT_COMPOSER_DRAFT_STORAGE_PREFIX}${chatId}`, "input");
   const restored = { input, stagedSteering: null };
   chatComposerDraftCache.set(chatId, restored);
   return restored;
@@ -222,14 +217,7 @@ function writeChatComposerDraft(chatId: string | null, patch: Partial<ChatCompos
   const current = readChatComposerDraft(chatId);
   const next = { ...current, ...patch };
   chatComposerDraftCache.set(chatId, next);
-  try {
-    if (typeof window === "undefined") return;
-    const key = `${CHAT_COMPOSER_DRAFT_STORAGE_PREFIX}${chatId}`;
-    if (next.input) window.sessionStorage.setItem(key, JSON.stringify({ input: next.input }));
-    else window.sessionStorage.removeItem(key);
-  } catch {
-    // Quota/security failures must never make the composer unusable.
-  }
+  writeComposerDraft(`${CHAT_COMPOSER_DRAFT_STORAGE_PREFIX}${chatId}`, "input", next.input);
 }
 
 /** popover에 그릴 한 행 + 평탄화 인덱스용 메타. group은 같은 헤더 아래로 그룹핑되지만 인덱스는 flat. */
@@ -498,6 +486,8 @@ function ChatInputComponent({
       return open ? null : current;
     });
   }
+  // A receipt card's "Raise the permission" opens this conversation's permission menu (lib/composer-control-bus.ts); a disabled composer offers none.
+  useEffect(() => (activeChatId && !disabled ? registerComposerControls(activeChatId, { openPermission: () => setLayerOpen("permission", true) }) : undefined), [activeChatId, disabled]); // eslint-disable-line react-hooks/exhaustive-deps
   const plusOpen = activeLayer === "plus";
   const agentPickerOpen = activeLayer === "agent-picker";
   const permOpen = activeLayer === "permission";
@@ -551,6 +541,9 @@ function ChatInputComponent({
   // write는 cwd 파일 편집만 허용(셸·외부 자동호출은 차단)이라 안전한 기본값.
   const [permissions, setPermissions] = useState<PermissionLevel>("write");
   const permissionLabel = `${t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}${alwaysApproval.enabled ? (locale === "ko" ? " · 항상 승인" : " · Always approve") : ""}`;
+  // a write run on an AI nothing confines (kimi, cursor, antigravity on Windows) says so in the chip's title and aria-label; the visible label stays the permission.
+  const unconfinedWriteLine = unconfinedWriteWarning(runtime, permissions, platformOfNavigator(typeof navigator === "undefined" ? "" : navigator.platform), locale === "ko" ? "ko" : "en");
+  const permissionTitle = `${locale === "ko" ? "권한" : "Permissions"}: ${permissionLabel}${unconfinedWriteLine ? ` · ${unconfinedWriteLine}` : ""}`;
   // 컨텍스트는 진단 지표가 아니라 다음 행동(새 세션/비우기)으로 바로 이어져야 한다.
   // / 슬래시 + @ 멘션 인라인 자동완성
   const [trigger, setTrigger] = useState<null | {
@@ -735,20 +728,8 @@ function ChatInputComponent({
     const next = e.target.value;
     setInput(next);
     const caret = e.target.selectionStart ?? next.length;
-    // 직전 단어 시작 위치 찾기 — 공백/개행으로 끊김
-    const before = next.slice(0, caret);
-    const lastSpace = Math.max(
-      before.lastIndexOf(" "),
-      before.lastIndexOf("\n"),
-      before.lastIndexOf("\t"),
-    );
-    const tokenStart = lastSpace + 1;
-    const token = before.slice(tokenStart);
-    if (token.startsWith("@")) {
-      setTrigger({ kind: "mention", query: token.slice(1), startIndex: tokenStart });
-    } else {
-      setTrigger(null);
-    }
+    const token = mentionAtCaret(next, caret);
+    setTrigger(token ? { kind: "mention", query: token.query, startIndex: token.start } : null);
   }
 
   // Where the "@" sits inside the composer shell; recomputed only when the trigger opens or moves.
@@ -814,7 +795,7 @@ function ChatInputComponent({
   }, [activeAgentId]);
 
   // fillOnly=true(Tab): 실행/전환 없이 텍스트만 자동완성해 넣는다(절대 전송 안 함).
-  // fillOnly=false(Enter): @agent/@firm은 이번 턴 호출로 추가하고, 그 외는 텍스트 삽입.
+  // fillOnly=false(Enter): @agent/@firm은 이름을 글에 남기고 이번 턴 호출로도 추가하며, 그 외는 텍스트 삽입.
   function applyAutocomplete(opt: AutocompleteOption, fillOnly = false) {
     if (!trigger) return;
     const before = input.slice(0, trigger.startIndex);
@@ -823,7 +804,10 @@ function ChatInputComponent({
 
     if (!fillOnly) {
       if (opt.target) {
-        setInput(`${before}${after}`.trimStart());
+        // The picked name stays in the words as well as in the turn's call list: a group room reads WHO a sentence is for from the name in it, and
+        // with the name cut out ("는 12월 공지 초안…") the agent it named never got its task.
+        // One rule for "what picking does to the words" (lib/composer-agent-pick.ts); this composer lists its picks as chips (turnCalls), so it only ever ADDS here.
+        setInput(pickAgent(input, [], { id: opt.key, name: opt.replacement.replace(/^@/, "") }, { at: { start: trigger.startIndex, end: caret, query: trigger.query }, mode: "add" }).text.trimStart());
         setTrigger(null);
         setGateSheet(null);
         setTurnCalls((current) => current.some((call) => call.key === opt.key)
@@ -1132,11 +1116,23 @@ function ChatInputComponent({
       dismiss();
       window.requestAnimationFrame(() => trigger?.focus());
     }
+    // Focus that leaves the menu and its button (Tab out of the last item) closes it too; a menu left open over the composer is the same stray layer as one left open by a click.
+    function onFocusIn(e: FocusEvent) {
+      const target = e.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest(`[data-popover-trigger="${activeLayer}"]`) ||
+        target.closest(`[data-popover-kind="${activeLayer}"]`)
+      ) return;
+      dismiss();
+    }
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("focusin", onFocusIn, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("focusin", onFocusIn, true);
     };
   }, [activeLayer]);
 
@@ -1549,7 +1545,7 @@ function ChatInputComponent({
         />
       )}
 
-      <ComposerDecisionSlot className="composer-decision-stack" surface="work" />
+      <ComposerDecisionSlot className="composer-decision-stack" surface="work" chatId={activeChatId} draft={!activeChatId} />
       <div
         ref={shellRef}
         className="chat-input-shell"
@@ -1795,6 +1791,7 @@ function ChatInputComponent({
           }}
         />
 
+        {unconfinedWriteLine && <div role="status" data-composer-confinement="none" title={confinementChipText("none", locale === "ko" ? "ko" : "en") ?? undefined} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "var(--amber-deep)", padding: "0 2px 4px" }}><IconAlertTriangle size={12} aria-hidden="true" />{unconfinedWriteLine}</div>}
         {/* 하단 툴바 */}
         <div className="chat-input-toolbar" ref={toolbarRef}>
           <div className="chat-input-tools-left" data-fit-box>
@@ -1851,8 +1848,8 @@ function ChatInputComponent({
             <button
               className="chat-input-chip"
               data-fit-chip="permission"
-              aria-label={`${locale === "ko" ? "권한" : "Permissions"}: ${permissionLabel}`}
-              title={`${locale === "ko" ? "권한" : "Permissions"}: ${permissionLabel}`}
+              aria-label={permissionTitle}
+              title={permissionTitle}
               data-chat-always-approved={alwaysApproval.enabled ? "true" : "false"}
               aria-expanded={permOpen}
               aria-haspopup="menu"
@@ -2256,7 +2253,7 @@ export function ComposerGoalBar({
     ? stoppedCopy
     : runStatus === "verifying"
       ? (locale === "ko" ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria")
-    : goalObjectiveText(label ?? "").replace(/\s+/g, " ").trim() || (locale === "ko"
+    : goalObjectiveDisplay(label ?? "") || (locale === "ko"
       ? "다음 요청으로 목표와 성공 기준을 확정합니다"
       : "Your next request will define the goal and its acceptance criteria");
   const criteriaTitle = (criteria ?? []).join("\n");
@@ -2267,7 +2264,7 @@ export function ComposerGoalBar({
    * the criteria count — and opens for the criteria, plan, next check and automation links. Only a stop reason stays
    * visible while folded, because it asks the owner to act.
    */
-  const objective = goalObjectiveText(label ?? "").replace(/\s+/g, " ").trim();
+  const objective = goalObjectiveDisplay(label ?? "");
   const tone = pausing ? "pausing" : blocked ? "blocked" : paused ? "paused" : runStatus === "verifying" ? "verifying"
     : runStatus === "running" || runStatus === "queued" ? "running" : "idle";
   const toneLabel: Record<string, [string, string]> = {
@@ -2296,7 +2293,7 @@ export function ComposerGoalBar({
       )}
       {(criteria?.length ?? 0) > 0 && (
         <span className={`chat-composer-goal-criteria ${goalBarStyles.criteria}`} title={criteriaTitle}>
-          {locale === "ko" ? `기준 ${criteria?.length}` : `${criteria?.length} criteria`}
+          {locale === "ko" ? `완료 조건 ${criteria?.length}` : `${criteria?.length} criteria`}
         </span>
       )}
       <div className={goalBarStyles.actions}>
@@ -2352,7 +2349,7 @@ export function ComposerGoalBar({
       <div className={goalBarStyles.more} data-goal-details="true">
         {objective.length > 60 && <p className={goalBarStyles.fullObjective}>{objective}</p>}
         {(criteria?.length ?? 0) > 0 && (
-          <ul className={goalBarStyles.criteriaList} aria-label={locale === "ko" ? "성공 기준" : "Acceptance criteria"}>
+          <ul className={goalBarStyles.criteriaList} aria-label={locale === "ko" ? "완료 조건" : "Acceptance criteria"}>
             {criteria!.map((item, index) => <li key={index}>{item}</li>)}
           </ul>
         )}

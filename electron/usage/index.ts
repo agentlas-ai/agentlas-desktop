@@ -10,6 +10,8 @@ import { developmentEffectsSuppressed } from "../development-effect-policy";
 // Grok CLI는 실제 추론에서 확인된 402 소진 상태만 별도 어댑터가 표시하고,
 // 로컬(Ollama)은 무제한 — 둘 다 대시보드 "연결" 칩은 runtime.detect가 담당한다.
 // 향후 프로바이더는 이 배열에 어댑터만 추가하면 됨.
+import { forgetRuntimeAccountCache } from "../runtime/runtime-account";
+import { emitRuntimeSignal } from "../runtime/runtime-signals";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -187,6 +189,10 @@ export function checkUsageAccountChanges(
     if (seen.get(id) === current) continue;
     seen.set(id, current);
     changed.push(id);
+    // The retry windows and cooldowns are keyed by this account (runtime/runtime-account.ts): forget the cached identity, and when
+    // another account is now signed in tell every waiter to look again, since what it waited for (the old account's limit) is gone.
+    forgetRuntimeAccountCache();
+    if (current !== undefined) emitRuntimeSignal("signed-in", id);
     invalidateUsage(id);
     void buildUsageSnapshot({ forceProviderId: id })
       .catch((error) => console.warn(`[usage] account change refresh ${id} failed:`, error instanceof Error ? error.message : error))

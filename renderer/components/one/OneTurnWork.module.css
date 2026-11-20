@@ -422,6 +422,7 @@ button.summary:hover .summaryText { color: var(--work-ink); }
 .exploreLine { display: flex; gap: 8px; align-items: baseline; min-width: 0; max-width: 100%; }
 .exploreLine > * { min-width: 0; max-width: 100%; }
 .exploreOp { flex: 0 0 auto; color: var(--work-faint); font-size: 12px; }
+.exploreFailure { color: var(--work-muted); font-size: 12px; overflow-wrap: anywhere; }
 .exploreTarget { color: var(--work-muted); font-family: var(--work-mono); font-size: 12px; overflow-wrap: anywhere; }
 
 .thoughtBody { display: grid; gap: 4px; color: var(--ink-soft); font-size: 13px; line-height: 1.6; }

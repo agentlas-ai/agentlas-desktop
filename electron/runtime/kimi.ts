@@ -1,4 +1,5 @@
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { confinementNotice } from "../../shared/runtime-confinement";
 import { memoryDeathCause } from "./child-death";
 import { abortReasonError } from "./abort-reason";
 // Kimi Code CLI runtime — official Moonshot CLI (`@moonshot-ai/kimi-code`).
@@ -602,6 +603,10 @@ async function runKimiTurn(req: RunnerRequest, events: RunnerEvents, dispatch: {
       i18n: { ko, en },
     });
   }
+
+  // a write run is not kept inside its folder either (nothing confines Kimi); say so as a typed notice, never silently.
+  const unconfined = confinementNotice("kimi", runReq.permission, runReq.locale);
+  if (unconfined) events.onNotice?.(unconfined);
 
   events.onStatus(resumeSessionId
     ? (runReq.locale === "ko" ? "Kimi Code 대화를 이어가는 중..." : "Resuming the Kimi Code conversation...")

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { IconAlertTriangle, IconArrowLeft, IconChevronRight, IconClose, IconPlus, IconRefresh } from "@/components/Icon";
 import { NativeLiveWebView } from "@/components/NativeLiveWebView";
 import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
+import { browserPageNotice, BROWSER_SLOW_LOAD_MS } from "@/lib/browser-page-notice";
 import type { WorkLiveViewStatus } from "@/lib/types";
 import styles from "./TaskBrowser.module.css";
 import { BrowserControls } from "./BrowserControls";
@@ -271,9 +272,21 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
     }
   };
 
+  // The shown tab's own state in words (failed to open / slow), from the status Main already sends.
+  const [loadingForMs, setLoadingForMs] = useState(0);
+  const shownState = current?.status.state;
+  useEffect(() => {
+    setLoadingForMs(0);
+    if (shownState !== "loading" && shownState !== "opening") return;
+    const timer = setTimeout(() => setLoadingForMs(BROWSER_SLOW_LOAD_MS), BROWSER_SLOW_LOAD_MS);
+    return () => clearTimeout(timer);
+  }, [current?.id, current?.status.url, shownState]);
+  const pageNotice = browserPageNotice(current?.status, loadingForMs, ko);
+
   const lastNewTabRequest = useRef(0);
   useEffect(() => {
-    if (!connected || creating || newTabRequest <= 0 || lastNewTabRequest.current === newTabRequest) return;
+    // A clicked link is consumed only when its tab can really start: a create that is still in flight (the ref is ahead of the state) used to swallow the second link without a word.
+    if (!connected || creating || createInFlight.current || newTabRequest <= 0 || lastNewTabRequest.current === newTabRequest) return;
     lastNewTabRequest.current = newTabRequest;
     onNewTabRequestConsumed?.(newTabRequest);
     void create(newTabUrl);
@@ -310,7 +323,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
     {importBanner && <BrowserImportBanner ko={ko} onImport={openImport} onDismiss={dismissImportBanner} />}
     {importing && <CredentialImportDialog taskScopeId={taskScopeId} ko={ko} onClose={() => { setImporting(false); overlayClosed(); }} onDone={message => { setImporting(false); overlayClosed(); setNotice(message); void refreshImportReadiness(); }} />}
 
-    {notice && <p className={styles.notice} role="status">{notice}</p>}
+    {(notice || pageNotice) && <p className={styles.notice} role="status">{notice ?? pageNotice}</p>}
     <div ref={pagesRef} className={styles.pages}>
       {frozenPage && frozenPage.viewId === current?.id && <img className={styles.frozenPage} src={frozenPage.dataUrl} alt="" aria-hidden="true" />}
       {tabs.filter((tab) => tab.initialUrl).map((tab) => <div key={tab.id} className={styles.page} hidden={tab.id !== current?.id}>

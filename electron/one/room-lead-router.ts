@@ -69,6 +69,28 @@ export function findMentions(text: string, members: readonly LeadMember[]): Lead
   return found;
 }
 
+/**
+ * Who an owner's line is for: the host-side pick first, the words second, the lead last.
+ *   - `pickedAgentIds` is the composer's own record of whom the owner picked (the turn's agent list, renderer lib/composer-agent-pick.ts). A pick that names some
+ *     but not all of the room's members is the owner's choice and is not re-derived from the words: an edited sentence, a name the picker wrote with another
+ * spelling or a particle can no longer drop the member the owner picked. The room's own full roster is not a pick: the One composer
+ *     carries the whole roster as its default list, so "everyone" reads as "no pick" and the words decide.
+ *   - no pick (an older client, a phone line, a script): `@name` in the words, as before.
+ *   - neither: the lead.
+ * Members come back in the room's order, once each.
+ */
+export function resolveOwnerTargets(text: string, members: readonly LeadMember[], pickedAgentIds?: readonly string[] | null): LeadMember[] {
+  const picked = new Set((pickedAgentIds ?? []).filter((id) => typeof id === "string" && id.length > 0));
+  if (picked.size > 0) {
+    const chosen = members.filter((member) => picked.has(member.agentId));
+    if (chosen.length > 0 && chosen.length < members.length) return chosen;
+  }
+  const addressed = findMentions(text, members);
+  if (addressed.length > 0) return addressed;
+  const lead = leadOf(members);
+  return lead ? [lead] : [];
+}
+
 const LABEL_PREFIX = /^(?:\*\*\[[^\]\n]{1,40}\]\*\*|\[[^\]\n]{1,40}\])\s*/;
 
 /** The hand-offs in a member's answer: only a line that STARTS with `@name`. The speaker itself is never handed back its own turn. */
@@ -189,7 +211,7 @@ export interface LeadRouterPorts {
   db(): RoomDb;
   /** Members in the order of the room, the personal agent excluded and unavailable members left out; null when the chat is no group room. */
   roster(roomChatId: string): { title: string; members: LeadMember[] } | null;
-  appendOwnerLine(roomChatId: string, text: string, extra: { images?: unknown; fileGroupId?: string }): { id: string };
+  appendOwnerLine(roomChatId: string, text: string, extra: { images?: unknown; fileGroupId?: string; clientIntentId?: string }): { id: string };
   appendMemberPost(roomChatId: string, member: LeadMember, text: string, replyTo: string | null): { messageId: string; seq: number };
   appendSystemLine(roomChatId: string, text: string): void;
   /** The record, in the room, of a message another conversation sent into it (not the owner's line: it is not the owner's word). Its id is the request's id. */
@@ -217,6 +239,9 @@ export interface LeadRouterPorts {
   clearOpen?(roomChatId: string, ownerMessageIds: readonly string[]): void;
   /** Has a Stop been written into the room's open request by ANOTHER process (see runtime/session-scope.ts requestLeadRequestStop)? Read right before a turn starts. */
   stopMarked?(roomChatId: string, ownerMessageIds: readonly string[]): boolean;
+  /** The room's Stop counter (chats.stop_epoch). A request remembers it when it starts: a Stop of ANY route (the window's, the phone's, chat.stop) raises it, and
+   * nothing the request still holds - a member's answer, a failure line - is written into the room once it moved. Absent: only the in-memory Stop guards. */
+  stopEpoch?(roomChatId: string): number;
   now?(): number;
   /** The floor of the wait before a limited turn is tried again (a gate shortens it; the product uses runtime-cooldown.ts cooldownWindowMs). */
   retryFloorMs?(kind: string): number;
@@ -232,6 +257,10 @@ export interface LeadRouterPorts {
 export interface RoomPostInput {
   chatId: string; text: string; origin?: LeadOrigin; permission?: LeadPermission; runId?: string;
   images?: unknown; fileGroupId?: string;
+  /** The id the composer made for this line: stored on the owner's row so the window matches its bubble by id. */
+  clientIntentId?: string;
+  /** The agents the owner picked in the composer for this line (host-side pick; resolveOwnerTargets). Absent on lines that carry no pick. */
+  pickedAgentIds?: readonly string[];
   /** The owner typed this line (the entry's fact; see invocation/owner-spoke.ts). */
   ownerSpoke?: boolean;
 }
@@ -240,7 +269,7 @@ export interface RoomPostResult { handled: true; runId: string; targets: string[
 /** What the room shows for a member that is not running yet: its turn waits behind its own earlier turn, or it waits out a provider limit. */
 export type RoomWaitKind = "turn" | "retry";
 
-interface RoomState { controller: AbortController; runIds: Set<string>; ownerIds: Set<string>; waiting: Map<string, RoomWaitKind>; retryAt: Map<string, number>; active: number; stopLineWritten: boolean }
+interface RoomState { controller: AbortController; epoch: number; runIds: Set<string>; ownerIds: Set<string>; waiting: Map<string, RoomWaitKind>; retryAt: Map<string, number>; active: number; stopLineWritten: boolean }
 
 const defaultSleep = (ms: number, signal: AbortSignal): Promise<void> => new Promise((resolve) => {
   if (signal.aborted) { resolve(); return; }
@@ -275,10 +304,24 @@ export function createLeadRouter(ports: LeadRouterPorts) {
   /** Per room, while a request is being answered: one Stop signal, every run id that belongs to it, who waits. */
   const rooms = new Map<string, RoomState>();
 
+  /** The room's Stop counter now (0 when this host keeps none). */
+  function readEpoch(roomChatId: string): number { try { return ports.stopEpoch?.(roomChatId) ?? 0; } catch { return 0; } }
+  /**
+   * A Stop that was made after this request began and has not (yet) reached its in-memory state: the chat's own Stop counter moved. The request is ended
+   * here (every turn it runs or waits with is cancelled) and the caller writes nothing. The check and the write that follows it are one synchronous step.
+   */
+  function stoppedByEpoch(roomChatId: string, state: RoomState): boolean {
+    if (!ports.stopEpoch) return false;
+    if (state.controller.signal.aborted) return true;
+    if (readEpoch(roomChatId) === state.epoch) return false;
+    abortState(roomChatId, state);
+    return true;
+  }
+
   function enter(roomChatId: string): RoomState {
     let state = rooms.get(roomChatId);
     // A room that was stopped starts fresh for its next request; the stopped chains keep their own (aborted) state until they end.
-    if (!state || state.controller.signal.aborted) { state = { controller: new AbortController(), runIds: new Set(), ownerIds: new Set(), waiting: new Map(), retryAt: new Map(), active: 0, stopLineWritten: false }; rooms.set(roomChatId, state); }
+    if (!state || state.controller.signal.aborted) { state = { controller: new AbortController(), epoch: readEpoch(roomChatId), runIds: new Set(), ownerIds: new Set(), waiting: new Map(), retryAt: new Map(), active: 0, stopLineWritten: false }; rooms.set(roomChatId, state); }
     state.active += 1;
     return state;
   }
@@ -362,6 +405,7 @@ export function createLeadRouter(ports: LeadRouterPorts) {
         // A Stop that another process wrote (this chain ran in the background service, the owner's Stop came from the window or the
         // phone between two turns): the last look before a turn starts. It ends the whole request here, like a local Stop.
         if (stopMarkedFor(roomChatId, state.ownerIds)) { abortState(roomChatId, state); return cancelled(); }
+        if (stoppedByEpoch(roomChatId, state)) return cancelled();
         const { prompt, uptoSeq } = promptFor(roomChatId, live, roster, item.peer);
         const runId = attempt === 0 && item.runId ? item.runId : randomUUID();
         state.runIds.add(runId);
@@ -407,13 +451,15 @@ export function createLeadRouter(ports: LeadRouterPorts) {
         const { result, roster } = await memberTurn(roomChatId, item, permission, state);
         const text = result.text?.trim() ?? "";
         if (result.status !== "completed" || !text) {
-          if (signal.aborted || result.status === "cancelled") return; // a Stop writes one line for the whole request
+          if (signal.aborted || result.status === "cancelled" || stoppedByEpoch(roomChatId, state)) return; // a Stop writes one line for the whole request
           const limited = result.failure && (result.failure.kind === "rate_limit" || result.failure.kind === "quota");
           ports.appendSystemLine(roomChatId, limited
             ? (ko() ? `${item.member.name}: 사용 한도에 걸렸어요. 잠시 뒤 다시 보내 주세요.` : `${item.member.name} hit a usage limit. Send again in a little while.`)
             : failedTurnLine(item.member.name, result.failure, ko()));
           return;
         }
+        // An answer that comes after the person's Stop is not written (a reply landed 10 s after Stop): the Stop counter is read in the same step as the write.
+        if (stoppedByEpoch(roomChatId, state)) return;
         const written = ports.appendMemberPost(roomChatId, item.member, text, item.trigger);
         markRoomSeen(ports.db, roomChatId, item.member.agentId, written.seq);
         ports.emit(roomChatId);
@@ -449,7 +495,7 @@ export function createLeadRouter(ports: LeadRouterPorts) {
       const origin = input.origin ?? "owner";
       const store = createRoomDiscussionStore({
         db: ports.db,
-        appendChatMessage: (chatId, _role, line) => ({ id: ports.appendOwnerLine(chatId, line, { images: input.images, fileGroupId: input.fileGroupId }).id, createdAt: new Date().toISOString() }),
+        appendChatMessage: (chatId, _role, line) => ({ id: ports.appendOwnerLine(chatId, line, { images: input.images, fileGroupId: input.fileGroupId, ...(input.clientIntentId ? { clientIntentId: input.clientIntentId } : {}) }).id, createdAt: new Date().toISOString() }),
       });
       const owner = store.log.appendOwnerPost(input.chatId, text);
       const runId = input.runId ?? randomUUID();
@@ -464,8 +510,8 @@ export function createLeadRouter(ports: LeadRouterPorts) {
       state.runIds.add(runId);
       try { ports.markOpen?.(input.chatId, owner.messageId, { perm: input.permission ?? "write" }); } catch { /* without the row an interrupted request is only reported by the older rule */ }
       ports.emit(input.chatId);
-      const addressed = findMentions(text, roster.members);
-      const targets = addressed.length > 0 ? addressed : [leadOf(roster.members)!];
+      // The `@` in the owner's text is the owner's choice of who answers (a hand-off one member writes is not): the composer's pick first, the words second, the lead last.
+      const targets = origin === "owner" ? resolveOwnerTargets(text, roster.members, input.pickedAgentIds) : resolveOwnerTargets(text, roster.members);
       // Every target of the owner's own line answers the owner (an `@` in the owner's text is the owner's choice of who answers); a hand-off one member writes is not.
       const initial: Step[] = targets.map((member, index) => ({ member, trigger: owner.messageId, ...(input.ownerSpoke === true && origin === "owner" ? { ownerSpoke: true as const } : {}),
         ...(index === 0 ? { runId, extra: { images: input.images, fileGroupId: input.fileGroupId } } : {}) }));

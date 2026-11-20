@@ -32,6 +32,7 @@ import { createChatFileMessageBindings } from "./chat-file-message-bindings";
 import { createGeneratedVideoReceiptSchema } from "../invocation/generated-video-receipt-schema";
 import { settleDeadHostTriggerEvent } from "./unconfirmed-occurrence";
 import { purgeRetiredToolchainDetector } from "./retired-toolchain-detector";
+import { adoptOrgMemberNamesAsAliases, alignGroupRoomNamesWithChats } from "./r3-identity-migration";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -40,7 +41,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 141;
+const SCHEMA_VERSION = 142;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -7365,6 +7366,29 @@ export function initStore(options: StoreInitOptions = {}): void {
         );
         CREATE INDEX IF NOT EXISTS idx_harness_due_at ON harness_due(due_at) WHERE due_at IS NOT NULL;
       `);
+    })();
+  }
+
+  // v142 (Agentlas 2.0 root/C): one identity per saved row and one author rule per conversation.
+  //  - chat_messages.client_intent_id: the id the composer made for a message it sent; the saved row carries it so a screen matches
+  //    "the bubble I drew" to "the row that was saved" by id, never by text. NULL on every row that exists today (matched by row id).
+  //    Read by the transcript model and the prepared-row claim; deleted with the row. A partial unique index makes the same intent
+  //    in one chat a single row.
+  //  - chats.stop_epoch: raised by chat.stop; a writer that is not a run (Goal wake, continuation) compares its start-time value inside
+  //    its write transaction and writes nothing when it differs. 0 on every chat today. Deleted with the chat.
+  //  - names: group-room and seat titles are brought to chats.title once (revision + 1 only where they differed), and a team member's
+  //    own name moves to the agent it names (store/r3-identity-migration.ts). Everything runs in this one transaction, so a restart
+  //    in the middle runs the whole step again from the old version.
+  if (userVersion < 142) {
+    _db.transaction(() => {
+      addColumnIfMissing(_db!, "chat_messages", "client_intent_id", "client_intent_id TEXT CHECK(client_intent_id IS NULL OR length(client_intent_id) BETWEEN 1 AND 128)");
+      if (tableExists(_db!, "chat_messages")) {
+        _db!.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_client_intent ON chat_messages(chat_id, client_intent_id) WHERE client_intent_id IS NOT NULL");
+      }
+      addColumnIfMissing(_db!, "chats", "stop_epoch", "stop_epoch INTEGER NOT NULL DEFAULT 0 CHECK(stop_epoch >= 0)");
+      const renamed = alignGroupRoomNamesWithChats(_db!);
+      const adopted = adoptOrgMemberNamesAsAliases(_db!);
+      if (renamed || adopted) console.info(`[store] v142 names aligned: group rooms=${renamed} agent names adopted=${adopted}`);
     })();
   }
 

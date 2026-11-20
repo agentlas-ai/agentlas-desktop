@@ -6,6 +6,7 @@ import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSh
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
+import { scienceHostCopy, scienceHostNotice } from "@/lib/science-host-state";
 import { TaskSidePanel } from "@/components/workspace/TaskSidePanel";
 import { useChatOutputs } from "@/lib/one-earlier-outputs";
 import { InlineUiInstances, isResultCardInstance, useInlineUiInstances } from "@/components/UiInstances";
@@ -34,6 +35,8 @@ export default function ScienceHostPage() {
   const [extension, setExtension] = useState<ProductExtensionStatus | null>(null);
   const [view, setView] = useState<ProductExtensionViewStatus | null>(null);
   const [approvalHeight, setApprovalHeight] = useState(0);
+  // A retry mounts a fresh lease: the effect below closes the old one on cleanup and opens the next.
+  const [attempt, setAttempt] = useState(0);
   const [outputScope, setOutputScope] = useState<{ chatId: string } | null>(null);
   const [outputWidth, setOutputWidth] = useState(324);
   const [outputEmpty, setOutputEmpty] = useState(false);
@@ -83,7 +86,12 @@ export default function ScienceHostPage() {
   useEffect(() => {
     const surface = surfaceRef.current;
     const api = ipc();
-    if (!surface || !api?.productExtensions) return;
+    if (!surface || !api?.productExtensions) {
+      // No host bridge (a plain browser): say so instead of waiting for an interface that cannot come.
+      if (surface) setView({ id: "agentlas-science", leaseId: "", state: "error", errorCode: "science-host-unavailable" });
+      return;
+    }
+    setView(null);
     const epoch = ++mountEpochRef.current;
     const leaseId = crypto.randomUUID();
     let disposed = false;
@@ -194,10 +202,11 @@ export default function ScienceHostPage() {
       // also releases this exact lease, leaving any newer mount untouched.
       void closeView();
     };
-  }, []);
+  }, [attempt]);
 
   const unavailable = extension !== null && (extension.phase !== "installed" || !extension.enabled);
-  const failed = view?.state === "error";
+  const notice = scienceHostNotice({ unavailable, view });
+  const noticeCopy = notice ? scienceHostCopy(notice, ko) : null;
   return (
     <>
       <div className={styles.page} style={approvalHeight > 0 ? {
@@ -207,12 +216,19 @@ export default function ScienceHostPage() {
       } : undefined}>
         <div className={styles.workspace}>
         <div ref={surfaceRef} className={styles.surface}>
-          {(unavailable || failed) && (
+          {noticeCopy && (
             <div className={styles.fallback}>
-              <div className={styles.fallbackCard}>
-                <h1>{failed ? (ko ? "Science를 열지 못했습니다" : "Science could not be opened") : (ko ? "Science가 설치되어 있지 않습니다" : "Science is not installed")}</h1>
-                <p>{failed ? (view?.errorMessage ?? view?.errorCode) : (ko ? "설정에서 검증된 Science 확장을 설치하거나 다시 켜세요." : "Install or re-enable the verified Science extension in Settings.")}</p>
-                <button type="button" onClick={() => navigate("/settings")}>{ko ? "설정 열기" : "Open Settings"}</button>
+              <div className={styles.fallbackCard} role={notice === "loading" ? "status" : "alert"}>
+                <h1>{noticeCopy.title}</h1>
+                {noticeCopy.body && <p>{noticeCopy.body}</p>}
+                <div className={styles.fallbackActions}>
+                  {noticeCopy.retry && <button type="button" onClick={() => setAttempt((count) => count + 1)}>{ko ? "다시 열기" : "Open again"}</button>}
+                  <button type="button" className={noticeCopy.retry ? styles.secondary : undefined} onClick={() => navigate("/workspace")}>{ko ? "Work로 돌아가기" : "Back to Work"}</button>
+                  {noticeCopy.settings && <button type="button" className={styles.secondary} onClick={() => navigate("/settings")}>{ko ? "설정 열기" : "Open Settings"}</button>}
+                </div>
+                {notice !== "loading" && notice !== "not-installed" && (view?.errorMessage ?? view?.errorCode) && (
+                  <details className={styles.fallbackDetail}><summary>{ko ? "자세히" : "Details"}</summary><code>{view?.errorMessage ?? view?.errorCode}</code></details>
+                )}
               </div>
             </div>
           )}

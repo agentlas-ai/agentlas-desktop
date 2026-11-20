@@ -55,7 +55,11 @@ import {
   noteToolApprovalHandler,
   onToolApprovalResolved,
   resolveToolApproval,
+  resolveToolApprovalFrom,
 } from "../runtime/tool-approval";
+import { admitAnswer, admitView, appWideScopeStamp, scopeOfChat, type ScopeStamp } from "../scope/scope-gate";
+import { closeQuestionCard } from "../chat/closed-question-cards";
+import { closeQuestionFromPhone } from "../chat/phone-question-close";
 import {
   APPROVAL_OWNER_NOTE_MAX_CHARS,
   resolveBrowserApprovalWithOwnerNote,
@@ -268,6 +272,7 @@ import {
   type MobileBridgeChatDto,
   type MobileBridgeInvocationArtifactDto,
   type MobileBridgeBrowserApprovalDto,
+  type MobileBridgeScopeDto,
   type MobileBridgeInvokeSteerParams,
   type MobileBridgeCurrentTurnSteerReceipt,
   type MobileBridgeJsonValue,
@@ -312,6 +317,7 @@ import {
   projectMobileBridgeRuntimes,
   projectMobileBridgeSnapshotVariants,
   projectMobileBridgeUsage,
+  onInitialProjectionLateSettled,
 } from "./projector";
 import { MobileProjectFilePreviewRegistry } from "./project-file-preview";
 import {
@@ -617,6 +623,20 @@ function guardedParams(
   if (!isRecord(request.params)) throw new TypeError(`${request.method} params must be an object`);
   assertOnlyKeys(request.params, allowed, request.method);
   return request.params;
+}
+
+/** the conversation an answer says it is for. A phone that received a stamped card returns it as `scope: {account, chat, run}` (an older one sends nothing). Only the chat is read: the account the gate compares is this host's own. */
+function claimedChatOfAnswer(params: Record<string, unknown>): string | null {
+  const direct = typeof params.chat === "string" ? params.chat : "";
+  const nested = isRecord(params.scope) && typeof params.scope.chat === "string" ? params.scope.chat : "";
+  const claimed = direct || nested;
+  return claimed.length > 0 && claimed.length <= 256 ? claimed : null;
+}
+
+/** the stamp as the phone reads it (shared/mobile-bridge.ts MobileBridgeScopeDto). The room a hidden member session belongs to is a desktop pane matter and stays here. */
+function phoneScopeDto(stamp: ScopeStamp | null | undefined): MobileBridgeScopeDto | undefined {
+  if (!stamp) return undefined;
+  return { account: stamp.account, project: stamp.project, chat: stamp.chat, run: stamp.run ?? null };
 }
 
 function noParams(request: MobileBridgeRpcRequest): void {
@@ -2186,7 +2206,15 @@ export function observeMobilePushNotices(hostId: string, listener: (notice: Mobi
         dedupeKey: `handoff-ask:${hostId}:${qid}`, subject: "Agentlas", occurredAt: new Date().toISOString() }, stillWaiting);
     });
   } catch { /* a process with no hand-off sender sends no such push */ }
-  const stopApprovals = () => { stopMainApprovals(); stopNativeApprovals(); stopSentAsks(); };
+  // A consent chip of work this desktop's agent handed over while the person was away: one push for the sender's phone, whose chip answers it (the server sends none for a row a desktop sent).
+  let stopSentConsent = () => {};
+  try {
+    stopSentConsent = (require("../one/plural-handoff-cards") as typeof import("../one/plural-handoff-cards")).onSentConsent(({ rowId, chatId }, stillAsking) => {
+      listener({ category: "approval", destination: "approvals", hostId, entityId: chatId ?? rowId,
+        dedupeKey: `consent:${hostId}:${rowId}`, subject: "Agentlas", occurredAt: new Date().toISOString() }, stillAsking);
+    });
+  } catch { /* a process with no hand-off sender sends no such push */ }
+  const stopApprovals = () => { stopMainApprovals(); stopNativeApprovals(); stopSentAsks(); stopSentConsent(); };
   // A decision card the HOST wrote (askOwnerOnce) is not a run's final message, so it reaches the phone through the
   // owner-ask seam as the same thread push with the question wording. The personal One chat is skipped: its push needs a
   // message id the relay checks, and a host card there has none to give.
@@ -4811,6 +4839,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           automationReportNotice: this.clientHasCapability(context.deviceId, "thread.composition.v1"),
           chatFileLinks: this.clientHasCapability(context.deviceId, "chat.file.v1"),
           handoffCard: this.clientHasCapability(context.deviceId, "handoff.card.v1"),
+          receiptCard: this.clientHasCapability(context.deviceId, "receipt.card.v1"),
         });
         if (authority) assertPersonalOneHistoryUnchanged(authority,captureAuthority());
         return asJsonValue(result, request.method);
@@ -4921,6 +4950,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const { invocation, decisionAnswer } = invocationParams(request, false);
         // The owner typed this on the paired phone (ownerSpoke). A card answer picks an option; it is not the owner's written message.
         if (!decisionAnswer) markOwnerSpoke(invocation);
+        // The id the phone sent with this message rides on the saved row: the phone matches its own bubble by it, never by words.
+        if (!decisionAnswer && request.idempotencyKey && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(request.idempotencyKey)) invocation.clientIntentId = request.idempotencyKey;
         // A question card's answer still reaches a personal agent's room; an ordinary owner message does not.
         if (!decisionAnswer) assertOwnerMayWriteRoom(invocation.chatId);
         assertPersonalAgentHomeWritable(invocation.chatId);
@@ -5339,8 +5370,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       // DESKTOP_MOBILE_BRIDGE: Resolve only the opaque live browser request.
       // browserResolveApproval itself emits pending/resolved/expired lifecycle events.
       case "browser.resolveApproval": {
-        const params = guardedParams(request, ["requestId", "decision", "note"]);
+        const params = guardedParams(request, ["requestId", "decision", "note", "scope"]);
         const requestId = requiredIdentifier(params, "requestId", RUN_ID_RE);
+        // a stamped answer names the conversation the card was for; another one is refused and the card stays open.
+        const browserClaimedChat = claimedChatOfAnswer(params);
+        if (browserClaimedChat) {
+          const pendingOwner = listPendingBrowserApprovals().find(pending => pending.requestId === requestId)?.owner?.chatId;
+          if (typeof pendingOwner === "string" && pendingOwner && pendingOwner !== browserClaimedChat) throw new Error("approval_answer_refused_other_chat");
+        }
         const decision = requiredEnum(
           params,
           "decision",
@@ -5366,8 +5403,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // `note` is the owner's "No, and do this instead" line (advertised by capability approvalOwnerNoteV1). A phone
         // that does not know it never sends it; a Desktop that does not know it refuses the key, so a phone sends it
         // only after bridge.ready names the capability.
-        const params = guardedParams(request, ["id", "decision", "note"]);
+        const params = guardedParams(request, ["id", "decision", "note", "chat", "scope"]);
         const id = requiredIdentifier(params, "id", TOOL_APPROVAL_ID_RE);
+        const claimedChat = claimedChatOfAnswer(params);
         const decision = requiredEnum(
           params,
           "decision",
@@ -5387,7 +5425,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const receipt = await resolveToolApprovalWithOwnerNote({
           decision, note, chatId: noteChatId, requestId: id,
           // BB-1a: this answer came from the phone: a request this process holds is marked in the same write as its decision, one the background service holds right after it answered.
-          resolve: () => nativeOwned ? native!.resolve(context, id, decision) : resolveToolApproval(id, decision, undefined, "phone"),
+          resolve: () => nativeOwned ? native!.resolve(context, id, decision) : resolveToolApprovalFrom(id, decision, { account: appWideScopeStamp().account, surface: "phone", deviceTrusted: true, claimedChat }, undefined, "phone"),
         });
         if (nativeOwned && receipt.ok && receipt.status === "resolved") noteToolApprovalHandler(id, "phone");
         this.scheduleSnapshotUpdated();
@@ -5471,9 +5509,24 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.scheduleSnapshotUpdated();
         return asJsonValue(receipt,request.method);
       }
+      case "chat.question.close": {
+        // the phone's X on a question sheet becomes the conversation's closed-card state on this computer (the same row every window reads).
+        const params = guardedParams(request, ["chatId", "sourceMessageId", "scope"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        const claimedChat = claimedChatOfAnswer(params);
+        const result = closeQuestionFromPhone({ chatId, sourceMessageId: requiredIdentifier(params, "sourceMessageId") }, {
+          chatArchived: (id) => { const chat = getChat(id); return chat ? Boolean(chat.archivedAt) : null; },
+          messageOfChat: (id, messageId) => (getDb().prepare("SELECT role, text FROM chat_messages WHERE id = ? AND chat_id = ?").get(messageId, id) as { role: string; text: string } | undefined) ?? null,
+          admit: (id) => admitAnswer(scopeOfChat(id), { account: appWideScopeStamp().account, surface: "phone", deviceTrusted: true, claimedChat }).ok,
+          close: (item) => { closeQuestionCard(item); },
+        });
+        this.scheduleSnapshotUpdated();
+        return asJsonValue(result, request.method);
+      }
       case "runtime.submitUserInput": {
-        const params = guardedParams(request, ["requestId", "answer"]);
+        const params = guardedParams(request, ["requestId", "answer", "scope"]);
         const requestId = requiredIdentifier(params, "requestId", ASK_USER_REQUEST_ID_RE);
+        const questionClaimedChat = claimedChatOfAnswer(params);
         let answer: string | null = null;
         if (params.answer !== null) {
           answer = requiredText(params, "answer", 4_000).trim();
@@ -5482,7 +5535,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const pending=(await listRuntimeAskUserRequests()).find(question=>question.requestId===requestId);
         const chat=pending?.chatId?getChat(pending.chatId):null;
         const resolved=!!pending&&pending.expiresAt>Date.now()&&!!chat&&!chat.archivedAt
-          ?await submitRuntimeAskUserAnswer(requestId,answer):false;
+          ?await submitRuntimeAskUserAnswer(requestId,answer,{ account: appWideScopeStamp().account, surface: "phone", deviceTrusted: true, claimedChat: questionClaimedChat }):false;
         this.scheduleSnapshotUpdated();
         return asJsonValue({
           resolved,
@@ -6994,8 +7047,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     const localToolApprovals = listPendingToolApprovals();
     const nativeToolApprovals = this.options.nativeToolApprovals?.list() ?? [];
     const duplicateApprovalIds = new Set(localToolApprovals.map(request => request.id));
+    const phoneViewer = { account: appWideScopeStamp().account, surface: "phone" as const, deviceTrusted: true };
     const pendingToolApprovals = [...localToolApprovals, ...nativeToolApprovals.filter(request => !duplicateApprovalIds.has(request.id))]
       .filter((approval) => approval.mode === "live")
+      // the phone's view goes through the one gate (another account's card is not listed); an unstamped one (the background service's, an older row) is as before.
+      .filter((approval) => { const stamp = (approval as { scope?: ScopeStamp }).scope; return !stamp || admitView(stamp, phoneViewer).ok; })
       .map((approval) => {
         // `expiresAt` was added after the original tool-approval event. Read it
         // structurally so this bridge remains source-compatible with an older
@@ -7019,6 +7075,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ...(approval.chatId ? { chatId: approval.chatId } : {}),
           ...(approval.capability ? { capability: approval.capability } : {}),
           ...(approval.agentId ? { agentId: approval.agentId } : {}),
+          ...(phoneScopeDto((approval as { scope?: ScopeStamp }).scope) ? { scope: phoneScopeDto((approval as { scope?: ScopeStamp }).scope) } : {}),
         };
       });
     const pendingUserInputs: MobileBridgeUserInputDto[] = (await listRuntimeAskUserRequests())
@@ -7125,6 +7182,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.upstreamUnsubscribers = [
       invocationService.onEvent(forwardInvocationEvent),
       onNativeGuiInvocationEvent(forwardInvocationEvent),
+      // A source that missed the first projection's budget answered late: rebuild once so the phone stops showing the empty fallback (projector.ts).
+      onInitialProjectionLateSettled(() => this.scheduleSnapshotUpdated()),
       // E2E-2: a reply request of the personal agent that FAILED or was CANCELLED with no terminal event sent for its run (the runner refused the call, the start failed, it was cancelled
       // before it began): the phone gets the one terminal event the run did not give, read from the supervisor's receipt log in whichever process wrote it.
       (() => { const ends = personalRequestEnds(); const off = ends.onEnded((list) => this.forwardPersonalRequestEnds(list)); ends.start(); return off; })(),
@@ -7204,6 +7263,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       status: "pending",
       requestId: approval.requestId,
       chatId: typeof approval.owner?.chatId === "string" && approval.owner.chatId ? approval.owner.chatId : null,
+      ...(typeof approval.owner?.chatId === "string" && approval.owner.chatId && phoneScopeDto(scopeOfChat(approval.owner.chatId)) ? { scope: phoneScopeDto(scopeOfChat(approval.owner.chatId)) } : {}),
       site: boundedRedactedText(approval.site, 1_024),
       actionType: boundedRedactedText(approval.actionType, 512),
       summary: boundedRedactedText(approval.summary, 4_096),

@@ -1099,7 +1099,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   // holds with a list of one name, so nothing else of One Team is reachable; a conversation without another conversation in its project,
   // outside any project, a screen pack's, the personal agent's or a Hub-called agent's keeps its tool list byte for byte (peerMessageToolNames).
   const peerOnly = peerMessageTools.length > 0 && !toolchainConsumer && !roomMember && !workSessionMain && !oneTeamDispatchAllowedFor(callerChatId)
-    && (await import("../store/chats")).getChat(callerChatId!)?.kind === "user";
+    && ((await import("../store/chats")).getChat(callerChatId!)?.kind === "user" || (await import("../harness/deliver-runtime")).isRoomMemberSession(callerChatId));
 
   try {
   for (const s of serializedServers) {

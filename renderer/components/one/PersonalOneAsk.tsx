@@ -1,81 +1,43 @@
 "use client";
 import { useState } from "react";
-import { AskCard } from "@/components/AskCard";
-import { ASK_ACTION_COPY, composeAskAnswer } from "../../../shared/ask-action-bar";
+import { ClosedQuestionLine, QuestionCardHost } from "@/components/decision/QuestionCardHost";
+import { closeQuestionCard, reopenQuestionCard, useClosedQuestionCards } from "@/lib/question-cards";
 import type { PersonalOnePendingAsk } from "@/lib/personal-one-transcript";
 
 /**
- * The personal window's card for a question Hope ended its answer on. Picking a choice sends it as the
- * owner's next message through the window's own send path (the supervisor outbox), the same as typing it.
+ * The personal window's question for a question Hope ended its answer on. It draws nothing itself: the card is the one question card
+ * (components/decision/QuestionCardHost.tsx), the same one Work, One and a room draw. Picking a choice sends it as the owner's next
+ * message through the window's own send path (the supervisor outbox), the same as typing it. X closes the card and leaves a Reopen line.
  */
-export function PersonalOneAskCard({ ask, locale, disabled, onAnswer, onDismiss }: {
+export function PersonalOneAskCard({ ask, chatId, locale, disabled, onAnswer }: {
   ask: PersonalOnePendingAsk;
+  /** The personal conversation that asked; null while the window has none yet (the close then lives in this component only). */
+  chatId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
   onAnswer: (answer: string) => void;
-  onDismiss: () => void;
 }) {
-  const ko = locale === "ko";
-  const [picked, setPicked] = useState<number[]>([]);
-  const [typed, setTyped] = useState("");
-  const copy = ASK_ACTION_COPY[locale];
-  const send = (labels: string[], typed: string) => {
-    const answer = composeAskAnswer(labels, typed);
-    if (answer && !disabled) onAnswer(answer);
-  };
+  const cardKey = `personal-ask:${ask.sourceMessageId}`;
+  const closedCards = useClosedQuestionCards(chatId);
+  const [closedLocally, setClosedLocally] = useState(false);
+  const closed = chatId ? closedCards.some((item) => item.key === cardKey) : closedLocally;
+  const reopen = () => { if (chatId) reopenQuestionCard(chatId, cardKey); else setClosedLocally(false); };
+  if (closed) return <ClosedQuestionLine count={1} onReopen={reopen} />;
   return (
-    <AskCard
-      data-testid="personal-one-ask"
-      locale={locale}
-      title={ask.header || ask.question}
-      subtitle={ask.header ? ask.question : undefined}
-      options={ask.options.map((option, index) => ({
-        id: `pick:${index}`,
-        title: option.label,
-        ...(option.description ? { note: option.description } : {}),
-        ...(ask.multiSelect ? { checked: picked.includes(index) } : {}),
-        disabled,
-      }))}
-      onChoose={(id, typed) => {
-        const index = Number(id.slice("pick:".length));
-        if (!Number.isInteger(index) || !ask.options[index] || disabled) return;
-        if (ask.multiSelect) {
-          setPicked((current) => current.includes(index) ? current.filter((value) => value !== index) : [...current, index]);
-          return;
-        }
-        send([ask.options[index].label], typed);
-      }}
-      onClose={onDismiss}
-      collapsible
-      otherOption={{ title: copy.other, note: copy.otherNote }}
-      freeText={typed}
-      onFreeTextChange={setTyped}
-      statusLabel={copy.needsInput}
-      footer={{
-        placeholder: ko ? "직접 입력" : "Type your own answer",
-        skipLabel: ko ? "닫기" : "Close",
-        submitLabel: ko ? "보내기" : "Send",
-        hasSelection: picked.length > 0,
-        // 단추는 아래 동작 줄([건너뛰기][제출 ⌘↵])이 맡는다. 입력칸의 Enter 는 예전처럼 보내거나(답이 있으면) 닫는다.
-        hideButton: true,
-        onSkip: (typed) => {
-          const labels = picked.map((index) => ask.options[index].label);
-          if (labels.length || typed.trim()) send(labels, typed);
-          else onDismiss();
-        },
-      }}
-      actionRow={{
-        secondary: { id: "skip", label: copy.skip },
-        primary: {
-          id: "submit",
-          label: ask.multiSelect ? copy.submit(picked.length + (typed.trim() ? 1 : 0)) : copy.submitSingle,
-          disabled: disabled || (picked.length === 0 && !typed.trim()),
-        },
-        onAction: (id, text) => {
-          if (id === "skip") { onDismiss(); return; }
-          send(picked.map((index) => ask.options[index].label), text);
-        },
-      }}
+    <QuestionCardHost
+      source="personal-ask"
+      chatId={chatId}
+      replyStyle="plain"
+      locked={disabled}
+      questions={[{
+        id: ask.sourceMessageId,
+        question: ask.question,
+        ...(ask.header ? { header: ask.header } : {}),
+        multiSelect: ask.multiSelect,
+        options: ask.options,
+      }]}
+      onConfirm={(reply) => { if (reply.trim() && !disabled) onAnswer(reply); }}
+      onDismiss={() => { if (chatId) closeQuestionCard(chatId, cardKey, 1); else setClosedLocally(true); }}
     />
   );
 }

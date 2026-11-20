@@ -3,7 +3,8 @@ import { appendLongRunEvent, goalOwnerAnswerHold, getLongRun, longRunOwnerHold, 
   RUNTIME_RETRY_CLEANUP_WINDOW_MS, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, liveLongRunAttemptCount, type BlockedGoalRetry, type LongRunRecord } from "../store/long-runs";
 import { NO_PROGRESS_RETRY_LIMIT, VERIFICATION_NO_PROGRESS_REASON } from "../../shared/long-run-checkpoint";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
-import { appendChatMessage, getChat } from "../store/chats";
+import { getChat } from "../store/chats";
+import { ownerStopHoldsWriters, writeAssistantUnlessStopped } from "../chat/chat-stop";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import { getPendingInvocationAdmissionForChat } from "../store/invocation-admissions";
 import { hasQueuedOwnerSteer } from "../store/invocation-steers";
@@ -91,11 +92,12 @@ export function closeAutomaticGoalAtNoProgress(runId: string): boolean {
   if (!run || run.surface === "science" || !run.rootChatId || !isAutoMessageGoalId(run.goalId) || LONG_RUN_TERMINAL_STATUSES.has(run.status)
     || getChatGoalRevision(run.goalId)?.lifecycle !== "finite" || longRunOwnerHold(run.id) || goalOwnerAnswerHold(run.id)) return false;
   closeGoal(run.goalId, "cancelled", "cleanup", { reason: "automatic_goal_no_progress" });
+  // The Goal closes either way; the closing line is a new assistant row, so it is not written into a chat the person stopped.
   try {
-    appendChatMessage(run.rootChatId, "assistant", currentUiLocale() === "ko"
+    writeAssistantUnlessStopped(run.rootChatId, currentUiLocale() === "ko"
       ? "같은 결과가 반복돼 이 요청의 목표 추적을 닫았어요. 이어서 하실 일이 있으면 다시 말씀해 주세요."
       : "The same result kept coming back, so I closed the goal tracking for this request. Tell me if there is more to do.",
-      { noGoalResult: true, hostNotice: { purpose: "host-status", runId: run.id, status: "goal-closed" } });
+      { noGoalResult: true, hostNotice: { purpose: "host-status", runId: run.id, status: "goal-closed" } }, { longRunId: run.id });
   } catch (error) { console.warn("[long-run] automatic goal close notice failed:", error); }
   return true;
 }
@@ -227,9 +229,11 @@ export function settleNoProgressRest(run: LongRunRecord, retry: BlockedGoalRetry
         || (admission && Date.now() - Date.parse(admission.pendingAt) < 120_000)
         || hasQueuedOwnerSteer(chatId)) return false;
       if (restDelivered(run.id, digest)) return true;
-      appendChatMessage(chatId, "assistant", restReportText(currentUiLocale() === "ko" ? "ko" : "en", checkpoint, latestInvocationReport(checkpoint.invocationRunId)), { noGoalResult: true });
+      // A stopped chat gets no rest report; the digest is still marked delivered below so the sweep does not ask again.
+      const stoppedChat = ownerStopHoldsWriters(chatId, { longRunId: run.id });
+      if (!stoppedChat) writeAssistantUnlessStopped(chatId, restReportText(currentUiLocale() === "ko" ? "ko" : "en", checkpoint, latestInvocationReport(checkpoint.invocationRunId)), { noGoalResult: true }, { longRunId: run.id });
       appendLongRunEvent({ runId: run.id, kind: NO_PROGRESS_REST_DELIVERED_KIND, actorKind: "host",
-        payload: { digest, checkpointId: checkpoint.checkpointId, posted: true } });
+        payload: { digest, checkpointId: checkpoint.checkpointId, posted: !stoppedChat, ...(stoppedChat ? { held: "owner_stopped" } : {}) } });
       return true;
     }).immediate();
     // The caller must defer a stale snapshot, not reopen its old retry.

@@ -6,6 +6,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ipc, ipcEvents, grantForDroppedFile, grantForPastedAttachment, grantForPastedImage } from "@/lib/ipc";
 import { HandoffCard } from "@/components/PluralHandoffCards";
 import { decodeHandoffCard } from "@shared/plural-handoff-card";
+import { mergeCardsIntoTimeline, type TimelineCard } from "@/lib/timeline-cards";
+import { isReceiptRowId } from "@shared/receipt-card";
+import { withdrawnWords } from "@/lib/chat-stop";
+import { CHAT_SIGNAL_SAFETY_MS } from "@/lib/chat-signal";
+import { ReceiptRowCard } from "@/components/ReceiptCard";
+import { PendingPromisesStrip } from "@/components/PendingPromisesStrip";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { createStoreChangeThrottle, sameSnapshotIgnoring } from "@/lib/store-change-policy";
 import { ChatContinuationProjector, type ChatContinuationRow } from "@/lib/chat-continuations";
@@ -48,6 +54,7 @@ import { ComposerDecisionSlot } from "@/components/ComposerDecisionPortal";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { PersonalOneSupervisedApprovals } from "./PersonalOneSupervisedApprovals";
+import { PluralConsentPrompts } from "./PluralConsentPrompts";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { DefectReportButton } from "../support/DefectReport";
@@ -65,6 +72,7 @@ import dynamic from "next/dynamic";
 import styles from "./PersonalOneWorkspace.module.css";
 import { Select } from "@/components/Select";
 import { useComposerEnter } from "@/lib/use-composer-enter";
+import { useComposerAgentPicker } from "../composer/ComposerAgentPicker";
 import { nextNameInput } from "@shared/one-agent-name";
 
 const OneIdentityEditor=dynamic(()=>import("./OneCreateAgentDialog").then(module=>module.OneCreateAgentDialog),{ssr:false});
@@ -153,13 +161,16 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const historyScopeRef=useRef(historyScope);historyScopeRef.current=historyScope;
   // The hand-off cards of this conversation (shared/plural-handoff-card.ts: `handoff-card:` / `handoff-recv:` view rows). The supervisor snapshot carries no view rows, so they are read from the chat's own page and drawn after the
   // transcript, oldest first (prod test the card was kept in the right conversation with its words and the dori screen still drew nothing).
-  const [handoffRows,setHandoffRows]=useState<Array<{id:string;text:string}>>([]);
+  const [handoffRows,setHandoffRows]=useState<Array<{id:string;text:string;createdAt:string}>>([]);
   useEffect(()=>{
     const chatId=snapshot?.conversationChatId;
     if(!chatId){setHandoffRows([]);return;}
     let alive=true,timer:number|undefined;
     const load=async()=>{try{const page=await ipc()?.chats?.messagesPage?.({chatId,limit:120});if(!alive||!page)return;
-      const rows=page.messages.filter(item=>item.role==="system"&&/^handoff-(card|recv):/.test(String(item.id))).slice(-8).map(item=>({id:String(item.id),text:item.text}));
+      // The hand-off cards and the host's receipt rows (a schedule saved, a message sent, a run that did not finish) are both 'view' rows the supervisor snapshot does not carry; the last eight of each kind, in stored order.
+      const view=page.messages.filter(item=>item.role==="system"&&/^(handoff-(card|recv)|view:receipt):/.test(String(item.id)));
+      const keep=new Set([...view.filter(item=>isReceiptRowId(item.id)).slice(-8),...view.filter(item=>!isReceiptRowId(item.id)).slice(-8)]);
+      const rows=view.filter(item=>keep.has(item)).map(item=>({id:String(item.id),text:item.text,createdAt:String(item.createdAt ?? "")}));
       setHandoffRows(prior=>JSON.stringify(prior)===JSON.stringify(rows)?prior:rows);}catch{/* the next change reads again */}};
     void load();
     const off=ipcEvents()?.onStoreChanged?.(change=>{if(change.entity==="chat"&&change.id===chatId){window.clearTimeout(timer);timer=window.setTimeout(()=>void load(),400);}});
@@ -349,9 +360,12 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     const storeChanges=createStoreChangeThrottle({throttleMs:2000,run:()=>{void sync();},
       immediate:change=>change.entity==="chat"&&(!change.id||change.id===conversationChatIdRef.current)});
     mounted.current=true;void sync();const off=ipcEvents()?.onStoreChanged?.(change=>storeChanges.notify(change));
-    const timer=window.setInterval(()=>{if(document.visibilityState!=="hidden"){void sync();redeliverSaved();}},5000);const focus=()=>{void sync();};window.addEventListener("focus",focus);
+    // The snapshot is re-read on the store's signals above: this is the one safety net (60 s), not a 5 s loop. The retry clock below reads nothing from Main: it only
+    // runs the saved-request redelivery (its own backoff) while a request is still unconfirmed, and does nothing otherwise.
+    const timer=window.setInterval(()=>{if(document.visibilityState!=="hidden")void sync();},CHAT_SIGNAL_SAFETY_MS);
+    const retryClock=window.setInterval(()=>{if(document.visibilityState!=="hidden"&&(outbox.current?.list().length??0)>0)redeliverSaved();},5000);const focus=()=>{void sync();};window.addEventListener("focus",focus);
     const storage=(event:StorageEvent)=>{if(event.key?.startsWith("agentlas.one.supervisor.outbox.")){setSavedRequests(outbox.current?.list() ?? []);void sync();}};window.addEventListener("storage",storage);
-    return()=>{coordinator.dispose();if(refreshCoordinator.current===coordinator)refreshCoordinator.current=null;mounted.current=false;++generation.current;window.clearInterval(timer);off?.();storeChanges.dispose();window.removeEventListener("focus",focus);window.removeEventListener("storage",storage);};
+    return()=>{coordinator.dispose();if(refreshCoordinator.current===coordinator)refreshCoordinator.current=null;mounted.current=false;++generation.current;window.clearInterval(timer);window.clearInterval(retryClock);off?.();storeChanges.dispose();window.removeEventListener("focus",focus);window.removeEventListener("storage",storage);};
   },[sync,readSnapshot,redeliverSaved]);
   const observedCommands=useMemo(()=>{
     const messageIds=new Set(snapshot?.messages.map(message=>message.id));
@@ -366,7 +380,6 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   // typed cause and waits for the next try): no run is live in that gap, so the live reply's Stop below is not drawn. Main's stopReply takes it back.
   const waitingReply=activeReply?undefined:snapshot?.requests.find(item=>item.kind==="reply" && item.state==="stored" && item.runId && item.reason);
   const pendingAsk=useMemo(()=>personalOnePendingAsk(groups,pendingMessages.length),[groups,pendingMessages.length]);
-  const [dismissedAskId,setDismissedAskId]=useState<string|null>(null);
   const prepareUiFollowup=useCallback((prompt:string)=>{
     if(!snapshot?.conversationChatId || activeReply || attachmentBusy)return false;
     setText(current=>current.trim()?`${current}\n\n${prompt}`:prompt);
@@ -444,7 +457,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [cadence.enabled,cadence.registry,cadence.version,projectedRows,cadenceOps]);
   // Receipts sit between the rows by time: before the first row written after them, the rest at the end.
-  const timeline=useMemo(()=>{
+  const baseTimeline=useMemo(()=>{
     if(!dispatchNotices.length)return conversationRows.map(row=>({row}));
     // The window shows the recent turns only: a receipt older than its first row belongs to history that is folded away.
     const firstAt=conversationRows.map(row=>row.createdAt?Date.parse(row.createdAt):Number.NaN).find(Number.isFinite);
@@ -459,6 +472,15 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     for(const notice of pending)merged.push({notice});
     return merged;
   },[conversationRows,dispatchNotices]);
+  // The hand-off cards and receipt rows sit among the turns by the time they were first written (they were all drawn after the last turn, so a new turn read ABOVE an older card; renderer/lib/timeline-cards.ts).
+  const timeline=useMemo(()=>{
+    type Entry={row?:typeof conversationRows[number];notice?:ChatHistoryEntry;card?:TimelineCard};
+    // The work other devices handed to this agent ("다른 기기에서 맡긴 일" cards) is a record too and sits by its own time (it was still drawn after the newest turn).
+    const turnRuns=new Set((snapshot?.turns??[]).map(turn=>turn.runId));
+    const received=(snapshot?.delegations??[]).filter(item=>!item.originReplyRunId||!turnRuns.has(item.originReplyRunId))
+      .map(item=>({id:`delegation:${item.commandId}`,text:"",createdAt:item.createdAt,delegationId:item.commandId}));
+    return mergeCardsIntoTimeline(baseTimeline as Entry[],[...handoffRows,...received],entry=>Date.parse(entry.row?.createdAt ?? entry.notice?.createdAt ?? "")) as Entry[];
+  },[baseTimeline,handoffRows,snapshot?.delegations,snapshot?.turns]);
   // The list rises into place when a bubble comes out (renderer/lib/bubble-motion.ts). Anything that takes the scroll position over cancels it first.
   const followMotion=useRef<Animation|null>(null);const lastRowBox=useRef<{id:string;top:number}|null>(null);const risen=useRef(new Set<string>());
   const cancelFollowMotion=()=>{followMotion.current?.cancel();followMotion.current=null;};
@@ -560,6 +582,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);setSavedRequests(outbox.current.list());return value;
   };
   const enter=useComposerEnter(()=>{void send();});
+  // The "@" list: the one picker of every composer (lib/composer-agent-pick.ts). Here a pick keeps the name in the words the personal agent reads.
+  const picker=useComposerAgentPicker({text,setText,inputRef:composerInput,locale:ko?"ko":"en"});
   const send=async(answer?:string,selectionSettled?:boolean)=>{
     // An active turn's question answer has its own custody. Only a new composer
     // submission waits, before attachments, outbox IDs or draft state change. It waits for the model pick that is still on its
@@ -605,6 +629,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     try{showReceipt(await write(task.runId?"stopTask":"control",{oneId:snapshot?.oneId,taskId:task.taskId,expectedVersion:task.controlVersion,...(task.runId?{runId:task.runId}:{action:"cancel"})}));void sync();}
     catch{setError(true);void sync();}finally{setStopPending(null);}
   };
+  // The conversation's one Stop: besides the reply, every send of this conversation that has not started is taken back, and its words go into the input box.
+  const stopConversation=()=>{const stopChatId=snapshot?.conversationChatId;if(stopChatId)void ipc()?.chat?.stop?.(stopChatId).then(receipt=>{const back=withdrawnWords(receipt);if(back.length)setText(current=>[current,...back].filter(words=>words.trim()).join("\n"));}).catch(()=>undefined);};
   const openIdentity=async()=>{
     openSettings("identity");if(identityProfile)return;
     if(identityLoading)return;const epoch=settingsEpoch.current;
@@ -692,7 +718,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     {!detached&&<aside id="personal-one-navigation" className={styles.navigation} data-collapsed={navCollapsed} hidden={navCollapsed||settingsSection!==null} aria-label={copy("One 탐색","One navigation")}>
       <div className="titlebar-drag" style={{height:28}}/><ProductModeMenu current="one" locale={ko?"ko":"en"}/>
       <button className={styles.personalEntry} data-personal-one-entry="true" aria-current="page"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"} revision={snapshot?.profileVersion}/><span className={styles.personalIdentity}><strong>{name}</strong><small>{copy("개인 에이전트","Personal agent")}</small></span></button>
-      <div className={styles.navigationLinks}><button onClick={()=>navigateRail("mail")}><IconMail size={16}/>{copy("메일","Mail")}</button><button onClick={()=>void appearance()}><IconSettings size={16}/>{copy("이름과 말풍선","Name and bubbles")}</button><button onClick={()=>void openMemory()}><IconBrain size={16}/>{copy("메모리","Memory")}</button><button type="button" data-one-capabilities-entry="true" onClick={openCapabilityCatalog}><IconPuzzle size={16}/>{copy("능력","Capabilities")}</button><button onClick={()=>setHistoryOpen(true)}>{copy("개인 에이전트와 지난 대화","Previous conversations with the personal agent")}</button></div>
+      <div className={styles.navigationLinks}><button onClick={()=>navigateRail("mail")}><IconMail size={16}/>{copy("에이전트 메일","Agent mail")}</button><button onClick={()=>void appearance()}><IconSettings size={16}/>{copy("이름과 말풍선","Name and bubbles")}</button><button onClick={()=>void openMemory()}><IconBrain size={16}/>{copy("메모리","Memory")}</button><button type="button" data-one-capabilities-entry="true" onClick={openCapabilityCatalog}><IconPuzzle size={16}/>{copy("능력","Capabilities")}</button><button onClick={()=>setHistoryOpen(true)}>{copy("개인 에이전트와 지난 대화","Previous conversations with the personal agent")}</button></div>
       <p className={styles.localLabel}>{copy("이 데스크탑에서 실행","Runs on this computer")}</p>
     </aside>}
     <main className={styles.conversation} hidden={settingsSection!==null}>
@@ -734,6 +760,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             let shownAt:number|null=null;let shownRole:string|null=null;
             return timeline.map(entry=>{
             const row=entry.row;
+            if(entry.card?.delegationId){const item=snapshot?.delegations?.find(d=>d.commandId===entry.card!.delegationId);return item?delegation(item):null;}
+            if(entry.card){const card=entry.card;if(isReceiptRowId(card.id))return <div key={card.id} data-personal-one-receipt-card={card.id}><ReceiptRowCard row={{id:card.id,role:"system",text:card.text}} chatId={snapshot?.conversationChatId}/></div>;const decoded=decodeHandoffCard(card.text);return decoded?<div key={card.id} data-personal-one-handoff-card={card.id}><HandoffCard value={decoded}/></div>:null;}
             if(!row){const notice=entry.notice!;return <div key={`dispatch-notice:${notice.id}`} className={styles.turn} data-role="notice" data-personal-one-dispatch-notice={notice.id}>
               <HostContinuationNotice text={notice.text} locale={ko?"ko":"en"} notice={notice.hostNotice} onOpenChat={chatId=>void openMain(`/one?chat=${encodeURIComponent(chatId)}`)} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile}/>
             </div>;}
@@ -779,17 +807,16 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             }} />}
           </div></Fragment>;});})()}
           {historyEnd<groups.length&&<button type="button" style={historyButtonStyle} data-personal-one-history="later" onClick={()=>revealHistory("later")}>{copy("다음 대화 24개 보기","Show 24 later turns")}</button>}
-          {snapshot?.delegations?.filter(item=>!item.originReplyRunId || !snapshot.turns?.some(turn=>turn.runId===item.originReplyRunId)).map(delegation)}
-          {handoffRows.map(row=>{const card=decodeHandoffCard(row.text);return card?<div key={row.id} data-personal-one-handoff-card={row.id}><HandoffCard value={card}/></div>:null;})}
         </div>
       </div>
       </IntellectUiActions.Provider>
       <div ref={composerDock} className={styles.composerDock}>
+        <PendingPromisesStrip chatId={snapshot?.conversationChatId}/>
         <OneHomeMoveCards />
         <OneFrontNote view={front.view} locale={ko?"ko":"en"} onOpenSetting={()=>void appearance()}/>
         <div className={styles.decisionStack}>
-          {pendingAsk&&pendingAsk.sourceMessageId!==dismissedAskId&&<PersonalOneAskCard key={pendingAsk.sourceMessageId} ask={pendingAsk} locale={ko?"ko":"en"} disabled={Boolean(activeReply)||attachmentBusy} onAnswer={answer=>void send(answer)} onDismiss={()=>setDismissedAskId(pendingAsk.sourceMessageId)} />}
-          <ComposerDecisionSlot surface="one" />
+          {pendingAsk&&<PersonalOneAskCard key={pendingAsk.sourceMessageId} ask={pendingAsk} chatId={snapshot?.conversationChatId??null} locale={ko?"ko":"en"} disabled={Boolean(activeReply)||attachmentBusy} onAnswer={answer=>void send(answer)} />}
+          <ComposerDecisionSlot surface="one" chatId={snapshot?.conversationChatId ?? null} draft={!snapshot?.conversationChatId} />
           {/* Only Main's exact pending requests may authorize an action. A current
               local permission selection must not resolve a previous run's card. */}
           <ToolApprovalInline chatId={snapshot?.conversationChatId} compact chip composerWidth={Math.max(300,Math.min(736,viewportWidth-(detached?32:250)))} />
@@ -797,6 +824,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               conversation's own cards; each card still answers its own room. */}
           <PersonalOneSupervisedApprovals conversationChatId={snapshot?.conversationChatId} locale={ko?"ko":"en"}
             composerWidth={Math.max(300,Math.min(736,viewportWidth-(detached?32:250)))} onOpenRoom={href=>void openMain(href)} />
+          {/* another agent wants to hand work to this one; the server holds it until the person answers. */}
+          <PluralConsentPrompts locale={ko?"ko":"en"} />
         </div>
         {receipt?.state==="failed"&&receipt.kind!=="reply"&&receipt.reason!=="interrupted_requires_review"&&receipt.reason!=="cancel_raced_terminal_outcome"&&<DefectReportButton key={receipt.commandId} locale={ko?"ko":"en"} draft={{
           chatId:snapshot?.conversationChatId,runId:receipt.runId ?? receipt.commandId,failureCode:"one_supervisor_command_failed",category:"other",
@@ -808,6 +837,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         {sendWaiting&&<p role="status" className={styles.feedback}>{copy("모델 선택을 확인하는 중이에요. 확인되면 바로 보냅니다.","Checking the model selection. It sends as soon as that is confirmed.")}</p>}
         <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
         <OneWaitingLine />
+        {picker.node}
         <OneHomeLockGate><form className={styles.composer} data-one-composer="true" data-has-files={attachments.length>0} data-ready={Boolean(text.trim())||attachments.length>0} onSubmit={event=>{event.preventDefault();void send();}}>
           {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>
             {/* One horizontal strip of thumbnails and file tiles, each with × (media-carousel). */}
@@ -834,7 +864,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void appearance();}}><span className={styles.plusIcon}><IconSettings size={15}/></span><strong>{copy("이름과 말풍선","Name and bubbles")}</strong></button>
             </div>}
           </div>
-          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);}} onCompositionUpdate={enter.onCompositionUpdate} onCompositionEnd={enter.onCompositionEnd} onKeyDown={event=>{enter.handleEnter(event);}} onPaste={event=>{
+          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);}} onCompositionUpdate={enter.onCompositionUpdate} onCompositionEnd={enter.onCompositionEnd} onKeyDown={event=>{if(picker.handleKey(event))return;enter.handleEnter(event);}} onPaste={event=>{
             // Clipboard files (screenshots, Finder copies, audio, video, documents) become attachments; plain text pastes as text.
             const clipboard=event.clipboardData;if(!clipboard)return;const files:File[]=[];const seen=new Set<string>();
             const add=(file:File|null)=>{if(!file)return;const id=`${file.name}|${file.size}|${file.type}`;if(seen.has(id))return;seen.add(id);files.push(file);};
@@ -849,12 +879,12 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
           {front.view&&!front.view.effective&&<p className={styles.feedback} data-one-personal-model-scope="true" title={copy("개인 One과의 대화에 사용할 모델입니다. Work 업무의 실행 모델은 업무별로 선택합니다.","The model for your personal One conversation. Choose the execution model separately for each Work task.")}>{copy("개인 대화 모델","Personal chat model")}</p>}
           <div className={styles.trail}><OneRuntimeChips chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} disabled={!snapshot} /></div>
         </div>}
-        {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>{cadence.registry.flush();void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true));}}>{copy("이 답변 중지","Stop this reply")}</button>}
-        {waitingReply?.runId&&<div role="status" data-waiting-retry-stop="true" className={styles.feedback}><span>{copy("메시지를 앱이 다시 보내는 중이에요.","The app is sending your message again.")}</span> <button className={styles.stopReply} data-waiting-retry-stop-button="true" onClick={()=>void write("stopReply",{runId:waitingReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("중지","Stop")}</button></div>}
+        {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>{cadence.registry.flush();stopConversation();void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true));}}>{copy("이 답변 중지","Stop this reply")}</button>}
+        {waitingReply?.runId&&<div role="status" data-waiting-retry-stop="true" className={styles.feedback}><span>{copy("메시지를 앱이 다시 보내는 중이에요.","The app is sending your message again.")}</span> <button className={styles.stopReply} data-waiting-retry-stop-button="true" onClick={()=>{stopConversation();void write("stopReply",{runId:waitingReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}}>{copy("중지","Stop")}</button></div>}
       </div>
     </main>
     <BrowserActionApprovalSheet chatId={snapshot?.conversationChatId ?? null} />
-    {live?.keyRequest && live.keyRequest.runId!==dismissedKeyRun && <McpKeyRequestSheet key={live.keyRequest.runId}
+    {live?.keyRequest && live.keyRequest.runId!==dismissedKeyRun && <McpKeyRequestSheet key={live.keyRequest.runId} chatId={snapshot?.conversationChatId ?? null}
       request={live.keyRequest} presentation="one" localeOverride={ko?"ko":"en"} onResolved={()=>setDismissedKeyRun(live.keyRequest!.runId)} />}
     <div className={styles.outputPanel} hidden={settingsSection!==null} data-personal-one-output-panel="true" data-visible={outputPanelVisible} style={{'--personal-panel-width':shownPanelWidth+'px','--personal-composer-height':composerHeight+'px','--personal-context-bottom':contextBottom+'px'} as CSSProperties}>
       <aside className={styles.taskDrawer} hidden={!taskDrawerVisible} aria-labelledby="one-task-heading" data-one-task-drawer="true" onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();setTasksOpen(false);composerInput.current?.focus();}}}>

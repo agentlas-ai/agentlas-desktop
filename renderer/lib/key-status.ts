@@ -23,6 +23,20 @@ export interface KeyStatus {
   cause?: "limit_reached" | "near_limit";
   /** With limit_reached: the code Main refuses those runs with (credit use off) or the provider's own exhaustion. */
   runRefusalCode?: "subscription_credits_disabled" | "quota_exhausted";
+  /** With a warning: the highest percent USED among the affected providers' supported windows (the one number every usage screen shows); absent when none was read. */
+  usedPercent?: number;
+}
+
+/** The highest percent USED over the given providers' supported windows; undefined when none has one. */
+function peakUsedPercent(providers: ReadonlyArray<UsageSnapshot["providers"][number]>): number | undefined {
+  let peak: number | undefined;
+  for (const p of providers) {
+    for (const w of p.windows ?? []) {
+      if (!isSupportedProviderUsageWindow(w, p.provider) || typeof w.usedPercent !== "number" || !Number.isFinite(w.usedPercent)) continue;
+      peak = peak === undefined ? w.usedPercent : Math.max(peak, w.usedPercent);
+    }
+  }
+  return peak;
 }
 
 /** Runtimes whose exhausted subscription may continue on credits, gated by the owner's credit-use switch (runtime/selection.ts). */
@@ -63,10 +77,10 @@ export function deriveKeyStatus(snap: UsageSnapshot | null | undefined, provider
   const healthy = providers.filter((p) => p.status !== "error");
   const connected = providers.length - dead.length;
 
-  const nearLimit = providers
+  const nearLimitProviders = providers
     .filter((p) => p.status === "ok" && p.windows.some((w) =>
-      isSupportedProviderUsageWindow(w, p.provider) && (w.usedPercent ?? 0) >= NEAR_LIMIT_PERCENT))
-    .map((p) => p.label);
+      isSupportedProviderUsageWindow(w, p.provider) && (w.usedPercent ?? 0) >= NEAR_LIMIT_PERCENT));
+  const nearLimit = nearLimitProviders.map((p) => p.label);
 
   // 전 프로바이더가 '키 사망'으로 실측된 경우에만 "모든 에이전트가 멈춥니다"를 단언한다.
   if (connected === 0) return { health: "error", affected: dead.map((p) => p.label), connected: 0 };
@@ -83,10 +97,26 @@ export function deriveKeyStatus(snap: UsageSnapshot | null | undefined, provider
     const creditsOff = exhausted.some((p) => CREDIT_GATED_PROVIDERS.has(p.provider)
       && (p.allowPaidUsage ?? snap.subscriptionCreditUse) === false);
     return { health: "warning", affected: exhausted.map((p) => p.label), connected, cause: "limit_reached",
-      runRefusalCode: creditsOff ? "subscription_credits_disabled" : "quota_exhausted" };
+      runRefusalCode: creditsOff ? "subscription_credits_disabled" : "quota_exhausted", ...(peakUsedPercent(exhausted) !== undefined ? { usedPercent: peakUsedPercent(exhausted)! } : {}) };
   }
   // 한도 임박만 경고로 올린다. 일부 프로바이더의 usage 조회 실패(transient)는
   // "한도 임박"과 다른 사안이므로 경고 배너로 오인시키지 않는다(연결 자체는 살아있음).
-  if (nearLimit.length > 0) return { health: "warning", affected: nearLimit, connected, cause: "near_limit" };
+  if (nearLimit.length > 0) return { health: "warning", affected: nearLimit, connected, cause: "near_limit", ...(peakUsedPercent(nearLimitProviders) !== undefined ? { usedPercent: peakUsedPercent(nearLimitProviders)! } : {}) };
   return { health: "ok", affected: [], connected };
+}
+
+/**
+ * What the usage banner says about a warning, from the machine cause only. It states what Main does, and Main's rule is: a start on a
+ * runtime whose subscription limit is used up (credit use off) is refused before anything is sent, and the turn goes on with the next
+ * connected AI of the role (mcp/client.ts, runtime/selection.ts). So "no new run starts" is true of that AI alone, never of the chat:
+ * it said so beside a chip that was running another AI.
+ */
+export function keyStatusWarningSummary(status: Pick<KeyStatus, "cause" | "runRefusalCode">, locale: "ko" | "en"): string {
+  const ko = locale === "ko";
+  if (status.cause !== "limit_reached") return ko ? "사용량 한도에 근접했습니다." : "Approaching usage limit.";
+  return status.runRefusalCode === "subscription_credits_disabled"
+    ? (ko ? "사용량 한도에 도달했고 크레딧 자동 사용이 꺼져 있어 이 AI로는 새 실행이 시작되지 않습니다. 연결된 다른 AI가 있으면 그쪽으로 이어갑니다."
+      : "Usage limit reached and automatic credit use is off, so this AI will not start new runs. If another AI is connected, the run continues there.")
+    : (ko ? "사용량 한도에 도달해 이 AI로는 새 실행이 거부될 수 있습니다. 연결된 다른 AI가 있으면 그쪽으로 이어갑니다."
+      : "Usage limit reached; this AI may refuse new runs. If another AI is connected, the run continues there.");
 }

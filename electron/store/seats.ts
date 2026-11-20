@@ -13,6 +13,7 @@
 //   I9 스냅샷은 사건이 일어나는 그 트랜잭션에서 기록한다(소멸 뒤 역참조 금지).
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
+import { agentDisplayName as sharedAgentDisplayName } from "../../shared/agent-display-name";
 
 export interface OneSeatOccupant {
   slot: number;
@@ -77,11 +78,12 @@ function nextOccupancySince(seatId: string, slot: number, now: string): string {
   return Number.isFinite(bumped) ? new Date(bumped).toISOString() : now;
 }
 
+/** The name an occupancy row records: the one reader every screen uses (shared/agent-display-name.ts). */
 function agentDisplayName(agentId: string): string {
-  const row = getDb().prepare("SELECT name FROM installed_agents WHERE id = ?").get(agentId) as
-    | { name: string }
+  const row = getDb().prepare("SELECT name, name_en AS nameEn, local_display_name AS localDisplayName, slug FROM installed_agents WHERE id = ?").get(agentId) as
+    | { name: string; nameEn: string | null; localDisplayName: string | null; slug: string | null }
     | undefined;
-  return row?.name ?? "";
+  return sharedAgentDisplayName(row);
 }
 
 function openOccupants(seatId: string): OccupantRow[] {
@@ -324,7 +326,8 @@ export function ensureGroupSeatForTaskforce(input: {
   db.prepare(
     "INSERT OR IGNORE INTO one_seats (id, kind, title, project_id, created_at, updated_at) VALUES (?, 'group', ?, ?, ?, ?)",
   ).run(seatId, input.title, input.projectId ?? null, input.createdAt ?? now, now);
-  db.prepare("UPDATE one_seats SET title = ?, updated_at = ? WHERE id = ?").run(input.title, now, seatId);
+  // The seat's title follows chats.title through renameChat/syncGroupRoomName; this call only seats members, so a stale title in the
+  // caller's hand (the taskforce row it read earlier) cannot overwrite the name the person last set. A new seat takes `title` above.
   syncGroupSeatOccupants(seatId, input.memberAgentIds);
   return seatId;
 }

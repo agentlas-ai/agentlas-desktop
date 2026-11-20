@@ -14,7 +14,8 @@ import { Markdown, type LinkedFileArtifact } from "../Markdown";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import { ToolApprovalInline } from "../ToolApprovalInline";
 import { BrowserActionApprovalSheet } from "../BrowserActionApprovalSheet";
-import { ChatQuestionSheet } from "../ChatQuestionSheet";
+import { ClosedQuestionLine, QuestionCardHost } from "../decision/QuestionCardHost";
+import { closeQuestionCard, reopenQuestionCard, useClosedQuestionCards } from "@/lib/question-cards";
 
 type Notice = Extract<ChatHostNotice, { purpose: "one-dispatch-link" | "one-dispatch-result" }>;
 type ReportPage = { key: string; messageId: string; text: string; nextOffset: number | null };
@@ -127,6 +128,10 @@ export function OneDispatchNotice({ notice, locale, onOpenChat, onOpenLinkedFile
   };
   const status = dispatch?.status;
   const question = dispatch?.pendingQuestion;
+  // X on the card closes it with a Reopen line (lib/question-cards.ts), the same as every surface; the card key is the question's own message.
+  const closedCards = useClosedQuestionCards(current.chatId);
+  const questionCardKey = `room-member:${question?.sourceMessageId ?? ""}`;
+  const questionClosed = closedCards.find((item) => item.key === questionCardKey) ?? null;
   const loadReportPage = async () => {
     const api = ipc();
     const oneOrg = api?.oneOrg as (NonNullable<ReturnType<typeof ipc>>["oneOrg"] & {
@@ -209,11 +214,14 @@ export function OneDispatchNotice({ notice, locale, onOpenChat, onOpenLinkedFile
         {ko ? "이 보고서의 원문을 불러오지 못했습니다. 팀원 세션에서 확인할 수 있어요." : "The full report could not be loaded. You can check the teammate's session."}
       </p>}
     </>}
-    {question && answeredSource !== question.sourceMessageId && <ChatQuestionSheet
+    {question && answeredSource !== question.sourceMessageId && !questionClosed && <QuestionCardHost
+      source="room-member"
+      chatId={current.chatId}
       questions={(question.questionBank?.questions ?? question.questions).map((item,index) => ({...item,id:`${question.sourceMessageId}-q${index}`}))}
       initialReply={question.committedReply}
       onRetryCommitted={question.committedReply ? () => { void answer(question.committedReply!); } : undefined}
-      busy={answerBusy} onConfirm={(reply) => { void answer(reply); }} onDismiss={() => setAnsweredSource(question.sourceMessageId)} />}
+      busy={answerBusy} onConfirm={(reply) => { void answer(reply); }} onDismiss={() => closeQuestionCard(current.chatId, questionCardKey, (question.questionBank?.questions ?? question.questions).length)} />}
+    {question && answeredSource !== question.sourceMessageId && questionClosed && <ClosedQuestionLine count={questionClosed.count} onReopen={() => reopenQuestionCard(current.chatId, questionCardKey)} />}
     {answerError && <p role="alert" style={{fontSize:12,color:"var(--muted-deep)"}}>{answerError}</p>}
     {dispatch && current.purpose === "one-dispatch-link" && (status === "running" || status === "waiting_input") && <>
       <ToolApprovalInline chatId={current.chatId} compact />

@@ -17,9 +17,8 @@ import {
   IconSparkles,
   IconToolchain,
 } from "@/components/Icon";
-import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
+import type { OneActivityState } from "@/lib/one-activity";
 import type { OneThreadRunBlock } from "@/lib/one-thread-work";
-import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
 import { ToolObservation } from "../ToolObservation";
 import { toolObservationAction } from "@/lib/tool-observation";
 import { toolchainSourcesOf, type ToolchainSourceRef } from "@/lib/toolchain-source";
@@ -33,6 +32,9 @@ import {
   groupOneWorkerWork,
   isOneOrchestratorGroup,
   isQuietHostNote,
+  commandWorkLabel,
+  runWasRefused,
+  recoveredFailedCellIds,
   workerModelLabel,
   type OneWorkerWorkGroup,
   formatWorkElapsed,
@@ -209,7 +211,7 @@ function cellOriginBadge(cell: OneWorkCell, locale: "ko" | "en") {
 }
 
 function statusSuffix(cell: OneWorkCell, locale: "ko" | "en"): ReactNode {
-  if (cell.kind === "call" && cell.failureCode) {
+  if ((cell.kind === "call" || cell.kind === "run") && cell.failureCode) {
     const copy = toolFailureCopy(cell.failureCode, locale);
     if (copy) {
       const tone = cell.failureCode === "tool_failed"
@@ -245,6 +247,9 @@ function ShellResultFooter({ cell, locale }: {
   cell: Extract<OneWorkCell, { kind: "run" }>;
   locale: "ko" | "en";
 }) {
+  if (runWasRefused(cell)) {
+    return <span className={styles.muted} data-shell-outcome="not-run">{locale === "ko" ? "실행 안 함 · 승인되지 않음" : "Not run · not approved"}</span>;
+  }
   const outcome = shellExecutionOutcome(cell);
   if (outcome === "failed") {
     return (
@@ -313,6 +318,7 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
                     </span>
                     <span className={styles.exploreTarget}>{entry.label}</span>
                     {entry.origin && <ToolOriginBadge origin={entry.origin} locale={locale} />}
+                    {entry.failure && <span className={styles.exploreFailure} data-explore-failure="true">{entry.failure}</span>}
                   </span>
                 ))}
               </span>
@@ -633,6 +639,7 @@ export function OneTurnWork({
   interruptionCause,
   hostStopCause,
   supersededByRunId,
+  supersededByCompleted = false,
   onRetry,
   retryDisabled = false,
   onInspectWorker,
@@ -669,6 +676,11 @@ export function OneTurnWork({
    * not a red failure, and its failure rows fold away with the rest (owner Yotube 2026-10-17: a recovered failure stayed red).
    */
   supersededByRunId?: string;
+  /**
+   * the later run that took this run's request over COMPLETED (ledger status of that run). A step of this run that failed is then history
+   * (the blocked write the continuation finished), not the run's state: no failed-step count, no failure rows; one quiet tag says so.
+   */
+  supersededByCompleted?: boolean;
   /** 낸 오류에는 푸는 길이 있어야 한다 — 중단된 턴의 질문을 다시 보낸다. */
   onRetry?: () => void;
   retryDisabled?: boolean;
@@ -679,7 +691,6 @@ export function OneTurnWork({
 }) {
   const ko = locale === "ko";
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
-  const automationRegistrations = useMemo(() => extractAutomationRegistrations(state), [state]);
   const toolchainSources = useMemo(() => toolchainSourcesOf(presentation.cells), [presentation.cells]);
   // A run Main still executes is live even when this screen did not start or attach to it: its durable receipt says so
   // (production Yotube 2026-10-17: a Goal turn the update restart resumed was drawn as a finished, frozen block).
@@ -702,6 +713,10 @@ export function OneTurnWork({
   const recovered = !active && !steeringInterrupted && Boolean(supersededByRunId)
     && (runStatus === "failed" || runStatus === "interrupted");
   const interrupted = !active && runStatus === "interrupted" && !steeringInterrupted;
+  // The person's own Stop (here, in another window or on the phone) is told on the work line itself, quietly: the turn's answer is not
+  // there, and a line that only says "worked for 53s" reads as an answer that vanished. A host stop (update, quit, Goal pause) and a
+  // steering interruption keep their own copy; the typed terminal status decides, never wording.
+  const stoppedByOwner = !active && !steeringInterrupted && !hostStopCause && !recovered && presentation.terminal === "cancelled";
   // Only active runs use a wall clock. Settled rows require a measured,
   // immutable lifecycle duration; revisiting a task must not add idle time.
   const settledMs = active ? liveElapsedMs : presentation.durationMs;
@@ -744,12 +759,14 @@ export function OneTurnWork({
   const hasPlan = planEntries.length > 0;
   // Failures and owner waits are never folded away; everything else opens from the one line. A recovered run's failure is
   // history: its rows open from the line like the rest.
-  const ownerEyeCells = useMemo(() => recovered ? [] : inlineCells.filter(needsOwnerEye), [inlineCells, recovered]);
+  const ownerEyeCells = useMemo(() => recovered || (!active && runStatus === "completed" && Boolean(supersededByRunId) && supersededByCompleted) ? [] : inlineCells.filter(needsOwnerEye), [inlineCells, recovered, active, runStatus, supersededByRunId, supersededByCompleted]);
   // Failed steps not already drawn as their own row stay countable on the folded line.
-  const failedStepCount = recovered ? 0 : visibleCells.filter((cell) => cell.kind !== "notice" && !needsOwnerEye(cell)
+  const stepsRecovered = !active && !steeringInterrupted && runStatus === "completed" && Boolean(supersededByRunId) && supersededByCompleted;
+  const recoveredInTurn = useMemo(() => recoveredFailedCellIds(visibleCells), [visibleCells]);
+  const failedStepCount = recovered || stepsRecovered ? 0 : visibleCells.filter((cell) => cell.kind !== "notice" && !needsOwnerEye(cell) && !runWasRefused(cell) && !recoveredInTurn.has(cell.id)
     && (cell.status === "failed" || (cell.kind === "run" && cell.exitCode != null && cell.exitCode !== 0))).length;
 
-  if (!active && !loginWaiting && !hasRows && !hasPlan && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !state.artifacts.length) {
+  if (!active && !loginWaiting && !hasRows && !hasPlan && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !stoppedByOwner && !state.artifacts.length) {
     // Nothing happened beyond the answer itself (no thought, no tool). Codex
     // shows no work line for such a turn.
     return null;
@@ -761,12 +778,13 @@ export function OneTurnWork({
   // Claude 처럼 접힌 줄이 "무엇을" 했는지 먼저 말한다(레퍼런스 "명령 2개 실행함 ›") — 명령이 있던 턴은
   // 명령 개수 + 걸린 시간, 없으면 지금처럼 걸린 시간만. 개수는 실제로 돈 명령 행(run 칸)만 센다.
   const commandCount = visibleCells.filter((cell) => cell.kind === "run").length;
+  const commandLabel = commandWorkLabel(visibleCells, locale);
   const elapsedLabel = settledMs != null ? formatWorkElapsed(settledMs, locale) : null;
   const planDone = planEntries.filter((entry) => entry.status === "completed").length;
   const workedFor = hasPlan
     ? (ko ? `${planDone}/${planEntries.length}단계 완료` : `${planDone}/${planEntries.length} steps done`)
-    : commandCount > 0
-      ? (ko ? `명령 ${commandCount}개 실행함` : `Ran ${commandCount} command${commandCount === 1 ? "" : "s"}`)
+    : commandLabel
+      ? commandLabel
       : settledMs != null
         ? (ko ? `${formatWorkElapsed(settledMs, locale)} 동안 작업` : `Worked for ${formatWorkElapsed(settledMs, locale)}`)
         : (ko ? "작업" : "Work");
@@ -792,12 +810,16 @@ export function OneTurnWork({
       {failedStepCount > 0 && (
         <span className={styles.summaryAlert} data-failed-steps={failedStepCount}
           title={ko ? `실패한 단계 ${failedStepCount}개` : `${failedStepCount} failed ${failedStepCount === 1 ? "step" : "steps"}`}>
-          <IconAlertTriangle size={11} strokeWidth={1.8} />{failedStepCount}
+          <IconAlertTriangle size={11} strokeWidth={1.8} />{/* While the turn is still running the failed step is an earlier one, not the turn ("답변 작성 중 실패 1" read as the answer failing). */}{active ? (ko ? `앞 단계 실패 ${failedStepCount}` : `${failedStepCount} earlier ${failedStepCount === 1 ? "step" : "steps"} failed`) : (ko ? `실패 ${failedStepCount}` : `${failedStepCount} failed`)}
         </span>
       )}
-      {/* Host stops, owner stops, steering and unanswered turns are internal states: not drawn (owner 2026-10-14). */}
+      {/* Host stops, steering and unanswered turns are internal states and draw nothing; the person's own Stop is the quiet "중지함" tag below. */}
       {failed && terminal === "failed" && (
         <span className={styles.headerTerminal}>{ko ? "실패" : "failed"}</span>
+      )}
+      {stoppedByOwner && <span className={styles.summaryModel} data-stopped-by-owner="true">{ko ? "중지함" : "Stopped"}</span>}
+      {stepsRecovered && (
+        <span className={styles.summaryModel} data-steps-recovered={supersededByRunId}>{ko ? "막힌 단계는 다음 실행에서 끝냄" : "A blocked step was finished by the next run"}</span>
       )}
       {recovered && (
         <span className={styles.summaryModel} data-superseded-by={supersededByRunId}>{ko ? "다음 실행이 이어받음" : "Taken over by the next run"}</span>
@@ -875,18 +897,8 @@ export function OneTurnWork({
         </div>
       )}
     </section>
-    {/* 자동화 등록 영수증(automation.create/update)은 접힌 작업 행 안의 한 줄이
-        아니라 대화의 1급 결과 카드다 — 호스트가 확인한 등록만 여기 승격된다. */}
-    {automationRegistrations.map((registration) => (
-      <OneAutomationRegistrationCard
-        key={`automation-registration:${registration.itemId}`}
-        automationId={registration.automationId}
-        name={registration.name}
-        action={registration.action}
-        schedule={registration.schedule}
-        locale={locale}
-      />
-    ))}
+    {/* A registered / changed schedule is told once, by its receipt card (the stored `view:receipt:` row the host wrote with the registration);
+        the tool event no longer draws a second card for it. */}
     {artifactScope && <BoundImageArtifacts items={state.artifacts} chatId={artifactScope.chatId} runId={artifactScope.runId} locale={locale} />}
     <OneTurnWorkDividers presentation={presentation} />
     </>

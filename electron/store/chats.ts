@@ -12,6 +12,7 @@ import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
 import { isStoreBusyError, runWithStoreBusyRetry } from "./store-busy-retry";
 import { takePreparedUserRow } from "./prepared-user-rows";
+import { groupRoomTitleOf } from "./group-room-title";
 import { bindChatFileGroupToMessage } from "./chat-file-message-bindings";
 import { oneDispatchSidebarPredicate, createOneDispatchNoticeProjector } from "../one/dispatch-presentation";
 import { personalAgentRoomIdsAmong } from "../one/personal-agent-rooms";
@@ -899,6 +900,23 @@ export function getOrCreateStudioSession(studioKey: string): Chat {
   return createChat({ title: marker, kind: "division" });
 }
 
+export { groupRoomTitleOf };
+
+/** The taskforce id when this chat is a group room whose stored names were changed to follow `title`; null otherwise (not a room, or already the same name). */
+function syncGroupRoomName(db: ReturnType<typeof getDb>, chatId: string, title: string, at: string): string | null {
+  const name = groupRoomTitleOf(title);
+  if (!name) return null;
+  try {
+    const row = db.prepare("SELECT id FROM one_taskforces WHERE chat_id = ?").get(chatId) as { id: string } | undefined;
+    if (!row) return null;
+    // The room's revision moves with its name: a form opened before the rename no longer passes the edit check. A same-name write
+    // changes nothing and leaves the revision alone.
+    const moved = db.prepare("UPDATE one_taskforces SET title = ?, revision = revision + 1 WHERE id = ? AND title <> ?").run(name, row.id, name).changes;
+    db.prepare("UPDATE one_seats SET title = ?, updated_at = ? WHERE id = ? AND title <> ?").run(name, at, `seat_tf_${row.id}`, name);
+    return moved ? row.id : null;
+  } catch { return null; /* no taskforce tables in this store: not a group room */ }
+}
+
 export function renameChat(id: string, title: string): Chat {
   // 빈 문자열 허용 — UI는 fallback 라벨 표시
   const db = getDb();
@@ -906,6 +924,7 @@ export function renameChat(id: string, title: string): Chat {
   const updatedAt = new Date().toISOString();
   // A Work task and its root chat are the same user-facing object. Updating
   // only chats left project sidebars and dashboard cards stuck on "New task".
+  const synced: { groupId: string | null } = { groupId: null };
   db.transaction(() => {
     db.prepare("UPDATE chats SET title = ?, updated_at = ? WHERE id = ?")
       .run(nextTitle, updatedAt, id);
@@ -914,9 +933,13 @@ export function renameChat(id: string, title: string): Chat {
     // explicit acceptance binds to after a run finishes.
     db.prepare("UPDATE tasks SET title = ? WHERE origin_chat_id = ?")
       .run(nextTitle, id);
+    // A group room's name also sits on its taskforce row and its seat. Renaming only the chat left those two on the old name, and the
+    // members dialog (which reads the taskforce row) wrote the old name back over the new one on the next member save.
+    synced.groupId = syncGroupRoomName(db, id, nextTitle, updatedAt);
   })();
   const chat = getChat(id) as Chat;
   emitDesktopStoreChange({ entity: "chat", id });
+  if (synced.groupId) emitDesktopStoreChange({ entity: "one-taskforce", id: synced.groupId });
   emitTaskStoreChange(getDb(), `task_${id}`);
   return chat;
 }
@@ -1139,7 +1162,13 @@ interface MessageRow {
   created_at: string;
   host_notice_json?: string | null;
   speaker_agent_id?: string | null;
+  client_intent_id?: string | null;
 }
+
+/** A history row with the composer's intent id when the row was saved from one. (ChatHistoryEntry.clientIntentId is the same field once shared/types.ts carries it: patch-types.) */
+export type StoredChatEntry = ChatHistoryEntry & { clientIntentId?: string };
+
+const CLIENT_INTENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 // Builds before v0.9.36 accidentally persisted the CEO's private synthesis
 // packet as a second user turn. The current invocation path records
@@ -1198,12 +1227,59 @@ export function appendChatMessage(
   role: "user" | "assistant" | "system",
   rawText: string,
   options?: ChatMessageAppendOptions,
-): ChatHistoryEntry {
+): StoredChatEntry {
+  return writeChatMessage(chatId, role, rawText, options, null) as StoredChatEntry;
+}
+
+/**
+ * The stop epoch of a conversation (chats.stop_epoch, schema v142): raised by `chat.stop`, never lowered. A writer that is not a run (a
+ * Goal wake, a continuation, an auto-message) reads it when it starts and writes through appendChatMessageIfStopEpoch, so a Stop that came
+ * after it started leaves it nothing to write. A chat that is gone reads 0.
+ */
+export function getChatStopEpoch(chatId: string): number {
+  const row = getDb().prepare("SELECT stop_epoch AS epoch FROM chats WHERE id = ?").get(chatId) as { epoch: number } | undefined;
+  return row?.epoch ?? 0;
+}
+
+/** Raises the epoch by one and returns the new value (0 when the chat does not exist). The caller of chat.stop owns the rest of the Stop. */
+export function bumpChatStopEpoch(chatId: string): number {
+  const db = getDb();
+  return db.transaction(() => {
+    db.prepare("UPDATE chats SET stop_epoch = stop_epoch + 1 WHERE id = ?").run(chatId);
+    return getChatStopEpoch(chatId);
+  }).immediate();
+}
+
+/**
+ * Writes the row only when the chat's stop epoch still equals `expectedEpoch`, checked inside the write transaction (BEGIN IMMEDIATE),
+ * so a Stop and a wake that run at the same instant end with exactly one of them winning: a write that commits first stays above the
+ * Stop line, a Stop that commits first leaves the write nothing. Returns null (nothing written, no event) when the epoch moved.
+ */
+export function appendChatMessageIfStopEpoch(
+  chatId: string,
+  role: "user" | "assistant" | "system",
+  rawText: string,
+  expectedEpoch: number,
+  options?: ChatMessageAppendOptions,
+): StoredChatEntry | null {
+  return writeChatMessage(chatId, role, rawText, options, { expectedEpoch });
+}
+
+function writeChatMessage(
+  chatId: string,
+  role: "user" | "assistant" | "system",
+  rawText: string,
+  options: ChatMessageAppendOptions | undefined,
+  guard: { expectedEpoch: number } | null,
+): StoredChatEntry | null {
   // A mistyped ask open marker is repaired once, here, so the inbox query, mobile and every surface read one shape.
   const text = role === "assistant" ? repairAskOpenMarkers(rawText) : rawText;
+  // The composer's id for this message (a person's text only). A malformed id is dropped, never stored: the row is then matched by its own id.
+  const clientIntentId = role === "user" && typeof options?.clientIntentId === "string" && CLIENT_INTENT_ID_RE.test(options.clientIntentId)
+    ? options.clientIntentId : null;
   // The send queue saved this message when it was accepted; the run that finally starts it must not add a second bubble.
   if (role === "user") {
-    const prepared = takePreparedUserRow<ChatHistoryEntry>(chatId, text);
+    const prepared = takePreparedUserRow<StoredChatEntry>(chatId, text, clientIntentId);
     if (prepared) return prepared;
   }
   const id = randomUUID();
@@ -1222,11 +1298,17 @@ export function appendChatMessage(
   const goalId = role === "assistant" && !options?.hostNotice && !options?.noGoalResult ? getChat(chatId)?.goalId : null;
   const goalResult: GoalResultPresentation | undefined = goalId ? { goalId, runId: null, status: "pending" } : undefined;
   let persistedImageUrls: string[] | undefined;
+  let outcome = "written" as "written" | "stopped" | "same-intent";
   const write = db.transaction(() => {
+    outcome = "written";
+    if (guard && getChatStopEpoch(chatId) !== guard.expectedEpoch) { outcome = "stopped"; return; }
+    // The same intent in the same chat is the same message: a retry (renderer died after the IPC went through, a second window) finds
+    // its row instead of adding a second bubble. The unique index is the cross-process backstop.
+    if (clientIntentId && db.prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND client_intent_id = ?").get(chatId, clientIntentId)) { outcome = "same-intent"; return; }
     db.prepare(
-      "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json, speaker_agent_id, row_scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json, speaker_agent_id, row_scope, client_intent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(id, chatId, role, text, now, hostNotice ? JSON.stringify(hostNotice) : null, speakerAgentId,
-      options?.rowScope === "runtime-input" && role !== "assistant" ? "runtime-input" : null);
+      options?.rowScope === "runtime-input" && role !== "assistant" ? "runtime-input" : null, clientIntentId);
     if (role === "user" && options?.fileGroupId) {
       bindChatFileGroupToMessage(db, { chatId, messageId: id, groupId: options.fileGroupId });
     }
@@ -1258,7 +1340,24 @@ export function appendChatMessage(
   // A refused write left nothing behind (the transaction rolled back), so it is the same write, with the same id, that runs
   // again. Everything after it is bookkeeping about a row that is already committed: a lock there must not turn a saved
   // answer into a failed turn, and (worse) must not make a caller write the row a second time.
-  runWithStoreBusyRetry(write);
+  const attempt = (): void => { if (guard) write.immediate(); else write(); };
+  const existingForIntent = (): StoredChatEntry | null => {
+    if (!clientIntentId) return null;
+    const row = db.prepare("SELECT id, role, text, created_at, host_notice_json, speaker_agent_id, client_intent_id FROM chat_messages WHERE chat_id = ? AND client_intent_id = ?")
+      .get(chatId, clientIntentId) as MessageRow | undefined;
+    return row ? projectChatMessageRows(chatId, [row])[0] ?? null : null;
+  };
+  try {
+    runWithStoreBusyRetry(attempt);
+  } catch (error) {
+    // Another process saved the same intent between the check and the insert (the unique index refused ours): that row is the message.
+    const raced = /UNIQUE constraint failed: chat_messages\.chat_id, chat_messages\.client_intent_id/.test(String((error as Error)?.message ?? ""))
+      ? existingForIntent() : null;
+    if (!raced) throw error;
+    return raced;
+  }
+  if (outcome === "stopped") return null;
+  if (outcome === "same-intent") return existingForIntent();
   try {
     const chat = getChat(chatId);
     if (chat?.projectId) touchProject(chat.projectId);
@@ -1273,6 +1372,7 @@ export function appendChatMessage(
     ...(goalResult ? { goalResult } : {}),
     role,
     ...(speakerAgentId ? { speakerAgentId } : {}),
+    ...(clientIntentId ? { clientIntentId } : {}),
     text,
     createdAt: now,
     ...(hostNotice ? { hostNotice } : {}),
@@ -1298,6 +1398,11 @@ type ChatMessageAppendOptions = {
   speakerAgentId?: string;
   /** A teammate's working-room message is not the Goal's answer, so it never waits for a verification verdict. */
   noGoalResult?: boolean;
+  /**
+   * The id the composer made for this message (user rows only). Saved on the row so every surface matches the bubble it drew to the saved
+   * row by id; the same id in the same chat is the same message and is saved once. A value that is not an id is ignored.
+   */
+  clientIntentId?: string;
 };
 
 /** Completion may be published only after its exact assistant body is durable. */
@@ -1470,6 +1575,19 @@ export function answerStartIn(text: string, recorded: StoredAnswerStart | undefi
   if (!recorded || recorded.at <= 0) return 0;
   if (text.length === recorded.len) return recorded.at < text.length && text.slice(recorded.at).trim() ? recorded.at : 0;
   return recorded.tailHash === null ? 0 : locateAnswerStart(text, { at: recorded.at, tailHash: recorded.tailHash });
+}
+
+/** A history page with the answer start of each assistant row that has one (see ChatHistoryEntry.answerStart); a row without one is returned as it is. */
+export function withAnswerStarts<P extends { messages: ChatHistoryEntry[] }>(chatId: string, page: P): P {
+  const ids = page.messages.filter((message) => message.role === "assistant").map((message) => message.id);
+  if (!ids.length) return page;
+  const starts = storedAnswerStarts(chatId, ids);
+  if (!starts.size) return page;
+  return { ...page, messages: page.messages.map((message) => {
+    if (message.role !== "assistant") return message;
+    const at = answerStartIn(message.text, starts.get(message.id));
+    return at > 0 ? { ...message, answerStart: at } : message;
+  }) };
 }
 
 /** Bind by exact persisted body and invocation interval, never by "latest answer" alone. */
@@ -1707,8 +1825,8 @@ function legacyGoalResults(chatId: string, messageIds: string[]): Map<string, Go
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
   const rows = getDb()
     .prepare(
-      `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id FROM (
-         SELECT rowid AS seq, id, role, text, created_at, host_notice_json, speaker_agent_id
+      `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id, client_intent_id FROM (
+         SELECT rowid AS seq, id, role, text, created_at, host_notice_json, speaker_agent_id, client_intent_id
            FROM chat_messages
           WHERE chat_id = ?
             AND NOT (role = 'user' AND instr(text, ?) > 0)
@@ -1787,7 +1905,7 @@ function readChatMessageKeyset(
   options: { excludeSystem?: boolean; uiAnchor?: boolean } = {},
 ): { messages: ChatHistoryEntry[]; hasOlder: boolean } {
   const rows = getDb().prepare(
-    `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id
+    `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id, client_intent_id
        FROM chat_messages
       WHERE chat_id = ? AND NOT (role = 'user' AND instr(text, ?) > 0)
         ${options.excludeSystem ? "AND role != 'system'" : ""}
@@ -1822,7 +1940,7 @@ export function listSeatMessagesPage(
     throw new TypeError("History cursor no longer matches this seat; reload the newest page");
   }
   const rows = db.prepare(
-    `SELECT m.id, m.chat_id, m.role, m.text, m.created_at, m.host_notice_json, m.speaker_agent_id
+    `SELECT m.id, m.chat_id, m.role, m.text, m.created_at, m.host_notice_json, m.speaker_agent_id, m.client_intent_id
        FROM chat_messages m
       WHERE ${direct} AND NOT (m.role = 'user' AND instr(m.text, ?) > 0)
         ${before ? "AND (m.created_at < ? OR (m.created_at = ? AND m.rowid < (SELECT rowid FROM chat_messages WHERE id = ?)))" : ""}
@@ -1852,7 +1970,7 @@ export function listAgentRoomWorkMessages(agentId: string, limit: number): Array
   if (!Number.isInteger(limit) || limit < 1 || limit > 400) throw new TypeError("Invalid room work limit");
   if (typeof agentId !== "string" || !agentId) throw new TypeError("Agent id is required");
   const rows = getDb().prepare(
-    `SELECT m.id, m.chat_id, m.role, m.text, m.created_at, m.host_notice_json, m.speaker_agent_id,
+    `SELECT m.id, m.chat_id, m.role, m.text, m.created_at, m.host_notice_json, m.speaker_agent_id, m.client_intent_id,
             p.id AS room_id, p.title AS room_title
        FROM chat_messages m
        JOIN chats c ON c.id = m.chat_id
@@ -1931,7 +2049,7 @@ function createSettledHostNoticeProjector(chatId: string, notices: ReadonlyArray
   };
 }
 
-function projectChatMessageRows(chatId: string, rows: MessageRow[]): ChatHistoryEntry[] {
+function projectChatMessageRows(chatId: string, rows: MessageRow[]): StoredChatEntry[] {
   const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
   const goalResults = storedGoalResults(chatId, rows.filter((row) => row.role === "assistant").map((row) => row.id));
   const legacyResults = legacyGoalResults(chatId, rows.filter((row) => row.role === "assistant" && !goalResults.has(row.id)).map((row) => row.id));
@@ -1947,6 +2065,7 @@ function projectChatMessageRows(chatId: string, rows: MessageRow[]): ChatHistory
         ? { goalResult: goalResults.get(r.id) ?? legacyResults.get(r.id) } : {}),
       role: r.role,
       ...(r.role === "assistant" && r.speaker_agent_id ? { speakerAgentId: r.speaker_agent_id } : {}),
+      ...(r.client_intent_id ? { clientIntentId: r.client_intent_id } : {}),
       text: r.text,
       createdAt: r.created_at,
       ...(hostNotice ? { hostNotice } : {}),
@@ -2024,6 +2143,20 @@ export function upsertViewNoticeRow(input: { id: string; chatId: string; text: s
   return recordViewNoticeRow(input) === "written" ? "written" : "refused";
 }
 
+/**
+ * The person dismisses a hand-off card that ended badly (failed, expired, cancelled): its one record row goes. Only a `handoff-card:` row (never a receipt, an answer or a person's message), only a 'view' system row.
+ * Returns whether a row was removed. The card's work is over, so nothing else keeps its state.
+ */
+export function deleteHandoffCardRow(id: string): boolean {
+  if (!id.startsWith("handoff-card:") || id.length > 300) return false;
+  const db = getDb();
+  const row = db.prepare("SELECT chat_id FROM chat_messages WHERE id = ? AND role = 'system' AND row_scope = 'view'").get(id) as { chat_id: string } | undefined;
+  if (!row) return false;
+  const changed = runWithStoreBusyRetry(() => db.prepare("DELETE FROM chat_messages WHERE id = ? AND role = 'system' AND row_scope = 'view'").run(id).changes);
+  if (changed) emitDesktopStoreChange({ entity: "chat", id: row.chat_id });
+  return changed > 0;
+}
+
 /** The text of a view row (by id), or null. */
 export function getViewRowText(id: string): string | null {
   const row = getDb().prepare("SELECT text FROM chat_messages WHERE id = ? AND row_scope = 'view'").get(id) as { text: string } | undefined;
@@ -2040,7 +2173,7 @@ export function getLastChatMessage(chatId: string): ChatHistoryEntry | null {
   // The closed-request line is a record beside the conversation, never its last message (a pending question card is judged by the last row).
   const row = getDb()
     .prepare(
-      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND id NOT LIKE 'approval-closed:%' AND id NOT LIKE 'server-app-done:%' AND id NOT LIKE 'handoff-card:%' AND id NOT LIKE 'handoff-recv:%' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+      "SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? AND id NOT LIKE 'approval-closed:%' AND id NOT LIKE 'server-app-done:%' AND id NOT LIKE 'handoff-card:%' AND id NOT LIKE 'handoff-recv:%' AND id NOT LIKE 'view:receipt:%' ORDER BY created_at DESC, rowid DESC LIMIT 1",
     )
     .get(chatId) as MessageRow | undefined;
   return row

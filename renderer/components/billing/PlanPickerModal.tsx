@@ -16,6 +16,7 @@ import { IconCircleDollar, IconAlertTriangle } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
 import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { useT } from "@/lib/i18n";
+import { useWorkspaceDialog } from "@/components/agent-workspace/use-workspace-dialog";
 import type { BillingCheckoutReadiness, BillingPlanOffer } from "@/lib/types";
 import { PRICING_PAGE_URL, PLAN_CHANGED_EVENT, type PlanPickerSource } from "@/lib/plan-picker";
 export { PRICING_PAGE_URL, PLAN_CHANGED_EVENT } from "@/lib/plan-picker";
@@ -50,7 +51,7 @@ function makeCopy(ko: boolean) {
     recommended: "추천",
     soon: "곧 출시",
     everything: (name: string) => `${name}의 모든 기능`,
-    credits: (n: string) => `월 ${n} AI 크레딧`,
+    usage: (free: boolean) => (free ? "기본 AI 사용량" : "더 많은 AI 사용량"),
     cloud: (n: string) => `Cloud 에이전트 ${n}개 보관`,
     mail: (addresses: string, recipients: string) => `에이전트 전용 메일 주소 ${addresses}개 · 월 ${recipients}명 발송`,
     byo: "내 AI 구독 연결 · 로컬 실행",
@@ -88,7 +89,7 @@ function makeCopy(ko: boolean) {
     recommended: "Recommended",
     soon: "Coming soon",
     everything: (name: string) => `Everything in ${name}`,
-    credits: (n: string) => `${n} AI credits / month`,
+    usage: (free: boolean) => (free ? "Basic AI usage" : "More AI usage"),
     cloud: (n: string) => `Keep ${n} Cloud agents`,
     mail: (addresses: string, recipients: string) => `${addresses} agent mail address · ${recipients} recipients / month`,
     byo: "Connect your own AI · local runs",
@@ -133,7 +134,6 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
   const [currentPlan, setCurrentPlan] = useState<string | null>(null);
   const [cycle, setCycle] = useState<Cycle>("monthly");
   const [checkout, setCheckout] = useState<Record<string, CardCheckout>>({});
-  const closeRef = useRef<HTMLButtonElement | null>(null);
   const pendingPlanRef = useRef<string | null>(null);
 
   const loadPlans = useCallback(async () => {
@@ -159,9 +159,13 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
     void loadCurrent();
   }, [open, loadPlans, loadCurrent]);
 
+  // The app's one modal focus rule (agent-workspace/use-workspace-dialog): Tab and Shift+Tab stay inside the dialog (Tab used to leave the open plan dialog for the
+  // sidebar behind it), the first control takes the focus when it opens, and the control that opened it gets the focus back when it closes (Esc used to drop it on
+  // the sidebar). Declared before the effect below so it reads the opener before anything moves the focus.
+  const scrimRef = useRef<HTMLDivElement>(null);
+  useWorkspaceDialog(open, scrimRef as React.RefObject<HTMLElement>, onClose);
   useEffect(() => {
     if (!open) return;
-    closeRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") { event.stopPropagation(); onClose(); }
     };
@@ -217,9 +221,9 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
   const currentIndex = plans && effectiveCurrent ? plans.findIndex((plan) => plan.id === effectiveCurrent) : -1;
 
   return (
-    <div className={styles.scrim} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }} data-plan-picker data-plan-picker-source={source}>
+    <div ref={scrimRef} className={styles.scrim} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }} data-plan-picker data-plan-picker-source={source}>
       <div className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="plan-picker-title">
-        <button ref={closeRef} type="button" className={styles.close} onClick={onClose} aria-label={copy.close}>×</button>
+        <button type="button" className={styles.close} onClick={onClose} aria-label={copy.close}>×</button>
         <div className={styles.planMark} aria-hidden="true"><IconCircleDollar size={23}/></div><h2 id="plan-picker-title" className={styles.title}>{copy.title}</h2>
 
         {plans && (
@@ -262,7 +266,7 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
               const state = checkout[plan.id];
               const features: Array<{ key: string; text: string }> = [];
               if (previous) features.push({ key: "everything", text: copy.everything(previous.name) });
-              features.push({ key: "credits", text: copy.credits(num(plan.monthlyCredits)) });
+              features.push({ key: "credits", text: copy.usage(free) });
               features.push({ key: "cloud", text: copy.cloud(num(plan.cloudAgentLimit)) });
               if ((plan.agentMailAddresses ?? 0) > 0) {
                 features.push({ key: "agentMail", text: copy.mail(num(plan.agentMailAddresses ?? 0), num(plan.agentMailMonthlyRecipients ?? 0)) });
@@ -281,7 +285,7 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
                     <h3>{plan.name}</h3>
                     {plan.highlighted && !isCurrent && <span className={styles.badge}>{copy.recommended}</span>}
                   </header>
-                  <p className={styles.tagline}>{plan.tagline || copy.taglines[plan.id] || ""}</p>
+                  <p className={styles.tagline}>{(ko ? copy.taglines[plan.id] || plan.tagline : plan.tagline || copy.taglines[plan.id]) || ""}</p>
                   <div className={styles.price}>
                     <strong>{money(Math.round(price * 100) / 100)}</strong>
                     <span>{free ? copy.forever : copy.perMonth}</span>

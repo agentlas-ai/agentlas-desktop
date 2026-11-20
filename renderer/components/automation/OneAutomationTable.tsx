@@ -9,7 +9,7 @@ import Link from "next/link";
 import { ipc } from "@/lib/ipc";
 import { humanSchedule } from "@shared/graph-blueprint";
 import type { Automation, AutomationRunRecord } from "@/lib/types";
-import { enabledScheduleWithoutNextRun } from "@/lib/automation-schedule-state";
+import { enabledScheduleWithoutNextRun, isEndedOneShot } from "@/lib/automation-schedule-state";
 import { IconTrash } from "@/components/Icon";
 
 type LastRun = { ranAt: string; status: AutomationRunRecord["status"] } | null;
@@ -30,6 +30,7 @@ function lastRunLabel(run: LastRun, ko: boolean): string {
 }
 
 function nextRunLabel(a: Automation, ko: boolean): string {
+  if (isEndedOneShot(a)) return ko ? "종료됨" : "Ended";
   if (!a.enabled) return ko ? "정지됨" : "paused";
   if (enabledScheduleWithoutNextRun(a)) return ko ? "다음 예약 없음 · 실행 내역 확인" : "No next run · check history";
   if (!a.nextRunAt) return "—";
@@ -129,11 +130,18 @@ export function OneAutomationTable({
                 <td style={{ ...cell, color: run?.status === "error" ? "#c0392b" : "var(--muted-deep)" }}>{lastRunLabel(run, ko)}</td>
                 <td style={{ ...cell, color: "var(--muted-deep)" }}>{nextRunLabel(a, ko)}</td>
                 <td style={{ ...cell, textAlign: "right", whiteSpace: "nowrap" }}>
-                  <button
-                    type="button"
-                    onClick={() => onToggle(a.id, !a.enabled)}
-                    style={{ marginRight: 6, padding: "4px 10px", fontSize: 11, borderRadius: 7, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", color: "var(--ink-soft)", cursor: "pointer" }}
-                  >{a.enabled ? (ko ? "정지" : "Pause") : (ko ? "다시 켜기" : "Resume")}</button>
+                  {isEndedOneShot(a)
+                    // 끝난 한 번짜리는 켜기가 거절된다 — 시각을 바꾸는 편집으로 보낸다.
+                    ? <Link
+                        href={`/automation/new?id=${encodeURIComponent(a.id)}`}
+                        className="titlebar-nodrag"
+                        style={{ marginRight: 6, padding: "4px 10px", fontSize: 11, borderRadius: 7, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", color: "var(--ink-soft)", textDecoration: "none" }}
+                      >{ko ? "시각 바꾸기" : "Change time"}</Link>
+                    : <button
+                        type="button"
+                        onClick={() => onToggle(a.id, !a.enabled)}
+                        style={{ marginRight: 6, padding: "4px 10px", fontSize: 11, borderRadius: 7, border: "1px solid var(--paper-edge)", background: "var(--paper-2)", color: "var(--ink-soft)", cursor: "pointer" }}
+                      >{a.enabled ? (ko ? "정지" : "Pause") : (ko ? "다시 켜기" : "Resume")}</button>}
                   <button
                     type="button"
                     onClick={() => onRemove(a.id)}

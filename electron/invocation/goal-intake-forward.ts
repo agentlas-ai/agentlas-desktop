@@ -25,6 +25,7 @@ import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { DeviceBridgeError, daemonDeviceBridge } from "../daemon/device-bridge";
 import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
+import { ownerStoppedSince } from "../chat/chat-stop";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { tryRecordRunEvent } from "../store/run-events";
 import { followDaemonTurnGoal } from "../long-run/daemon-turn-goal";
@@ -131,6 +132,12 @@ async function performIntake(input: GoalIntakeForward, text: string, signal: Abo
     if (signal.aborted) return done("unavailable", "goal_intake_cancelled", { retryScheduled: false });
     const chat = getChat(input.chatId);
     if (!chat) return done("source_invalid", "chat_missing");
+    // The person pressed Stop after the message that would become a Goal and has said nothing since: no Goal is admitted (it would wake turns
+    // into a chat they stopped). The ordinary answer stands; the marker ends here (a classification is a model call we do not make).
+    try {
+      const sent = getDb().prepare("SELECT created_at FROM chat_messages WHERE id = ?").get(input.sourceMessageId) as { created_at: string } | undefined;
+      if (sent && ownerStoppedSince(input.chatId, sent.created_at)) return done("bypass", "owner_stopped_before_intake");
+    } catch { /* an unreadable ledger never blocks the intake */ }
     const bound = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
     if (bound && bound.goalId === goalIdFor(input.sourceMessageId)) return done("already_admitted", "goal_exists", { goalId: bound.goalId });
     if (bound && !LONG_RUN_TERMINAL_STATUSES.has(bound.status)) return done("chat_already_bound", "live_goal_in_chat", { goalId: bound.goalId });

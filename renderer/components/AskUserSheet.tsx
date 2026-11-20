@@ -1,6 +1,6 @@
 "use client";
 
-import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
+import { ComposerDecisionPortal, decisionKeysBelongHere } from "./ComposerDecisionPortal";
 
 // 에이전트의 **동기 질문** 시트 — 도구가 답을 기다리는 질문이다.
 //
@@ -12,15 +12,15 @@ import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
-import { AskCard } from "@/components/AskCard";
+import { QuestionCardFrame } from "@/components/decision/QuestionCardHost";
 import { ASK_ACTION_COPY } from "@shared/ask-action-bar";
 import { clearAskUserDraft, loadAskUserDraft, saveAskUserDraft } from "@/lib/ask-user-draft";
 import { ipc } from "@/lib/ipc";
 import { askUserQueueSnapshot, removeAskUserRequest, useAskUserQueue } from "@/lib/ask-user-queue";
 import { useOrphanAttentionRevealed } from "@/lib/attention";
 import { useToolApprovals } from "@/lib/tool-approvals";
-import { useFocusedSpaceChatId } from "@/lib/space-store";
 import { roomOfChat } from "@/lib/room-children";
+import { firstRequestPerOwner } from "@/lib/composer-decision-target";
 import type { AskUserRequestEvent } from "@/lib/types";
 
 /*
@@ -34,6 +34,10 @@ import type { AskUserRequestEvent } from "@/lib/types";
  * (revealOrphanAttention).
  *
  * 대기열 자체는 lib/ask-user-queue 의 모듈 저장소다 — 시트가 언마운트돼도 질문은 살아 있다.
+ *
+ * 화면에 대화가 여럿(Space 의 칸들)이면 **칸마다 자기 질문 하나**를 그 칸의 작성창 위에 편다(lib/composer-decision-target.ts).
+ * 예전에는 창에 카드가 하나뿐이고 가장 새로 열린 칸의 작성창에 붙어서, 강남구 대화의 질문이 숙제 대화의 입력 위에 떴고
+ * 칸마다 낸 질문이 그 한 칸에 줄줄이 쌓였다.
  */
 /** Live questions whose conversation is not on screen — the attention dot counts them. */
 export function useAskUserElsewhere(): readonly AskUserRequestEvent[] {
@@ -43,12 +47,21 @@ export function useAskUserElsewhere(): readonly AskUserRequestEvent[] {
 }
 
 export function AskUserSheet() {
+  const queue = useAskUserQueue();
+  const orphansRevealed = useOrphanAttentionRevealed();
+  const { visible } = useToolApprovals();
+  const onScreen = (item: AskUserRequestEvent): boolean => item.chatId ? visible.has(item.chatId) : orphansRevealed;
+  // One card per conversation on screen (a room and its member sessions count as one), each drawn in its own conversation's composer.
+  const cards = firstRequestPerOwner(queue.filter(onScreen), (chatId) => roomOfChat(chatId));
+  return <>{cards.map((request) => <AskUserCard key={request.requestId} req={request} />)}</>;
+}
+
+function AskUserCard({ req }: { req: AskUserRequestEvent }) {
   const pathname = usePathname();
   const { locale } = useT();
   const ko = locale === "ko";
   const oneRoute = pathname.startsWith("/one");
-  const queue = useAskUserQueue();
-  const orphansRevealed = useOrphanAttentionRevealed();
+  const cardRef = useRef<HTMLDivElement>(null);
   const attemptsRef = useRef(new Map<string, symbol>());
   const [submission, setSubmission] = useState<{
     requestId: string;
@@ -58,20 +71,9 @@ export function AskUserSheet() {
   } | null>(null);
   const [draftValue, setDraftValue] = useState("");
   const [now, setNow] = useState(() => Date.now());
-  const { visible } = useToolApprovals();
-  const onScreen = (item: AskUserRequestEvent): boolean => item.chatId ? visible.has(item.chatId) : orphansRevealed;
-  // Home's Space can show several rooms at once: the question of the focused pane comes first, so it lands in that pane's composer.
-  const spaceFocus = useFocusedSpaceChatId();
-  const req = (spaceFocus ? queue.find((item) => roomOfChat(item.chatId) === spaceFocus && onScreen(item)) : undefined) ?? queue.find(onScreen) ?? null;
   const isLive = (requestId: string): boolean => askUserQueueSnapshot().some((item) => item.requestId === requestId);
-  const currentRequestIdRef = useRef<string | null>(null);
-  currentRequestIdRef.current = req?.requestId ?? null;
 
   useEffect(() => {
-    if (!req) {
-      setDraftValue("");
-      return;
-    }
     setDraftValue(loadAskUserDraft(req) ?? "");
     setNow(Date.now());
     const tick = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -81,7 +83,6 @@ export function AskUserSheet() {
   }, [req]);
 
   const answer = async (value: string | null) => {
-    if (!req) return;
     const requestId = req.requestId;
     if (!isLive(requestId) || attemptsRef.current.has(requestId)) return;
     const attempt = Symbol(requestId);
@@ -113,7 +114,6 @@ export function AskUserSheet() {
   };
 
   const dismiss = () => {
-    if (!req) return;
     const requestId = req.requestId;
     // A close is a real null answer, not a renderer-only dismissal. Keep the
     // request mounted until Main acknowledges it so a bridge failure cannot
@@ -136,16 +136,16 @@ export function AskUserSheet() {
    *   모달은 어디서나 같은 방법으로 닫혀야 한다.
    */
   useEffect(() => {
-    if (!req) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
+      // Several conversations may each hold a card: Esc closes the one in the pane that holds the focus, not all of them.
+      if (!decisionKeysBelongHere(cardRef.current, event.target)) return;
       event.stopPropagation();
       dismiss();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [dismiss, req]);
-  if (!req) return null;
   const currentSubmission = submission?.requestId === req.requestId ? submission : null;
   const updateDraft = (value: string) => {
     setDraftValue(value);
@@ -172,8 +172,9 @@ export function AskUserSheet() {
    * 규격은 docs/DESIGN-ASK-CARD.md.
    */
   return (
-    <ComposerDecisionPortal enabled>
+    <ComposerDecisionPortal enabled chatId={req.chatId}>
     <div
+      ref={cardRef}
       data-composer-decision-card="true"
       className={`aus ${oneRoute ? "aus-one" : ""}`}
       role="dialog"
@@ -182,7 +183,8 @@ export function AskUserSheet() {
       style={oneRoute ? ({ "--agentlas-composer-width": "720px" } as CSSProperties) : undefined}
     >
       {/* 카드의 겉모양(테두리·그림자·여백)은 AskCard 하나가 정한다 — 예전에는 여기서 한 겹을 더 씌워 테두리가 둘이었다. */}
-      <AskCard
+      <QuestionCardFrame
+        source="ask-user"
         key={req.requestId}
         title={req.askedBy ? `${req.askedBy} · ${req.question}` : req.question}
         locale={ko ? "ko" : "en"}
@@ -201,6 +203,7 @@ export function AskUserSheet() {
         onFreeTextChange={updateDraft}
         onChoose={(id) => { void answer(id); }}
         onClose={dismiss}
+        closeLabel={ko ? "건너뛰기 — 에이전트에게 '답하지 않음'을 보냅니다" : "Skip - tells the agent you did not answer"}
         collapsible
         footer={req.allowFreeText ? {
           placeholder: ko ? "직접 답하기" : "Answer in your own words",
@@ -232,7 +235,7 @@ export function AskUserSheet() {
             : (ko ? "답변을 전달했는지 확인하지 못했습니다. 선택하거나 입력한 답변을 다시 보내 주세요."
               : "The answer was not acknowledged. Choose or submit your draft again to retry.")}
         </p>}
-      </AskCard>
+      </QuestionCardFrame>
       <style jsx>{`
         /* Without a composer slot (a chat-less question on a non-chat page) there is no
            composer to line up with; window-centred fell left of the content column. Sit in

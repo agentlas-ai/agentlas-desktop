@@ -369,7 +369,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
     saveUserRow: (request) => {
       if (request.promptOrigin === "system") return null;
       const row = options.custody?.savedUserRow(request)
-        ?? appendChatMessage(request.chatId, "user", request.userPrompt, { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}) });
+        ?? appendChatMessage(request.chatId, "user", request.userPrompt, { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}), ...(request.clientIntentId ? { clientIntentId: request.clientIntentId } : {}) });
       try { autoTitleFromFirstMessage(request.chatId, request.userPrompt); } catch { /* a title is cosmetic */ }
       return row;
     },
@@ -377,7 +377,7 @@ export function createRendererSendQueue(startNow: RendererStartNow, options: Ren
       // Never inherit a settling run's personal-native original (see withoutOnePersonalNativeOriginal).
       const start = () => withoutOnePersonalNativeOriginal(() => startOwned(event, request as McpInvocationRequest, sendId, () => options.beforeQueuedStart?.(event, request as McpInvocationRequest)));
       return userRow
-        ? withPreparedUserRow<ChatHistoryEntry, { runId: string }>(request.chatId, request.userPrompt, userRow as ChatHistoryEntry, start)
+        ? withPreparedUserRow<ChatHistoryEntry, { runId: string }>(request.chatId, request.userPrompt, userRow as ChatHistoryEntry, start, request.clientIntentId ?? null)
         : start();
     },
     onEnded: ({ chatId, request, reason, code, runId, sendId }) => {

@@ -134,7 +134,7 @@ function withWireArgs(input:unknown):unknown{
   const wire=args.slice();while(wire.length&&wire[wire.length-1]===undefined)wire.pop();
   return{...(input as object),args:wire};
 }
-export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer'|'personal.command'|'companion.work.admit'|'companion.work.retireUnstarted'|'companion.credential.retry',input?:unknown):Promise<any> {
+export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer'|'personal.command'|'companion.work.admit'|'companion.work.retireUnstarted'|'companion.credential.retry'|'approval.remote',input?:unknown):Promise<any> {
   const channel=bootstrap?.getChannel(),identity=channel && nativeGuiChannelIdentity(channel);
   if(!channel || !identity)fail('supervisor_native_channel_unavailable');
   const assertCurrent=()=>{if(nativeGuiChannelIdentity(channel)!==identity)fail('supervisor_native_channel_changed');};

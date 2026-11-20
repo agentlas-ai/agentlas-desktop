@@ -73,7 +73,14 @@ export async function invokeWithUnsettledContinuation<Req>(port: UnsettledContin
   const surface = (o: UnsettledOutcome): RunnerResult => { if (!o.ok) throw o.error; return o.result; };
   const unsettled = (o: UnsettledOutcome): boolean => {
     if (!port.eligible || port.aborted()) return false;
-    if (!o.ok) return o.error instanceof RuntimeTurnUnsettledError;
+    if (!o.ok) {
+      if (!(o.error instanceof RuntimeTurnUnsettledError)) return false;
+      // an unsettled turn whose typed cause is the person's own limit or sign-in (kind quota / rate_limit / auth) is that failure, not a turn to run again:
+      // a second dispatch meets the same wall, and the turn-outcome line (invocation/turn-outcome-line.ts) must name the limit or the sign-in, never "may have acted".
+      // The error still carries the typed cause (runner.ts unsettledTurnCauseFailure), so it surfaces as before and the end line reads it.
+      const cause = failureOf(o);
+      return !(cause && (cause.kind === "quota" || cause.kind === "rate_limit" || cause.kind === "auth"));
+    }
     // A typed pre-dispatch refusal (RuntimeTurnDelivery "not-dispatched") is that failure: nothing to continue.
     if (o.result.ownerControlTerminal === "completed" || o.result.turnDelivery === "not-dispatched" || port.noModelWork()) return false;
     // A transient cause outside the app after dispatch (the provider at capacity, a lost stream, a stalled stream the host

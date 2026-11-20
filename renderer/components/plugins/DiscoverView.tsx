@@ -16,6 +16,8 @@ export interface CardItem {
   description?: string;
   maker?: string;
   installed: boolean;
+  /** What is wrong with this installed row's connection, in words ("Sign-in needed", "Key needed"); the row shows it as a badge. Nothing when it is fine. */
+  problem?: string;
   onOpen: () => void;
   onAdd?: () => void;
 }
@@ -73,6 +75,7 @@ export function RowGrid({ items, ko }: { items: CardItem[]; ko: boolean }) {
     {items.map((item) => <div key={item.key} role="button" tabIndex={0} className={styles.listRow} onClick={item.onOpen} onKeyDown={(event) => { if (event.key === "Enter") item.onOpen(); }}>
       {item.icon}
       <span className={styles.rowText}><span className={styles.rowName}>{item.name}</span>{item.description && <span className={styles.rowSub}>{item.description}</span>}</span>
+      {item.problem ? <span className={styles.rowProblem} data-row-problem="true">{item.problem}</span> : null}
       <button type="button" className={styles.listRowAction} data-installed={item.installed} aria-label={item.installed ? ko ? "관리" : "Manage" : ko ? "추가" : "Add"} onClick={(event) => { event.stopPropagation(); (item.installed ? item.onOpen : item.onAdd ?? item.onOpen)(); }}>
         {item.installed ? <IconMoreHorizontal size={18} /> : <IconPlus size={18} />}
       </button>

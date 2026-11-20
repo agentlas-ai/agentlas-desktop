@@ -18,7 +18,7 @@ export function FinanceMarketOverview({result,loading,ko,watchlist,quotes,source
  const watchlistId=useId(),watchlistRoot=useRef<HTMLDivElement>(null),watchlistTrigger=useRef<HTMLButtonElement>(null),addTrigger=useRef<HTMLButtonElement>(null);
  const closeWatchlist=()=>{setWatchlistOpen(false);watchlistTrigger.current?.focus();};
  const findAsset=()=>{closeWatchlist();onFind();};
- useDismissibleLayer({open:watchlistOpen,roots:[watchlistTrigger,watchlistRoot],restoreFocusRef:watchlistTrigger,onDismiss:()=>setWatchlistOpen(false)});
+ useDismissibleLayer({open:watchlistOpen,roots:[watchlistTrigger,watchlistRoot],restoreFocusRef:watchlistTrigger,dismissOnFocusLeave:true,onDismiss:()=>setWatchlistOpen(false)});
  useEffect(()=>{if(watchlistOpen)addTrigger.current?.focus();},[watchlistOpen]);
  return <div className={styles.layout}><div className={styles.main}><section>
   <div className={styles.overviewHead} onBlur={event=>{if(event.relatedTarget instanceof Node&&!event.currentTarget.contains(event.relatedTarget))setWatchlistOpen(false);}}>

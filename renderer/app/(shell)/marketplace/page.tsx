@@ -223,6 +223,8 @@ function MarketplacePage() {
   const [q, setQ] = useState(() => searchParams.get("q") ?? "");
   const [searchFocused, setSearchFocused] = useState(false);
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
+  // Enter takes a suggestion only after the person moved to it (arrow keys or pointer); otherwise Enter searches what was typed.
+  const [searchPicked, setSearchPicked] = useState(false);
   const [bookmarking, setBookmarking] = useState<string | null>(null);
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   // Hub 검색 0건/실패 시 hep-search(엔진) 보조 후보 — 카드와 별도의 단순 리스트로 표시.
@@ -594,6 +596,7 @@ function MarketplacePage() {
                   setQ(e.target.value);
                   setSearchFocused(true);
                   setSearchActiveIndex(0);
+                  setSearchPicked(false);
                 }}
                 onFocus={() => setSearchFocused(true)}
                 onKeyDown={(event) => {
@@ -607,11 +610,15 @@ function MarketplacePage() {
                   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                     event.preventDefault();
                     const delta = event.key === "ArrowDown" ? 1 : -1;
-                    setSearchActiveIndex((index) => (index + delta + hubSuggestions.length) % hubSuggestions.length);
+                    // The first arrow press lands on the first row; later presses move from the row the person is on.
+                    setSearchActiveIndex((index) => searchPicked ? (index + delta + hubSuggestions.length) % hubSuggestions.length : (delta > 0 ? 0 : hubSuggestions.length - 1));
+                    setSearchPicked(true);
                   } else if (event.key === "Enter") {
                     event.preventDefault();
-                    const selected = hubSuggestions[searchActiveIndex] ?? hubSuggestions[0];
-                    setQ(selected.slug);
+                    if (searchPicked) {
+                      const selected = hubSuggestions[searchActiveIndex] ?? hubSuggestions[0];
+                      setQ(selected.slug);
+                    }
                     setSearchFocused(false);
                   }
                 }}
@@ -621,7 +628,7 @@ function MarketplacePage() {
                 aria-autocomplete="list"
                 aria-expanded={searchFocused && normalizedQuery.length > 0}
                 aria-controls="desktop-hub-search-suggestions"
-                aria-activedescendant={searchFocused && hubSuggestions.length > 0 ? `desktop-hub-option-${searchActiveIndex}` : undefined}
+                aria-activedescendant={searchFocused && searchPicked && hubSuggestions.length > 0 ? `desktop-hub-option-${searchActiveIndex}` : undefined}
               />
             {searchFocused && normalizedQuery.length > 0 && (
               <div
@@ -657,8 +664,8 @@ function MarketplacePage() {
                         key={`${entityClass}-${listing.slug}`}
                         type="button"
                         role="option"
-                        aria-selected={index === searchActiveIndex}
-                        onMouseEnter={() => setSearchActiveIndex(index)}
+                        aria-selected={searchPicked && index === searchActiveIndex}
+                        onMouseEnter={() => { setSearchActiveIndex(index); setSearchPicked(true); }}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => {
                           setQ(listing.slug);
@@ -672,7 +679,7 @@ function MarketplacePage() {
                           gap: 10,
                           padding: "9px 10px",
                           borderRadius: 8,
-                          background: index === searchActiveIndex ? "var(--rd-surface-2)" : "transparent",
+                          background: searchPicked && index === searchActiveIndex ? "var(--rd-surface-2)" : "transparent",
                           color: "var(--rd-ink)",
                           textAlign: "left",
                         }}

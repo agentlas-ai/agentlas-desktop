@@ -229,8 +229,8 @@ export const WAITABLE_EXTERNAL_CAUSES: ReadonlySet<ExternalFailureCause> = new S
  */
 export function waitingOwnerLine(locale: "ko" | "en", cause: ExternalFailureCause, untilIso: string | null): string {
   const ko = locale === "ko";
-  const tail = ko ? " 그 사이 새 메시지를 보내시면 그쪽을 우선하고 이 요청은 다시 실행하지 않습니다."
-    : " If you send a new message meanwhile, that one comes first and this request is not run again.";
+  const tail = ko ? " 그 사이 새 메시지를 보내시면 그쪽을 우선하고 이 요청은 다시 실행하지 않습니다. 자동화 화면의 '대기 중인 요청'에서 보거나 취소할 수 있고, 삭제·전송 같은 일은 이어 갈 때 다시 물어봅니다."
+    : " If you send a new message meanwhile, that one comes first and this request is not run again. You can see or cancel it under Automations > Waiting requests, and a delete or a send is asked about again when it continues.";
   const saved = ko ? "아무것도 실행되지 않았고 요청은 저장되어 있습니다." : "Nothing ran and your request is saved.";
   if (cause === "provider_limit") {
     const reset = untilIso ? formatRuntimeQuotaReset(untilIso, locale) : null;

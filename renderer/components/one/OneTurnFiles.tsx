@@ -34,7 +34,8 @@ export function FileGlyph({ kind, deleted = false }: { kind: TurnFileKind; delet
   return <svg {...sv}>{sheet}</svg>;
 }
 
-function toLinkedFile(file: TurnFile): LinkedFileArtifact {
+/** The file as the caller's open-linked-file function takes it (a chip, a list row and an Outputs row open the same way). */
+export function linkedFileOfTurnFile(file: TurnFile): LinkedFileArtifact {
   return { id: `file:${file.path}`, name: file.name, href: file.path, path: file.absolute ? file.path : undefined, paths: file.absolute ? [file.path] : [], fileUrl: file.absolute ? fileUrlForLinkedFile(file.path) : file.path };
 }
 
@@ -69,11 +70,19 @@ export function OneTurnFiles({ files, chatId, locale, onPreview, inset = 0 }: {
     const todo = shown.filter((f) => f.absolute && !checked.current.has(f.path));
     for (const f of todo) checked.current.add(f.path);
     if (!todo.length) return;
-    void Promise.all(todo.map(async (f) => {
+    // "Missing" is asked twice, 1.5 s apart: a chip is drawn while the turn is still writing, and an edit that replaces the file (delete then write)
+    // is missing for an instant. One "missing" there struck the name through for good while the file was there (
+    // "notes.md — Deleted" next to a live notes.md). Only the second answer marks it gone.
+    const isMissing = async (path: string): Promise<boolean> => {
       try {
-        const r = await api.fs.readTextFile(f.path, { kind: "chat-workspace", chatId });
-        return r?.reason === "missing" ? f.path : null;
-      } catch { return null; }
+        const r = await api.fs.readTextFile(path, { kind: "chat-workspace", chatId });
+        return r?.reason === "missing";
+      } catch { return false; }
+    };
+    void Promise.all(todo.map(async (f) => {
+      if (!(await isMissing(f.path))) return null;
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));
+      return cancelled ? null : (await isMissing(f.path)) ? f.path : null;
     })).then((missing) => {
       const list = missing.filter((p): p is string => Boolean(p));
       if (!cancelled && list.length) setGone((prev) => new Set([...prev, ...list]));
@@ -81,7 +90,7 @@ export function OneTurnFiles({ files, chatId, locale, onPreview, inset = 0 }: {
     return () => { cancelled = true; };
   }, [key, chatId, shown]);
 
-  const preview = useCallback((f: TurnFile) => { if (!gone.has(f.path)) onPreview?.(toLinkedFile(f)); }, [gone, onPreview]);
+  const preview = useCallback((f: TurnFile) => { if (!gone.has(f.path)) onPreview?.(linkedFileOfTurnFile(f)); }, [gone, onPreview]);
   const reveal = useCallback((f: TurnFile) => { if (f.absolute) void ipc()?.fs?.showItemInFolder?.(f.path); }, []);
   const copy = useCallback((f: TurnFile) => { try { void navigator.clipboard.writeText(f.path); } catch { /* the clipboard is the OS's to refuse */ } }, []);
 

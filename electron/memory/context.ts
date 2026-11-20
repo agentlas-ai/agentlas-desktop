@@ -55,6 +55,7 @@ import {
   recordContextSourceMarker,
 } from "../store/run-events";
 import { previousTurnMemorySection } from "./previous-turn";
+import { handOffFactsSection } from "../one/plural-handoff-cards";
 import { memoryClassificationRules, workspaceRulesOn } from "./classification";
 import { alwaysLoadSpec, pickAlwaysLoad, renderAlwaysLoad } from "../../shared/memory-classification";
 import { sharedOpenHere } from "./shared-ids";
@@ -1057,7 +1058,8 @@ export async function buildMemoryContext(
   const sections: string[] = [];
   // Short-term memory (owner 2026-10-05): the previous turn of this conversation, so the model itself checks
   // an interrupted outside action before repeating it instead of the host locking the Goal.
-  const previousTurn = previousTurnMemorySection(options.chatId, options.runId);
+  // The host's current record of the conversation's hand-offs rides with it (plural-handoff-cards.ts handOffFactsSection): a chip's answer is a fact the model reads, not one it must remember.
+  const previousTurn = [previousTurnMemorySection(options.chatId, options.runId), guarded(() => handOffFactsSection(options.chatId), null, "partial")].filter((part): part is string => Boolean(part)).join("\n\n") || null;
   // Stable governed sources come first; the fresh observation delta stays at
   // the tail so it cannot invalidate the reusable selected-memory prefix.
   const withPreviousTurn = (list: string[]): string[] => previousTurn ? [...list, previousTurn] : list;

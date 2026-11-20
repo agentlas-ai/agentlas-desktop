@@ -21,7 +21,7 @@ import { PLURAL_PLACES_V } from "../one/plural-handoff-wire";
  * What the later bundles read from here: `onPluralAnswer(listener)` / `lastPluralAnswer()` - the answer of every GET, parsed, in the process that made it
  * (E "receive" reads `rows` / `done` / `approvals`, C2 "shared memory" reads `sharedSeq`, the place list reads `placesRev`).
  */
-export const PLACES_PROTOCOL_V = PLURAL_PLACES_V;    // the `v` the desktop reports (1..99 on the server): 2 = this desktop knows the question and end words of the hand-off wire (a sender only sends work to a place with v >= 2)
+export const PLACES_PROTOCOL_V = PLURAL_PLACES_V;    // the `v` the desktop reports (1..99 on the server): 2 = this desktop knows the question and end words of the hand-off wire (a sender only sends work to a place with v >= 2); 3 = it draws the consent chip (a hand-off from this desktop to another agent needs v >= 3)
 export const PLACES_REQUEST_TIMEOUT_MS = 10_000;     // one request; the same bound the team-seat sync uses for its server call
 const STATE_FILE = "places-report.json";
 const WAKE_ID = /^[A-Za-z0-9_-]{8,100}$/;
@@ -42,6 +42,8 @@ export interface PluralAnswer {
   more: boolean;
   /** Rows this desktop sent that are not ended yet (`open`), and the answer's places list (only when `placesRev` differs): kept as the server sent them; the sender side parses them. */
   open: unknown[];
+  /** Chips waiting on this desktop (hand-offs another agent wants to give to this desktop's agent); an older server sends none. */
+  consent: unknown[];
   places?: unknown;
   /** The wake id this answer was asked with (null: connect or a plain read). */
   wake: string | null;
@@ -75,11 +77,34 @@ export function parsePluralAnswer(body: unknown, wake: string | null): PluralAns
   // `approvals` is the old wire's list of questions of rows this desktop sent; the new wire carries them in `open[]` - an answer without it is as good
   const approvals = Array.isArray(body.approvals) ? body.approvals : [];
   if (!Array.isArray(rows) || !Array.isArray(done) || !count(sharedSeq) || !count(placesRev) || typeof known !== "boolean" || typeof removed !== "boolean") return null;
-  return { rows, done, approvals, sharedSeq, placesRev, known, removed, sharedOpen: body.sharedOpen === true, removedAt: removedAtOf(body.removedAt), held: Array.isArray(body.held) ? body.held : [], cancel: Array.isArray(body.cancel) ? body.cancel : [], more: body.more === true, open: Array.isArray(body.open) ? body.open : [], ...(body.places !== undefined ? { places: body.places } : {}), wake };
+  return { rows, done, approvals, sharedSeq, placesRev, known, removed, sharedOpen: body.sharedOpen === true, removedAt: removedAtOf(body.removedAt), held: Array.isArray(body.held) ? body.held : [], cancel: Array.isArray(body.cancel) ? body.cancel : [], more: body.more === true, open: Array.isArray(body.open) ? body.open : [], consent: Array.isArray(body.consent) ? body.consent : [], ...(body.places !== undefined ? { places: body.places } : {}), wake };
 }
 
 export function placeDigest(values: PlaceValues): string {
-  return createHash("sha256").update(JSON.stringify([values.machine, values.agent, values.preset, values.style, [...values.reach].sort(), values.runnable, values.v])).digest("hex").slice(0, 16);
+  // `paths` joins the digest only when there are some: a desktop that reports none digests exactly as it did before this column existed (no spurious report after an update).
+  const paths = values.paths && values.paths.length ? [[...values.paths].sort()] : [];
+  return createHash("sha256").update(JSON.stringify([values.machine, values.agent, values.preset, values.style, [...values.reach].sort(), values.runnable, values.v, ...paths])).digest("hex").slice(0, 16);
+}
+
+let pathsProvider: (() => string[]) | null = null;
+/** The roads this computer measured as ready (connectors/desktop-paths.ts measureDesktopPaths, kept by Main). Null = none are reported (the switch is off: nothing is added to any report). */
+export function setPlacePathsProvider(provider: (() => string[]) | null): void { pathsProvider = provider; }
+/**
+ * `PLACE_PATHS_MAX` 200 = the server's own ceiling for one report (companion-places.mjs MAX_PLACE_PATHS): the card file has one road per service, so 200 leaves room for a computer that holds most of them.
+ * Reached: roads past the 200th (sorted order) are not reported; the phone then does not know the computer has them and falls to the next road.
+ */
+export const PLACE_PATHS_MAX = 200;
+const pathsListeners = new Set<() => void>();
+/** The runtime that holds the link subscribes: a changed measured set reports once (the digest keeps an unchanged one from being sent). In-process signal, no timer. */
+export function onPlacePathsChanged(listener: () => void): () => void { pathsListeners.add(listener); return () => { pathsListeners.delete(listener); }; }
+export function notifyPlacePathsChanged(): void { for (const listener of [...pathsListeners]) { try { listener(); } catch { /* a listener never changes the answer */ } } }
+/** True once a server refused a report that carried `paths` (an older service): they are not sent again in this process, so the place is reported exactly as it always was. */
+let pathsRefused = false;
+export function __resetPlacePathsForTest(): void { pathsRefused = false; pathsProvider = null; }
+function withReportablePaths(values: PlaceValues, allowed: boolean): PlaceValues {
+  const { paths: _own, ...rest } = values;
+  const paths = allowed ? (values.paths ?? pathsProvider?.() ?? []) : [];
+  return paths.length ? { ...rest, paths: [...new Set(paths)].sort().slice(0, PLACE_PATHS_MAX) } : rest;
 }
 
 export interface PlacesLinkDeps {
@@ -149,10 +174,14 @@ export function createPlacesLink(deps: PlacesLinkDeps): PlacesLink {
   }
 
   async function report(userId: string): Promise<void> {
-    const values = deps.values();
-    if (!values) return;
-    const digest = placeDigest(values);
-    const out = await call("POST", "/api/desktop/place", JSON.stringify({ hostId: deps.hostId, ...values, reach: [...values.reach].sort() }));
+    const raw = deps.values();
+    if (!raw) return;
+    let values = withReportablePaths(raw, !pathsRefused);
+    let digest = placeDigest(values);
+    const send = (v: PlaceValues) => call("POST", "/api/desktop/place", JSON.stringify({ hostId: deps.hostId, ...v, reach: [...v.reach].sort(), ...(v.paths?.length ? { os: process.platform } : {}) }));
+    let out = await send(values);
+    // An older service that refuses the unknown column (400): the roads are dropped for this process and the report goes out as it always did, once, now.
+    if (out && out.status === 400 && values.paths?.length) { pathsRefused = true; values = withReportablePaths(raw, false); digest = placeDigest(values); out = await send(values); }
     if (!out) { say("place report: not sent"); return; }
     if (out.status === 404) { switchClosed = true; return; }                           // the server's switch is closed: nothing, quietly
     if (out.status === 409) {
@@ -192,14 +221,14 @@ export function createPlacesLink(deps: PlacesLinkDeps): PlacesLink {
     for (const listener of [...listeners]) { try { listener(answer); } catch { /* a listener never changes the answer */ } }
     if (answer.removed) { removed(answer.removedAt); return; }
     const values = deps.values();
-    if (!answer.known || (values !== null && !reported(userId, placeDigest(values)))) await report(userId);
+    if (!answer.known || (values !== null && !reported(userId, placeDigest(withReportablePaths(values, !pathsRefused))))) await report(userId);
   }
 
   async function runValues(): Promise<void> {
     const userId = deps.userId();
     if (!userId || stopped || switchClosed) return;
     const values = deps.values();
-    if (!values || reported(userId, placeDigest(values))) return;
+    if (!values || reported(userId, placeDigest(withReportablePaths(values, !pathsRefused)))) return;
     await report(userId);
   }
 

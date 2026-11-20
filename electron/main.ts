@@ -93,6 +93,7 @@ import { registerScienceQuestionDecisionIpc } from "./science-host/question-ipc"
 import { scienceQuestionHost } from "./science-host/question-continuation";
 import { isScienceStoreFormatRefusal, scienceBootstrapFailure } from "./science-host/bootstrap-failure";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
+import { installConnectorRouteInMain } from "./connectors/main-wiring";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
 import { closeStore, getDb, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
@@ -111,13 +112,14 @@ import { chatOriginSurface, getChat, repairPlaceholderTaskTitles } from "./store
 import { isPersonalAgentId } from "./one/personal-agent-id";
 import { isLeadRoomMemberChat } from "./runtime/session-scope";
 import { notificationClickTarget, retainNotification } from "./notification-target";
+import { deepLinkRefusedLogShape, deepLinkRefusedText } from "./deep-link-text";
 import { createSessionEndingHandler, protocolRegistrationPlan, wireWindowsSessionEnd, windowsAppUserModelId } from "./windows-shell-integration";
 import { expireOrphanedSurfaceJobs } from "./store/agent-surface-jobs";
 import { reconcileAbandonedGoalContracts } from "./store/chat-goals";
 import { repairDetachedGoalBindings } from "./store/goal-binding-repair";
 import { appendLongRunEvent } from "./store/long-runs";
 import { getCanonicalTask, findCanonicalTaskForChat, settleInterruptedTasksOnBoot } from "./store/tasks";
-import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
+import { getInvocationRunReceipt, scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
 import { automationWorkInFlight, closeAutomationDispatchForShutdown, quiesceAutomationSchedulerForUpdate, startAutomationScheduler } from "./automation-scheduler";
 import { setGoalWaitHost, pollGoalWaitSubscriptions, reconcileClaimedGoalWaitsAtStartup,
   interruptGoalWaitReplans, goalWaitReplansSettled } from "./long-run/wait-subscriptions";
@@ -201,6 +203,7 @@ import { cancelStartupRecovery, recoverDesktopStartup, type StartupRecoveryPrese
 import { initFileLogging, installMainProcessErrorSink, installStdioErrorGuard, mainLogFilePath } from "./logging";
 import { shouldYieldToNativeInstall } from "./updater/yield-to-native-install";
 import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
+import { readScheduledWorkCount } from "./scheduled-work-reader";
 import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitCensus, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
 import { fitWindowToWorkArea, secondInstanceWindowAction, watchWindowForLastVisibleClose } from "./window-lifecycle";
@@ -1257,7 +1260,18 @@ function routeAgentlasDeepLink(rawUrl: string): void {
   if (developmentEffectsSuppressed()) return;
   const trimmed = rawUrl.trim();
   const match = PLUGIN_DEEP_LINK_RE.exec(trimmed);
-  if (!match) return; // 모르는 모양은 무시한다 — 바깥 입력이 임의 경로를 열 수 없다. (회사 링크 agentlas://company/… 는 2026-10-28 폐지)
+  if (!match) {
+    // 모르는 모양은 열지 않는다 — 바깥 입력이 임의 경로를 열 수 없다. (회사 링크 agentlas://company/… 는 폐지)
+    // 다만 조용히 버리지 않는다: 로그에 한 줄, 사람에게 한 번 알린다(같은 말을 macOS·Windows·Linux 모두에서).
+    console.info("[protocol] link not opened (not a link this app acts on)", deepLinkRefusedLogShape(trimmed));
+    try {
+      if (Notification.isSupported()) {
+        const text = deepLinkRefusedText(currentUiLocale() === "ko" ? "ko" : "en");
+        new Notification({ title: text.title, body: text.body, silent: true }).show();
+      }
+    } catch { /* a platform without notifications: the log line is the trace */ }
+    return;
+  }
   const route = `/marketplace?install=${encodeURIComponent(match[2])}&family=${encodeURIComponent(match[1])}`;
   pendingDeepLinkRoute = route;
   const deliver = (): void => {
@@ -2316,10 +2330,12 @@ function relaunchWithWindow(): void {
 /** A start by the background service: the app runs in its tray (the same hold as "continue in background") and opens no window. */
 function startInBackgroundForOne(): void {
   console.info("[startup] started by the background service: running in the tray, no window");
-  holdInBackground({ kind: "background", activeWork: 0, autoQuitWhenIdle: false });
+  holdInBackground({ kind: "background", activeWork: 0, autoQuitWhenIdle: false }, false);
 }
 
-function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>): void {
+/** `announce`: the person just closed the window, so one notice says the app is still running (a service-started tray hold and a second entry say nothing). */
+function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>, announce = true): void {
+  const wasHolding = backgroundHoldActive();
   clearQuitIntent();
   // Backgrounding Desktop changes its own surface, never unrelated One/dialog/browser windows.
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
@@ -2329,7 +2345,8 @@ function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>): void
   enterBackgroundHold({
     locale: () => (currentUiLocale() === "ko" ? "ko" : "en"),
     // null = unreadable this tick: the hold neither quits on it nor shows a count; the next tick asks again.
-    activeWork: async () => { const census = await readQuitCensus(); return census.unreadable ? null : census.count; },
+    // Scheduled reminders count too: a hold chosen to keep them alive must not end the moment nothing is running (it ends when the last one has passed).
+    activeWork: async () => { const census = await readQuitCensus(); return census.unreadable ? null : census.count + readScheduledWorkCount(); },
     continuity: loginContinuityOn,
     openOne: () => { void openOneFromNotification(); },
     open: () => {
@@ -2343,7 +2360,7 @@ function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>): void
       noteQuitIntent("menu-quit", { from: "background-tray" });
       commitQuit({ kind: "quit", daemon: "stop" });
     },
-  }, { autoQuitWhenIdle: plan.autoQuitWhenIdle });
+  }, { autoQuitWhenIdle: plan.autoQuitWhenIdle, announce: announce && !wasHolding });
 }
 
 async function resolveOrdinaryQuit(): Promise<void> {
@@ -2368,20 +2385,22 @@ async function resolveOrdinaryQuit(): Promise<void> {
       continuity, activeWork, fullQuitConfirmed: quitFullConfirmed,
       systemShutdown: systemShutdownInProgress || nonInteractive, relaunching, headless,
       userQuit: intentCode === "menu-quit" || intentCode === "window-all-closed",
+      // Only the X on the last window (Windows/Linux): it reads as "put it away", and a quit then would drop what is scheduled without a word.
+      scheduledWork: needsCensus && intentCode === "window-all-closed" ? readScheduledWorkCount() : 0,
     });
     if (plan.kind === "quit") { commitQuit(plan); return; }
     if (plan.kind === "background") { holdInBackground(plan); return; }
-    const text = quitPromptText(currentUiLocale() === "ko" ? "ko" : "en", plan.activeWork);
+    const text = quitPromptText(currentUiLocale() === "ko" ? "ko" : "en", plan.activeWork, plan.scheduledWork ?? 0);
     const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : undefined;
     const options = {
       type: "question" as const, message: text.message, detail: text.detail, buttons: text.buttons,
-      // The focused button is the one Enter presses: never the one that stops the running work (Windows human test Alt+F4 opened this prompt
+      // The focused button is the one Enter presses: never the one that stops the running work (Alt+F4 opened this prompt
       // with "Stop work and quit" focused). "Keep running in background" loses nothing and the work ends the app by itself.
       defaultId: QUIT_PROMPT_CHOICES.indexOf("background"), cancelId: QUIT_PROMPT_CHOICES.indexOf("cancel"), noLink: true,
     };
     const answer = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
     const choice = QUIT_PROMPT_CHOICES[answer.response] ?? "cancel";
-    const next = planAfterQuitPrompt(choice, plan.activeWork);
+    const next = planAfterQuitPrompt(choice, plan.activeWork + (plan.scheduledWork ?? 0));
     if (!next) {
       clearQuitIntent();
       // Cancelling a quit that started by closing the last window (Windows/Linux) must not leave a
@@ -2980,6 +2999,9 @@ app.whenReady().then(async () => {
     }});
   } catch (error) { console.error("[toolchain] personal native owner unavailable:", error instanceof Error ? error.message : error); }
   registerIpcHandlers();
+  // API first, macro second. Off unless AGENTLAS_CONNECTOR_ROUTE_V1=1 (then: the enforcement gate, measured roads reported to the places link, the account-connections rows).
+  // A browser road is not reported until the window host hands in `browserSession` (work-live-view.ts nativeSessions): not measured, so never claimed.
+  installConnectorRouteInMain(ipcMain);
   registerOnePersonalIntegrationMainIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),gmailSourceOwner:nativeGmailSourceOwner,historyWorkOwner:nativeHistoryWorkOwner,lifetime:{ready:()=>!nativePersonalCleanupUnknown&&!nativePersonalShutdown.signal.aborted,currentEpoch:()=>nativePersonalEpoch}});
   registerRoomDiscussionIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
   registerOneVaultMainIpc({ipc:ipcMain,host:{preloadPath:path.join(__dirname,'preload.js'),
@@ -5149,6 +5171,24 @@ app.whenReady().then(async () => {
     console.error("[architecture] backfillEntityKinds failed:", err);
   }
   traceStartup("entity-kinds-ready");
+  // schedules saved before the project stamp get the project of the conversation that made them (their own monitor.originChatId); standalone ones stay.
+  try {
+    const { getDb: scopeGetDb } = require("./store/db") as typeof import("./store/db");
+    const { backfillAutomationProjects } = require("./scope/backfill-automation-project") as typeof import("./scope/backfill-automation-project");
+    const filled = backfillAutomationProjects(scopeGetDb());
+    if (filled.filled > 0) console.info(`[scope] filled the project of ${filled.filled} older schedule(s)`);
+  } catch (err) {
+    console.error("[scope] schedule project backfill failed:", err);
+  }
+  // a schedule a group-room member made reported into the member's hidden session; point it at the room (scope/repoint-room-member-schedules.ts).
+  try {
+    const { getDb: repointGetDb } = require("./store/db") as typeof import("./store/db");
+    const { repointRoomMemberSchedules } = require("./scope/repoint-room-member-schedules") as typeof import("./scope/repoint-room-member-schedules");
+    const moved = repointRoomMemberSchedules(repointGetDb());
+    if (moved.repointed > 0) console.info(`[scope] pointed ${moved.repointed} schedule(s) of group-room members at their room`);
+  } catch (err) {
+    console.error("[scope] room-member schedule repoint failed:", err);
+  }
   // Agentlas 2.0 O2: a folder move interrupted between its rename and its route update (kill -9, power loss) is finished before anything reads
   // the routes. Synchronous, no table, nothing to do (and nothing read) when no route points at a missing path.
   try {
@@ -5671,6 +5711,28 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error("[invocation] queued steer recovery failed", error);
   }
+  try {
+    // a run a dead process left running (no terminal event, alive nowhere) gets its one turn-outcome line, once (the marker is the time of the last sweep).
+    const { sweepRunsLeftRunning } = await import("./invocation/turn-outcome-line");
+    const swept = sweepRunsLeftRunning({ db: getDb(), isLive: (runId) => (getInvocationRunReceipt(runId)?.status ?? "") === "running" });
+    if (swept > 0) console.info("[invocation] runs cut by the last close got their line", { swept });
+  } catch (error) {
+    console.error("[invocation] turn-outcome start sweep failed", error);
+  }
+  try {
+    // (uncertain effects): a change the last close cut off mid-call (no settle in the effect ledger) leaves one "could not confirm" card in its conversation, once
+    // (the marker is the time of the last start; a conversation with a run alive in the daemon is skipped). Same pattern as the sweep above.
+    const { reconcileEffectsLeftUncertain } = await import("./harness/turn-receipts");
+    const { uncertainEffects } = await import("./harness/effect-ledger");
+    const { chatHasLiveRun } = await import("./invocation/turn-outcome-line");
+    const reconciled = await reconcileEffectsLeftUncertain({
+      db: getDb(), list: () => uncertainEffects(),
+      isLive: (chatId) => chatHasLiveRun(getDb(), chatId, (runId) => (getInvocationRunReceipt(runId)?.status ?? "") === "running"),
+    });
+    if (reconciled > 0) console.info("[invocation] changes cut by the last close got their card", { reconciled });
+  } catch (error) {
+    console.error("[invocation] uncertain-effect start reconcile failed", error);
+  }
   if (!developmentEffectsSuppressed()) {
     // A page check the owner passed while the app was closed or before the chat could take the continuation: judged once per start.
     void import("./browser/page-release-resume").then((m) => m.pageReleaseResume().sweep())
@@ -5723,6 +5785,22 @@ app.whenReady().then(async () => {
       } catch (error) { console.warn("[one-org] orphan seat cleanup skipped:", error instanceof Error ? error.message : String(error)); }
       const resumed = await resumeSettledGoalCheckpoints(invocationService);
       if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
+      // The person is told: one line in each conversation whose run the app took up by itself (the answer used to just appear), and one
+      // summary when it was more than one.
+      try {
+        const { announceStartupResumes, startupResumeSummaryText } = await import("./long-run/startup-resume-notice");
+        const [{ appendChatMessage }, { getLongRun }] = await Promise.all([import("./store/chats"), import("./store/long-runs")]);
+        const locale = currentUiLocale() === "ko" ? "ko" : "en";
+        const told = announceStartupResumes(resumed, {
+          locale,
+          rootChatId: (runId) => getLongRun(runId)?.rootChatId ?? null,
+          append: (chatId, text, runId) => { appendChatMessage(chatId, "assistant", text, { hostNotice: { purpose: "host-status", runId, status: "startup-resumed" } }); },
+        });
+        if (told.length > 1 && Notification.isSupported()) {
+          const summary = startupResumeSummaryText(locale, told.length);
+          retainNotification(new Notification({ title: summary.title, body: summary.body, silent: true })).show();
+        }
+      } catch (error) { console.warn("[long-run] startup resume notice skipped:", error instanceof Error ? error.message : String(error)); }
       const scheduled = scheduleUnverifiedOngoingGoalCycles();
       if (scheduled.length) console.info("[long-run] ongoing observation recovery", scheduled);
       void resumeLegacyOngoingBlockedGoals(invocationService)

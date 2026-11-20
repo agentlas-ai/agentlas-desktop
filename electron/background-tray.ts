@@ -2,8 +2,8 @@
 // Agentlas keeps running without a window: login continuity ON, or the owner
 // chose "백그라운드에서 계속" at quit. It is the visible handle on that process —
 // "완전히 종료" is always one click away, so nothing runs invisibly.
-import { app, Menu, Tray } from "electron";
-import { backgroundHoldShouldQuit, backgroundTrayText } from "./quit-policy";
+import { app, Menu, Notification, Tray } from "electron";
+import { backgroundHoldNoticeText, backgroundHoldShouldQuit, backgroundTrayText } from "./quit-policy";
 import { trayIcon } from "./tray-icon";
 
 export interface BackgroundHoldHost {
@@ -40,7 +40,7 @@ export function quitFromBackgroundHold(): boolean {
   return true;
 }
 
-export function enterBackgroundHold(host: BackgroundHoldHost, options: { autoQuitWhenIdle: boolean }): void {
+export function enterBackgroundHold(host: BackgroundHoldHost, options: { autoQuitWhenIdle: boolean; announce?: boolean }): void {
   hold = { autoQuitWhenIdle: options.autoQuitWhenIdle };
   holdHost = host;
   if (process.platform === "darwin") app.dock?.hide();
@@ -63,6 +63,8 @@ export function enterBackgroundHold(host: BackgroundHoldHost, options: { autoQui
     if (process.platform !== "darwin") tray.on("click", () => host.open());
   }
   render(0);
+  // Closing the window hides the app from the task bar / Dock: say once that it still runs and where its icon is (the same on macOS, Windows and Linux).
+  if (options.announce) showBackgroundHoldNotice(host.locale());
   const tick = () => {
     void host.activeWork().then((count) => {
       render(count ?? 0);
@@ -77,6 +79,17 @@ export function enterBackgroundHold(host: BackgroundHoldHost, options: { autoQui
   if (ticker) clearInterval(ticker);
   ticker = setInterval(tick, 5_000);
   ticker.unref?.();
+}
+
+/** One native notice, never a dialog: a platform without notification support just shows none (the tray tooltip and menu still say it). */
+function showBackgroundHoldNotice(locale: "ko" | "en"): void {
+  try {
+    if (!Notification.isSupported()) return;
+    const text = backgroundHoldNoticeText(locale);
+    new Notification({ title: text.title, body: text.body, silent: true }).show();
+  } catch (error) {
+    console.warn("[quit] background notice not shown:", error instanceof Error ? error.message : error);
+  }
 }
 
 export function leaveBackgroundHold(): void {

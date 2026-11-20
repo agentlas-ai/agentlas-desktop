@@ -5799,8 +5799,11 @@ button[data-toggle-state="on"] {
 
 /* Codex desktop transcript geometry: one centered 740px reading column and
    plain assistant turns (identity belongs to the task header, not every row). */
+/* The ONE reading-column width of a conversation (messages, approval record lines, the live automation rows, the "scheduled" strip): every line that sits in the
+   conversation takes this token and centers in it; none carries a width of its own (two system lines ran outside the column). */
+:root { --chat-column-width: 740px; }
 .agentlas-chat-message-anchor {
-  width: min(740px, 100%);
+  width: min(var(--chat-column-width), 100%);
   margin-inline: auto;
 }
 
@@ -7105,6 +7108,13 @@ button[data-toggle-state="on"] {
   flex: 1 1 0;
   min-width: 0;
   justify-content: center;
+  /* A label longer than half the card wraps inside its button instead of running past the card edge. */
+  height: auto;
+  min-height: 30px;
+  padding-block: 5px;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
 }
 
 .rd .hub-card-actions > a {
@@ -8390,6 +8400,12 @@ button[data-toggle-state="on"] {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 4px 10px 10px;
+  /* A list longer than a short window shows where it continues: the edge shadows are drawn only while there is more above or below. */
+  background:
+    linear-gradient(var(--paper) 30%, transparent) center top / 100% 18px no-repeat local,
+    linear-gradient(transparent, var(--paper) 70%) center bottom / 100% 18px no-repeat local,
+    linear-gradient(rgba(11, 11, 15, 0.14), transparent) center top / 100% 8px no-repeat scroll,
+    linear-gradient(transparent, rgba(11, 11, 15, 0.14)) center bottom / 100% 8px no-repeat scroll;
 }
 .sidenav[data-collapsed="true"] .sidenav-scroll {
   padding: 4px 8px 10px;
@@ -10175,17 +10191,18 @@ button[data-toggle-state="on"] {
    from its own composer (the source shows the same overlap on every OS). */
 .chat-input-shell[data-pane-composer="true"]:has(.chat-input-stop-button) .chat-input-send-button { right: 52px !important; }
 .chat-input-shell[data-pane-composer="true"]:has(.chat-input-stop-button) .chat-input-voice > * { right: 94px !important; }
-.chat-input-shell[data-pane-composer="true"]:has(.chat-input-stop-button) textarea[data-chat-input] { padding-right: 134px !important; }
+/* The attribute twice: Space.module.css sets this padding with the same specificity and !important, so a tie went to whichever sheet came last (Windows 2.0.6: the placeholder still ran ~10px under the mic). */
+.chat-input-shell[data-pane-composer="true"]:has(.chat-input-stop-button) textarea[data-chat-input][data-chat-input] { padding-right: 134px !important; }
+/* Bottom-right corner, not the middle: in a narrow pane a long message fills the width and a centred button sat on its text. */
 .agentlas-chat-latest-button {
   position: absolute;
-  left: 50%;
-  bottom: 16px;
-  transform: translateX(-50%);
+  right: 14px;
+  bottom: 10px;
   z-index: 4;
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   padding: 0;
   align-items: center;
   border: 1px solid var(--paper-edge);

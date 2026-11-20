@@ -1,4 +1,5 @@
 import { serverFailureCodeForStatus } from "./provider-overload";
+import { MODEL_REQUIRES_CREDITS_CLI_CODE, MODEL_REQUIRES_CREDITS_CODE } from "../../shared/runtime-failure-scope";
 import { selectionFor } from "../capabilities/one-capabilities";
 import type { ChildProcess } from "node:child_process";
 import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
@@ -46,13 +47,14 @@ import { memoryDeathCause } from "./child-death";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
 import { detectSandboxDeath, detectSandboxLaunchDenial, sandboxDeathNotice, sandboxLaunchDenialNotice } from "./sandbox-death";
-import { shellDeleteGateHook, writeSandboxLaunchGuardHook } from "./write-sandbox-launch-guard";
+import { armCliStagingFolder, watchCliStagingFolder } from "./cli-staging-leftovers";
+import { osSchedulerGateHook, shellDeleteGateHook, writeSandboxLaunchGuardHook } from "./write-sandbox-launch-guard";
 import { SHELL_GATE_CONTROL_ENV, SHELL_GATE_HANDLE_ENV, openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
 import { remoteRowShellGateWanted } from "../one/plural-remote-ask";
 import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
 import { mcpProxyControlInfoPath } from "../mcp-tools/proxy-channel";
 import { detectMcpServerDisconnected, mcpOutageNotice, toolOutageGuidance } from "./mcp-outage";
-import { announceToolDenied, toolApprovalSessionKey } from "./tool-approval";
+import { announceToolDenied, announcedCallDeclined, toolApprovalSessionKey } from "./tool-approval";
 import { PERMISSION_ESCALATION_MARKER } from "../../shared/permission-escalation";
 import {
   claudeMcpGrantDigest,
@@ -360,6 +362,26 @@ export function claudeAgentPackageReadRules(agentId: string | null | undefined, 
   return rule ? [rule] : [];
 }
 
+/**
+ * Read rules for the skill text of the plugins the app itself installs (~/.agentlas/plugins/<slug>/skills and /references).
+ * The router prompt points the model at those files ("open the skill by reading it", plugins/router-prompt.ts), but a
+ * write (acceptEdits) or read run reads only inside its working folders and nobody answers a headless prompt: the Read came
+ * back denied and the person was asked "Continue with full access?" for opening the app's own skill file (the
+ * phone chat asking for a dinosaur picture). Read only and only these two folders: a plugin's `.state/` and its code stay
+ * closed, and the plugin folder is never added as a working folder, so the run cannot edit it.
+ */
+export function claudeInstalledPluginReadRules(platform: NodeJS.Platform = process.platform): string[] {
+  let root: string | null = null;
+  try { root = (require("../plugins/materialize") as typeof import("../plugins/materialize")).installedPluginsRoot({ configureScience: false }); } catch { root = null; }
+  if (!root) return [];
+  const rules: string[] = [];
+  for (const folder of ["skills", "references"]) {
+    const rule = claudeAgentPackageReadRule((platform === "win32" ? path.win32 : path.posix).join(root, "*", folder), platform);
+    if (rule) rules.push(rule);
+  }
+  return rules;
+}
+
 export function claudeBuiltinPreAllowedTools(
   permission: RunnerRequest["permission"],
   opts: { browserOnly?: boolean; untrustedNoTools?: boolean } = {},
@@ -461,14 +483,37 @@ export class ClaudeTurnModelTracker {
   }
 }
 
-/** 헤드리스 쓰기 실행에 허용하는 임시 폴더 — OS 임시 폴더와 Claude CLI 자체 스크래치(/tmp). */
-export function claudeScratchDirArgs(): string[] {
-  const dirs = new Set<string>();
-  // Plus the product's sandbox npm cache, so `npm install` works in the project (sandbox-tool-cache.ts).
-  for (const candidate of [os.tmpdir(), "/tmp", sandboxNpmCacheDir()]) {
-    if (candidate && path.isAbsolute(candidate)) dirs.add(candidate);
+/**
+ * The scratch folders a headless Claude write run may write besides its working folder: the CLI's own per-user scratch
+ * folder (`claude-<uid>` / `claude`) inside each temp root, and the product's sandbox npm cache. Never a whole temp root:
+ * `--add-dir /tmp` made every file under /tmp (a person's own folder there, /private/tmp/<anything>) writable with no card
+ * and no grant (a Write of a file under /private/tmp). Codex
+ * already refuses the same wall (sandbox-tool-cache.ts: "never /tmp, never the real TMPDIR"); this is the Claude sibling.
+ * A write outside these and the working folder is refused by the CLI, which the room reads as the permission boundary
+ * (card or grant), not silently allowed.
+ */
+export function claudeScratchDirs(opts: { tmpdir?: string; uid?: number | null; npmCache?: string } = {}): string[] {
+  const uid = opts.uid === undefined ? (typeof process.getuid === "function" ? process.getuid() : null) : opts.uid;
+  const names = uid === null ? ["claude"] : [`claude-${uid}`, "claude"];
+  const roots = new Set<string>();
+  for (const root of [opts.tmpdir ?? os.tmpdir(), "/tmp"]) {
+    if (root && path.isAbsolute(root)) roots.add(root.replace(/[\\/]+$/, ""));
   }
-  return [...dirs].flatMap((dir) => ["--add-dir", dir]);
+  const dirs = new Set<string>();
+  for (const root of roots) for (const name of names) dirs.add(path.join(root, name));
+  const cache = opts.npmCache ?? sandboxNpmCacheDir();
+  if (cache && path.isAbsolute(cache)) dirs.add(cache);
+  return [...dirs];
+}
+
+/** 헤드리스 쓰기 실행에 허용하는 임시 폴더 — Claude CLI 자체 스크래치(claude-<uid>)와 제품 npm 캐시만(통째 /tmp 아님). */
+export function claudeScratchDirArgs(): string[] {
+  const dirs = claudeScratchDirs();
+  for (const dir of dirs) {
+    // An --add-dir that does not exist is dropped by the CLI; our own scratch folders are created (0700) so the grant holds.
+    try { require("node:fs").mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch { /* the run keeps the narrower wall */ }
+  }
+  return dirs.flatMap((dir) => ["--add-dir", dir]);
 }
 
 export function claudePermissionArgs(
@@ -497,7 +542,9 @@ export function claudePermissionArgs(
 export async function claudeExecutionSettings(req: RunnerRequest): Promise<string | null> {
   // A full-access run of a Work handed over by a hand-off row keeps its full access but gets the shell delete gate alone (no sandbox, no launch guard): its deletes are asked on the row.
   const remoteRowShell = remoteRowShellGateWanted(req);
-  if (req.permission !== "write" && !remoteRowShell) return req.toolBrokerSettingsPath ?? null;
+  // The OS scheduler gate (os-scheduler-gate-hook.ts) is on every run that has a shell, write or full access: no run puts a job in launchd / cron / systemd / a Windows task.
+  const schedulerGateWanted = (req.permission === "write" || req.permission === "full") && !req.browserOnly && !req.untrustedNoTools && !req.minimalObservation;
+  if (req.permission !== "write" && !remoteRowShell && !schedulerGateWanted) return req.toolBrokerSettingsPath ?? null;
 
   let hooks: unknown;
   if (req.toolBrokerSettingsPath) {
@@ -527,12 +574,20 @@ export async function claudeExecutionSettings(req: RunnerRequest): Promise<strin
     hooks = parsed.hooks;
   }
 
+  const schedulerGate = schedulerGateWanted ? osSchedulerGateHook() : null;
+  if (schedulerGateWanted && !schedulerGate) throw new Error("claude_os_scheduler_gate_missing");
   if (remoteRowShell) {
     const remoteDeleteGate = shellDeleteGateHook();
     if (!remoteDeleteGate) throw new Error("claude_write_shell_delete_gate_missing");
     const remoteBrokerHooks = hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks as Record<string, unknown> : {};
     const remotePreToolUse = Array.isArray(remoteBrokerHooks.PreToolUse) ? remoteBrokerHooks.PreToolUse as unknown[] : [];
-    return JSON.stringify({ hooks: { ...remoteBrokerHooks, PreToolUse: [...remotePreToolUse, remoteDeleteGate] } });
+    return JSON.stringify({ hooks: { ...remoteBrokerHooks, PreToolUse: [...remotePreToolUse, ...(schedulerGate ? [schedulerGate] : []), remoteDeleteGate] } });
+  }
+  if (req.permission !== "write") {
+    // Full access: no sandbox, no launch guard, no delete card - the scheduler gate alone, beside the tool broker's own hooks.
+    const fullBrokerHooks = hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks as Record<string, unknown> : {};
+    const fullPreToolUse = Array.isArray(fullBrokerHooks.PreToolUse) ? fullBrokerHooks.PreToolUse as unknown[] : [];
+    return JSON.stringify({ hooks: { ...fullBrokerHooks, PreToolUse: [...fullPreToolUse, schedulerGate] } });
   }
   /*
    * 런처 관문(2026-09-14, 페르소나 라운드 2 재시험): seatbelt 는 `open`·osascript·launchctl 같은 OS 런처가
@@ -552,7 +607,7 @@ export async function claudeExecutionSettings(req: RunnerRequest): Promise<strin
   if (!deleteGate) throw new Error("claude_write_shell_delete_gate_missing");
   const brokerHooks = hooks && typeof hooks === "object" && !Array.isArray(hooks) ? hooks as Record<string, unknown> : {};
   const brokerPreToolUse = Array.isArray(brokerHooks.PreToolUse) ? brokerHooks.PreToolUse as unknown[] : [];
-  const mergedHooks = { ...brokerHooks, PreToolUse: [...brokerPreToolUse, launchGuard, deleteGate] };
+  const mergedHooks = { ...brokerHooks, PreToolUse: [...brokerPreToolUse, ...(schedulerGate ? [schedulerGate] : []), launchGuard, deleteGate] };
   const encoded = JSON.stringify({
     ...claudeWorkspaceSandboxSettings(),
     hooks: mergedHooks,
@@ -1019,7 +1074,7 @@ function claudeErrorLead(code: string | undefined, locale: string | undefined): 
 
 export function claudeFailureFromEvent(
   ev: { type?: string; subtype?: string; error?: unknown; is_error?: boolean; result?: unknown; terminal_reason?: string;
-        errors?: unknown; api_error_status?: number | null; rate_limit_info?: { status?: string; resetsAt?: number };
+        errors?: unknown; api_error_status?: number | null; rate_limit_info?: { status?: string; resetsAt?: number; errorCode?: string };
         startup_failure_reason?: unknown },
   finalText: string,
   prior: RunnerFailure | null,
@@ -1045,7 +1100,11 @@ export function claudeFailureFromEvent(
   // The subscription's usage window rejected the request: an exhausted plan until resetsAt (quota), not throttling.
   if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status === "rejected") {
     return {
-      kind: "quota", message: "Claude rate limit rejected", providerCode: "rate_limit_rejected", runtime: "claude", source: "marker",
+      // A model that needs paid usage credits (the CLI's errorCode "credits_required") refuses only that model: the subscription window
+      // itself is not used up, so the code says so and the retry store keeps the wait on that model (store/runtime-retry.ts scope).
+      kind: "quota", message: "Claude rate limit rejected",
+      providerCode: ev.rate_limit_info.errorCode === MODEL_REQUIRES_CREDITS_CLI_CODE ? MODEL_REQUIRES_CREDITS_CODE : "rate_limit_rejected",
+      runtime: "claude", source: "marker",
       ...(typeof ev.rate_limit_info.resetsAt === "number"
         ? { retryAfterHint: new Date(ev.rate_limit_info.resetsAt * 1000).toISOString() }
         : {}),
@@ -1538,7 +1597,8 @@ const runClaudeTurn = async (
   });
   // A full run bypasses permissions anyway; browser-only and untrusted runs get no file tools at all.
   const packageReadRules = req.permission === "full" || runReq.browserOnly || runReq.untrustedNoTools ? [] : claudeAgentPackageReadRules(runReq.agentId);
-  const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed, ...packageReadRules];
+  const pluginReadRules = req.permission === "full" || runReq.browserOnly || runReq.untrustedNoTools ? [] : claudeInstalledPluginReadRules();
+  const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed, ...packageReadRules, ...pluginReadRules];
   recordClaudeCapabilityRequest({ permission: req.permission, browserOnly: Boolean(runReq.browserOnly),
     untrustedNoTools: Boolean(runReq.untrustedNoTools), allowedBuiltins: builtinPreAllowed });
   const allowedToolArgs = preAllowedTools.length > 0 ? ["--allowedTools", preAllowedTools.join(",")] : [];
@@ -1734,6 +1794,7 @@ const runClaudeTurn = async (
    * 떨어지고, 사용자 화면에는 아무 차이도 남지 않는다.
    */
   const runCwd = req.cwd ?? agentRunCwd();
+  armCliStagingFolder(runCwd);
   // Product sessions live in Agentlas's own Claude config dir, never in the person's ~/.claude; the
   // person's keychain sign-in is reused unchanged (claude-product-home.ts). One keeps the user MCP servers it switched on.
   // Claude Code compacts at 80% of the model's own window, as Codex does with model_auto_compact_token_limit:
@@ -2083,6 +2144,8 @@ const runClaudeTurn = async (
     };
     if (session) {
       child = session.child;
+      // The CLI's sandbox leaves a hidden `.claude/.cc-writes` in the working folder; it is removed when the last process there exits (cli-staging-leftovers.ts).
+      watchCliStagingFolder(runCwd, child);
     } else {
       try {
         child = spawnCli(bin, oneShotJson ? [...args, "--input-format", "stream-json"] : args, {
@@ -2100,6 +2163,7 @@ const runClaudeTurn = async (
         return;
       }
       trackRunChild(child);
+      watchCliStagingFolder(runCwd, child);
       lingeringChild = child;
       turnDispatchAttempted = true;
       // Context-reduction C01: a one-shot spawn seeds history+context (fresh) or sends a delta onto a resumed session (--resume).
@@ -2376,7 +2440,7 @@ const runClaudeTurn = async (
       const key = `${toolId ?? ""}|${what0 ?? blocked.message.slice(0, 120)}`;
       if (announcedApprovalBlocks.has(key)) return;
       announcedApprovalBlocks.add(key);
-      announceToolDenied({
+      const denial = {
                 ...(runReq.signal ? { signal: runReq.signal } : {}),
         runtime: KIND,
         // 선택("다음부터 허용")을 반영하려면 어느 세션의 결정인지 알아야 한다.
@@ -2384,13 +2448,18 @@ const runClaudeTurn = async (
         tool: call?.name ?? (blocked.blocked ? "Bash" : "tool"),
         detail: what0,
         cwd: runReq.cwd,
-        deniedBy: "runtime-headless",
-      });
-      const what = what0 ? `: ${what0}` : "";
+        deniedBy: "runtime-headless" as const,
+      };
+      const alreadyDeclined = announcedCallDeclined(denial);
+      announceToolDenied(denial);
+      // A path is shown by the card itself; in this line it only reaches the phone as the mask "[local-path]".
+      const what = what0 && !path.isAbsolute(what0) && !/^[A-Za-z]:[\\/]/.test(what0) ? `: ${what0}` : "";
       // "자동으로 거부됐다"는 문장은 사람에게 '끝났다'로 읽힌다(페르소나 루프 라운드 1: 배너가 떠 있었는데도 실패로 기록).
       // 다음 행동 — 아래 승인 배너에서 허용 — 을 문장 안에 넣는다.
-      const ko = `권한이 필요해 이 단계가 멈췄습니다${what}. 사용자가 거절한 것이 아닙니다 — 아래 "전체 액세스로 진행할까요?"에서 허용하면 여기서부터 이어집니다.`;
-      const en = `This step stopped because it needs permission${what}. You did not reject it — allow it in "Continue with full access?" below and it resumes from here.`;
+      const ko = alreadyDeclined ? `권한이 없어 이 단계는 하지 않았습니다${what}.`
+        : `권한이 필요해 이 단계가 멈췄습니다${what}. 사용자가 거절한 것이 아닙니다 — 아래 "전체 액세스로 진행할까요?"에서 허용하면 여기서부터 이어집니다.`;
+      const en = alreadyDeclined ? `This step was not done because it has no permission${what}.`
+        : `This step stopped because it needs permission${what}. You did not reject it — allow it in "Continue with full access?" below and it resumes from here.`;
       events.onNotice?.({
         level: "warning",
         code: "approval-required",
@@ -2594,7 +2663,7 @@ const runClaudeTurn = async (
       stop_reason?: unknown;
       startup_failure_reason?: unknown;
       api_error_status?: number;
-      rate_limit_info?: { status?: string; resetsAt?: number };
+      rate_limit_info?: { status?: string; resetsAt?: number; errorCode?: string };
       event?: {
         type?: string;
         index?: number;

@@ -16,5 +16,4 @@
 .automations ul { display: grid; gap: 3px; margin: 1px 0 0; padding: 0; list-style: none; }
 .automations li { display: grid; grid-template-columns: minmax(80px, max-content) minmax(0, 1fr) max-content; gap: 5px; color: var(--muted-deep); overflow-wrap: anywhere; }
 .automations li time { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.disclaimer { margin-top: 3px !important; padding-top: 6px; border-top: 1px solid var(--paper-edge); font-size: 10px; }
 @media (max-width: 480px) { .body { padding-left: 19px; } .automations li { grid-template-columns: minmax(70px, max-content) minmax(0, 1fr); } .automations li time { grid-column: 2; } }

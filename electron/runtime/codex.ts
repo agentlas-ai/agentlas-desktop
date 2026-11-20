@@ -35,7 +35,7 @@ import { codexAnswerMark, countAgentMessages, normalizeMessagePhase, type AgentM
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { codexShellEnvironmentArgs } from "./env-key-reach";
 import { toolApprovalSessionKey } from "./tool-approval";
-import { codexExecDeleteGateArgs } from "./codex-delete-gate";
+import { codexExecDeleteGateArgs, codexExecSchedulerGateArgs } from "./codex-delete-gate";
 import { remoteRowShellGateWanted } from "../one/plural-remote-ask";
 import { openShellDeleteGate, shellDeleteGateHandle } from "./shell-delete-gate";
 import { ensureMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
@@ -3715,7 +3715,14 @@ export const runCodex: Runner = async (
   // shell-delete-gate.ts). Opened per turn below; the handle is stable for the run key. Only exec carries it: the app-server asks the host itself.
   const execGateWanted = (runReq.permission === "write" && !runReq.browserOnly && !runReq.untrustedNoTools) || remoteRowShellGateWanted(runReq);
   const execGateKey = `${KIND}\0${runReq.chatId ?? ""}\0${runReq.cwd ?? agentRunCwd()}\0${runtimeSessionOwnerId ?? ""}`;
+  // A full-access exec run has no delete gate but still refuses a job in an OS scheduler (os-scheduler-gate-hook.ts); a write or remote-row run's delete-gate script refuses it too.
+  const execSchedulerGateWanted = runReq.permission === "full" && !runReq.browserOnly && !runReq.untrustedNoTools && !execGateWanted;
   const execDeleteGateArgs = (): string[] => {
+    if (execSchedulerGateWanted) {
+      const args = codexExecSchedulerGateArgs();
+      if (args.length === 0) events.onStatus("[os-scheduler-gate] runtime=codex-exec unavailable (no hook form on this OS or no script): an OS scheduler job is not refused here");
+      return args;
+    }
     if (!execGateWanted) return [];
     // Main and the daemon start the wire at boot; this only re-binds it if it went away, and only on the exec path (the hook refuses a delete it cannot ask about).
     void ensureMcpProxyApprovalServer().catch(() => undefined);

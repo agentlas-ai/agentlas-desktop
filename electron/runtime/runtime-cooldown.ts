@@ -23,6 +23,7 @@
 import type { RunnerFailure, RunnerFailureKind } from "./runner";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import { emitRuntimeSignal } from "./runtime-signals";
+import { runtimeAccountChanged, runtimeAccountFingerprint } from "./runtime-account";
 
 /**
  * 시한을 못 읽었을 때의 기본값 — 10분.
@@ -76,6 +77,9 @@ export interface RuntimeCooldown {
   until: number;
   kind: RunnerFailureKind;
   message: string;
+  /** The provider account the runtime was signed in to when this was recorded (runtime-account.ts); absent when the runtime reports none.
+   * A cooldown of another account is not a fact about the one signed in now, so it is dropped when read, restart or not. */
+  account?: string;
 }
 
 const cooldowns = new Map<string, RuntimeCooldown>();
@@ -162,6 +166,7 @@ export function noteRuntimeFailure(
     until,
     kind: failure.kind,
     message: String(failure.message ?? "").slice(0, 400),
+    ...(runtimeAccountFingerprint(runtime.kind) ? { account: runtimeAccountFingerprint(runtime.kind) } : {}),
   };
   pruneCooldowns(now);
   cooldowns.set(entryKey(runtime), entry);
@@ -188,7 +193,13 @@ export function noteRuntimeFailure(
 
 /** Drops every expired cooldown, not only the one being asked about. */
 function pruneCooldowns(now: number): void {
-  for (const [key, entry] of cooldowns) if (entry.until <= now) cooldowns.delete(key);
+  for (const [key, entry] of cooldowns) {
+    if (entry.until <= now) { cooldowns.delete(key); continue; }
+    if (!entry.account) continue;
+    let kind: unknown;
+    try { kind = (JSON.parse(key) as unknown[])[0]; } catch { continue; }
+    if (typeof kind === "string" && runtimeAccountChanged(kind, entry.account)) cooldowns.delete(key);
+  }
 }
 
 /** Keeps a map at its cap by dropping the records that matter least (earliest expiry or oldest fact). */

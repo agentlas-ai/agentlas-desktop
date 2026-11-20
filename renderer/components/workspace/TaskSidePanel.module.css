@@ -1313,6 +1313,28 @@ button.artifactVisual { cursor: pointer; }
   box-shadow: none;
 }
 
+/* A Space pane too narrow to hold the chat and the rail side by side (data-pane-narrow, measured from the pane itself - the window-wide media query
+   below cannot see a pane): the rail lies over the transcript instead of squeezing the chat and its composer to a few characters. It stops above the
+   composer (--rail-composer-clearance, the composer area's measured height, set by TaskCockpit while the rail is open): the input and Send are never covered. */
+.taskCockpitShell[data-output-flow="true"][data-pane-narrow="true"] {
+  display: flex !important;
+}
+
+.taskCockpitShell[data-output-flow="true"][data-pane-narrow="true"] > [data-one-runtime-artifacts="true"] {
+  position: absolute !important;
+  top: 8px !important;
+  right: 8px !important;
+  bottom: calc(var(--rail-composer-clearance, 0px) + 8px) !important;
+  inset-inline-start: auto !important;
+  z-index: 5;
+  width: min(var(--task-cockpit-output-width, 392px), calc(100% - 16px)) !important;
+  height: auto;
+  margin-right: 0;
+  border: 1px solid var(--paper-3);
+  border-radius: 12px;
+  box-shadow: -10px 0 28px rgba(24, 29, 32, .10);
+}
+
 @media (max-width: 760px) {
   .taskCockpitShell[data-output-flow="true"] {
     display: flex !important;
@@ -1322,7 +1344,7 @@ button.artifactVisual { cursor: pointer; }
     position: absolute !important;
     top: 80px !important;
     right: 20px !important;
-    bottom: 20px !important;
+    bottom: calc(var(--rail-composer-clearance, 0px) + 20px) !important;
     inset-inline-start: auto !important;
     width: min(var(--task-cockpit-output-width, 392px), calc(100% - 56px)) !important;
     height: auto;

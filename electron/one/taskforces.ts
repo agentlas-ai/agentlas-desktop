@@ -8,7 +8,7 @@ import type {
   RemoveOneTaskforceInput,
   UpdateOneTaskforceInput,
 } from "../../shared/one-taskforces";
-import { createChat, renameChat } from "../store/chats";
+import { createChat, groupRoomTitleOf, renameChat } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getDb } from "../store/db";
 import { getProject } from "../store/projects";
@@ -145,13 +145,18 @@ export function listOneTaskforces(): OneTaskforce[] {
   // 해체(dissolved)된 좌석의 단톡은 활동 목록에서 빠진다 — 세션(chats)은 보존되고
   // 세션 목록에서 읽기 전용 아카이브로 계속 보인다(SEAT-SESSION-PLAN-v2 T7, I3).
   return (getDb().prepare(
-    `SELECT tf.* FROM one_taskforces tf
+    `SELECT tf.*, c.title AS chat_title FROM one_taskforces tf
      JOIN chats c ON c.id = tf.chat_id
      LEFT JOIN one_seats s ON s.id = c.seat_id
      WHERE c.archived_at IS NULL
        AND (s.id IS NULL OR s.dissolved_at IS NULL)
      ORDER BY tf.updated_at DESC`,
-  ).all() as Row[]).map(toTaskforce);
+  ).all() as Array<Row & { chat_title?: string | null }>).map((row) => {
+    // The chat's own title is the name the person sees and last set (rename, reuse of an empty room, auto-title). A row written before renameChat kept the
+    // taskforce row in step may still hold an older name; the members dialog starts from this value, so it must not write the old one back.
+    const shown = groupRoomTitleOf(row.chat_title);
+    return toTaskforce(shown ? { ...row, title: shown } : row);
+  });
 }
 
 export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce {
@@ -203,42 +208,95 @@ function insertTaskforce(input: { title: string; description: string; memberAgen
   return toTaskforce(rowFor(id));
 }
 
-export function updateOneTaskforce(input: UpdateOneTaskforceInput): OneTaskforce {
+/** The name a member-only change (lead, leave) keeps: the chat's own title, which the person last set; the row's older value only when the chat has none. */
+export function currentGroupTitle(chatId: string, fallback: string): string {
+  try { return groupRoomTitleOf((getDb().prepare("SELECT title FROM chats WHERE id = ?").get(chatId) as { title?: string } | undefined)?.title) ?? fallback; } catch { return fallback; }
+}
+
+type SetMembersInput = {
+  id: string;
+  memberAgentIds: string[];
+  description?: string;
+  expectedRevision?: number;
+  expectedMemberAgentIds?: string[];
+};
+
+/**
+ * Saves a group room's members and description. It never writes the name: the name is `chats.title` and only `renameChat` writes it
+ *. The members form used to write its whole copy back, so a name changed after the form was opened was reverted by the next
+ * member save.
+ *
+ * Conflict rule: when the caller says which member list it opened with (`expectedMemberAgentIds`), the save conflicts only if the list
+ * changed since (a rename, which moves the revision, is no conflict because this save does not touch the name). A caller that sends only
+ * `expectedRevision` (older renderers, app-control) keeps the strict check.
+ */
+export function setTaskforceMembers(input: SetMembersInput): OneTaskforce {
   assertManagedOneTeamAvailable();
   const id = assertId(input?.id, "id");
+  const saved = getDb().transaction(() => applyTaskforceMembers(input)).immediate();
+  emitTaskforceChanged(id);
+  return saved;
+}
+
+function applyTaskforceMembers(input: SetMembersInput): OneTaskforce {
+  const id = assertId(input?.id, "id");
   const row = rowFor(id);
-  assertExpectedRevision(row, input.expectedRevision);
-  const title = normalizeTitle(input.title);
-  const description = normalizeDescription(input.description);
+  const priorMemberIds = readMemberIds(row.member_agent_ids_json);
+  if (input.expectedMemberAgentIds !== undefined) {
+    const opened = normalizeMemberIds(input.expectedMemberAgentIds, { allowUnavailable: true });
+    if (opened.length !== priorMemberIds.length || opened.some((agentId, index) => agentId !== priorMemberIds[index])) {
+      throw new Error("This Taskforce changed on another surface. Reload and try again.");
+    }
+  } else assertExpectedRevision(row, input.expectedRevision);
+  const description = input.description === undefined ? row.description ?? "" : normalizeDescription(input.description);
   // Existing members intentionally survive lease expiry, archival, or package
   // removal so the group transcript keeps an honest grey participant row.
   // Only newly-added identities must still be active staff.
-  const priorMemberIds = readMemberIds(row.member_agent_ids_json);
   const memberAgentIds = normalizeMemberIds(input.memberAgentIds, { allowUnavailable: true });
   const prior = new Set(priorMemberIds);
   assertMembersAvailable(memberAgentIds.filter((agentId) => !prior.has(agentId)));
   const now = new Date().toISOString();
-  getDb().transaction(() => {
+  {
+    // Re-read inside the write transaction: the name and revision that are current NOW are the ones this save keeps.
+    const current = rowFor(id);
+    if (current.member_agent_ids_json !== row.member_agent_ids_json) throw new Error("one_group_revision_changed: This Taskforce changed on another surface. Reload and try again.");
     const added = memberAgentIds.filter((agentId) => !prior.has(agentId));
     assertMembersAvailable(added);
     ensureOneGroupLocalStaff(added, false, { allowPriorTaskFailure: true });
     const changed = getDb().prepare(
       `UPDATE one_taskforces
-       SET title = ?, description = ?, member_agent_ids_json = ?, updated_at = ?, revision = revision + 1
-       WHERE id = ? AND revision = ? AND member_agent_ids_json = ?`,
-    ).run(title, description, JSON.stringify(memberAgentIds), now, id, row.revision, row.member_agent_ids_json);
+       SET description = ?, member_agent_ids_json = ?, updated_at = ?, revision = revision + 1
+       WHERE id = ? AND member_agent_ids_json = ?`,
+    ).run(description, JSON.stringify(memberAgentIds), now, id, row.member_agent_ids_json);
     if (changed.changes !== 1) throw new Error("one_group_revision_changed: This Taskforce changed on another surface. Reload and try again.");
-    renameChat(row.chat_id, title);
     // T3(멤버 영입)·T4(멤버 방출) — 열린 점유를 멤버 목록에 맞추고(빠진 멤버는 행을
-    // 닫기만 한다, I6) 좌석 제목·세션 스냅샷을 같은 트랜잭션에서 갱신한다(I9).
-    const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: row.created_at });
+    // 닫기만 한다, I6) 세션 스냅샷을 같은 트랜잭션에서 갱신한다(I9). 좌석 제목은 건드리지 않는다.
+    const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title: current.title, memberAgentIds, createdAt: row.created_at });
     getDb().prepare("UPDATE chats SET seat_id = ? WHERE id = ? AND (seat_id IS NULL OR seat_id <> ?)").run(seatId, row.chat_id, seatId);
-    renameSeat(seatId, title);
     syncGroupSeatOccupants(seatId, memberAgentIds);
     bindOneTaskforceSessionScope(getDb(),row.chat_id);
+  }
+  return toTaskforce(rowFor(id));
+}
+
+/**
+ * The members form's save (`oneTaskforces:update`): members and description through setTaskforceMembers. The name is written only when
+ * the caller says it changed it: `expectedTitle` is the name the form opened with, and a `title` that differs from it is a rename
+ * (through renameChat, in the same transaction). Without `expectedTitle` (older renderers, app-control) `title` is not written, so a
+ * stale copy can never overwrite the name.
+ */
+export function updateOneTaskforce(input: UpdateOneTaskforceInput): OneTaskforce {
+  assertManagedOneTeamAvailable();
+  const id = assertId(input?.id, "id");
+  const renameTo = input.expectedTitle !== undefined
+    && groupRoomTitleOf(input.title) !== groupRoomTitleOf(input.expectedTitle) ? normalizeTitle(input.title) : null;
+  const saved = getDb().transaction(() => {
+    const result = applyTaskforceMembers(input);
+    if (renameTo) renameChat(result.chatId, renameTo);
+    return result;
   }).immediate();
   emitTaskforceChanged(id);
-  return toTaskforce(rowFor(id));
+  return renameTo ? toTaskforce(rowFor(id)) : saved;
 }
 
 /**
@@ -327,7 +385,20 @@ function ensureOneTaskforceForChat(input: { chatId: string; memberAgentIds: stri
   const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: now, projectId: chat.project_id });
   db.prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chatId);
   applySeatSnapshotToChats(seatId);
+  for (const listener of promotionListeners) listener({ chatId, taskforceId: id });
   return { id, chatId, revision: 1, memberAgentIds };
+}
+
+type PromotionListener = (event: { chatId: string; taskforceId: string }) => void;
+const promotionListeners = new Set<PromotionListener>();
+/**
+ * Called inside the caller's reservation transaction, once, when a one-to-one conversation becomes a group room. The listener (the
+ * Main send state machine) holds the preparations that were opened for the room it used to be (state machine row 12: held, room_changed);
+ * it must not touch the submission that is being reserved right now. Returns an unsubscribe function.
+ */
+export function onOneTaskforcePromoted(listener: PromotionListener): () => void {
+  promotionListeners.add(listener);
+  return () => { promotionListeners.delete(listener); };
 }
 
 export function notifyOneTaskforceFromPreflight(receipt: OneTaskforceReceipt): void {

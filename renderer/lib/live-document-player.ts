@@ -289,7 +289,8 @@ export function useLiveDocumentSession(sessionId: string | null) {
       }
     });
     // The journal watcher in Main pushes liveDocument:changed for every write by any process; the minute is only the net under it.
-    const timer = window.setInterval(() => void refresh("delta"), LIVE_DOCUMENT_SAFETY_READ_MS);
+    // The net re-reads the metadata too ("changed" = delta + meta): with "delta" alone a lost push left "Unsaved - 2 changes" (meta.savedRevision) on the tab after the agent had saved the file.
+    const timer = window.setInterval(() => void refresh("changed"), LIVE_DOCUMENT_SAFETY_READ_MS);
     return () => {
       disposed = true;
       if (refreshRef.current === refresh) refreshRef.current = null;

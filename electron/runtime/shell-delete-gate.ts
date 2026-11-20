@@ -15,6 +15,7 @@
  */
 import { createHmac, randomBytes } from "node:crypto";
 import { approvalRefusalResultText, shellCommandDeletes } from "./approval-rule";
+import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -64,6 +65,26 @@ export type ShellDeleteDecision = { decision: "allow" } | { decision: "deny"; re
 const DENY_NO_GATE = approvalRefusalResultText({ action: "delete", cause: "nobody_to_ask" });
 
 /**
+ * The signal one hook question is asked under: it ends when the run's does and when the hook's wire does (each keeps its own reason), and it is a registered child of the run's signal.
+ * A native (daemon-owned) run knows its cards by that lineage: a card asked under a merged signal (a new one, with no lineage) was never stamped as the run's, so the
+ * Desktop window neither drew it nor could place an answer on it (a phone's "allow" of a handed-over Work's delete never reached the shell). Returns null when the run's own native
+ * execution has already ended: nobody can answer for it any more.
+ */
+function hookAskSignal(runSignal: AbortSignal | undefined, wireSignal: AbortSignal | undefined): { signal: AbortSignal | undefined; dispose(): void } | null {
+  if (!runSignal) return { signal: wireSignal, dispose() { /* nothing was attached */ } };
+  const ctrl = new AbortController();
+  const fromRun = (): void => ctrl.abort(runSignal.reason);
+  const fromWire = (): void => ctrl.abort(wireSignal?.reason);
+  if (runSignal.aborted) ctrl.abort(runSignal.reason);
+  else {
+    try { registerNativeApprovalChildSignal(runSignal, ctrl.signal); } catch { return null; }
+    runSignal.addEventListener("abort", fromRun, { once: true });
+  }
+  if (wireSignal) { if (wireSignal.aborted) ctrl.abort(wireSignal.reason); else wireSignal.addEventListener("abort", fromWire, { once: true }); }
+  return { signal: ctrl.signal, dispose() { runSignal.removeEventListener("abort", fromRun); wireSignal?.removeEventListener("abort", fromWire); } };
+}
+
+/**
  * One delete question from a hook. Anything that is not a delete by the shared rule is answered "allow" without a card (the hook only asks about
  * deletes; this is the second look). An unknown or closed handle, a missing arbiter that would refuse, or an arbiter that throws is a refusal.
  */
@@ -73,8 +94,9 @@ export async function decideShellDelete(handle: unknown, command: unknown, wireS
   if (!entry) return { decision: "deny", refusal: DENY_NO_GATE };
   if (!shellCommandDeletes(command)) return { decision: "allow" };
   const { gate } = entry;
-  const signals = [gate.signal, wireSignal].filter((value): value is AbortSignal => Boolean(value));
-  const merged = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+  const linked = hookAskSignal(gate.signal, wireSignal);
+  if (!linked) return { decision: "deny", refusal: DENY_NO_GATE };
+  const merged = linked.signal;
   const ask: RuntimeToolPermissionAsk = {
     ...(merged ? { signal: merged } : {}),
     ...(wireSignal ? { closed: wireSignal } : {}),
@@ -94,6 +116,7 @@ export async function decideShellDelete(handle: unknown, command: unknown, wireS
   const arbiter = getRuntimeToolPermissionArbiter();
   let verdict: string;
   try { verdict = arbiter ? await arbiter(ask) : defaultRuntimeToolPermission(ask); } catch { verdict = "deny"; }
+  finally { linked.dispose(); }
   if (verdict !== "deny") return { decision: "allow" };
   return { decision: "deny", refusal: toolApprovalRefusalText(ask) || DENY_NO_GATE };
 }

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { withdrawnWords } from "@/lib/chat-stop";
 
 /**
  * The owner's Stop in the gap between two attempts of a message the app is sending again by itself (a start that failed before any
@@ -20,7 +21,9 @@ export function waitingRetryCopy(locale: "ko" | "en"): { waiting: string; stop: 
 const POLL_WHILE_WAITING_MS = 60_000;
 const STOPPED_NOTICE_MS = 6_000;
 
-export function WaitingRetryStop({ chatId, locale, live, maxWidth }: { chatId: string | null; locale: "ko" | "en"; live: boolean; maxWidth?: number }) {
+export function WaitingRetryStop({ chatId, locale, live, maxWidth, onWithdrawn }: { chatId: string | null; locale: "ko" | "en"; live: boolean; maxWidth?: number;
+  /** The words of the messages the Stop took back (they were not sent): the surface puts them in its input box. */
+  onWithdrawn?: (words: string[]) => void }) {
   const [waiting, setWaiting] = useState(0);
   const [stopping, setStopping] = useState(false);
   const [stoppedNotice, setStoppedNotice] = useState(false);
@@ -66,15 +69,18 @@ export function WaitingRetryStop({ chatId, locale, live, maxWidth }: { chatId: s
   const stop = useCallback(() => {
     const api = ipc();
     const id = chatRef.current;
-    if (!api?.invoke.stopWaitingRetries || !id || stopping) return;
+    if (!api?.chat?.stop || !id || stopping) return;
     setStopping(true);
-    void api.invoke.stopWaitingRetries(id).then((answer) => {
+    // The conversation's one Stop, not a Stop of waiting retries only: the same call every surface's Stop makes.
+    void api.chat.stop(id).then((receipt) => {
       if (chatRef.current !== id) return;
       setWaiting(0);
-      if ((answer?.stopped ?? 0) > 0) setStoppedNotice(true);
+      const words = withdrawnWords(receipt);
+      if (words.length) onWithdrawn?.(words);
+      if ((receipt?.withdrawn?.length ?? 0) > 0) setStoppedNotice(true);
       else read(); // one just started: the run's own Stop is drawn now
     }).catch(() => { read(); }).finally(() => setStopping(false));
-  }, [read, stopping]);
+  }, [onWithdrawn, read, stopping]);
 
   const box = { maxWidth, margin: "6px auto", display: "flex", alignItems: "center", gap: 10, color: "var(--ink-soft)", fontSize: 12 } as const;
   if (stoppedNotice && !live) return <p role="status" data-waiting-retry-stopped="true" style={box}>{copy.stopped}</p>;

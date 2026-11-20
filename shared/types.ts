@@ -1479,6 +1479,13 @@ export interface McpToolCatalogEntry {
   brandColor?: string;
   /** 로고 타일 모노그램 (1–2자) */
   mark?: string;
+  /**
+   * How this service signs the program in (connector card fact, decision / design CONNECTOR-ROUTING-API-FIRST 2.5; the words of the web placement vocabulary), read from the server's README
+   * (the same lines as `envRequirements`). Absent = not declared: the card is then built from `envRequirements` only.
+   */
+  auth?: "none" | "oauth" | "api_key" | "token" | "os-permission";
+  /** What running this program needs from the machine (the web placement vocabulary). Absent = not declared. */
+  needs?: Array<"network" | "process" | "long-running" | "filesystem" | "browser" | "local-app" | "intranet">;
 }
 
 /** 사용자가 설치/구성한 MCP 서버 (SQLite에 영구화). */
@@ -2227,7 +2234,9 @@ export type HostStatusKind =
   /** A failed run whose request a later run took over (receipt supersededByRunId). Quiet: drawn nowhere. */
   | "recovered"
   /** The owner's message was received and waits for its chat to be free (invocation/owner-intake.ts). */
-  | "owner-received";
+  | "owner-received"
+  /** The app started again and took an interrupted run up by itself (long-run/startup-resume-notice.ts): one line per run per start, with a Stop. */
+  | "startup-resumed";
 
 export interface ChatMessagesCursor {
   id: string;
@@ -2245,11 +2254,22 @@ export interface ChatHistoryEntry {
   id: string;
   /** Opaque Main-issued durable chat-message identity; never derived from copy or timestamps. */
   durableMessageId?: string;
+  /**
+   * The id the composer made for this message (user rows saved from a composer send; absent on older rows and on every other row). A
+   * surface matches the bubble it drew to this saved row by this id, never by text.
+   */
+  clientIntentId?: string;
   role: "user" | "assistant" | "system";
   /** Installed agent that authored this assistant row; absent for older or host-authored rows. */
   speakerAgentId?: string;
   text: string;
   createdAt: string;
+  /**
+   * Desktop history page only: where the answer starts inside `text` (UTF-16 index). What comes before it is the progress the model wrote
+   * between its tool calls ("Now formatting, then save."): a surface may fold it into the steps view. Absent / 0 = the whole text is the answer.
+   * `text` itself is never shortened (the tool rows are anchored to it). Same mark the phone's history reads (runtime/final-answer-turns.ts).
+   */
+  answerStart?: number;
   /** Exact Main-issued purpose of a system turn; absent on legacy history. */
   hostNotice?: ChatHostNotice;
   /** 사용자 또는 호스트가 생성해 영구화한 이미지 첨부 URL. */
@@ -2370,7 +2390,13 @@ export interface TelegramConnectActionResult {
 // ── 스케줄 트리거 spec — 저장/문법/표시 분리(설계 §2.1) ───────────
 // 내부 진실은 이 discriminated union 하나. 프리셋은 별도 kind가 아니라 라벨 붙은 cron.
 export type ScheduleSpec =
-  | { kind: "cron"; expr: string; tz: string }
+  | { kind: "cron"; expr: string; tz: string;
+      /** Only every Nth week counts: the weeks are counted from the week (Monday start, in `tz`) that holds `from` (YYYY-MM-DD, the first run's date); a slot before `from` is not a run. every >= 2. */
+      everyWeeks?: { every: number; from: string };
+      /** Local dates (YYYY-MM-DD in `tz`) on which the cron slot does NOT run. */
+      skipDates?: string[];
+      /** The last local date (YYYY-MM-DD in `tz`) a slot may run on; after it nothing runs and the job ends. */
+      until?: string }
   | { kind: "interval"; everyMs: number; anchor: "wallclock" | "lastRun" }
   | { kind: "once"; atIso: string }
   | { kind: "manual" };
@@ -2588,6 +2614,25 @@ export interface AutomationTriggerEventReconcileResult {
   automationId: string;
   resolution: AutomationTriggerEventReconcileInput["resolution"];
   status: "delivered" | "pending";
+}
+
+/** One owner send that is not a transcript row yet (mirror of electron/chat/owner-input-queue.ts OwnerInputItem; shared/ never imports electron/). */
+export interface OwnerInputItem {
+  key: string;
+  source: "pending_chat_send" | "preflight_submission" | "preflight_steer" | "invocation_steer";
+  id: string;
+  chatId: string;
+  state: "accepted" | "waiting" | "starting" | "delivered" | "held" | "uncertain" | "withdrawn";
+  reason: string | null;
+  text: string | null;
+  intentId: string | null;
+  runId: string | null;
+  createdAt: string;
+}
+/** The one Stop of a conversation: the live run + every send that has not started. `withdrawn` = not sent, words handed back for the input box. */
+export interface ChatStopReceipt {
+  chatId: string; runId: string | null; status: "requested" | "already-requested" | "not-found"; epoch: number;
+  withdrawn: Array<{ id?: string; sendId?: string; source?: string; intentId: string | null; text: string; bubbleRemoved: boolean }>;
 }
 
 export interface InvocationCancelReceipt {
@@ -2975,9 +3020,12 @@ export interface Automation {
  */
 export type AutomationCreateInput = Omit<
   Automation,
-  "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy" | "executionPermission" | "goalId" | "workspaceCanFollowGoal" | "workspaceNeedsReview" | "workspaceGoalCandidate"
+  "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy" | "executionPermission" | "goalId" | "workspaceCanFollowGoal" | "workspaceNeedsReview" | "workspaceGoalCandidate" | "targetType" | "targetId"
 > & {
   executionPermission?: AutomationExecutionPermission;
+  /** Omit both from a conversation: the host uses that conversation's own agent (or company). An id that names nothing registered is refused. */
+  targetType?: AutomationTargetType;
+  targetId?: string;
 };
 
 /** 기존 자동화 편집 패치(설계 한계 #7 — 삭제-재생성 대신 in-place 수정). */
@@ -4793,6 +4841,8 @@ export interface McpInvocationRequest {
   userPrompt: string;
   /** Main-only exact person-authored text before One appends standing-staff context. */
   oneUserAuthoredPrompt?: string;
+  /** The id the composer made for this send: Main stores it on the person's row so a surface matches the bubble by id, never by words. */
+  clientIntentId?: string;
   /**
    * Who authored `userPrompt`. "system" marks a prompt the product sent on the
    * user's behalf (continue an unfinished run, resume after runtime recovery).
@@ -5147,6 +5197,8 @@ export interface McpInvocationEvent {
   observedAt?: string;
   /** Opaque durable assistant-message identity, present only after Main commits the transcript row. */
   durableMessageId?: string;
+  /** Where the answer starts inside the final `text` (the recorded answer_start): what comes before is progress the model wrote between tool calls. Absent = the whole text is the answer. */
+  answerStart?: number;
   goalResult?: import("./goal-result").GoalResultPresentation;
   /** Main-owned run boundary. Unlike status prose, this is an authoritative lifecycle fact. */
   lifecycle?: {
@@ -6299,6 +6351,8 @@ export interface HephaestusUpdateJournal {
   status: string | null;
   /** Structured failure reported by the updater, when present. */
   errorCode?: string;
+  /** The release the updater was moving to when it wrote this record (a failed update names the one it failed to reach). */
+  targetVersion?: string | null;
   reason: string | null;
   current: string | null;
   latest: string | null;
@@ -7008,6 +7062,8 @@ export interface InvocationRunReceipt {
    * Failed/interrupted run whose request a later run of the same chat took over, read from the ledger: the later run
    * started from this run's prompt row as the newest owner message, or ran the same prompt row again. Its failure is
    * recovered history, not the room's current state (Yotube 2026-10-17: d85e262f → bb73a150).
+   * also set on a COMPLETED run that kept a failed step, when a later run took the request over (the full-access continuation); the
+   * screen then stops calling that step the state of the run once the later run completed too.
    */
   supersededByRunId?: string;
 }
@@ -7342,7 +7398,12 @@ export interface AgentlasIpc {
   /** The answered or closed cards of these conversations (oldest first), for the conversation's one quiet line where the card was. Read only. */
   listSettledToolApprovals: (chatIds: string[]) => Promise<SettledToolApproval[]>;
   /** A button of a hand-off card (cancel, retry, or the answer to a confirmation of work this desktop handed over). Main reads the card row; the card carries only ids. */
-  pluralHandoffAct: (input: { op: "cancel" | "retry"; id: string } | { op: "answer"; id: string; qid: string; answer: "allow" | "allow_task" | "deny" }) => Promise<{ ok: boolean; state?: string }>;
+  pluralHandoffAct: (input: { op: "cancel" | "retry"; id: string } | { op: "answer"; id: string; qid: string; answer: "allow" | "allow_task" | "deny" } | { op: "consent"; id: string; answer: "allow" | "always" | "deny" }) => Promise<{ ok: boolean; state?: string; answer?: string }>;
+  /** The consent chips waiting on this desktop: another agent wants to hand work to this desktop's agent. The list is the server's answer; a change is announced by `onPluralConsentChanged`. */
+  pluralConsentAsks: () => Promise<{ asks: Array<{ id: string; from: string; fromName: string; brief: string; doneWhen?: string; createdAt?: string; expiresAt?: string }> }>;
+  /** The standing "Always allow" rules of hand-offs between this account's agents (ok:false = an older server). */
+  pluralAllows: () => Promise<{ ok: boolean; rules: Array<{ from: string; fromName?: string; to: string; toName?: string; at?: string }> }>;
+  pluralAllowOff: (from: string, to: string) => Promise<{ state: "off" | "none" | null }>;
   /** 데몬 자동 시작(로그인 기동) — 기본 off. 켜면 부팅 항목까지 같은 턴에 정합된다. */
   getDaemonAutostart: () => Promise<{ enabled: boolean; installed?: boolean; loaded?: boolean; reconciled?: boolean; reason?: string }>;
   setDaemonAutostart: (enabled: boolean) => Promise<{ enabled: boolean; installed?: boolean; loaded?: boolean; reconciled?: boolean; reason?: string }>;
@@ -8061,6 +8122,8 @@ export interface AgentlasIpc {
   };
   /** 외부 MCP 툴 플러그인 — Slack/Discord/GitHub 등을 실제로 연결한다.
    *  env 값은 글로벌 vault(env)에서 가져와 stdio 자식 프로세스에 주입. */
+  /** Connector routing: the account-connections rows. Optional: an older Main has no such answer and the reader uses an optional chain. */
+  connectors?: { routeView(): Promise<import("./connector-route-view").RouteViewRow[]> };
   mcpTools: {
     /** 연결 가능한 외부 툴 카탈로그 (setting_guide) */
     listCatalog: () => Promise<McpToolCatalogEntry[]>;
@@ -8385,6 +8448,23 @@ export interface AgentlasIpc {
       kind: OntologySourceKind,
     ) => Promise<OntologyProjectStatus>;
     openInbox: (projectId: string) => Promise<{ ok: boolean; path: string | null; message: string }>;
+  };
+  chat: {
+    /** The one Stop of a conversation: the live run + every send that has not started. */
+    stop: (chatId: string) => Promise<ChatStopReceipt>;
+    /** Owner inputs that are not a transcript row yet (accepted | waiting | starting | held | uncertain). */
+    ownerInputs: (chatId: string) => Promise<OwnerInputItem[]>;
+    /** the conversation's durable promises (schedules, waits, its Goal's wait) - the strip every surface draws. */
+    pendingPromises: (chatId: string) => Promise<import("./pending-promises").PendingPromises>;
+    /** the live state of the objects behind a conversation's receipt cards, by receipt id. */
+    receiptLive: (chatId: string) => Promise<Record<string, import("./receipt-card").ReceiptLive>>;
+    /** the question cards the person closed with X (the conversation's state in the database). */
+    closedQuestions: (chatId: string) => Promise<Array<{ key: string; count: number; at: number }>>;
+    closeQuestion: (input: { chatId: string; key: string; count?: number }) => Promise<Array<{ key: string; count: number; at: number }>>;
+    reopenQuestion: (input: { chatId: string; key: string }) => Promise<Array<{ key: string; count: number; at: number }>>;
+    pruneQuestions: (input: { chatId: string; liveKeys: string[] }) => Promise<Array<{ key: string; count: number; at: number }>>;
+    /** The old per-window localStorage copy, imported once; returns how many entries were new. */
+    importClosedQuestions: (legacy: Record<string, unknown>) => Promise<number>;
   };
   chats: {
     messagesPage: (input: { chatId: string; limit?: number; before?: ChatMessagesCursor }) => Promise<ChatMessagesPage>;
@@ -8761,6 +8841,9 @@ export interface AgentlasIpc {
         expectedRunVersion: number;
       };
     }) => Promise<import("./automation-strategy-review").AutomationStrategyReviewResult>;
+    /**
+     * Save a schedule. From a conversation, leave targetType and targetId out: the host uses that conversation's own agent and reports back into it (an id that names nothing registered is refused). monitor.deliverAnswer true means each run's answer is itself what the person asked to receive (a repeating reminder, a daily briefing) and is delivered even when the run changed nothing outside the app; leave it out to keep runs that only checked something quiet. A schedule that runs once always delivers its answer.
+     */
     create: (input: AutomationCreateInput) => Promise<Automation>;
     toggle: (id: string, enabled: boolean) => Promise<Automation>;
     remove: (id: string) => Promise<void>;
@@ -8962,6 +9045,10 @@ export interface AgentlasIpc {
     liveRunChannel: (automationId: string) => string;
     /** 이 자동화의 최근 실행 스냅샷(per-node 상태). 라이브 오버레이 초기 하이드레이트용. */
     latestRun: (automationId: string) => Promise<WorkflowRunSnapshot | null>;
+    /** Requests the app keeps for an outside cause (usage limit, sign-in, connection) and continues by itself; absent on an older Main. */
+    keptRequests?: () => Promise<import("./kept-requests").KeptRequestView[]>;
+    /** Closes one kept request for good (terminal; the owner's cancel). */
+    cancelKeptRequest?: (id: string) => Promise<{ ok: true } | { ok: false; reason: "not_kept" | "unreadable" }>;
     /**
      * 대화(또는 Work 프로젝트)에 딸린 자동화와 지금 도는 실행의 원장 요약. 구 preload 에는 없다.
      * 바뀌면 store:changed {entity:"automation"}, 도구 활동은 liveRunChannel(id) 로 온다.
@@ -9365,6 +9452,8 @@ export interface SettledToolApproval {
   agentId?: string;
   requestedAt: string;
   outcome: "approved" | "declined" | "expired";
+  /** Why an `expired` card closed, read from the ledger row's own reason (run_cancelled / owner_restarted / anything else = the time ran out): the card's word and the closed-request notice come from this one fact. */
+  closeReason?: "timed_out" | "cancelled" | "restarted";
   /** The owner's answer; absent when the card expired unanswered. */
   choice?: ToolApprovalDecision;
   decidedAt: string;
@@ -9437,6 +9526,8 @@ export interface ToolApprovalRequestEvent {
   taskAllowOffered?: true;
   /** A sending card: the beginning of what is sent (the approval detail, cut to 2,000 characters). Only on a remote Work's card. */
   preview?: string;
+  /** where this request was made (account, project, conversation, room): computed once by Main (runtime/approval-scope.ts scopeStampOfChat) and judged by one gate per surface (shared/scope-stamp.ts). The account is an opaque id. */
+  scope?: import("./scope-stamp").ScopeStamp;
 }
 
 /**

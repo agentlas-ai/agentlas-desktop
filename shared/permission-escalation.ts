@@ -43,3 +43,13 @@ export function stripPermissionEscalationMarker(text: string): string {
     .filter((line) => !line.trim().startsWith(PERMISSION_ESCALATION_MARKER));
   return kept.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/, "");
 }
+
+/**
+ * The operating system's own refusal of a write, as a CLI's shell tool prints it when its sandbox holds the run inside its folders (Codex workspace-write on macOS
+ * seatbelt / Linux landlock: `Operation not permitted`, `Read-only file system`). It is the sandbox speaking, not a model: a write-permission turn that hit it earns the
+ * same "continue with full access?" chip the marker does, so a model that only apologises (the same refusal four times, no way out) still leaves the person
+ * a button. A plain `Permission denied` (a file the user has no right to) is not it: more access in this app would not change that.
+ */
+export function isSandboxWriteDenial(result: unknown): boolean {
+  return typeof result === "string" && /\bOperation not permitted\b|\bRead-only file system\b|\bEROFS\b/.test(result);
+}

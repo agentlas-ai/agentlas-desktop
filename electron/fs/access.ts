@@ -354,12 +354,22 @@ function generatedRootRules(): RootRule[] {
   return GENERATED_ROOT_NAMES.map((name) => ({ path: path.join(userData, name), mode: "tree" }));
 }
 
+/**
+ * The one folder a conversation works in: its own working folder, else its project's folder. A run in a project executes in the project's
+ * folder (mcp/client.ts) while the chat row keeps `working_folder` empty, so reading only the chat row refused a conversation the files its own
+ * run had just written (the file chip's preview opened blank). A store without the `projects` table keeps the chat row alone.
+ */
 function chatWorkspaceRule(chatId: string): RootRule | null {
   if (!chatId || chatId.length > 256) return null;
   try {
-    const row = getDb()
-      .prepare("SELECT working_folder AS path FROM chats WHERE id = ?")
-      .get(chatId) as { path: string | null } | undefined;
+    const db = getDb();
+    let row: { path: string | null } | undefined;
+    try {
+      row = db.prepare("SELECT COALESCE(c.working_folder, p.folder_path) AS path FROM chats c LEFT JOIN projects p ON p.id = c.project_id WHERE c.id = ?")
+        .get(chatId) as { path: string | null } | undefined;
+    } catch {
+      row = db.prepare("SELECT working_folder AS path FROM chats WHERE id = ?").get(chatId) as { path: string | null } | undefined;
+    }
     return row?.path ? { path: row.path, mode: "tree", canonical: true } : null;
   } catch {
     return null;
@@ -411,9 +421,15 @@ function delegatedChatWorkspaceRules(chatId: string): RootRule[] {
 
 function allChatWorkspaceRules(): RootRule[] {
   try {
-    const rows = getDb()
-      .prepare("SELECT DISTINCT working_folder AS path FROM chats WHERE working_folder IS NOT NULL")
-      .all() as Array<{ path: string }>;
+    const db = getDb();
+    let rows: Array<{ path: string }>;
+    try {
+      // A project's folder is where its conversations work (see chatWorkspaceRule), so its images are served like a chat's own folder's.
+      rows = db.prepare("SELECT working_folder AS path FROM chats WHERE working_folder IS NOT NULL UNION SELECT folder_path AS path FROM projects WHERE folder_path IS NOT NULL")
+        .all() as Array<{ path: string }>;
+    } catch {
+      rows = db.prepare("SELECT DISTINCT working_folder AS path FROM chats WHERE working_folder IS NOT NULL").all() as Array<{ path: string }>;
+    }
     return rows
       .filter((row) => typeof row.path === "string" && path.isAbsolute(row.path))
       .map((row) => ({ path: row.path, mode: "tree", canonical: true }));

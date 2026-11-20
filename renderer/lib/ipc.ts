@@ -51,6 +51,8 @@ interface AgentlasEvents {
   onActiveChats: (handler: (chatIds: string[]) => void) => () => void;
   /** Agent mail changed (ids + unread count). Absent on older preloads. */
   onAgentMailChanged?: (handler: (event: import("@shared/agent-mail").AgentMailChangedEvent) => void) => () => void;
+  /** The chips waiting on this desktop changed (no data; re-read `pluralConsentAsks`). Absent on older preloads. */
+  onPluralConsentChanged?: (handler: () => void) => () => void;
   /** New-mail notification was clicked: open this thread in One's mailbox. */
   onAgentMailOpen?: (handler: (event: { threadId: string | null }) => void) => () => void;
   /** Pairing/device lifecycle notification. Contains no nonce, token, or certificate. */

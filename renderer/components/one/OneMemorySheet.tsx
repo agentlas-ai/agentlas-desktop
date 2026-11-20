@@ -34,7 +34,7 @@ import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
 import type { AgentAppMemorySharing } from "@shared/agent-app-memory";
-import type { DesktopMemoryQueryResult, DesktopMemoryDetail, DesktopMemorySharing, DesktopMemoryStatus } from "@shared/desktop-memory-inspector";
+import type { DesktopMemoryEntry, DesktopMemoryQueryResult, DesktopMemoryDetail, DesktopMemorySharing, DesktopMemoryStatus } from "@shared/desktop-memory-inspector";
 import type { OneDurableMemoryEntryUi } from "@shared/types";
 import type { OneMemoryMapSnapshot } from "@shared/one-memory-map";
 import { OneMemoryMap, ONE_MEMORY_KIND_COLORS } from "./OneMemoryMap";
@@ -177,6 +177,8 @@ function LegacyOneMemoryView({open,active,locale}:{open:boolean;active:boolean;l
   const forgetDurable = async (entry: OneDurableMemoryEntryUi) => {
     const api = ipc();
     if (!api?.oneMemory?.forgetEntry) return;
+    if (!(await confirmPopup(locale === "ko" ? "이 기억을 잊을까요? 에이전트가 더 이상 이 내용을 떠올리지 않습니다." : "Forget this memory? The agent will no longer recall it.",
+      { title: locale === "ko" ? "이 기억을 잊을까요?" : "Forget this memory?", tone: "danger", confirmLabel: locale === "ko" ? "잊기" : "Forget", cancelLabel: locale === "ko" ? "취소" : "Cancel" }))) return;
     const request = ++durableRequest.current;
     setBusyId(entry.id);
     setMessage(null);
@@ -392,20 +394,23 @@ export function DesktopMemoryInspector({open,active,locale,revisionHint,fixed}:{
     }catch(cause){if(current===generation.current)settleFailure(cause);}finally{setBusy(false);}
   };
   const describe=useCallback((id:string)=>{const row=result?.entries.find(value=>value.memoryId===id);return row?{label:`${row.actorName} · ${kindLabel(row.kind,locale)}`,text:row.content}:null;},[result,locale]);
-  const mutate=async(action:"edit"|"forget")=>{
-    if(!detail)return;const api=ipc()?.oneMemory.inspector;if(!api)return;
+  const mutate=async(action:"edit"|"forget",from:DesktopMemoryEntry|null=detail)=>{
+    // `from` is the open detail, or a list row (its forget icon): both carry the whole target (id, owner, actor, revision, epoch).
+    if(!from)return;const api=ipc()?.oneMemory.inspector;if(!api)return;
     // once shared memory is open here a delete says how far it reaches before anything is deleted. Before that (no `sharing` on the line) the screen asks nothing, as it never did.
-    if(action==="forget"){const sharing=result?.entries.find(row=>row.memoryId===detail.memoryId)?.sharing;
-      if(sharing&&!(await confirmPopup(deleteConfirmText(detail.content,sharing,detail.actorName,locale),{title:locale==="ko"?"이 기억을 삭제할까요?":"Delete this memory?",tone:"danger",confirmLabel:locale==="ko"?"삭제":"Delete",cancelLabel:locale==="ko"?"취소":"Cancel"})))return;}
+    if(action==="forget"){const sharing=result?.entries.find(row=>row.memoryId===from.memoryId)?.sharing;
+      // Forgetting always asks first: the plain line when nothing is shared, the reach line (who else loses it) when it is.
+      const question=sharing?deleteConfirmText(from.content,sharing,from.actorName,locale):(locale==="ko"?"이 기억을 잊을까요? 에이전트가 더 이상 이 내용을 떠올리지 않습니다.":"Forget this memory? The agent will no longer recall it.");
+      if(!(await confirmPopup(question,{title:sharing?(locale==="ko"?"이 기억을 삭제할까요?":"Delete this memory?"):(locale==="ko"?"이 기억을 잊을까요?":"Forget this memory?"),tone:"danger",confirmLabel:sharing?(locale==="ko"?"삭제":"Delete"):(locale==="ko"?"잊기":"Forget"),cancelLabel:locale==="ko"?"취소":"Cancel"})))return;}
     const current=generation.current;setBusy(true);setError(null);setNotice(null);
     try {
-      const target={memoryId:detail.memoryId,ownerRef:detail.ownerRef,actorId:detail.actorId,expectedRevision:detail.expectedRevision,expectedEpoch:detail.expectedEpoch};
+      const target={memoryId:from.memoryId,ownerRef:from.ownerRef,actorId:from.actorId,expectedRevision:from.expectedRevision,expectedEpoch:from.expectedEpoch};
       const receipt=action==="edit"?await api.edit({...target,content:text}):await api.forget(target);
       if(current!==generation.current)return;
       setNotice(action==="edit"?(locale==="ko"?"수정했어요. 이전 내용은 이력으로 남습니다.":"Updated. The previous content remains in history.")
         :(locale==="ko"?`${receipt.affectedMemoryIds.length}개 기억을 잊었어요.`:`Forgot ${receipt.affectedMemoryIds.length} memories.`));
       setRetry(value=>value+1);
-    }catch(cause){if(current===generation.current)settleFailure(cause,keptEditAfterRefresh(action,detail,text,memorySheetOutcome(cause,locale)));}
+    }catch(cause){if(current===generation.current)settleFailure(cause,keptEditAfterRefresh(action,from,text,memorySheetOutcome(cause,locale)));}
     finally{setBusy(false);}
   };
   const recallLabel=(value:string)=>({user_identity:locale==="ko"?"개인 공통":"Personal",team_memory:locale==="ko"?"팀":"Team",agent_repo:locale==="ko"?"이 Agent":"This agent",agent_team:locale==="ko"?"Agent 팀":"Agent team",project:locale==="ko"?"프로젝트":"Project",session:locale==="ko"?"이 대화":"This conversation"}[value]??value);
@@ -413,12 +418,12 @@ export function DesktopMemoryInspector({open,active,locale,revisionHint,fixed}:{
   return <section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
     <h3 id="durable-memory-title" className={styles.memoryCount}>{locale==="ko"?"기억":"Memories"} <span>{result?.total??"…"}</span></h3>
     <div className={`${styles.editForm} ${styles.memoryFilters}`}>
-      {!fixed&&<label><span>{locale==="ko"?"One / Agent":"One / Agent"}</span><select aria-label="Memory actor" value={actor} disabled={busy} onChange={event=>setActor(event.target.value)}>
+      {!fixed&&<label><span>{locale==="ko"?"One / 에이전트":"One / Agent"}</span><select aria-label={locale==="ko"?"기억 주체":"Memory actor"} value={actor} disabled={busy} onChange={event=>setActor(event.target.value)}>
         <option value={BUILTIN_ONE_AGENT_ID}>One</option><option value="*">{locale==="ko"?"모든 Agent":"All agents"}</option>
         {result?.actors.filter(value=>value.id&&value.id!==BUILTIN_ONE_AGENT_ID).map(value=><option key={value.id} value={value.id!}>{value.name}</option>)}</select></label>}
-      <label><span>{locale==="ko"?"프로젝트":"Project"}</span><select aria-label="Memory project" value={project} disabled={busy} onChange={event=>setProject(event.target.value)}><option value="">{locale==="ko"?"모든 프로젝트":"All projects"}</option>{result?.projects.map(value=><option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
-      <label><span>{locale==="ko"?"적용 범위":"Scope"}</span><select aria-label="Memory scope" value={scope} disabled={busy} onChange={event=>setScope(event.target.value)}><option value="">{locale==="ko"?"모든 범위":"All scopes"}</option>{["user_identity","team_memory","agent_repo","agent_team","project","session"].map(value=><option key={value} value={value}>{recallLabel(value)}</option>)}</select></label>
-      <label><span>{locale==="ko"?"상태":"Status"}</span><select aria-label="Memory status" value={status} disabled={busy} onChange={event=>setStatus(event.target.value as DesktopMemoryStatus|"all")}>{["active","disabled","superseded","forgotten","all"].map(value=><option key={value} value={value}>{statusLabel(value)}</option>)}</select></label>
+      <label><span>{locale==="ko"?"프로젝트":"Project"}</span><select aria-label={locale==="ko"?"기억 프로젝트":"Memory project"} value={project} disabled={busy} onChange={event=>setProject(event.target.value)}><option value="">{locale==="ko"?"모든 프로젝트":"All projects"}</option>{result?.projects.map(value=><option key={value.id} value={value.id}>{value.name}</option>)}</select></label>
+      <label><span>{locale==="ko"?"적용 범위":"Scope"}</span><select aria-label={locale==="ko"?"기억 범위":"Memory scope"} value={scope} disabled={busy} onChange={event=>setScope(event.target.value)}><option value="">{locale==="ko"?"모든 범위":"All scopes"}</option>{["user_identity","team_memory","agent_repo","agent_team","project","session"].map(value=><option key={value} value={value}>{recallLabel(value)}</option>)}</select></label>
+      <label><span>{locale==="ko"?"상태":"Status"}</span><select aria-label={locale==="ko"?"기억 상태":"Memory status"} value={status} disabled={busy} onChange={event=>setStatus(event.target.value as DesktopMemoryStatus|"all")}>{["active","disabled","superseded","forgotten","all"].map(value=><option key={value} value={value}>{statusLabel(value)}</option>)}</select></label>
     </div>
     <p className={styles.memoryHint}>{locale==="ko"?"Agent별 회상 범위를 유지하며 소유자가 기억을 관리할 수 있습니다.":"Manage your memories while preserving each agent's recall scope."}</p>
     {skipped.map(item=><p key={`${item.kind}:${item.code}`} className={styles.memoryHint} role="status" data-skipped-store={item.code}>{skippedStoreText(item.kind,item.code,locale)}</p>)}
@@ -427,17 +432,18 @@ export function DesktopMemoryInspector({open,active,locale,revisionHint,fixed}:{
     {!result&&!error&&<p className={styles.empty} role="status">{locale==="ko"?"기억을 불러오는 중입니다.":"Loading memories."}</p>}
     {result?.truncated&&<p className={styles.memoryHint}>{locale==="ko"?`최근 ${result.entries.length}개를 표시합니다. 필터로 범위를 좁혀 주세요.`:`Showing the latest ${result.entries.length}. Narrow the filters to see a smaller range.`}</p>}
     {result&&result.map.nodes.length>0&&<div className={styles.memoryMap}><OneMemoryMap snapshot={result.map} locale={locale} height={232} colorByKind selectedId={selected} onSelect={setSelected} describe={describe} unassignedProjectLabel={locale==="ko"?"프로젝트 없음":"No project"} ownerLabel={fixed?.name}/></div>}
-    <div className={styles.memoryList}>{result?.entries.map(row=><button key={row.memoryId} type="button" className={styles.memoryEntryButton} data-selected={selected===row.memoryId?"true":undefined} onClick={()=>setSelected(value=>value===row.memoryId?null:row.memoryId)}>
-      <KindIcon kind={row.kind}/><span>{row.title||statusLabel(row.status)}</span><small>{row.actorName} · {statusLabel(row.status)}{sharingMark(row.sharing,locale)?` · ${sharingMark(row.sharing,locale)}`:""}</small></button>)}</div>
+    <div className={styles.memoryList}>{result?.entries.map(row=><div key={row.memoryId} className={styles.memoryEntryRow}><button type="button" className={styles.memoryEntryButton} data-selected={selected===row.memoryId?"true":undefined} onClick={()=>setSelected(value=>value===row.memoryId?null:row.memoryId)}>
+      <KindIcon kind={row.kind}/><span>{row.title||statusLabel(row.status)}</span><small>{row.actorName} · {statusLabel(row.status)}{sharingMark(row.sharing,locale)?` · ${sharingMark(row.sharing,locale)}`:""}</small></button>
+      {/* the list had no forget; it was only in the opened detail. The same confirm and the same call as the detail's button. */}
+      {row.status==="active"&&row.actorId&&<button type="button" className={styles.memoryEntryForget} disabled={busy} data-memory-forget={row.memoryId} aria-label={row.sharing?(locale==="ko"?"삭제":"Delete"):(locale==="ko"?"잊기":"Forget")} title={row.sharing?(locale==="ko"?"삭제":"Delete"):(locale==="ko"?"잊기":"Forget")} onClick={()=>void mutate("forget",row)}><IconTrash size={14}/></button>}</div>)}</div>
     {result&&result.entries.length===0&&<p className={styles.empty}>{locale==="ko"?"선택한 범위에 기억이 없습니다.":"No memories in this selection."}</p>}
     {detail&&<section className={styles.memoryInspectorDetail} aria-label={locale==="ko"?"기억 상세":"Memory details"}>
       <h4>{detail.actorName} · {kindLabel(detail.kind,locale)}</h4><p className={styles.memoryBody}>{detail.content}</p>
-      <dl><dt>{locale==="ko"?"학습 Agent":"Source actor"}</dt><dd>{detail.actorName} · {detail.actorId??(locale==="ko"?"알 수 없음":"Unknown")}</dd><dt>{locale==="ko"?"출처":"Origins"}</dt><dd>{detail.originRefs.length?detail.originRefs.map(ref=><span key={`${ref.kind}:${ref.id}:${ref.revision}`}>{ref.kind} · {ref.id}{ref.revision?` (${shortRef(ref.revision)})`:""}</span>):locale==="ko"?"출처 기록 없음":"No recorded origin"}</dd>
+      <dl><dt>{locale==="ko"?"학습 Agent":"Source actor"}</dt><dd>{detail.actorName}</dd><dt>{locale==="ko"?"출처":"Origins"}</dt><dd>{detail.originRefs.length?detail.originRefs.map(ref=><span key={`${ref.kind}:${ref.id}:${ref.revision}`}>{ref.kind==="ticket"?(locale==="ko"?"대화에서 기억함":"Remembered from a conversation"):ref.kind==="run"?(locale==="ko"?"작업 실행":"A run"):(locale==="ko"?"기록":"Record")}{" "}</span>):locale==="ko"?"출처 기록 없음":"No recorded origin"}</dd>
         <dt>{locale==="ko"?"프로젝트 관계":"Project relations"}</dt><dd>{detail.projects.length?detail.projects.map(ref=><span key={`${ref.id}:${ref.relation}`}>{ref.relation==="origin"?(locale==="ko"?"출처":"Origin"):(locale==="ko"?"적용":"Applies to")} · {result?.projects.find(value=>value.id===ref.id)?.name??ref.id}</span>):"—"}</dd>
-        <dt>{locale==="ko"?"회상 범위":"Recall scope"}</dt><dd>{recallLabel(detail.applicability.scope)}{detail.applicability.compatibilityScope?` · ${detail.applicability.compatibilityScope.scope}`:""}{detail.applicability.actorId?` · ${detail.applicability.actorId}`:""}</dd>
-        <dt>{locale==="ko"?"열람 범위":"Audience"}</dt><dd>{detail.audience.declaration==="unknown"?(locale==="ko"?"알 수 없음(이전 형식)":"Unknown / legacy"):`${recallLabel(detail.audience.scope)} · ${detail.audience.sensitivity}`}</dd>
-        <dt>{locale==="ko"?"현재 유효성":"Validity"}</dt><dd>{statusLabel(detail.status)} · {formatDate(detail.createdAt,locale)}{detail.supersededAt?` → ${formatDate(detail.supersededAt,locale)}`:""}</dd>
-        <dt>{locale==="ko"?"개정":"Revision"}</dt><dd>{detail.bindingRevision??"—"} · {shortRef(detail.expectedRevision)} · {detail.curationActor}</dd></dl>
+        <dt>{locale==="ko"?"회상 범위":"Recall scope"}</dt><dd>{recallLabel(detail.applicability.scope)}</dd>
+        {detail.audience.declaration!=="unknown"&&<><dt>{locale==="ko"?"열람 범위":"Audience"}</dt><dd>{recallLabel(detail.audience.scope)}</dd></>}
+        <dt>{locale==="ko"?"현재 유효성":"Validity"}</dt><dd>{statusLabel(detail.status)} · {formatDate(detail.createdAt,locale)}{detail.supersededAt?` → ${formatDate(detail.supersededAt,locale)}`:""}</dd></dl>
       {appSharing&&<div className={styles.editForm} aria-label={locale==="ko"?"이 기억의 App 공유":"App sharing for this memory"}>
         {appSharing.current&&<p className={styles.memoryHint}>{locale==="ko"?"현재 공유 대상: ":"Currently shared with: "}{appSharing.choices.find(value=>value.appId===appSharing.current?.appId&&value.actorId===appSharing.current.actorId)?.label??`${appSharing.current.appId} · ${appSharing.current.actorId}`}</p>}
         {appSharing.choices.length>0&&<><label className={styles.wideField}><span>{locale==="ko"?"이 기억을 공유할 App · 멤버":"App · member for this memory"}</span><select aria-label="Memory App receiver" value={appChoice} disabled={busy} onChange={event=>setAppChoice(event.target.value)}><option value="">{locale==="ko"?"공유 대상 선택":"Choose receiver"}</option>{appSharing.choices.map((value,index)=><option key={`${value.appId}:${value.actorId}`} value={index}>{value.label}</option>)}</select></label>

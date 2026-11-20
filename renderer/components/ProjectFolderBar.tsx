@@ -70,6 +70,7 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
     open,
     roots: [rootRef],
     restoreFocusRef: triggerRef,
+    dismissOnFocusLeave: true,
     onDismiss: () => setOpen(false),
   });
 

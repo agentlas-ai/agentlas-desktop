@@ -80,6 +80,16 @@ export function discoverySignInRequired(reason: string | null | undefined): bool
 }
 
 /**
+ * The vendor refused this ACCOUNT for this runtime, as a fact about the account: HTTP-style 401 / 403 or a permission / not-authorised answer (Copilot's
+ * `acp:403 "unauthorized: not authorized to use this Copilot feature"`). Not "nobody is signed in" (that one is typed: `discoverySignInRequired`), and not a
+ * broken listing. One definition: the log (model-discovery-store.ts, info once per runtime) and every screen that says "connected" read it, so the log and the
+ * screen never disagree about the same refusal.
+ */
+export function discoveryEntitlementRefused(reason: string | null | undefined): boolean {
+  return typeof reason === "string" && /\b(?:acp:)?40[13]\b|permission_denied|unauthori[sz]ed|not authori[sz]ed/i.test(reason);
+}
+
+/**
  * Classify a finished discovery attempt. `models` must already be validated ids.
  * The classifier never invents rows; it only decides how loud to be.
  */

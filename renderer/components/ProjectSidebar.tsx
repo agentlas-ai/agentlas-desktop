@@ -55,9 +55,9 @@ export function ProjectSidebar() {
       <IconHome size={15} />{rail.collapsed ? null : dashboardLabel}
     </button>
   );
-  // New chat: the dialog of the conversation on screen's project (F-D6 turns this into the start screen). A new project is the "+" on PROJECTS.
+  // New chat: the start screen, outside every project (a chat in a project is the "+" on that project's row). A new project is the "+" on PROJECTS.
   const newChat = (
-    <button type="button" className="project-sidebar-new" data-new-chat="top" onClick={() => requestNewChat({ projectId: "current" })}
+    <button type="button" className="project-sidebar-new" data-new-chat="top" onClick={() => requestNewChat({ projectId: null })}
       aria-label={rail.collapsed ? newChatLabel : undefined} title={rail.collapsed ? newChatLabel : undefined}>
       <IconPlus size={15} />{rail.collapsed ? null : newChatLabel}
     </button>

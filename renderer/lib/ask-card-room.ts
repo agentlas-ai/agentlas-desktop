@@ -62,7 +62,11 @@ export interface AskCardColumn {
 
 export function findAskCardColumn(card: HTMLElement): AskCardColumn | null {
   const slot = card.closest<HTMLElement>("[data-composer-decisions]");
-  if (!slot) return null;
+  return slot ? findDecisionSlotColumn(slot) : null;
+}
+
+/** The same column, found from the decision slot itself (the slot exists before and after any card). */
+export function findDecisionSlotColumn(slot: HTMLElement): AskCardColumn | null {
   let branch: HTMLElement = slot;
   for (let element = slot.parentElement, depth = 0; element && element !== document.body && depth < 8; branch = element, element = element.parentElement, depth += 1) {
     const style = getComputedStyle(element);
@@ -72,6 +76,34 @@ export function findAskCardColumn(card: HTMLElement): AskCardColumn | null {
     if (grow) return { element, grow };
   }
   return null;
+}
+
+/**
+ * The most the decision slot may take of its column so the composer (send, Stop, the model chip) is never pushed out of the pane:
+ * column height - everything else in the column (composer, banners) - the conversation's minimum. A card taller than this scrolls inside the
+ * slot, so its buttons stay reachable and so does the composer under it. Never below DECISION_SLOT_FLOOR_PX (a card header and one option).
+ * Every kind of card shares this one cap: question cards, tool and browser approvals, key requests (in a 4-pane window at 800x600
+ * an approval card filled its pane, the composer was gone, and its buttons sat under the next pane).
+ */
+export const DECISION_SLOT_FLOOR_PX = 96;
+export function decisionSlotMaxHeight(columnHeight: number, otherWithoutSlotHeight: number): number {
+  return Math.max(DECISION_SLOT_FLOOR_PX, Math.floor(columnHeight - otherWithoutSlotHeight - ASK_THREAD_MIN_PX));
+}
+
+/** Column height and what the column holds besides the conversation and the slot, read from the DOM. */
+export function measureDecisionSlotRoom(slot: HTMLElement, column: AskCardColumn): { columnHeight: number; otherWithoutSlotHeight: number } {
+  const style = getComputedStyle(column.element);
+  const columnHeight = column.element.clientHeight - px(style.paddingTop) - px(style.paddingBottom);
+  let other = 0;
+  for (const child of Array.from(column.element.children)) {
+    if (child === column.grow || !(child instanceof HTMLElement)) continue;
+    const childStyle = getComputedStyle(child);
+    if (childStyle.display === "none" || childStyle.position === "absolute" || childStyle.position === "fixed") continue;
+    other += child.getBoundingClientRect().height + px(childStyle.marginTop) + px(childStyle.marginBottom);
+  }
+  const slotStyle = getComputedStyle(slot);
+  other -= slot.getBoundingClientRect().height + px(slotStyle.marginTop) + px(slotStyle.marginBottom);
+  return { columnHeight, otherWithoutSlotHeight: Math.max(0, other) };
 }
 
 const px = (value: string) => Number.parseFloat(value) || 0;
@@ -87,8 +119,10 @@ export function measureAskCardColumn(card: HTMLElement, column: AskCardColumn): 
     if (childStyle.display === "none" || childStyle.position === "absolute" || childStyle.position === "fixed") continue;
     other += child.getBoundingClientRect().height + px(childStyle.marginTop) + px(childStyle.marginBottom);
   }
-  // 이 카드의 지금 높이는 자식(푸터) 안에 들어 있다 — 카드가 쓸 몫을 구하려면 뺀다.
-  other -= card.getBoundingClientRect().height;
+  // 이 카드의 지금 높이는 자식(푸터) 안에 들어 있다 — 카드가 쓸 몫을 구하려면 뺀다. 결정 슬롯이 상한(decisionSlotMaxHeight)에 걸려 카드를 안에서
+  // 스크롤시키는 중이면 열 안에 실제로 자리를 차지한 것은 슬롯의 보이는 높이까지다.
+  const slot = card.closest<HTMLElement>("[data-composer-decisions]");
+  other -= Math.min(card.getBoundingClientRect().height, slot ? slot.getBoundingClientRect().height : Infinity);
   return { columnHeight, otherHeight: Math.max(0, other) };
 }
 

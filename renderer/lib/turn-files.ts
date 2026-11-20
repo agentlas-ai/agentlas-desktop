@@ -99,6 +99,44 @@ export function turnFilesOfActivity(states: readonly OneActivityState[], locale:
   return turnFilesOfCells(cells, workspacePath);
 }
 
+/**
+ * The files of a whole conversation, answer by answer, with one rule applied across answers: a path an earlier answer already touched is "edited" when a
+ * later answer writes it again (a whole-file write of a file that is already there is not a new file - the same refs.md read
+ * "New" after its second change while another pane said "Edited"). The first answer to touch a path keeps what its own calls say. Pure; the input is
+ * in conversation order and an answer with no files is an empty list.
+ */
+export function settleTurnFileOps(perAnswer: ReadonlyArray<readonly TurnFile[]>): TurnFile[][] {
+  const touched = new Set<string>();
+  return perAnswer.map((files) => {
+    const settled = files.map((file) => (file.op === "created" && touched.has(file.path) ? { ...file, op: "edited" as const } : file));
+    for (const file of files) touched.add(file.path);
+    return settled;
+  });
+}
+
+/** The conversation's files once each (first touch order): what the Overview's Outputs list names beside the files Main bound. */
+export function distinctTurnFiles(perAnswer: ReadonlyArray<readonly TurnFile[]>): TurnFile[] {
+  const seen = new Set<string>();
+  const out: TurnFile[] = [];
+  for (const files of perAnswer) for (const file of files) {
+    if (seen.has(file.path)) continue;
+    seen.add(file.path);
+    out.push(file);
+  }
+  return out;
+}
+
+/**
+ * The Outputs rows of the files the turns' own calls wrote, leaving out the ones a Main-bound artifact of the same name and kind already names (that
+ * row opens through Main's verified binding and wins). Without this the Overview listed only the artifacts a result surface bound, so a file the
+ * chat's answer showed as a chip sat under "Files and sites you create appear here".
+ */
+export function unboundTurnFiles(files: readonly TurnFile[], bound: ReadonlyArray<{ kind: string; label: string }>): TurnFile[] {
+  const key = (kind: string, name: string): string => `${kind}\0${name.trim().toLocaleLowerCase()}`;
+  const named = new Set(bound.map((item) => key(item.kind, item.label)));
+  return files.filter((file) => !named.has(key(file.kind === "image" ? "image" : "file", file.name)));
+}
+
 export const TURN_FILES_CHIP_LIMIT = 3;
 export const TURN_FILES_LIST_ROWS = 8;
 export const TURN_FILE_NAME_MAX_PX = 230;

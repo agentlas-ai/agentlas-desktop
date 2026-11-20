@@ -41,14 +41,29 @@ import {
   type ToolPermission,
 } from "../../shared/builtin-tools";
 import { askUser } from "../confirm/ask-user";
-import { APPROVAL_REFUSAL_RESULT_MODULE, approvalRefusalResultText, type ApprovalRefusal, type ApprovalToolAnnotations } from "./approval-rule";
+import { APPROVAL_REFUSAL_RESULT_MODULE, approvalRefusalResultText, askRegistersOsScheduler, type ApprovalRefusal, type ApprovalToolAnnotations } from "./approval-rule";
 import { registerDeclaredPromptModule } from "./prompt-order";
+import { routeRefusalOf } from "../connectors/route-gate";
 import type { AskAnswer, AskKind, CloseWhy, RemoteAsk } from "../one/plural-handoff-wire";
 import { pluralRowAsker } from "../one/plural-remote-ask";
 import { redactSecrets } from "../../shared/secret-patterns";
+import { admitScopeAnswer, admitScopeView, scopeGrantCovers, type GrantLifetime, type ScopeAnswerer, type ScopeStamp, type ScopeViewer } from "../../shared/scope-stamp";
 
-/** 승인 요청 하나 — 화면과 같은 정의를 쓴다(shared/types.ts). */
-export type ToolApprovalRequest = ToolApprovalRequestEvent;
+/**
+ * 승인 요청 하나 — 화면과 같은 정의를 쓴다(shared/types.ts). `scope` = where it was made (shared/scope-stamp.ts), set by the one stamper below.
+ * (shared/types.ts is a shared giant file; the field is added there by the integrator. Until then the type is widened here.)
+ */
+export type ToolApprovalRequest = ToolApprovalRequestEvent & { scope?: ScopeStamp };
+
+/**
+ * the host policy installs the one function that stamps a request with its account, project and conversation
+ * (runtime/approval-scope.ts scopeStampOfChat; an app-wide stamp when the request has no conversation). This module stays free of the store.
+ */
+let approvalScopeStamper: ((chatId: string | undefined) => ScopeStamp | null) | null = null;
+export function setApprovalScopeStamper(fn: typeof approvalScopeStamper): void { approvalScopeStamper = fn; }
+function stampOf(chatId: string | undefined): { scope: ScopeStamp } | Record<string, never> {
+  try { const stamp = approvalScopeStamper?.(chatId) ?? null; return stamp ? { scope: stamp } : {}; } catch { return {}; }
+}
 
 /** Host-owned approval/result scope. Keep the selected runtime in the identity. */
 export function toolApprovalSessionKey(runtime: string, primaryIdentity?: string | null, cwd?: string | null): string {
@@ -298,8 +313,30 @@ export function toolApprovalExpired(ask: object): boolean { return expiredAsks.h
 const refusedAsks = new WeakMap<object, ApprovalRefusal>();
 export function markToolApprovalRefusal(ask: object, refusal: ApprovalRefusal): void { refusedAsks.set(ask, refusal); }
 export function toolApprovalRefusal(ask: object): ApprovalRefusal | undefined { return refusedAsks.get(ask); }
+/**
+ * A shell command or file write that puts a job in an OS scheduler (approval-rule.ts shellCommandRegistersScheduler) is refused in every mode, full access included, and
+ * nobody is asked: Agentlas owns scheduling, an OS job is invisible in the app. The model's line sends it to the app automation. True when `ask` was refused here.
+ */
+function refuseOsSchedulerAsk(ask: object): boolean {
+  if (!askRegistersOsScheduler(ask as Parameters<typeof askRegistersOsScheduler>[0])) return false;
+  markToolApprovalRefusal(ask, { action: "os_scheduler", cause: "app_owns_schedules" });
+  return true;
+}
+/**
+ * API first, macro second (decision; connectors/route-gate.ts): a call whose road is LOWER than a road that is READY now for the same service and effect is refused in every mode, full access included,
+ * and nobody is asked: the model is told the road to use. True when `ask` was refused here. Nothing is installed (the switch is off) = always false, the behaviour is what it was.
+ */
+const routeRefusedAsks = new WeakMap<object, string>();
+function refuseLowerRoadAsk(ask: object): boolean {
+  const refusal = routeRefusalOf(ask as Parameters<typeof routeRefusalOf>[0]);
+  if (!refusal) return false;
+  routeRefusedAsks.set(ask, refusal.text);
+  return true;
+}
 /** The one model-facing line for a refused ask ("" when the rule did not refuse it): the registered module, rendered from typed host data. */
 export function toolApprovalRefusalText(ask: object): string {
+  const routed = routeRefusedAsks.get(ask);
+  if (routed) return routed;
   const refusal = refusedAsks.get(ask);
   if (!refusal) return "";
   registerDeclaredPromptModule(APPROVAL_REFUSAL_RESULT_MODULE);
@@ -322,6 +359,10 @@ export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter 
   if (!runtimeToolPermissionArbiter && runtimeToolPermissionRelays.size === 0) return null;
   return async (ask) => {
     if ((ask.planMode && ask.mutating) || ask.signal?.aborted) return "deny";
+    // Before any relay, stored rule or permission mode: no run puts a job in an OS scheduler (the relays and the base arbiter never see it).
+    if (refuseOsSchedulerAsk(ask)) return "deny";
+    // Same place, same reason: a lower road is never taken while a higher one is ready (a refusal the model can follow, not a card).
+    if (refuseLowerRoadAsk(ask)) return "deny";
     try {
       let selected: RuntimeToolPermissionArbiter | undefined;
       for (const select of runtimeToolPermissionRelays) {
@@ -345,9 +386,11 @@ export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter 
  * 이 함수를 부르지 말고 곧장 deny 다(실패가 허용으로 바뀌면 안 된다).
  */
 export function defaultRuntimeToolPermission(
-  ask: Pick<RuntimeToolPermissionAsk, "permission" | "mutating" | "planMode">,
+  ask: Pick<RuntimeToolPermissionAsk, "permission" | "mutating" | "planMode"> & Partial<Pick<RuntimeToolPermissionAsk, "command" | "kind" | "detail" | "arguments">>,
 ): RuntimeToolPermissionDecision {
   if (ask.planMode && ask.mutating) return "deny";
+  if (refuseOsSchedulerAsk(ask)) return "deny";
+  if (refuseLowerRoadAsk(ask)) return "deny";
   const readOnly = ask.permission === "read" || ask.permission === undefined;
   return readOnly && ask.mutating ? "deny" : "allow_once";
 }
@@ -383,7 +426,13 @@ type Pending = {
 const pending = new Map<string, Pending>();
 const pendingByKey = new Map<string, string>();
 let moneyCallSeq = 0;
-const sessionGrants = new Map<string, Set<string>>();
+/**
+ * a session grant is no longer a bare key that lives until the process ends. Each one remembers the stamp it was made under and its lifetime:
+ * "for this task" (allow_session) is a RUN grant and ends with the run (endRunToolGrants, called where a run settles); the permission-escalation
+ * question is worded "in this conversation" and is a CHAT grant (until the app quits). A grant is read only for the conversation that made it.
+ */
+type SessionGrant = { lifetime: GrantLifetime; stamp: ScopeStamp | null };
+const sessionGrants = new Map<string, Map<string, SessionGrant>>();
 const listeners = new Set<(request: ToolApprovalRequest) => void>();
 const resolvedListeners = new Set<(id: string, outcome: ToolApprovalOutcome) => void>();
 type ResolutionRecord = {
@@ -477,7 +526,8 @@ function approvalDedupeKey(
   const binding = consentBindingKey(request.consentBinding);
   // The detail is part of the key: a broad binding (a tool asked about as a whole) must not let a second, different call join the first one's card.
   if (binding) return `binding\u0000${request.chatId ?? ""}\u0000${binding}\u0000${request.detail ?? ""}`;
-  return `session\u0000${sessionKey}\u0000${grantKey(request)}`;
+  // The conversation is part of the key: two conversations that share a session key (a cwd seed) never share one card.
+  return `session\u0000${sessionKey}\u0000${request.chatId ?? ""}\u0000${grantKey(request)}`;
 }
 
 function settleApproval(
@@ -513,22 +563,62 @@ export function listPendingToolApprovals(): ToolApprovalRequest[] {
   return [...pending.values()].map((entry) => entry.request);
 }
 
+/** the one test of whether a surface may see a request. The IPC list, the window broadcast and the phone snapshot all call this. */
+export function toolApprovalVisibleTo(request: ToolApprovalRequest, viewer: ScopeViewer): boolean {
+  return admitScopeView(request.scope, viewer).ok;
+}
+
+/** The open requests a surface may see (a request with no stamp, made before this change, is shown to no conversation pane and to the app-wide sheet only). */
+export function listPendingToolApprovalsFor(viewer: ScopeViewer): ToolApprovalRequest[] {
+  return listPendingToolApprovals().filter((request) => request.scope ? toolApprovalVisibleTo(request, viewer)
+    : viewer.surface === "global-sheet" || ((viewer.surface === "chat-pane") && Boolean(request.chatId) && (viewer.chats ?? []).includes(request.chatId!)));
+}
+
 /** 세션 단위 허용이 이미 있는가. live 요청은 이걸 먼저 본다. */
 export function hasSessionGrant(
   sessionKey: string,
-  request: Pick<ToolApprovalRequest, "tool" | "detail" | "consentBinding" | "capability">,
+  request: Pick<ToolApprovalRequest, "tool" | "detail" | "consentBinding" | "capability"> & { scope?: ScopeStamp },
 ): boolean {
-  return sessionGrants.get(sessionKey)?.has(grantKey(request)) === true;
+  const grant = sessionGrants.get(sessionKey)?.get(grantKey(request));
+  // The grant answers only the conversation it was made for (a shared cwd-seeded session key does not widen it).
+  return grant !== undefined && scopeGrantCovers(grant, request.scope);
 }
 
+/** The escalation question's own session key says "this conversation" in its label; every other "for this task" grant is this run's. */
+const CHAT_LIFETIME_SESSION_KEY = /^permission-escalation:/;
+
 function rememberSessionGrant(sessionKey: string, request: ToolApprovalRequest): void {
-  const set = sessionGrants.get(sessionKey) ?? new Set<string>();
-  set.add(grantKey(request));
-  sessionGrants.set(sessionKey, set);
+  const map = sessionGrants.get(sessionKey) ?? new Map<string, SessionGrant>();
+  map.set(grantKey(request), { lifetime: CHAT_LIFETIME_SESSION_KEY.test(sessionKey) ? "chat" : "run", stamp: request.scope ?? null });
+  sessionGrants.set(sessionKey, map);
 }
 
 export function clearSessionGrants(sessionKey: string): void {
   sessionGrants.delete(sessionKey);
+}
+
+/**
+ * the run of this conversation ended (finished, failed or stopped): every grant it made "for this task" ends with it, so the next request of the
+ * conversation asks again. Chat-lifetime grants (the escalation question) stay until the app quits. Called from the one place a run settles (service.ts);
+ * returns how many grants it ended.
+ */
+export function endRunToolGrants(chatId: string | null | undefined): number {
+  if (!chatId) return 0;
+  let ended = 0;
+  for (const [sessionKey, map] of sessionGrants) {
+    for (const [key, grant] of map) {
+      if (grant.lifetime === "run" && grant.stamp?.chat === chatId) { map.delete(key); ended += 1; }
+    }
+    if (map.size === 0) sessionGrants.delete(sessionKey);
+  }
+  return ended;
+}
+
+/** How many session grants this process holds (a bound check for the invariant tests and diagnostics). */
+export function sessionGrantCount(): number {
+  let n = 0;
+  for (const map of sessionGrants.values()) n += map.size;
+  return n;
 }
 
 /**
@@ -603,6 +693,15 @@ function expirePending(entry: Pending, byTimeout = false): void {
   for (const fn of resolvedListeners) { try { fn(entry.request.id, outcome); } catch { /* UI cannot block settlement. */ } }
 }
 
+/** Closes the open cards of one tool in one conversation (a message_send card whose intent is gone). They end as expired and are drawn closed on every surface. Returns how many. */
+export function closePendingToolApprovalsOf(match: { chatId: string; tool: string }): number {
+  let n = 0;
+  for (const entry of [...pending.values()]) {
+    if (entry.request.chatId === match.chatId && entry.request.tool === match.tool) { expirePending(entry); n += 1; }
+  }
+  return n;
+}
+
 function joinApproval(entry: Pending, sessionKey: string, signal?: AbortSignal): Promise<ToolApprovalOutcome> {
   return new Promise((resolve, reject) => {
     const aborted = () => {
@@ -626,12 +725,14 @@ export function requestToolApproval(
 ): Promise<ToolApprovalOutcome> {
   const { sessionKey, timeoutMs = 5 * 60_000, signal, ...rest } = input;
   if (signal?.aborted) return Promise.reject(signal.reason ?? new Error("tool_approval_cancelled"));
-  if (rest.capability !== "money" && hasSessionGrant(sessionKey, rest)) {
+  const stamped = { ...rest, ...(rest as { scope?: ScopeStamp }).scope ? {} : stampOf(rest.chatId) };
+  if (rest.capability !== "money" && hasSessionGrant(sessionKey, stamped)) {
     return Promise.resolve({ decision: "allow_session", decidedAt: new Date().toISOString() });
   }
   // A money card belongs to ONE call (defect 2): two calls with the same recipient and amount are two payments, so a
   // single "yes" must not let both go. Its key is never shared; other cards keep merging a repeated request into one card.
   const dedupeKey = rest.capability === "money" ? `${approvalDedupeKey(sessionKey, rest)}\u0000money-call\u0000${++moneyCallSeq}` : approvalDedupeKey(sessionKey, rest);
+  // (the stamp was computed above, once, before the grant check)
   const existingId = pendingByKey.get(dedupeKey);
   if (existingId) {
     const existing = pending.get(existingId);
@@ -640,7 +741,7 @@ export function requestToolApproval(
   }
   const requestedAt = new Date();
   const request: ToolApprovalRequest = {
-    ...rest, id: `approval:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
+    ...stamped, id: `approval:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
     ...(isAppWorkFolder(rest.cwd) ? { cwdIsAppFolder: true as const } : {}),
     mode: "live", requestedAt: requestedAt.toISOString(),
     expiresAt: new Date(requestedAt.getTime() + timeoutMs).toISOString(),
@@ -746,7 +847,7 @@ export async function requestRemoteToolApproval(input: RemoteApprovalInput): Pro
   if (verdict === "allowed") return { decision: "allow_once", decidedAt: new Date().toISOString() };
   if (verdict === "refused") { try { asker.close(remote, id, "work_stopped"); } catch { /* nothing was kept */ } return refused(); }
   const request: ToolApprovalRequest = {
-    ...rest, id, capability: kind, mode: "live", requestedAt: requestedAt.toISOString(),
+    ...stampOf(rest.chatId), ...rest, id, capability: kind, mode: "live", requestedAt: requestedAt.toISOString(),
     ...(isAppWorkFolder(rest.cwd) ? { cwdIsAppFolder: true as const } : {}),
     remoteAsk: { rowId: remote.rowId, fromName: remote.fromName, askVia: "row" },
     ...(kind !== "money" ? { taskAllowOffered: true as const } : {}),
@@ -803,7 +904,7 @@ export function announceToolDenied(
     announcedByKey.delete(dedupeKey);
   }
   const request: ToolApprovalRequest = {
-    ...rest,
+    ...stampOf(rest.chatId), ...rest,
     id: `denied:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`,
     mode: "post-denial",
     requestedAt: new Date().toISOString(),
@@ -824,6 +925,16 @@ export function announceToolDenied(
   }
   for (const fn of listeners) { try { fn(request); } catch { /* 같은 이유 */ } }
   return request;
+}
+
+/**
+ * Did the owner already answer "no" to the card of this very denied call (same session, tool and detail)? A host fact read from the
+ * resolution record, for the line that says the call was blocked without anyone refusing it (claude-code.ts announceApprovalBlock).
+ */
+export function announcedCallDeclined(input: { sessionKey?: string } & Omit<ToolApprovalRequest, "id" | "requestedAt" | "expiresAt" | "mode">): boolean {
+  const { sessionKey, ...rest } = input;
+  const id = announcedByKey.get(approvalDedupeKey(sessionKey ?? "", rest));
+  return id !== undefined && resolutions.get(id)?.decision === "deny";
 }
 
 /** A decision this process no longer holds in memory (an earlier app run, or an evicted record) read back from the ledger. */
@@ -975,6 +1086,30 @@ export function resolveToolApproval(
     decision,
     "resolved",
   );
+}
+
+/**
+ * an answer that comes from a surface (a window's IPC, a paired phone) passes the gate before it reaches the request. A request this surface may
+ * not answer (another account, a conversation it cannot see, an unpaired device) is left exactly as it was and the surface hears "not found" - the same
+ * word as for an id that does not exist, so nothing about the other conversation is revealed. `refused` carries the typed code for the host's own log
+ * (shape only: no ids, no words). An answer for a request this process does not hold goes on to resolveToolApproval's own receipts unchanged.
+ */
+export function resolveToolApprovalFrom(
+  id: string,
+  decision: ToolApprovalDecision,
+  answerer: ScopeAnswerer,
+  actionId = toolApprovalActionId(id, decision),
+  via?: ToolApprovalVia,
+): ToolApprovalResolutionReceipt & { refused?: string } {
+  const held = pending.get(id)?.request ?? announced.get(id)?.request;
+  if (held) {
+    const verdict = held.scope ? admitScopeAnswer(held.scope, answerer) : { ok: true as const };
+    if (!verdict.ok) {
+      try { console.warn(`[scope-gate] approval answer refused: ${verdict.code} (${answerer.surface})`); } catch { /* a log is a courtesy */ }
+      return { ...unresolvedReceipt(id, decision, "not_found"), refused: verdict.code };
+    }
+  }
+  return resolveToolApproval(id, decision, actionId, via);
 }
 
 /** Main의 live queue와 resolution ledger를 한 요청 id로 다시 읽는다. */

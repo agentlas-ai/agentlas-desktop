@@ -514,6 +514,8 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
       .map(tool => ({ name: tool.name, inputSchema: tool.inputSchema }))));
   }
   reportInstructions.push("limits: mission boundaries + Goal permissions only");
+  // Host bookkeeping is not a reply topic: the owner reads outcomes and file paths, never ids, tool names, labels or the host's own re-check.
+  reportInstructions.push("owner reply: plain outcomes and where they are; never tactic ids (t1), tool or marker names, Goal/criteria/verify labels, or that the host re-checks");
   if (input.record !== false) {
     if (tactics.length) {
       const receipt = recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", createdAt: new Date(nowMs).toISOString(),
@@ -536,7 +538,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   // of the parts inside it therefore does not decide when it is resent; a change in any part resends the whole block.
   return purposePrompt([
     { id: "purpose.goal.plan.heading", revision: 1, stability: "fixed-policy", changeTriggers: ["release"], text: "## Goal plan (agentlas.goal-shape.v1)" },
-    { id: "purpose.goal.plan.report-contract", revision: 3, stability: "configuration", changeTriggers: ["release", "tool-grant", "runtime"], text: reportInstructions.join("\n") },
+    { id: "purpose.goal.plan.report-contract", revision: 4, stability: "configuration", changeTriggers: ["release", "tool-grant", "runtime"], text: reportInstructions.join("\n") },
     { id: "purpose.goal.plan.locale", revision: 1, stability: "configuration", changeTriggers: ["locale"], text: `locale: plan-op text = ${strategyLocale === "ko" ? "Korean" : "English"}` },
     { id: "purpose.goal.plan.snapshot", revision: 2, stability: "task-context", changeTriggers: ["plan-revision", "goal-revision", "checkpoint"], text: snapshot.join("\n") },
     { id: "purpose.goal.plan.live", revision: 1, stability: "turn-context", changeTriggers: ["checkpoint", "retrieval", "tool-grant"], text: lines.join("\n") },

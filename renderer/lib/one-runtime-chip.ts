@@ -107,6 +107,11 @@ export function withOneRuntimeSelection(
   };
 }
 
+/** What Main resolves for a conversation with no pin: the orchestrator pool's pick (the answer a run takes). Null when unknown. */
+export async function readOrchestratorPoolPick(api: { runtime?: { listRoleMembers?: () => Promise<{ picks?: { orchestrator?: { selection?: RuntimeSelection } } }> } } | null | undefined): Promise<RuntimeSelection | null> {
+  try { return (await api?.runtime?.listRoleMembers?.())?.picks?.orchestrator?.selection ?? null; } catch { return null; }
+}
+
 /** What the chip shows: the conversation's pin, or the default orchestrator runtime when it has none (as in a room). */
 export function chipRuntimeFor(runtimes: readonly RuntimeStatus[], pin: RuntimeSelection | null): RuntimeStatus | null {
   const matched = pin

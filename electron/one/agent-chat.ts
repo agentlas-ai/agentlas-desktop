@@ -12,7 +12,7 @@ import type { RoomDb } from "./room-discussion-store";
 import { forgetMemberCursor, startMemberFromNow } from "./room-member-view";
 import { isPersonalAgentId, withoutPersonalAgents } from "./personal-agent-id";
 import { agentChatState } from "./agent-chat-state";
-import { composeOneTaskforceForChat, createAgentGroupRoom, updateOneTaskforce } from "./taskforces";
+import { composeOneTaskforceForChat, createAgentGroupRoom, currentGroupTitle, updateOneTaskforce } from "./taskforces";
 import { oneDispatchSidebarPredicate } from "./dispatch-presentation";
 
 /*
@@ -53,6 +53,16 @@ function reuseEmptyRoom(db: ReturnType<typeof getDb>, chatId: string): Chat {
   return getChat(chatId) as Chat;
 }
 
+/**
+ * An empty room is reused only when the new request does not name it differently. A room the person named and saw on screen is theirs:
+ * renaming it into the next request's name made the first room vanish. A request with no name, or the same name, reuses it.
+ */
+function emptyRoomKeepsItsName(db: ReturnType<typeof getDb>, chatId: string, requestedTitle: string): boolean {
+  if (!requestedTitle) return true;
+  const current = (db.prepare("SELECT title FROM chats WHERE id = ?").get(chatId) as { title: string } | undefined)?.title ?? "";
+  return cleanTitle(current) === requestedTitle || !cleanTitle(current);
+}
+
 function emptySoloRoom(db: ReturnType<typeof getDb>, agentId: string, projectId: string | null): string | null {
   const row = db.prepare(
     `SELECT c.id FROM chats c
@@ -89,7 +99,7 @@ function openSoloRoom(input: { agentId: string; projectId?: string | null; title
   const made = db.transaction(() => {
     ensureOneOrgSeat(agentId);
     const emptyId = emptySoloRoom(db, agentId, projectId);
-    if (emptyId) {
+    if (emptyId && emptyRoomKeepsItsName(db, emptyId, cleanTitle(input.title))) {
       const title = cleanTitle(input.title);
       if (title) renameChat(emptyId, title);
       return { chat: reuseEmptyRoom(db, emptyId), reused: true };
@@ -146,7 +156,7 @@ export function createAgentChatRoom(input: { agentIds: string[]; projectId?: str
     // Seating comes first, as for a new room, so a room that is reused answers for the same members.
     for (const agentId of ids) ensureOneOrgSeat(agentId);
     const found = emptyGroupRoom(db, ids, projectId);
-    if (!found) return null;
+    if (!found || !emptyRoomKeepsItsName(db, found, cleanTitle(input.title))) return null;
     const title = cleanTitle(input.title);
     if (title) renameChat(found, title);
     reuseEmptyRoom(db, found);
@@ -222,7 +232,7 @@ export function setAgentChatLead(input: { chatId: string; agentId: string }): Ag
   if (members[0] === input.agentId) return receipt();
   const seat = (require("./org") as typeof import("./org")).getOneOrgState().members.find((member) => member.installedAgentId === input.agentId && !member.archivedAt); // eslint-disable-line @typescript-eslint/no-require-imports
   if (seat?.source === "hub") throw new Error(ko() ? "호출만 하는 에이전트는 팀장이 될 수 없어요." : "An agent that is only called cannot lead.");
-  updateOneTaskforce({ id: row.id, title: row.title, description: row.description, memberAgentIds: [input.agentId, ...members.filter((id) => id !== input.agentId)], expectedRevision: row.revision });
+  updateOneTaskforce({ id: row.id, title: currentGroupTitle(chat.id, row.title), description: row.description, memberAgentIds: [input.agentId, ...members.filter((id) => id !== input.agentId)], expectedRevision: row.revision });
   return receipt();
 }
 
@@ -245,7 +255,7 @@ export function removeAgentChatParticipant(input: { chatId: string; agentId: str
   // The leaving member's resident CLI is registered under its own child session, not the room: let it go now, not at the idle trim.
   try { (require("./room-lead-runtime") as typeof import("./room-lead-runtime")).releaseRoomMemberResidency(input.chatId, input.agentId); } catch { /* the idle trim finds it */ } // eslint-disable-line @typescript-eslint/no-require-imports
   const convertedToSolo = db.transaction(() => {
-    updateOneTaskforce({ id: row.id, title: row.title, description: row.description, memberAgentIds: remaining, expectedRevision: row.revision });
+    updateOneTaskforce({ id: row.id, title: currentGroupTitle(input.chatId, row.title), description: row.description, memberAgentIds: remaining, expectedRevision: row.revision });
     try { forgetMemberCursor(() => db as unknown as RoomDb, input.chatId, input.agentId); } catch { /* no room tables */ }
     if (remaining.length !== 1) return false;
     const stayed = remaining[0]!;

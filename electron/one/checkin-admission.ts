@@ -51,11 +51,17 @@ function sharedOpenHere(): boolean {
   try { return (require("../memory/shared-ids") as typeof import("../memory/shared-ids")).sharedOpenHere((require("../memory/database") as typeof import("../memory/database")).getMemoryDb()); } catch { return false; }
 }
 
-export async function admitCheckinReview(runId: string): Promise<void> {
+/**
+ * `ownerAuthored`: the run answers a message the owner just wrote (a personal-agent reply with its user row). The person's own words are never "proactive": the shared
+ * boundary (quiet hours, no-proactive) and the domains' check-in gates hold what the AGENT starts by itself, so they do not see an owner's reply. Before, "no alerts 23:00-07:00"
+ * saved at 23:48 held the owner's own next question for fifteen minutes with no line and no run. The write gate below stays for every run: it is about this computer, not the owner's words.
+ */
+export async function admitCheckinReview(runId: string, options: { ownerAuthored?: boolean } = {}): Promise<void> {
   // The personal agent's write gate (Agentlas 2.0 O-M3b): a sealed computer waits (the move may be cancelled), an away computer is not the home any more.
   const refused = (await import("./home")).oneWriteRefusal();
   if (refused === "one_sealed") throw new CheckinAdmissionDeferred(refused);
   if (refused === "one_away") throw new CheckinAdmissionDenied(refused);
+  if (options.ownerAuthored === true) return;
   // the person's shared boundary - said at ANY place, this desktop included - holds a check-in before a model is called for it. `no_proactive` = the agent does not start a conversation
   // (the request is settled, nothing runs); `quiet_hours` = it waits for the window's end (the scheduler asks again at its next sweep). No boundary line with a structure = nothing changes.
   const boundary = sharedOpenHere() ? (await import("./shared-boundary")).readSharedBoundary() : null;   // only once shared memory is open here (I11): before that a check-in is held by what it was held by

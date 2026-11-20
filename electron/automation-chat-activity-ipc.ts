@@ -9,6 +9,7 @@
 import { net, type IpcMain } from "electron";
 import { isPublicHostname } from "../shared/automation-activity";
 import { automationChatActivity, automationRunDigest, automationRunPage } from "./store/automation-chat-activity";
+import { cancelKeptRequest, listKeptRequests } from "./invocation/kept-requests";
 
 const ICON_MAX_BYTES = 64 * 1024;
 const ICON_TIMEOUT_MS = 4_000;
@@ -74,4 +75,8 @@ export function registerAutomationChatActivityIpc(ipcMain: Pick<IpcMain, "handle
     return automationRunPage(id, { before: text(input.before), limit: typeof input.limit === "number" ? input.limit : undefined });
   });
   ipcMain.handle("automations:siteIcon", (_event, host: unknown) => siteIconDataUrl(host));
+  // Requests the app keeps for an outside cause (a usage limit, a sign-in, no connection) and continues by itself: listed with the scheduled
+  // work, and the owner's cancel is one terminal write (invocation/kept-requests.ts).
+  ipcMain.handle("automations:keptRequests", () => listKeptRequests());
+  ipcMain.handle("automations:cancelKeptRequest", (_event, id: unknown) => cancelKeptRequest(id));
 }

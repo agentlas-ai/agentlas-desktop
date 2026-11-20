@@ -10,3 +10,9 @@ export function enabledScheduleWithoutNextRun(automation: Automation): boolean {
     && (automation.triggerType ?? automation.trigger?.kind ?? "schedule") === "schedule"
     && automation.nextRunAt == null;
 }
+
+/** A one-time automation that has run (or whose time passed) and is switched off. It cannot be turned back on:
+ * only a new time brings it back (Edit), so every list says "Ended" the same way instead of offering a switch that refuses. */
+export function isEndedOneShot(automation: Automation): boolean {
+  return !automation.enabled && automation.scheduleSpec?.kind === "once" && automation.nextRunAt == null;
+}

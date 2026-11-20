@@ -22,11 +22,11 @@ function nextActionLabel(
   ko: boolean,
 ): string {
   const labels = {
-    wait_observe: ko ? "다음 관찰 대기" : "Wait for the next observation",
-    repair_verified_failure: ko ? "확인된 실패 수리" : "Repair a verified failure",
-    gather_missing_evidence: ko ? "부족한 증거 수집" : "Gather missing evidence",
-    hold_for_user: ko ? "사용자 판단 대기" : "Wait for your decision",
-    inspect_before_action: ko ? "행동 전 현재 상태 확인" : "Inspect state before acting",
+    wait_observe: ko ? "다음 확인 대기" : "Wait",
+    repair_verified_failure: ko ? "실패 고치기" : "Fix the failure",
+    gather_missing_evidence: ko ? "자료 더 모으기" : "Gather more",
+    hold_for_user: ko ? "당신의 결정 대기" : "Waiting for you",
+    inspect_before_action: ko ? "먼저 상태 확인" : "Check first",
   };
   return labels[value];
 }
@@ -35,10 +35,10 @@ function strategyStateLabel(
   state: NonNullable<NonNullable<ChatContinuitySnapshot["goal"]>["episodeStrategy"]>["state"] | null,
   ko: boolean,
 ): string {
-  if (state === "changed") return ko ? "검증 후 다음 행동 변경" : "Next action changed after verification";
-  if (state === "unchanged") return ko ? "검증 후 기존 행동 유지" : "Existing action retained after verification";
-  if (state === "unknown") return ko ? "증거 미확정 · 자동 변경 없음" : "Evidence inconclusive · no automatic change";
-  return ko ? "이번 주기 판단 대기" : "This cycle has not been evaluated yet";
+  if (state === "changed") return ko ? "다음 행동 바뀜" : "Next step changed";
+  if (state === "unchanged") return ko ? "그대로 유지" : "Unchanged";
+  if (state === "unknown") return ko ? "확인 못 함 · 변경 없음" : "Unclear · no change";
+  return ko ? "판단 대기" : "Not judged yet";
 }
 
 function automationLabel(
@@ -46,20 +46,13 @@ function automationLabel(
   ko: boolean,
 ): string {
   if (!row.enabled) return ko ? "꺼짐" : "off";
-  if (row.liveState === "running") return ko ? "최근 실행 기록 있음" : "recent run recorded";
-  if (row.liveState === "queued") return ko ? "스케줄러 대기" : "queued by scheduler";
-  if (row.nextRunAt) return ko ? "다음 실행 예약" : "next run scheduled";
-  return ko ? "지금 실행 중인지 알 수 없음" : "live state not confirmed";
+  if (row.liveState === "running") return ko ? "최근 실행함" : "ran recently";
+  if (row.liveState === "queued") return ko ? "대기 중" : "queued";
+  if (row.nextRunAt) return ko ? "다음 실행 예약" : "next run set";
+  return ko ? "상태 모름" : "state unknown";
 }
 
-/**
- * Read-only Goal strategy projection.
- *
- * `episodeStrategy` is a host-verified description for one settled episode;
- * it is not an applied Graph revision or a permission grant. Keep this
- * distinction visible in One so a changed next action cannot look like an
- * already-applied automation mutation.
- */
+// Read-only: a described episode strategy is not an applied change, and this card has no write callback.
 export function GoalStrategyStatus({ continuity, surface, locale }: Props) {
   const goal = continuity?.goal;
   if (!goal) return null;
@@ -74,10 +67,6 @@ export function GoalStrategyStatus({ continuity, surface, locale }: Props) {
   const status = strategy?.state ?? null;
   const dataObservation = strategy ? "verified" : "pending";
   const surfaceLabel = goalSurfaceStatusLabel(surface.state, locale);
-
-  // Keep this pure and bounded: this component has no write-capable callback.
-  // `classifyGoalSurfaceStatus` is intentionally called with the already
-  // observed status only to keep this card's labels aligned with Continuity.
   const observedSurface = classifyGoalSurfaceStatus({
     runStatus: goal.runStatus,
     pauseReason: goal.pauseReason,
@@ -92,51 +81,44 @@ export function GoalStrategyStatus({ continuity, surface, locale }: Props) {
 
   return <details className={styles.root} data-goal-strategy-status="true" data-strategy-observation={dataObservation}>
     <summary>
-      <strong>{ko ? "전략 · 다음 주기" : "Strategy · next cycle"}</strong>
+      <strong>{ko ? "다음 단계" : "Next step"}</strong>
       <span>{strategyStateLabel(status, ko)}</span>
     </summary>
     <div className={styles.body}>
       <p className={styles.state} data-strategy-state={status ?? "pending"}>
-        <strong>{ko ? "Goal 실행 상태" : "Goal execution state"}</strong>
-        <span>{surfaceConsistent ? surfaceLabel : (ko ? "상태 재확인 중" : "Rechecking execution state")}</span>
+        <strong>{ko ? "상태" : "State"}</strong>
+        <span>{surfaceConsistent ? surfaceLabel : (ko ? "다시 확인 중" : "Rechecking")}</span>
       </p>
       {strategy ? <>
-        <p><strong>{ko ? "이번 주기 판단" : "This cycle"}</strong> · {strategyStateLabel(strategy.state, ko)}</p>
-        <p><strong>{ko ? "다음 행동" : "Next action"}</strong> · {nextActionLabel(strategy.nextAction, ko)}</p>
+        <p><strong>{ko ? "이번 판단" : "Judgment"}</strong> · {strategyStateLabel(strategy.state, ko)}</p>
+        <p><strong>{ko ? "다음" : "Next"}</strong> · {nextActionLabel(strategy.nextAction, ko)}</p>
         <p className={styles.metrics}>
-          {ko ? "검증 결과" : "Verification"} · {ko ? "통과" : "passed"} {strategy.metrics.passed}
-          {` · ${ko ? "수리 가능 실패" : "repairable failures"} ${strategy.metrics.repairableFailed}`}
-          {` · ${ko ? "증거 미확정" : "inconclusive"} ${strategy.metrics.inconclusive}`}
+          {ko ? "확인" : "Checks"} · {ko ? "통과" : "passed"} {strategy.metrics.passed}
+          {` · ${ko ? "고칠 수 있는 실패" : "fixable"} ${strategy.metrics.repairableFailed}`}
+          {` · ${ko ? "불확실" : "unclear"} ${strategy.metrics.inconclusive}`}
         </p>
-      </> : <p>{ko ? "아직 확정된 주기 평가가 없습니다. 다음 실행 결과가 확인되면 표시됩니다." : "No settled cycle evaluation is available yet. It will appear after the next result is verified."}</p>}
+      </> : <p>{ko ? "아직 판단 없음" : "No judgment yet"}</p>}
       <p className={styles.next}>
-        <strong>{ko ? "다음 주기" : "Next cycle"}</strong> · {nextWake
-          ? (ko ? `${nextWake}에 확인 예정` : `check expected ${nextWake}`)
-          : (ko ? "예약 시각 알 수 없음" : "no confirmed time")}
-        {goal.wait?.state === "pending" && ` · ${ko ? "앱 실행 중" : "while the app is running"}`}
+        <strong>{ko ? "다음 확인" : "Next check"}</strong> · {nextWake ? nextWake : (ko ? "시각 모름" : "time unknown")}
+        {goal.wait?.state === "pending" && ` · ${ko ? "앱 켜둔 때만" : "app open only"}`}
       </p>
       <div className={styles.automations}>
-        <strong>{ko ? "현재 자동화" : "Current automations"}</strong>
-        <span>{ko ? `Goal 연결 확인 ${goalBound.length}` : `${goalBound.length} Goal-linked and verified`}</span>
-        {unverified.length > 0 && <span>{ko ? `연결 확인 안 됨 ${unverified.length}` : `${unverified.length} link unverified`}</span>}
-        {independent.length > 0 && <span>{ko ? `독립 예약 ${independent.length}` : `${independent.length} independent schedule(s)`}</span>}
-        {rows.length === 0 && <span>{ko ? "등록된 자동화 없음" : "No automation recorded"}</span>}
+        <strong>{ko ? "자동화" : "Automations"}</strong>
+        <span>{ko ? `목표에 연결 ${goalBound.length}` : `${goalBound.length} linked`}</span>
+        {unverified.length > 0 && <span>{ko ? `연결 불확실 ${unverified.length}` : `${unverified.length} unclear link`}</span>}
+        {independent.length > 0 && <span>{ko ? `따로 ${independent.length}` : `${independent.length} separate`}</span>}
+        {rows.length === 0 && <span>{ko ? "없음" : "None"}</span>}
         {rows.length > 0 && <ul>
           {rows.slice(0, 4).map((row) => <li key={row.automationId} data-automation-id={row.automationId}>
-            <span>{row.relationship === "goal-bound" ? (ko ? "Goal 연계" : "Goal-linked")
-              : row.relationship === "unverified" ? (ko ? "연결 확인 안 됨" : "link unverified")
-                : (ko ? "독립" : "independent")}</span>
+            <span>{row.relationship === "goal-bound" ? (ko ? "연결" : "linked")
+              : row.relationship === "unverified" ? (ko ? "연결 불확실" : "unclear link")
+                : (ko ? "따로" : "separate")}</span>
             <span>{automationLabel(row, ko)}</span>
             {row.nextRunAt && <time dateTime={row.nextRunAt}>{formatWhen(row.nextRunAt, locale)}</time>}
           </li>)}
-          {rows.length > 4 && <li>{ko ? `외 ${rows.length - 4}개는 상세 상태에서 확인` : `${rows.length - 4} more in detailed status`}</li>}
+          {rows.length > 4 && <li>{ko ? `+${rows.length - 4}` : `+${rows.length - 4}`}</li>}
         </ul>}
       </div>
-      <p className={styles.disclaimer}>
-        {ko
-          ? "이 카드는 앱이 확인한 설명만 보여줍니다. 전략 변경 제안은 자동화나 Goal을 직접 바꾸지 않으며, 적용하려면 따로 검토하고 승인해야 합니다."
-          : "This card shows only observations the app has verified. A strategy suggestion does not modify the automation or Goal; applying a change requires an explicit review and approval."}
-      </p>
     </div>
   </details>;
 }

@@ -5,6 +5,8 @@ import { decodeMemoryRoomCard, memoryRoomPlainLine } from "../../shared/memory-r
 import { currentUiLocale as memoryRoomLocale } from "../ui-locale";
 import { Buffer } from "node:buffer";
 import { HANDOFF_CARD_MARKER, closedHandoffCard, decodeHandoffCard, encodeHandoffCard, handoffPlainLine } from "../../shared/plural-handoff-card";
+import { RECEIPT_CARD_CAPABILITY, RECEIPT_CARD_MARKER, decodeReceiptCard, receiptForPhone } from "../../shared/receipt-card";
+import { receiptLiveOf } from "../harness/receipt-live";
 import { seatEventText } from "../../shared/one-seat-events";
 import { currentUiLocale } from "../ui-locale";
 import { listUiInstances } from "../harness/ui-instances";
@@ -12,6 +14,7 @@ import { fitInlineUiTranscriptText } from "../../shared/inline-ui-transcript";
 import { MOBILE_SNAPSHOT_VISUAL_BYTES, mergeMobileInlineUiTranscript } from "./finance-ui-transcript";
 import { withoutArchivedAgents } from "../archive/auto-archive";
 import { isHousekeepingHostNotice, normalizeChatHostNotice } from "../../shared/chat-host-notice";
+import { listClosedQuestionCards } from "../chat/closed-question-cards";
 import { chatBelongsToOne } from "../../shared/chat-surface";
 import { oneDispatchRoomUpdatedAt } from "../one/dispatch-presentation";
 import { projectOneDecisionOwnerAnswerV4 } from "./one-decision-owner-answer";
@@ -174,6 +177,7 @@ import {
   stripMobileBridgeControlFences,
 } from "./sanitize";
 import { chatFileSourceText, cutChatFileText, rewriteChatFilePaths } from "./chat-file-links";
+import { agentDisplayName } from "../../shared/agent-display-name";
 
 const INITIAL_PROJECTION_BUDGET_MS = 2_500;
 const CHAT_ATTACHMENT_ID_PATTERN = "[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
@@ -267,7 +271,36 @@ function mobileBridgeChatFiles(
   return files;
 }
 
-async function settleInitialProjectionWithin<T>(
+/*
+ * A source that missed the 2.5 s budget is projected with its empty fallback so bridge.ready is never held (a slow Mac, a swapping
+ * disk, a slow account server). That left the phone on "no runtimes / no cloud agents" until some unrelated event rebuilt the
+ * snapshot ("initial runtime projection deferred", then a phone that stayed half-connected). When the late source finally
+ * answers, its result is already in the source's own cache, so one coalesced snapshot rebuild is all the phone needs: listeners
+ * (the bridge authority) ask for it here. At most once per label per LATE_REPROJECTION_MIN_GAP_MS, so a source that is always
+ * slow cannot turn this into a rebuild loop; nothing is stored, nothing waits.
+ */
+const LATE_REPROJECTION_MIN_GAP_MS = 15_000;
+const lateProjectionListeners = new Set<(label: string) => void>();
+const lateProjectionNotifiedAt = new Map<string, number>();
+
+export function onInitialProjectionLateSettled(listener: (label: string) => void): () => void {
+  lateProjectionListeners.add(listener);
+  return () => { lateProjectionListeners.delete(listener); };
+}
+
+function notifyLateProjection(label: string): void {
+  if (lateProjectionListeners.size === 0) return;
+  const now = Date.now();
+  const last = lateProjectionNotifiedAt.get(label);
+  if (last !== undefined && now - last < LATE_REPROJECTION_MIN_GAP_MS) return;
+  lateProjectionNotifiedAt.set(label, now);
+  for (const listener of [...lateProjectionListeners]) {
+    try { listener(label); } catch { /* an observer never changes the projection */ }
+  }
+}
+
+/** Exported for the private gate scripts/test-mobile-bridge-late-projection.cjs only. */
+export async function settleInitialProjectionWithin<T>(
   label: string,
   promise: Promise<T>,
   fallback: T,
@@ -286,7 +319,11 @@ async function settleInitialProjectionWithin<T>(
     ]);
   } finally {
     if (timer) clearTimeout(timer);
-    if (timedOut) console.warn(`[mobile-bridge] initial ${label} projection deferred`);
+    if (timedOut) {
+      console.warn(`[mobile-bridge] initial ${label} projection deferred`);
+      // Only an answer counts: a source that failed has nothing new to show.
+      void promise.then(() => notifyLateProjection(label), () => undefined);
+    }
   }
 }
 
@@ -647,8 +684,8 @@ function agentsDto(
     return {
       id: agent.id,
       slug: agent.slug,
-      name: displayText(agent.name, 512),
-      nameEn: displayText(agent.nameEn, 512),
+      name: displayText(agentDisplayName(agent, "ko"), 512),
+      nameEn: displayText(agentDisplayName(agent, "en"), 512),
       tagline: displayText(agent.tagline, 2_048),
       taglineEn: displayText(agent.taglineEn, 2_048),
       trustGrade: agent.trustGrade,
@@ -992,6 +1029,29 @@ export interface MobileBridgeHistoryOptions {
   chatFileLinks?: boolean;
   /** The phone reported handoff.card.v1: a hand-off card row is sent as the closed card value; every other phone gets one plain line of it. */
   handoffCard?: boolean;
+  /** The phone reported receipt.card.v1: a receipt row is sent as the marker + the closed value with the host's line inside; every other phone gets one plain `[Record] ...` line. */
+  receiptCard?: boolean;
+}
+
+/**
+ * The text a phone is given for a receipt row: the line is made HERE from the value and the object's state now (shared/receipt-card.ts
+ * receiptPlainLine), so the phone, the desktop and the server say the same words. A phone that says receipt.card.v1 gets the marker + the closed value with `line`
+ * beside it (it draws the line as it is and the value's kind/outcome as its icon); an older phone gets one plain line. Null when the text is not a receipt row.
+ */
+/**-a: the zone this computer is in (the zone its schedules run in); a receipt time with no zone read as UTC (23:00 for 08:00 in Seoul). */
+function deviceTimeZone(): string | undefined {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined; } catch { return undefined; }
+}
+
+function projectReceiptRow(text: string, closed: boolean): string | null {
+  const value = decodeReceiptCard(text);
+  if (!value) return null;
+  const locale = currentUiLocale() === "ko" ? "ko" : "en";
+  const live = receiptLiveOf(value);
+  const shown = receiptForPhone(value, live, { capabilities: closed ? [RECEIPT_CARD_CAPABILITY] : [], locale, timeZone: deviceTimeZone() });
+  if (shown.kind === "line") return sanitizeMobileBridgeText(shown.text, 1200);
+  // the phone reads `line` as a string (the host's words for this value now); every word passes the same sanitizer as any transcript text
+  return `${RECEIPT_CARD_MARKER}${JSON.stringify({ ...shown.value, line: sanitizeMobileBridgeText(shown.line, 1200) })}`;
 }
 
 /** The text a phone is given for a hand-off card row: the marker + closed value (handoff.card.v1) or the seat-style plain line; null when the text is not a card row. */
@@ -1008,7 +1068,7 @@ function projectHandoffCardRow(text: string, closed: boolean): string | null {
     ...(value.place ? { place: clean(value.place, 80) } : {}), ...(value.result ? { result: clean(value.result, 1200) } : {}) });
 }
 function sanitizeHandoffRowText(text: string, max: number): string {
-  return Buffer.byteLength(text, "utf8") <= max ? text : text.startsWith(HANDOFF_CARD_MARKER) ? "" : sanitizeMobileBridgeText(text, max);
+  return Buffer.byteLength(text, "utf8") <= max ? text : text.startsWith(HANDOFF_CARD_MARKER) || text.startsWith(RECEIPT_CARD_MARKER) ? "" : sanitizeMobileBridgeText(text, max);
 }
 
 export function projectMobileBridgeHistory(
@@ -1106,13 +1166,14 @@ export function projectMobileBridgeHistory(
       ...(message.role === "user" && promptRunIds.has(message.id)
         ? { runId: promptRunIds.get(message.id)! }
         : {}),
+      ...(message.role === "user" && message.clientIntentId ? { clientIntentId: message.clientIntentId } : {}),
       ...(projectedImages.length ? { images: projectedImages } : {}),
       ...(files.length ? { files } : {}),
     };
     const remaining = budget - outBytes - mobileBridgeJsonBytes(shell) - 16;
     if (remaining <= 0) break;
     // A hand-off card (a 'view' row of the personal agent's conversation): the closed value for a phone that draws it, else one plain line as the quiet notice every phone already draws. Never the raw row.
-    const handoff = message.role === "system" ? projectHandoffCardRow(message.text, options.handoffCard === true) : null;
+    const handoff = message.role === "system" ? (projectReceiptRow(message.text, options.receiptCard === true) ?? projectHandoffCardRow(message.text, options.handoffCard === true)) : null;
     if (handoff !== null) {
       const cardText = sanitizeHandoffRowText(handoff, Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining));
       const cardCandidate: MobileBridgeChatMessageDto = { ...shell, text: cardText };
@@ -1230,7 +1291,17 @@ async function messagesDto(
 export function projectMobileBridgeConfirmations(
   confirmations: readonly PendingConfirmation[] = listPendingConfirmations(),
 ): MobileBridgePendingConfirmationDto[] {
-  return confirmations.map((confirmation) => {
+  // A question the person closed with X (here or on a phone: chat.question.close) is the conversation's closed-card state on this computer; a phone that restarted
+  // would otherwise be listed it again and open the sheet again. Listing is not answering: the question stays answerable from the conversation.
+  const closedOf = new Map<string, ReadonlySet<string>>();
+  const isClosed = (confirmation: PendingConfirmation): boolean => {
+    try {
+      let keys = closedOf.get(confirmation.chatId);
+      if (!keys) { keys = new Set(listClosedQuestionCards(confirmation.chatId).map((item) => item.key)); closedOf.set(confirmation.chatId, keys); }
+      return keys.has(`decision:${confirmation.sourceMessageId}`);
+    } catch { return false; }
+  };
+  return confirmations.filter((confirmation) => !isClosed(confirmation)).map((confirmation) => {
     let taskId = `task_${confirmation.chatId}`;
     try {
       // Division chats resolve to their root Task here. The deterministic

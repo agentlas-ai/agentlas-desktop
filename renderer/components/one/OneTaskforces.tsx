@@ -148,7 +148,7 @@ export function OneTaskforceDialog({
   busy: boolean;
   onClose: () => void;
   onCreate: (input: { title: string; description: string; memberAgentIds: string[] }) => Promise<void>;
-  onUpdate: (input: { id: string; title: string; description: string; memberAgentIds: string[]; expectedRevision: number }) => Promise<void>;
+  onUpdate: (input: { id: string; title: string; expectedTitle: string; description: string; memberAgentIds: string[]; expectedRevision: number; expectedMemberAgentIds: string[] }) => Promise<void>;
   onRemove: (input: { id: string; expectedRevision: number }) => Promise<void>;
   oneAvatarIcon?: string;
 }) {
@@ -228,7 +228,8 @@ export function OneTaskforceDialog({
     if (!nextTitle || busy) return;
     setError(null);
     try {
-      if (taskforce) await onUpdate({ id: taskforce.id, title: nextTitle, description: description.trim(), memberAgentIds: selected, expectedRevision: taskforce.revision });
+      // The save names what the form opened with: the name (a rename only when the person edited it here) and the member list (a rename elsewhere is no conflict).
+      if (taskforce) await onUpdate({ id: taskforce.id, title: nextTitle, expectedTitle: taskforce.title, description: description.trim(), memberAgentIds: selected, expectedRevision: taskforce.revision, expectedMemberAgentIds: taskforce.memberAgentIds });
       else await onCreate({ title: nextTitle, description: description.trim(), memberAgentIds: selected });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

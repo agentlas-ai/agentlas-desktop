@@ -52,7 +52,7 @@ import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
   captureGoalProducerAdmission, admitGoalProducer, assertGoalProducerDispatch, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
 import { latestGoalWaitSubscription, goalWaitContinuationPermission, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { recordGoalWaitProposal } from "../long-run/goal-wait-proposal";
-import { automaticGoalClosesWhenIdle } from "../long-run/auto-goal-quiescence";
+import { automaticGoalClosesOnFirstQuestion, automaticGoalClosesWhenIdle } from "../long-run/auto-goal-quiescence";
 import { boundedWaitRefusalCause } from "../long-run/wait-refusal-cause";
 import type { ParsedGoalWait } from "../long-run/wait-emitter";
 import { finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, GOAL_WAIT_FINITE_TIMER_NOTICE, waitRefusalDisposition } from "../long-run/goal-wait-refusal";
@@ -88,15 +88,17 @@ import {
   STOPPED_BY_USER,
 } from "../runtime/invocation-lifecycle";
 import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause, isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
+import { writeTurnOutcome } from "./turn-outcome-line";
 import { isAppSideRunFailureCode, undispatchedInternalFailure } from "../../shared/run-failure-cause";
 import { readRunTurnPlacement } from "./turn-placement";
 import { runFailureNoticeText } from "../../shared/run-failure-notice";
 import { internalFailureOwnerLine, type InternalFailurePlan } from "../../shared/owner-failure-class";
 import {
   HOST_RECOVERY_LINK, decideOwnerFailure, hostRecoveryOf, hostRecoveryOriginalOf, isOwnerTurnRequest, claimHostRecovery, buildHostRecoveryReplay, hostRecoveryFailedParkable, parkHostRecovery,
-  recordHarnessDefect, recordHostRecoveryOutcome, requestIsReplayable, scheduleHostRecovery, sweepCutOffOwnerTurns, sweepOrphanedHostRecoveries,
+  closeKeptRequestsOfGoal, recordHarnessDefect, recordHostRecoveryOutcome, requestIsReplayable, scheduleHostRecovery, sweepCutOffOwnerTurns, sweepOrphanedHostRecoveries,
   type OwnerFailureDecision,
 } from "./host-recovery";
+import { clearHarnessDueInDb } from "../store/harness-due";
 import { hostInternalFailureMessage, isHostInternalException, isMissingWorkingFolderError, workingFolderMissingMessage } from "./host-internal-failure";
 import { forecastAppResend } from "./resend-forecast";
 import { queueWillStartRunAgain } from "./queue-retry-fact";
@@ -163,10 +165,11 @@ import type { RunnerNativeTurnController, RunnerOwnerControlInbox, RunnerNativeC
 import type { InvocationCurrentTurnSteerRequest, InvocationCurrentTurnSteerReceipt } from "../../shared/types";
 import { claimCurrentTurnSteer, countPendingCurrentTurnSteers, existingCurrentTurnSteer, getCurrentTurnSteer,
   listUncertainCurrentTurnSteers, rejectQueuedCurrentTurnSteersForStop, settleCurrentTurnSteer, takeCurrentTurnSteers } from "../store/current-turn-steers";
-import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
+import { endRunToolGrants, getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
 import {
   PERMISSION_ESCALATION_TOOL,
   hasPermissionEscalationMarker,
+  isSandboxWriteDenial,
   stripPermissionEscalationMarker,
 } from "../../shared/permission-escalation";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
@@ -216,6 +219,8 @@ import { GOAL_CONTINUATION_HOST_WAKE } from "../store/goal-continuation-rows";
 import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAutomationGoalExecutionOwnerMatches, nativeGoalStopOwnerMatches, snapshotAutomationGoalRunStops,
   stopKnownAutomationGoalRuns, type NativeGoalStopOwner } from "../automation-execution-control";
 import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
+import { effectOutcomeOfRun } from "../harness/turn-receipts";
+import { chatWaitsOnPeer } from "../harness/peer-reply-wait";
 import { normalizePeerBody, notePeerChainRun, peerChainOfRequest, peerChainRowExists, peerChainStopped } from "../harness/peer-chain";
 import { resumeInterruptedPeerTurns as resumePeerTurns, type PeerResumeReport } from "../harness/peer-turn-resume";
 import { withEarlierAttempt } from "./earlier-attempt";
@@ -399,6 +404,8 @@ export interface InvocationSettledEnvelope {
   oneMode: boolean;
   /** Host-owned approval/input wait discovered from the terminal response. */
   pendingQuestion?: boolean;
+  /** This turn ended by offering the full-access chip: its answer is a blocked step, not the conversation's first real answer (the titler waits for the continuation). */
+  permissionEscalationOffered?: boolean;
   browserLoginWaiting?: boolean;
   /** Semantic wait projection only; never an approval or execution grant. */
   userDecisionRequest?: AgentlasUserDecisionRequest;
@@ -487,6 +494,8 @@ interface RunRecord {
   oneMode: boolean;
   goal: string;
   pendingQuestion: boolean;
+  /** this turn ended by asking the owner for full access (the permission chip); a continuation run will follow if allowed. Read by the session titler. */
+  permissionEscalationOffered?: boolean;
   /** `unclosedAttemptId`: the Goal attempt this turn left "running" because the runtime was not measured to have stopped; the wait's end closes it. */
   browserLoginWait?: { handle: BrowserLoginWaitHandle; durable: InvocationBrowserLoginWait; unsubscribe?: () => void; unclosedAttemptId?: string };
   userDecisionRequest?: AgentlasUserDecisionRequest;
@@ -4128,7 +4137,10 @@ export class InvocationService {
         ? true : effectBoundary.provesNoOutsideEffect();
       let goalCarries = false;
       try {
-        const carried = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
+        // `chat` is the row read when this run started: a Goal this very turn admitted (automaticGoalId) is not in it, and a request that a
+        // Goal carries must not also be kept by the app for a second, independent start (the same send ran from both at the cleared limit).
+        const carriedGoalId = record.automaticGoalId ?? getChat(chat.id)?.goalId ?? chat.goalId;
+        const carried = carriedGoalId ? getLongRunByGoalId(carriedGoalId) : null;
         goalCarries = Boolean(carried && ["queued", "running", "waiting_tool", "waiting_worker"].includes(carried.status));
       } catch { goalCarries = false; }
       let queueResends = false;
@@ -4179,7 +4191,37 @@ export class InvocationService {
     // (F51, 2026-10-21: a turn blocked by the provider's content safety filters read "The run failed …" + "App problem").
     // `delivery` is the host's fact that this failed attempt sent nothing to a model, where the throwing site knows it (the error event's
     // turnDelivery, or runnerRefusedBeforeDispatch); the run ledger's attempt rows say the same for the rest (turn-placement.ts).
+    /*
+     * / a run that does not finish leaves ONE `turn-outcome` receipt in its conversation, written here in the same step that settles it (the three
+     * terminal sites call persistEmptyFailureNotice, which calls this first, whatever it then decides to say). It covers a run that never started (a usage limit, a
+     * signed-out runtime, a refusal before dispatch, no terminal event) as well as one that was stopped, cut by a close or failed. Facts only: the run's terminal
+     * code, the typed provider failure, who stopped it, the runner's name. A turn waiting for the owner, a background run, a host-started wake that is quiet by
+     * its own rule, a steering replacement (the next turn answers) and a failure the host retries by itself (the host-status line says so) write none.
+     */
+    const writeRunEndLine = (terminalKind: string, errorCode?: string | null, failure?: McpInvocationEvent["error"], delivery?: "not-dispatched"): void => {
+      try {
+        if (record.background || runReq.agentAppMode || terminalKind === "invoke_completed") return;
+        const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
+        const hostCause = invocationHostStopCause(abortReason);
+        if (runReq.promptOrigin === "system" && !(typeof errorCode === "string" && OWNER_ACTION_FAILURE_CODES.has(errorCode)) && !isOwnerGoalStopCause(abortReason)) return;
+        if (record.steeringInterruptRequested && !isOwnerGoalStopCause(abortReason)) return;
+        if (ownerFailure && (ownerFailure.action === "recover" || ownerFailure.action === "queue")) return;
+        let placement: string = "unconfirmed";
+        try { placement = readRunTurnPlacement(runId); } catch { placement = "unconfirmed"; }
+        const notStarted = (delivery ?? failure?.turnDelivery ?? (turnProvedNotDispatched ? "not-dispatched" : undefined)) === "not-dispatched" || placement === "not-dispatched";
+        const selection = record.currentRuntimeSelection ?? runReq.runtimeSelection;
+        writeTurnOutcome({
+          chatId: chat.id, runId, runner: selection ? (selection.acpAgentId ?? selection.kind) : null, end: notStarted ? "not_started" : "interrupted",
+          code: errorCode ?? failure?.code ?? null, runtimeFailure: failure?.runtimeFailure ?? null,
+          // A run the APP stopped (quit / update restart) ends as `invoke_cancelled` too, but it is not the owner's Stop: its line says the app restarted, from the same marker the end sentence reads.
+          ownerStopped: (terminalKind === "invoke_cancelled" && !hostCause) || isOwnerGoalStopCause(abortReason),
+          hostRestart: hostCause === "app_closed" || hostCause === "update_restart",
+          ownerWait: record.pendingQuestion || Boolean(record.browserLoginWait),
+        });
+      } catch { /* the run ledger stays authoritative; a line that cannot be written is the writer's own `recorded:false` */ }
+    };
     const persistEmptyFailureNotice = (terminalKind: string, errorCode?: string | null, failure?: McpInvocationEvent["error"], delivery?: "not-dispatched"): void => {
+      writeRunEndLine(terminalKind, errorCode, failure, delivery);
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
       // A host-started Goal continuation (promptOrigin "system") stays quiet, except for a cause only the owner can clear
       // (shared/run-failure-notice.ts OWNER_ACTION_FAILURE_CODES): the waiting Goal says why and what to do (YouTube),
@@ -4262,7 +4304,7 @@ export class InvocationService {
           && undispatchedInternalFailure({ code: errorCode, runtimeFailure: failure?.runtimeFailure, delivery: delivery ?? failure?.turnDelivery ?? ledgerDelivery });
         // The queue starts this owner message again by itself (pending-chat-sends.ts): say so, and say it once, not once per attempt.
         const queueRetriesBySelf = internalUndispatched && pendingSendRetriesAfterInternalFailure(getDb(), runId, errorCode);
-        const message = hostCause ? invocationHostStopCopy(hostCause, locale).detail
+        const message = hostCause ? invocationHostStopCopy(hostCause, locale, { hasGoal: Boolean(getChat(chat.id)?.goalId) }).detail
           : terminalKind === "invoke_interrupted"
             ? locale === "ko" ? "실행이 중단되어 답변을 완료하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 중단 원인과 재개 상태를 확인할 수 있습니다."
               : "The run was interrupted before it could finish a reply. Your request is saved; run history shows the interruption and resume status."
@@ -5239,6 +5281,16 @@ export class InvocationService {
         ) {
           permissionEscalationRequested = true;
         }
+        // The same chip for a runner that gives no typed denial (Codex, grok, Cursor, ACP): its sandbox refused a write the shell tool made.
+        if (
+          permissionEscalationEligible
+          && !event.agentId
+          && event.kind === "tool-use"
+          && event.tool?.isError === true
+          && isSandboxWriteDenial(event.tool.result)
+        ) {
+          permissionEscalationRequested = true;
+        }
         const attributedAgentId = event.runtimeAgentId ?? event.agentId;
         if (attributedAgentId) record.actualAgentId = attributedAgentId;
         if (!event.agentId && event.runtimeAgentId) {
@@ -5825,6 +5877,7 @@ export class InvocationService {
              * 완주한 읽기 전용 턴이 쓰기 승격을 표식으로 요청했다 — 그 대화 안에서
              * 기존 승인칩 한 벌로 묻는다. 승인 없이는 아무것도 승격되지 않는다.
              */
+            record.permissionEscalationOffered = true;
             void this.offerPermissionEscalation({
               record,
               chatId: runReq.chatId,
@@ -5861,8 +5914,8 @@ export class InvocationService {
           turn.observation?.onPromptBound();
         }
         const publishAutomaticGoalDegradedNotice = (reason: string, failureKind?: string) => {
-          const ko = "목표 자동 추적을 이번 실행에 적용하지 못했습니다. 작업은 일반 실행으로 계속합니다. 반복되면 설정의 모델 역할에서 오케스트레이터 연결과 사용 한도를 확인해 주세요.";
-          const en = "Automatic Goal tracking was unavailable for this run. The task is continuing as a normal run. If this repeats, check the orchestrator connections and usage limits under Model roles in Settings.";
+          const ko = "이번 요청은 이어서 챙기지 않고 한 번만 처리합니다. 계속 이러면 설정의 모델 역할에서 연결된 AI와 사용 한도를 확인해 주세요.";
+          const en = "This request will not be followed up on; it runs once. If this keeps happening, check the connected AI and its usage limit under Model roles in Settings.";
           const noticeEvent: McpInvocationEvent = {
             kind: "notice",
             notice: {
@@ -6634,7 +6687,21 @@ export class InvocationService {
           const turnGoalId = turnEndGoalId;
           const current = getLongRunByGoalId(turnGoalId);
           if (current && current.surface !== "science" && current.status === "running" && !longRunOwnerHold(current.id)) {
-            if (record.pendingQuestion) {
+            let quietFirstQuestionClose = false;
+            if (record.pendingQuestion && record.automaticGoalId === turnGoalId) {
+              // the Goal the host opened by itself ended its first turn on a question with nothing done: no Goal for it (see auto-goal-quiescence.ts).
+              try {
+                quietFirstQuestionClose = automaticGoalClosesOnFirstQuestion({ goalId: turnGoalId, lifecycle: getChatGoalRevision(turnGoalId)?.lifecycle,
+                  pendingQuestion: true, boundary: readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id }) });
+                if (quietFirstQuestionClose) closeGoal(turnGoalId, "cancelled", "cleanup", { reason: "automatic_goal_first_turn_asked_no_effect" });
+              } catch (error) {
+                quietFirstQuestionClose = false; // unreadable boundary or a failed close: the Goal is held as before
+                console.warn("[long-run] automatic Goal first-question close unavailable:", error instanceof Error ? error.message : String(error));
+              }
+            }
+            if (quietFirstQuestionClose) {
+              // closed above: nothing to hold or schedule
+            } else if (record.pendingQuestion) {
               // The turn asked the owner: this Goal waits for the answer (owner 2026-10-20 "답오기전에 해당작업 보류하며 다른
               // 작업은 진행"). It is held, not scheduled: nothing wakes it to ask the same card again, and its Work project's
               // provider stays free for the owner's other conversations. The answer (any owner message here) reopens it, and the
@@ -7018,6 +7085,8 @@ export class InvocationService {
         }
       })
       .finally(async () => {
+        // what this run was allowed "for this task" ends with it (the next run of the conversation asks again).
+        try { endRunToolGrants(runReq.chatId); } catch { /* a grant that cannot be ended is only ever narrower than its label on the next ask */ }
         releaseGoalObligationContinuation(req);
         await releaseWorkAttachmentRun(runId).catch(() => { /* cleanup refusal cannot prevent terminal settlement */ });
         if (record.automaticGoalDeadline && !this.pendingGoalVerifications.has(runId)) clearTimeout(record.automaticGoalDeadline);
@@ -7125,6 +7194,17 @@ export class InvocationService {
         // The end of a turn is a signal of the Agentlas Harness (long-run/goal-signals.ts): the Goal of this chat is looked at once the follow-up
         // above has been written (the replay-barrier card, the browser ladder's human-check card, an owner amendment waiting for a stop).
         if (!effectObservation) noteGoalTurnSettled(runReq.chatId);
+        // the turn that read a message with a registered wait (message_send await_reply) has ended: its sender is woken with the answer (harness/peer-reply-wait.ts).
+        // "interrupted" = Stop / failure / limit: the sender is still told, so the promise never dies silently.
+        if (!effectObservation) {
+          const peerMark = peerChainOfRequest(runReq);
+          if (peerMark) void import("../harness/peer-reply-wait").then((waits) => waits.onPeerReplyTurnSettled(waits.productionPeerReplyWaitPorts(),
+            { chatId: runReq.chatId, runId, peerChain: peerMark,
+              // The app closing (or restarting for an update) cut this turn: it is not the receiver's end, so the sender's wait stays (harness/peer-reply-wait.ts).
+              ended: controller.signal.aborted && ["app_closed", "update_restart"].includes(invocationHostStopCause(controller.signal.reason instanceof Error ? controller.signal.reason.message : null) ?? "") ? "host_stopped"
+                : controller.signal.aborted || observedRuntimeErrorCode ? "interrupted" : "answered" }))
+            .catch((error) => console.warn("[peer-wait] settle look failed:", error instanceof Error ? error.message : error));
+        }
         if (retryGoalCheckpoint && !hasQueuedSteer) this.continueGoalCheckpoint({
           ...retryGoalCheckpoint, record, executionContext,
         });
@@ -7408,6 +7488,8 @@ export class InvocationService {
         || longRunOwnerHold(run.id) || getChat(record.chatId)?.goalId !== goalId) return;
       // A Goal held for the owner's answer is woken by nobody; the turn-end calls that follow the question must not undo that.
       if (goalOwnerAnswerHold(run.id)) return;
+      // A conversation waiting on a peer's answer, or on the owner's card for a message_send, is not its turn: its own signal (the reply, the answer, the end of the wait) looks at the Goal again.
+      if (chatWaitsOnPeer(record.chatId)) return;
       if (automaticGoalReplayBlockerCode(run.id)) return;
       const wait = latestGoalWaitSubscription(goalId);
       if (wait && ["pending", "claimed"].includes(wait.state)) return;
@@ -7678,6 +7760,10 @@ export class InvocationService {
         }
         cancelQueuedSteersForChat(chatId, false, "goal-stopped");
         cancelQueuedOnePreflightSteersForChat(chatId);
+        // One stop, one record: a request the app kept for this Goal (a usage limit, a sign-in) must not start later while the screen says
+        // paused. The kept request is closed with the pause, in the same transaction.
+        closeKeptRequestsOfGoal(getDb(), expectedGoalId, action === "pause" ? "goal_paused_by_owner" : "goal_deleted_by_owner");
+        if (action === "pause") clearHarnessDueInDb(getDb(), chatId);
         if (action === "delete") closeGoal(expectedGoalId, "cancelled", "owner-stop", { reason: "user" });
       })();
     } finally {
@@ -7883,10 +7969,14 @@ export class InvocationService {
     }, expectedRunId, record.workspaceBinding, record.executionContext, mainAdmission);
   }
 
-  currentTurn(chatId: string): { runId: string } | null {
+  /**
+   * The turn a steer or a Stop aims at. A turn that already answered and now waits on its Goal's verification is not a steer target (its
+   * direction would be lost), but it IS what the owner's Stop must reach: `includeVerification` is passed by the Stop only (chat:stop).
+   */
+  currentTurn(chatId: string, options: { includeVerification?: boolean } = {}): { runId: string } | null {
     for (const [runId, record] of this.activeRuns.entries()) {
       if (record.chatId === chatId && !record.background && !record.controller.signal.aborted
-        && !this.pendingGoalVerifications.has(runId)) return { runId };
+        && (options.includeVerification === true || !this.pendingGoalVerifications.has(runId))) return { runId };
     }
     return null;
   }
@@ -8514,7 +8604,7 @@ export class InvocationService {
   /** The waiting owner message is in the transcript now; a received line follows if it is still waiting a moment later. */
   private keepOwnerIntakeMessage(row: DurableQueuedSteer, request: McpInvocationRequest, receivedLine = true): void {
     try {
-      appendChatMessage(row.chatId, "user", ownerVisiblePrompt(request), { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}) });
+      appendChatMessage(row.chatId, "user", ownerVisiblePrompt(request), { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}), ...(request.clientIntentId ? { clientIntentId: request.clientIntentId } : {}) });
     } catch (error) {
       console.warn("[owner-intake] waiting message could not be shown yet; it still runs:", error instanceof Error ? error.message : String(error));
       return;
@@ -9058,6 +9148,13 @@ export class InvocationService {
     if (status === "completed") {
       const already = getDb().prepare("SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'host_recovery_outcome' LIMIT 1").get(original);
       if (already) return;
+      // The line says "finished" only when the host's own receipts of the retry agree: a retry whose send was refused or left unanswered ended "completed" as a
+      // run, but its request was not carried out, and the receipt already says so in plain words.
+      const effects = effectOutcomeOfRun(record.chatId, runId);
+      if (effects.notDone.length > 0) {
+        recordHostRecoveryOutcome(original, record.chatId, "completed", "retry_effect_not_done");
+        return;
+      }
       recordHostRecoveryOutcome(original, record.chatId, "completed", "retry_completed");
       try {
         const locale = inferOwnerLocale(record.request.oneUserAuthoredPrompt ?? record.request.userPrompt, pickLocale(record.request));
@@ -9086,6 +9183,7 @@ export class InvocationService {
       receipt,
       oneMode: record.oneMode,
       pendingQuestion: record.pendingQuestion,
+      ...(record.permissionEscalationOffered ? { permissionEscalationOffered: true } : {}),
       ...(record.browserLoginWait ? { browserLoginWaiting: true } : {}),
       ...(record.userDecisionRequest ? { userDecisionRequest: record.userDecisionRequest } : {}),
       ...(record.goalWaitRequest ? { goalWaitRequest: record.goalWaitRequest } : {}),
@@ -9311,11 +9409,16 @@ export class InvocationService {
       // A carried direction's own rows are already in the chat (carried-owner-followups.ts): never a second copy.
       if (text.trim() && request.promptOrigin !== "system" && !request.agentAppMode && !next.id.startsWith(CARRIED_FOLLOWUP_STEER_PREFIX)) {
         // A preflight copy of the same direction may already have been delivered as a user turn.
-        const delivered = getDb().prepare(
-          "SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ? LIMIT 1",
-        ).get(chatId, text, next.queuedAt);
+        // The saved row of a direction carries its intent id: look it up by that id; words only for rows an older build wrote.
+        const intentId = typeof (request as { clientIntentId?: unknown }).clientIntentId === "string" && (request as { clientIntentId?: string }).clientIntentId
+          ? (request as { clientIntentId: string }).clientIntentId : undefined;
+        const delivered = intentId
+          ? getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND client_intent_id = ? LIMIT 1").get(chatId, intentId)
+          : getDb().prepare(
+            "SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ? LIMIT 1",
+          ).get(chatId, text, next.queuedAt);
         if (!delivered) {
-          const kept = appendChatMessage(chatId, "user", text, { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}) });
+          const kept = appendChatMessage(chatId, "user", text, { ...(request.images?.length ? { images: request.images } : {}), ...(request.fileGroupId ? { fileGroupId: request.fileGroupId } : {}), ...(intentId ? { clientIntentId: intentId } : {}) });
           // No synthetic "could not hand over" reply: the message is shown once, the cause is in the log above.
           // The kept message is the owner's: the chat's Goal reviews it like any owner message (D2).
           const goalId = reviewableChatGoalId(chatId);

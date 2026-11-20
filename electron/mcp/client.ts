@@ -1,4 +1,5 @@
 import { defaultRoleForChat } from "../runtime/agent-default-role";
+import { noteScreenGrant } from "../connectors/route-gate";
 import { noteTurnRuntime } from "../runtime/turn-runtime-note";
 import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
 import { browserSignInNeeded, ownerAnswersSignIn } from "../../shared/browser-sign-in-needed";
@@ -274,7 +275,7 @@ import { parseMemoryEvents, type RawMemoryEvent } from "../memory/events";
 import { hasQueuedOwnerSteer } from "../store/invocation-steers";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { roomMemberContext } from "../one/room-chat";
-import { automationProtocolFor, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
+import { AUTOMATION_READ_ONLY_NOTE, automationProtocolFor, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, SURFACE_PROTOCOL, parseSurfaces } from "../surface-emitter";
 import { applyFinalDisplayBackstop } from "./final-display-backstop";
 import {
@@ -291,8 +292,13 @@ import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure"
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import type { RuntimeToolKind } from "../../shared/runtime-tool-kind";
-import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
+import { automationProjectIdForChat, automationRegistrationMonitoring, hasAutomationRegistrationHandoff, isRoomMemberSession, resolveAutomationRegistrationTarget } from "../automation-registration";
 import { createAutomation, getAutomation, listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
+import { hostDeliveryClaim, peerSendOwnerPendingReceiptIds, receiptCountsOfRun, recordReceipt } from "../harness/turn-receipts";
+import { AUTO_MESSAGE_GOAL_PREFIX } from "../../shared/auto-goal";
+import { chatWaitsOnPeer, peerPendingIdsOfChat } from "../harness/peer-reply-wait";
+/** Tools whose event is a file write by itself (the typed write events of claude-code and codex); shell commands and reads are not. */
+const TYPED_FILE_WRITE_TOOLS = /^(?:Write|Edit|MultiEdit|NotebookEdit|apply_patch|file_change)$/iu;
 import { graphTeamGrantCurrent, type GraphTeamGrant } from "../one/graph-team-grant";
 import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
 import { isCompletedToolEvent, previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
@@ -315,6 +321,8 @@ import { durableGoalFailureAttempts } from "../runtime/durable-retry";
 import { RUNTIME_CREDENTIAL_UNAVAILABLE_CODE } from "../runtime/credential-access";
 import { recordResolvedAlias } from "../runtime/model-discovery-store";
 import { setResolvedCliModelAlias } from "../../shared/models";
+import { runtimeFallbackNoticeText } from "../../shared/runtime-fallback-notice";
+import { runtimeStoppedLine } from "../../shared/runtime-stopped-line";
 import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
 import { surfacePackScreen } from "../store/surface-conversation-schema";
 import { AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID } from "../workspace-preview/mcp-server";
@@ -397,6 +405,8 @@ import { clearOneFrontFallback, noteOneFrontFallback } from "../one/front";
 import { isCompanionFrontOwnLane } from "../one/companion-front-inbox";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
+import { humanizeScheduleLabel } from "../../shared/schedule-describe";
+import { turnClockLine } from "../../shared/turn-clock";
 import { extractBuildInterviewQuestions } from "../../shared/build-turn";
 import {
   oneTeamRuntimeBinding,
@@ -1287,7 +1297,7 @@ function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"
     `goal (host-owned, objective immutable): ${goal.objective}`,
     "criteria:",
     criteria || "1. Leave verifiable completion evidence on the real target surface.",
-    ...(firstStart ? ["first start: show objective, criteria and verification surfaces briefly before tools"] : []),
+    ...(firstStart ? ["first start: before tools, say in one plain sentence what you will deliver and where, no Goal/criteria/verification labels"] : []),
   ].join("\n");
 }
 
@@ -1669,9 +1679,9 @@ function automationRegistrationResultText(item: AutomationRegistrationResult, lo
     ? `${item.name} · 예약 실행을 껐습니다${item.activeRunStopRequested ? " · 진행 중인 실행에 중지를 요청했습니다" : ""}.`
     : `${item.name} · scheduled runs are disabled${item.activeRunStopRequested ? "; Stop requested for the active run" : ""}.`;
   if (locale === "ko") {
-    return `${item.name} ${action} 완료 · 앱 실행 중 확인 · ${item.schedule}${item.graph ? " · 워크플로우 그래프 포함" : ""}`;
+    return `${item.name} ${action} 완료 · 앱 실행 중 확인 · ${humanizeScheduleLabel(item.schedule, "ko")}${item.graph ? " · 워크플로우 그래프 포함" : ""}`;
   }
-  return `${item.name} ${action} · checks while app is running · ${item.schedule}${item.graph ? " · workflow graph included" : ""}`;
+  return `${item.name} ${action} · checks while app is running · ${humanizeScheduleLabel(item.schedule, "en")}${item.graph ? " · workflow graph included" : ""}`;
 }
 
 function automationFinalSummary(items: AutomationRegistrationResult[], locale: "ko" | "en"): string {
@@ -1684,7 +1694,7 @@ function automationFinalSummary(items: AutomationRegistrationResult[], locale: "
         : item.enabled && item.nextRunAt
           ? ` · next run ${formatAutomationNextRun(item.nextRunAt, item.timezone, locale)}`
           : "";
-    return `- ${item.name} · ${action} · ${item.schedule}${nextRun}`;
+    return `- ${item.name} · ${action} · ${humanizeScheduleLabel(item.schedule, locale)}${nextRun}`;
   });
   return locale === "ko"
     ? [`자동화 ${items.length}개를 설정했습니다.`, ...lines, "자동화 화면에서 바로 확인할 수 있습니다."].join("\n")
@@ -1693,8 +1703,8 @@ function automationFinalSummary(items: AutomationRegistrationResult[], locale: "
 
 function automationPermissionRequiredText(locale: "ko" | "en"): string {
   return locale === "ko"
-    ? "자동화는 저장하지 않았습니다. 쓰기 권한으로 다시 실행하세요."
-    : "Automation was not saved. Run again with write permission.";
+    ? "자동화는 저장하지 않았습니다. 이 대화는 읽기 전용이라 예약·알림을 만들 수 없어요. 쓰기 권한으로 다시 요청하세요."
+    : "Automation was not saved. This conversation is read-only, so no reminder or schedule can be created. Ask again with write permission.";
 }
 
 /**
@@ -2575,7 +2585,8 @@ async function runMcpInvocationInContext(
     // A card this turn presented that still waits for the owner's press is the owner's move, the same as an ask (typed, read
     // from the host's card store; Main holds the turn's Goal on it).
     if (ev.kind === "final" && !ev.agentId && req.runId) {
-      const ownerWaitIds = turnOwnerWaitInstanceIds(req.chatId, req.runId);
+      // A card the owner has not pressed, or a send that is not sent because the owner has not chosen (typed receipt).
+      const ownerWaitIds = [...turnOwnerWaitInstanceIds(req.chatId, req.runId), ...peerSendOwnerPendingReceiptIds(req.chatId, req.runId), ...peerPendingIdsOfChat({ db: () => getDb() as never }, req.chatId, req.runId)];
       if (ownerWaitIds.length) ev = { ...ev, ownerWait: { schemaVersion: "agentlas.owner-wait.v1", instanceIds: ownerWaitIds } };
     }
     if (ev.kind === "final" && ev.text?.trim()) {
@@ -2835,7 +2846,7 @@ async function runMcpInvocationInContext(
        * 데스크탑 경로에서 이 인자를 넘기지 않아, 실제로 그것을 쓰는 곳은 모바일
        * 브리지 하나뿐이었다.
        */
-      persistedUserMessageId = appendChatMessage(chat.id, "user", ownerVisiblePrompt(req), { ...(req.images?.length ? { images: req.images } : {}), ...(req.fileGroupId ? { fileGroupId: req.fileGroupId } : {}), ...runtimeInputScope }).id;
+      persistedUserMessageId = appendChatMessage(chat.id, "user", ownerVisiblePrompt(req), { ...(req.images?.length ? { images: req.images } : {}), ...(req.fileGroupId ? { fileGroupId: req.fileGroupId } : {}), ...(req.clientIntentId ? { clientIntentId: req.clientIntentId } : {}), ...runtimeInputScope }).id;
       if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, ownerVisiblePrompt(req));
     }
     userMessagePersisted = true;
@@ -4129,7 +4140,9 @@ async function runMcpInvocationInContext(
       // N7 carry-over (a): a plain conversation of a project that has another conversation carries the one tool message_send (anyone
       // may write to anyone in the project). Read here, from the store; a conversation outside a project, alone in its project, a screen
       // pack's, the personal agent's or a Hub-called agent's is offered nothing and its request is what it always was.
-      const peerMessageOffered = !req.agentAppMode && chat.kind === "user"
+      // A member of a group room works in a hidden session of its own and writes as its room (harness/deliver.ts fromKind, scope-gate.ts peerCandidates): its session
+      // is offered the tool as well (the room's lead said it had no way to hand a result to another conversation of the project).
+      const peerMessageOffered = !req.agentAppMode && (chat.kind === "user" || (await import("../harness/deliver-runtime")).isRoomMemberSession(chat.id))
         ? (await import("../harness/deliver-runtime")).peerMessageToolNames(chat.id).length > 0 : false;
       if (req.oneMode && !req.agentAppMode) {
         try {
@@ -4140,7 +4153,7 @@ async function runMcpInvocationInContext(
             oneMemberToolPolicy = {
               autoSelectTools: row.auto_select_tools !== 0,
               // A teammate working a hand-off from a group room also carries room_say (One Team, that one tool).
-              fixedServerIds: [...agent.mcpServers.slice(0, 100), ...(oneRoomMemberRun ? ["one-team"] : [])],
+              fixedServerIds: [...agent.mcpServers.slice(0, 100), ...(oneRoomMemberRun || (peerMessageOffered && chat.kind !== "user") ? ["one-team"] : [])],
             };
           }
         } catch {
@@ -6183,6 +6196,13 @@ async function runMcpInvocationInContext(
     turnContextParts.push("display: no \"Skills used:\" / \"사용 스킬:\" openers; start with what the user needs");
     keepLastTurnContext("reply.display", "fixed-policy", ["release"]);
   }
+  // The API and local-model loops carry no clock: one line per turn, in the owner's time zone (shared/turn-clock.ts). claude-code has its own.
+  if (active.kind !== "claude-code") {
+    let ownerZone: string | null = null;
+    try { ownerZone = getOneProfile().timeZone ?? null; } catch { /* the machine zone is the fallback */ }
+    turnContextParts.push(turnClockLine(Date.now(), ownerZone));
+    declareLastTurnContext("clock.now", "turn-context", ["task"]);
+  }
   // Router/supervisor/firm/project/pool definitions: system text for a fresh request, kept turn context for a retained one.
   // Each definition is its own declared producer (ledger desktop.main.turn-context.collector).
   const placeHostContext = (id: string, changeTriggers: readonly PromptChangeTrigger[], block: string, parts: readonly DeclaredPromptPart[]): void => {
@@ -6609,7 +6629,7 @@ async function runMcpInvocationInContext(
     }
   }
   // 사용자 채팅에서만 자동화 생성 protocol 주입 (백그라운드 automation 실행 세션은 제외 → 재귀 방지)
-  if (chat.kind !== "division" && canWrite) {
+  if ((chat.kind !== "division" || isRoomMemberSession(chat)) && canWrite) {
     // 2026-08-20: 단어장 게이트(isAutomationSetupRequest — ko/en AND 매칭) 제거.
     // 제3언어 자동화 요청은 그 게이트에 영구 미도달이었다. write 권한의 사용자 턴에는
     // 계약을 턴 컨텍스트로 무조건 전달한다 — read 권한으로 시작해 protocol 없이
@@ -6621,6 +6641,10 @@ async function runMcpInvocationInContext(
       const automationProtocol = automationProtocolFor(mcpIncludedServers.some(server => server.catalogId === "one-team"), mcpToolchainConsumer);
       turnContextParts.push(automationProtocol); keepLastTurnContext("automation.contract", "configuration", ["capability-inventory"]);
     }
+  }
+  // A read turn cannot register a schedule (host gate below), so it is told that instead of getting no automation text at all.
+  if ((chat.kind !== "division" || isRoomMemberSession(chat)) && !canWrite && executionContext?.source !== "science" && executionContext?.source !== "automation") {
+    turnContextParts.push(AUTOMATION_READ_ONLY_NOTE); keepLastTurnContext("automation.contract", "configuration", ["capability-inventory"]);
   }
   // One 실행 경계의 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유. 경계 블록 조립은
   // 동기라 캐시 peek만 가능했으므로, 여기(비동기)에서 판정을 확정해 같은 턴의 턴
@@ -6824,6 +6848,8 @@ async function runMcpInvocationInContext(
     const canonicalWorkPacket=canonicalWorkRecovery?.packet();
     const sessionCapableRuntime =
       active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity";
+    // Connector routing exception: a run the person explicitly put in Computer Use refuses no road for driving the screen.
+    noteScreenGrant(chat.id, req.toolMode === "computer-use");
     const runnerReq = {
       beforeMcpToolResult,
       ...(canonicalWorkRecovery ? { canonicalWorkRecovery } : {}),
@@ -7365,6 +7391,24 @@ async function runMcpInvocationInContext(
           ? bindInvocationOneArtifacts(id ?? "", artifactPaths ?? [], { name, ...(_toolKind ? { kind: _toolKind } : {}) }, (taken) => { producedPaths = taken; })
           : undefined;
         const outputPaths = isError ? [] : [...(artifactPaths ?? []), ...producedPaths];
+        // a file the run wrote through a typed write tool (claude Write/Edit, codex apply_patch) leaves ONE file receipt in its conversation, from the tool's own event and
+        // never from the answer's words (a work chat wrote two files and showed none). Only write-class tools: a Read of an image is also an artifact path and is no write.
+        // The runtimes that report a typed `edit` kind and its raw input instead of an artifact path (antigravity, the ACP lanes) name the written file in the event's arguments.
+        const typedEditPaths = !isError && req.runId && !req.agentAppMode && !artifactPaths?.length ? (require("../harness/typed-write-paths") as typeof import("../harness/typed-write-paths")).editToolWrittenPaths({ kind: _toolKind, args, isError }) : [];
+        if (!isError && req.runId && !req.agentAppMode && ((artifactPaths?.length && TYPED_FILE_WRITE_TOOLS.test(name.trim())) || typedEditPaths.length)) {
+          try {
+            const { recordFileWriteReceipt, rootsOfChat } = require("../harness/turn-receipts") as typeof import("../harness/turn-receipts");
+            const roots = rootsOfChat(chat.id);
+            const written = typedEditPaths.length ? typedEditPaths : (artifactPaths ?? []).slice(0, 16);
+            for (const writtenPath of written) recordFileWriteReceipt({ path: writtenPath, chatId: chat.id, runId: req.runId, roots });
+          } catch { /* a receipt that cannot be made never breaks the run */ }
+        }
+        // a file a SHELL call changed (cat > file, tee, cp, mv, a script) has no typed write event; the disk shows it. One `observed` file receipt per changed file, whichever
+        // runtime ran the shell (this callback is the one door), naming the project or the outside folder it landed in (harness/shell-write-receipts.ts). Idempotent by the file's effect id.
+        if (req.runId && !req.agentAppMode) {
+          try { (require("../harness/shell-write-receipts") as typeof import("../harness/shell-write-receipts")).recordShellWriteReceipts({ chatId: chat.id, runId: req.runId, toolName: name,
+            ...(_toolKind ? { toolKind: _toolKind } : {}), ...(id ? { toolId: id } : {}), ...(args !== undefined ? { args } : {}), ...(isError ? { isError: true as const } : {}), finished: result !== undefined }); } catch { /* a receipt that cannot be made never breaks the run */ }
+        }
         if (outputPaths.length) {
           const boundImageLabels = new Set((oneArtifacts ?? [])
             .filter((artifact) => artifact.type === "image")
@@ -7689,8 +7733,9 @@ async function runMcpInvocationInContext(
           koMessage = `사용할 수 있는 실행 환경 ${triedRuntimes.length}개를 모두 써 봤지만 답을 받지 못했습니다: ${listKo}. 자세한 원인은 자세히에서 볼 수 있어요.`;
           enMessage = `All ${triedRuntimes.length} available runtimes were tried and none answered: ${listEn}. The details hold each cause.`;
         } else {
-          koMessage = `${stoppedName} ${ownMachine ? "모델이" : "쪽 문제로"} ${attemptCount}번 시도했지만 답을 받지 못했습니다. 자세한 원인은 자세히에서 볼 수 있어요.`;
-          enMessage = `${stoppedName} did not answer after ${attemptCount} attempt${attemptCount === 1 ? "" : "s"}${ownMachine ? "" : " (a provider-side problem)"}. The details hold the cause.`;
+          const stoppedKind = (originalFailure ?? failure).kind;
+          koMessage = runtimeStoppedLine({ kind: stoppedKind, name: stoppedName, ownMachine, attempts: attemptCount, locale: "ko" });
+          enMessage = runtimeStoppedLine({ kind: stoppedKind, name: stoppedName, ownMachine, attempts: attemptCount, locale: "en" });
         }
         sink({
           kind: "notice",
@@ -8070,10 +8115,10 @@ async function runMcpInvocationInContext(
           const toLabel = `${fallback.kind}${fallback.model ? ` · ${fallback.model}` : ""}`;
           const koMessage = fallback.kind === "agentlas"
             ? `${fromLabel} 구독 한도가 소진되어 AI 크레딧으로 ${toLabel}에서 이어갑니다.`
-            : `선택한 실행 환경 ${fromLabel}을 사용할 수 없어 오케스트레이터 우선순위 모델 ${toLabel}로 이어갑니다. 저장된 선택은 변경하지 않았습니다.`;
+            : runtimeFallbackNoticeText({ from: fromLabel, to: toLabel, cause: failed, locale: "ko" });
           const enMessage = fallback.kind === "agentlas"
             ? `${fromLabel} reached its subscription limit; continuing on ${toLabel} with AI credits.`
-            : `The selected runtime ${fromLabel} is unavailable; continuing on orchestrator-priority model ${toLabel}. The saved selection was not changed.`;
+            : runtimeFallbackNoticeText({ from: fromLabel, to: toLabel, cause: failed, locale: "en" });
           runnerEvents.onNotice({
             level: "warning",
             code: "runtime-fallback-attempt",
@@ -8094,8 +8139,8 @@ async function runMcpInvocationInContext(
         sink({
           kind: "tool-use",
           status: locale === "ko"
-            ? "선택한 실행 환경을 사용할 수 없어 오케스트레이터 우선순위 다음 모델로 이어갑니다."
-            : "The selected runtime is unavailable; continuing on the next orchestrator-priority model.",
+            ? "선택한 모델이 이 요청을 받지 못해 다음 모델로 이어갑니다."
+            : "The selected model did not take this request; continuing on the next model.",
           activity: { code: "recovery_retry" },
         });
         active = fallback;
@@ -8230,8 +8275,8 @@ async function runMcpInvocationInContext(
               payload: { runtime: active.kind, phase: "moved", to: fallback.kind, ...(proof ? { proof } : {}) } });
             const fromLabel = `${active.kind}${active.model ? ` · ${active.model}` : ""}`;
             const toLabel = `${fallback.kind}${fallback.model ? ` · ${fallback.model}` : ""}`;
-            const koMessage = `선택한 실행 환경 ${fromLabel}을 사용할 수 없어 오케스트레이터 우선순위 모델 ${toLabel}로 이어갑니다. 저장된 선택은 변경하지 않았습니다.`;
-            const enMessage = `The selected runtime ${fromLabel} is unavailable; continuing on orchestrator-priority model ${toLabel}. The saved selection was not changed.`;
+            const koMessage = runtimeFallbackNoticeText({ from: fromLabel, to: toLabel, cause: failure, locale: "ko" });
+            const enMessage = runtimeFallbackNoticeText({ from: fromLabel, to: toLabel, cause: failure, locale: "en" });
             runnerEvents.onNotice({ level: "warning", code: "runtime-fallback-attempt", message: locale === "ko" ? koMessage : enMessage,
               i18n: { ko: koMessage, en: enMessage },
               details: JSON.stringify({ from: { kind: active.kind, backend: active.backend, model: active.model ?? null },
@@ -8312,6 +8357,10 @@ async function runMcpInvocationInContext(
     let identicalPassStreak = 0;
     let lastPassToolCalls: number | null = null;
     let lastPassNovelObservations: number | null = null;
+    // What the host's receipts say this run carried out, before the last pass and the change that pass made.
+    let effectsBeforeLastPass = 0;
+    let lastPassEffects: number | null = null;
+    const runEffectTotal = (): number => { try { return req.runId ? Object.values(receiptCountsOfRun(chat.id, req.runId)).reduce((sum, n) => sum + (n ?? 0), 0) : 0; } catch { return 0; } };
     let idleGoalPasses = 0;
     let ledgerDrivenPasses = 0;
     let goalIdleYield: { goalId: string } | null = null;
@@ -8323,7 +8372,7 @@ async function runMcpInvocationInContext(
      */
     let goalPassStop: GoalPassStop | null = null;
     const needsAutomationRegistration = (text: string): boolean => hasAutomationRegistrationHandoff(text, {
-      agentAppMode: req.agentAppMode === true, division: chat.kind === "division",
+      agentAppMode: req.agentAppMode === true, division: chat.kind === "division" && !isRoomMemberSession(chat),
       sessionAutomationId: req.automationId, backgroundAutomation: executionContext?.source === "automation",
       headlessFence: automationProtocolRead,
     });
@@ -8337,7 +8386,8 @@ async function runMcpInvocationInContext(
       const rawContinuation = stripStormbreakerContinueMarker(result.text);
       // 전술·계획 표식은 이 패스에서 원장에 반영하고 본문에서 뗀다(패스 본문은 곧바로 영속된다).
       if (!roomMemberTurn) rawContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: rawContinuation.text, runId: req.runId ?? null, signal }).text;
-      const passClaim = stripGoalCompleteMarker(rawContinuation.text);
+      const passClaim = hostDeliveryClaim(stripGoalCompleteMarker(rawContinuation.text), { goalId: activeGoalId ?? null, chatId: chat.id, runId: req.runId ?? null,
+        continues: rawContinuation.shouldContinue, asksOwner: turnAsksOwner(rawContinuation.text), aborted: Boolean(signal?.aborted) });
       if (passClaim.claimed) {
         goalClaimSeen = true;
         goalClaimEvidence = goalClaimEvidence ?? passClaim.evidence;
@@ -8355,7 +8405,7 @@ async function runMcpInvocationInContext(
       if (asksUser) passShouldContinue = false;
       // A card this turn presented that waits for the owner's press hands the next move to the owner too: another pass would
       // only draft it again (Finance 2026-10-28: one turn presented the same Analyst card three times, the older ones cancelled).
-      const ownerWait = Boolean(req.runId && turnOwnerWaitInstanceIds(chat.id, req.runId).length);
+      const ownerWait = Boolean(req.runId && (turnOwnerWaitInstanceIds(chat.id, req.runId).length || peerSendOwnerPendingReceiptIds(chat.id, req.runId).length)) || chatWaitsOnPeer(chat.id, req.runId);
       if (ownerWait) passShouldContinue = false;
       if (activeGoalId && continuousMode && !signal?.aborted && !asksUser && !ownerWait) {
         if (passClaim.claimed && !nativeGoalEpisode) {
@@ -8406,7 +8456,8 @@ async function runMcpInvocationInContext(
       // answer to that is enough. The plan is read only at a pass the Goal ledger alone keeps alive (one SQLite read).
       const planFinishedAtBoundary = Boolean(activeGoalId && continuousMode && goalDrivenPass && passShouldContinue && goalPlanFinished(activeGoalId));
       const idleStep = idleGoalPassStep({ continuousMode, goalDrivenPass, passShouldContinue, lastPassToolCalls, lastPassNovelObservations, idlePasses: idleGoalPasses,
-        planFinished: planFinishedAtBoundary });
+        planFinished: planFinishedAtBoundary,
+        settledEffects: Boolean(activeGoalId?.startsWith(AUTO_MESSAGE_GOAL_PREFIX) && lastPassEffects === 0 && effectsBeforeLastPass > 0) });
       idleGoalPasses = idleStep.idlePasses;
       if (idleStep.yieldNow) {
         passShouldContinue = false;
@@ -8553,6 +8604,7 @@ async function runMcpInvocationInContext(
        */
       const novelObservationsBeforePass = novelToolObservations;
       const toolCallsBeforePass = completedToolCalls;
+      const effectsBeforePass = runEffectTotal();
       try {
         result = await invokeCurrentRuntime(activeRunnerReq, "goal-continuation");
       } catch (error) {
@@ -8570,6 +8622,8 @@ async function runMcpInvocationInContext(
       // A failed pass is retried or handed on below; it is not an idle pass.
       lastPassToolCalls = result.failure ? null : completedToolCalls - toolCallsBeforePass;
       lastPassNovelObservations = result.failure ? null : novelToolObservations - novelObservationsBeforePass;
+      effectsBeforeLastPass = effectsBeforePass;
+      lastPassEffects = result.failure ? null : runEffectTotal() - effectsBeforePass;
       if (result.failure) {
         /*
          * A failed pass is not the end of the goal.
@@ -8754,7 +8808,7 @@ async function runMcpInvocationInContext(
     };
     const finalAsksOwner = turnAsksOwner(finalContinuation.text);
     // A card of this turn still waiting for the owner is the owner's move here too (the pass loop above stops on it).
-    const finalOwnerWait = Boolean(req.runId && turnOwnerWaitInstanceIds(chat.id, req.runId).length);
+    const finalOwnerWait = Boolean(req.runId && (turnOwnerWaitInstanceIds(chat.id, req.runId).length || peerSendOwnerPendingReceiptIds(chat.id, req.runId).length)) || chatWaitsOnPeer(chat.id, req.runId);
     let stormbreakerContinueRequested = !req.agentAppMode && !goalWaitRequest && !automationHandoff && !finalAsksOwner && !finalOwnerWait
       && finalContinuation.shouldContinue;
     result = { ...result, text: goalCompletion.text };
@@ -8966,7 +9020,7 @@ async function runMcpInvocationInContext(
       }
       displayText = parseMemoryEvents(displayText).cleanedText;
     } else if (
-      chat.kind !== "division" ||
+      chat.kind !== "division" || isRoomMemberSession(chat) ||
       // 자동화 세션 채팅은 division 이다 — 편집 계약(위 req.automationId 주입)이 시킨
       // `## Automation` 방출을 여기서 소비하지 않으면 계약 전체가 죽은 경로가 된다.
       // (백그라운드 자동화 실행이 자동화를 낳는 재귀는 executionContext 로 계속 차단)
@@ -9012,6 +9066,9 @@ async function runMcpInvocationInContext(
                 executionAvailability:"app-running",schedule:row.scheduleHuman,targetType:row.targetType,targetId:row.targetId,
                 nextRunAt:row.nextRunAt,graph:Boolean(row.graph)};
               automationRegistrations.push(registration);
+              // The pause / resume leaves its receipt too (the One conversation draws no second card for it): effectId = this operation's id.
+              recordReceipt({ kind: "schedule", verb: a.action === "pause" ? "pause" : "resume", outcome: "done", ref: { automationId: row.id }, chatId: chat.id,
+                runId: typeof req.runId === "string" ? req.runId : "", effectId: operationId });
               sink({kind:"tool-use",tool:{id:operationId,name:toolName,isError:false,args:JSON.stringify(registration),
                 result:automationRegistrationResultText(registration,locale)}});
             } catch (error) {
@@ -9027,6 +9084,8 @@ async function runMcpInvocationInContext(
           const gateProblems = automationRegistrationGateProblems(a);
           if (gateProblems.length > 0) {
             automationRefusals.push(`${a.name}: ${gateProblems.join(" / ")}`);
+            recordReceipt({ kind: "schedule", outcome: "refused", code: "automation_registration_gate", ref: { runId: typeof req.runId === "string" ? req.runId : "" }, chatId: chat.id,
+              runId: typeof req.runId === "string" ? req.runId : "", effectId: `${req.runId ?? ""}|automation-block|${a.name}` });
             sink({
               kind: "tool-use",
               tool: {
@@ -9051,6 +9110,8 @@ async function runMcpInvocationInContext(
           } catch (error) {
             const reason = error instanceof Error ? error.message : "automation_identity_invalid";
             automationRefusals.push(`${a.name}: ${reason}`);
+            recordReceipt({ kind: "schedule", outcome: "refused", code: reason, ref: { runId: typeof req.runId === "string" ? req.runId : "" }, chatId: chat.id,
+              runId: typeof req.runId === "string" ? req.runId : "", effectId: `${req.runId ?? ""}|automation-block|${a.name}` });
             sink({kind:"tool-use",tool:{name:"automation-registration-refused",isError:true,result:reason}});
             continue;
           }
@@ -9085,6 +9146,8 @@ async function runMcpInvocationInContext(
               });
               // 그래프는 방출됐을 때만 교체 — 사용자가 캔버스에서 편집한 그래프를 지우지 않는다.
               const updatedWithGraph = a.graph ? updateAutomationGraph(dup.id, a.graph) : updated;
+              recordReceipt({ kind: "schedule", verb: "update", outcome: "done", ref: { automationId: dup.id }, chatId: chat.id,
+                runId: typeof req.runId === "string" ? req.runId : "", effectId: registrationOperationId });
               const registration: AutomationRegistrationResult = {
                 action: "updated",
                 enabled: updatedWithGraph.enabled,
@@ -9175,6 +9238,8 @@ async function runMcpInvocationInContext(
                 scheduleHuman: a.schedule,
                 targetType,
                 targetId,
+                // An automation registered from a conversation inside a project belongs to that project (project_id was empty).
+                ...(automationProjectIdForChat(chat, getChat) ? { projectId: automationProjectIdForChat(chat, getChat)! } : {}),
                 promptTemplate: a.prompt,
                 createdBy: "agent",
                 // 구조화 스케줄 + steps→그래프를 통과시켜 챗 생성 자동화가 graph_json/schedule_json을 저장.
@@ -9183,6 +9248,9 @@ async function runMcpInvocationInContext(
                 graphJson: a.graph ?? null,
               });
                 if (req.runtimeSelection) recordAutomationPinProvenance(created.id, "agent_copy", "chat_registration");
+                // the registration of this run leaves its receipt in the same transaction as the row (effectId = this registration's operation id).
+                recordReceipt({ kind: "schedule", verb: "create", outcome: "done", ref: { automationId: created.id }, chatId: chat.id,
+                  runId: typeof req.runId === "string" ? req.runId : "", effectId: registrationOperationId });
                 // Only this newly created row and its genuine invocation may acquire a bridge.
                 if (activeGoalId && typeof req.runId === "string" && creationRevision?.chatId === chat.id) {
                   if (boundFinite) {
@@ -9243,6 +9311,8 @@ async function runMcpInvocationInContext(
             if (reason === "automation_registration_failed") console.error("[automation] registration failed:", error);
             const message = automationRegistrationRefusalText(reason, locale);
             automationRefusals.push(`${a.name}: ${message}`);
+            recordReceipt({ kind: "schedule", verb: startedTool === "automation.update" ? "update" : "create", outcome: reason === "automation_registration_failed" ? "failed" : "refused",
+              code: reason, ref: { runId: typeof req.runId === "string" ? req.runId : "" }, chatId: chat.id, runId: typeof req.runId === "string" ? req.runId : "", effectId: registrationOperationId });
             sink({kind:"tool-use",tool:{...(startedTool ? {id:registrationOperationId,name:startedTool} : {name:"automation-registration-refused"}),
               isError:true,args:JSON.stringify({name:a.name,reasonCode:reason}),result:message}});
           }
@@ -9251,6 +9321,19 @@ async function runMcpInvocationInContext(
       } catch (err) {
         console.error("[automation] parseAutomations failed:", err);
       }
+    } else if (executionContext?.source !== "automation") {
+      // A chat kind that registers nothing (a company division, a Work session) never drops a registration block in silence: the reply may say
+      // "registered" and the store holds no row. The block is removed from the text and the person is told nothing was registered.
+      try {
+        const dropped = parseAutomations(displayText, { headlessFence: automationProtocolRead });
+        if (dropped.automations.length > 0 || dropped.errors.length > 0) {
+          automationRefusals.push(locale === "ko" ? "이 대화에서는 예약을 등록하지 않아 아무것도 등록되지 않았습니다. 예약은 일반 대화에서 요청해 주세요."
+            : "This conversation does not register schedules, so nothing was registered. Ask for it in an ordinary conversation.");
+          displayText = dropped.cleanedText;
+          recordReceipt({ kind: "schedule", outcome: "refused", code: "automation_not_registered_here", ref: { runId: typeof req.runId === "string" ? req.runId : "" },
+            chatId: chat.id, runId: typeof req.runId === "string" ? req.runId : "", effectId: `${req.runId ?? ""}|automation-block-dropped` });
+        }
+      } catch { /* an unreadable block stays ordinary text */ }
     }
     // 호스트가 하는 말은 답변 본문에 이어붙이지 않는다 — 자기 행(notice)으로 나간다.
     if (automationRegistrations.length > 0) {
@@ -9632,12 +9715,13 @@ async function runMcpInvocationInContext(
     // notification body read this one number. Codex states it by phase (result.answerStart, counted in its own text: shifted by the
     // earlier passes' text); every other runner: the text accumulated when the last tool call began. Proven against the saved text,
     // never guessed: 0 (the whole text) whenever it is not.
+    let finalAnswerStart = 0;
     if (durableAssistantEntry && req.runId) {
       try {
         const runnerMark = result.answerStart ?? null;
         const answerAt = locateAnswerStart(durableAssistantEntry.text, runnerMark ?? answerTracker.mark(),
           runnerMark ? runnerMark.at + (partialFloor ? partialFloor.length + 1 : 0) : undefined);
-        if (answerAt > 0) recordAnswerStart({ chatId: chat.id, runId: req.runId, messageId: durableAssistantEntry.id, text: durableAssistantEntry.text, from: answerAt });
+        if (answerAt > 0 && recordAnswerStart({ chatId: chat.id, runId: req.runId, messageId: durableAssistantEntry.id, text: durableAssistantEntry.text, from: answerAt })) finalAnswerStart = answerAt;
       } catch (error) {
         console.warn("[answer-start] not recorded:", error instanceof Error ? error.message : error);
       }
@@ -9752,6 +9836,9 @@ async function runMcpInvocationInContext(
       ...(durableAssistantEntry
         ? { durableAssistantMessageIdForVerification: durableAssistantEntry.id }
         : {}),
+      // The live answer folds its progress the way a reloaded one does (the same recorded number): the sentences the model wrote between tool calls are not the answer
+      // (a reasoning line in English drew above the Korean answer until the chat was reopened). Only when the text drawn is the text saved.
+      ...(finalAnswerStart > 0 && durableAssistantEntry && boundImageDisplayWithFloor === durableAssistantEntry.text ? { answerStart: finalAnswerStart } : {}),
       tokens: finalObservedTokens || undefined,
       ...(invocationObservedUsage ? { observedUsage: invocationObservedUsage } : {}),
       model: active.model ?? active.kind,

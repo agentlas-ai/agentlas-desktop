@@ -705,8 +705,29 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
   bumpAutomationGraphEditEpoch(id);
   const automation = getAutomation(id) as Automation;
   if (patch.targetType !== undefined || patch.targetId !== undefined) restoreAutomationTarget(automation);
+  touchChatsHoldingReceiptsOf(id);
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
+}
+
+/**
+ *-b: a schedule receipt's words follow the schedule row NOW (shared/receipt-card.ts receiptPlainLine + harness/receipt-live.ts), and a paired phone
+ * only reads a conversation again when its updated_at moves. A pause, a change or a delete of the schedule moved nothing in the conversation that holds its card,
+ * so the phone kept "created · next run ..." for a schedule the Mac had stopped. This moves updated_at of every conversation holding a receipt of this schedule
+ * (rows of `view:receipt:*` whose text names the id), once, and tells the change bus. No new table or column; nothing is read unless a schedule changed.
+ */
+export function touchChatsHoldingReceiptsOf(automationId: string): number {
+  try {
+    if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(automationId)) return 0;
+    const db = getDb();
+    const rows = db.prepare("SELECT DISTINCT chat_id AS chatId FROM chat_messages WHERE id LIKE 'view:receipt:%' AND instr(text, ?) > 0")
+      .all(`"automationId":"${automationId}"`) as Array<{ chatId: string }>;
+    if (rows.length === 0) return 0;
+    const now = new Date().toISOString();
+    const touch = db.prepare("UPDATE chats SET updated_at = ? WHERE id = ?");
+    for (const row of rows) { touch.run(now, row.chatId); emitDesktopStoreChange({ entity: "chat", id: row.chatId }); }
+    return rows.length;
+  } catch { return 0; }
 }
 
 export function toggleAutomation(id: string, enabled: boolean): Automation {
@@ -734,6 +755,11 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
   // 단 시간 트리거일 때만 — 이벤트 트리거(fs/chain/poll/webhook)는 시계가 없어 next_run_at을
   // null로 유지해야 한다(그러지 않으면 재활성화 즉시 daily 시계로 승격되는 버그).
   const timeDriven = existing.triggerType === "schedule";
+  // Turning a time-driven automation on needs a time the scheduler can read. computeNextRun falls back to "24 hours from now" for text it cannot read, which showed as a
+  // next run at the hour of the click; the automation stays as it was and the caller is told why.
+  if (enabled && timeDriven && !storedScheduleReadable(existing.scheduleHuman, existing.scheduleSpec ? JSON.stringify(existing.scheduleSpec) : null, existing.timezone || defaultTz())) {
+    throw Object.assign(new Error("automation_schedule_unreadable: the stored schedule cannot be read as a time; change the schedule first, then turn it on"), { code: "automation_schedule_unreadable" });
+  }
   const nextRunAt =
     enabled && timeDriven
       ? computeNextRun(existing.scheduleHuman, new Date(), {
@@ -758,6 +784,7 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
     .run(enabled ? 1 : 0, nextRunAt, id);
   bumpAutomationGraphEditEpoch(id);
   const automation = restoreAutomationTarget(getAutomation(id) as Automation);
+  touchChatsHoldingReceiptsOf(id);
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
 }
@@ -787,6 +814,7 @@ export function removeAutomation(id: string): void {
     db.prepare("DELETE FROM automations WHERE id = ?").run(id);
   });
   remove.immediate();
+  touchChatsHoldingReceiptsOf(id);
   emitDesktopStoreChange({ entity: "automation", id });
   emitDesktopStoreChange({ entity: "chat" });
 }

@@ -277,7 +277,7 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
       : (ko ? "전략 변경을 확인해 주세요" : "Review this strategy change");
 
   return (
-    <ComposerDecisionPortal enabled>
+    <ComposerDecisionPortal enabled chatId={chatId}>
       <div className={styles.wrap} data-composer-decision-card="true" data-testid="automation-strategy-approval-sheet" role="alertdialog" aria-live="assertive" aria-label={approvalLabel}>
         <section className={styles.sheet}>
           <div className={styles.head}>

@@ -3,7 +3,7 @@
  * composer and two drop-downs; no chat exists until the first message is sent. This is screen state only: memory, no storage, no table, no timer.
  * The start itself is what the person asked for just now - it is never restored after a restart (nothing was created, nothing is lost).
  *
- *   projectId: a project id -> that project (the row's "+")     null -> Empty project     "current" -> the project of the conversation on screen
+ *   projectId: a project id -> that project (the row's "+")     null -> No project     "current" -> the project of the conversation on screen
  */
 import { useSyncExternalStore } from "react";
 

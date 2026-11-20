@@ -301,28 +301,46 @@ export function planFirstSendResume(entry: FirstSendEntry, facts: {
   return { kind: "resume" };
 }
 
-/** A durable user row with the same words, written at or after the send, is that send. */
-export function firstSendEchoed(entry: Pick<FirstSendEntry, "userPrompt" | "createdAt">, messages: ReadonlyArray<{
-  role: string; text: string; createdAt?: string; durableMessageId?: string;
-}>): boolean {
-  const sentAt = Date.parse(entry.createdAt);
-  return messages.some(message => message.role === "user" && Boolean(message.durableMessageId)
-    && message.text.trim() === entry.userPrompt.trim()
-    && (!message.createdAt || !Number.isFinite(Date.parse(message.createdAt)) || Date.parse(message.createdAt) >= sentAt - 5_000));
+type EchoRow = { id?: string; role: string; text: string; createdAt?: string; durableMessageId?: string };
+
+/**
+ * Which saved sends a transcript already shows, matched ONE row to ONE send, oldest send first. A row with the same words written at or after the send
+ * (5 s of clock slack) is that send. The same words sent twice are two sends: before, the row that answered the first also counted as the echo of the
+ * second, so the second - still waiting for the room, never taken by Main - was settled away or drawn as if it were the first (
+ * two identical bubbles on screen, one row in the database, the second never sent). `durableOnly` counts only rows the database has written.
+ */
+export function firstSendEchoes<M extends EchoRow>(entries: readonly FirstSendEntry[], messages: readonly M[], options: { durableOnly?: boolean } = {}): Map<FirstSendEntry, M> {
+  const claimed = new Set<M>();
+  const found = new Map<FirstSendEntry, M>();
+  const ordered = [...entries].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  for (const entry of ordered) {
+    const sentAt = Date.parse(entry.createdAt);
+    const echo = messages.find(message => !claimed.has(message) && message.role === "user"
+      && (!options.durableOnly || Boolean(message.durableMessageId))
+      && message.text.trim() === entry.userPrompt.trim()
+      && (!message.createdAt || !Number.isFinite(Date.parse(message.createdAt)) || Date.parse(message.createdAt) >= sentAt - 5_000));
+    if (echo) { claimed.add(echo); found.set(entry, echo); }
+  }
+  return found;
+}
+
+/** A durable user row with the same words, written at or after the send, is that send (one row answers one send: firstSendEchoes). */
+export function firstSendEchoed(entry: Pick<FirstSendEntry, "userPrompt" | "createdAt"> & { intentId?: string }, messages: ReadonlyArray<EchoRow>, siblings: readonly FirstSendEntry[] = []): boolean {
+  const all = [...siblings.filter(other => other.intentId !== entry.intentId), entry as FirstSendEntry];
+  return firstSendEchoes(all, messages, { durableOnly: true }).has(entry as FirstSendEntry);
 }
 
 /**
- * The saved sends of a chat that the transcript must draw: a row with the same words already on screen at or after
- * the send (the optimistic or the durable row) is that send.
+ * The saved sends of a chat that the transcript must draw: a send whose words are not yet on screen as a row at or after the send (the optimistic or
+ * the durable row) is drawn.
  */
 export function firstSendsToDraw<M extends { id: string; role: string; text: string; createdAt?: string }>(
   entries: readonly FirstSendEntry[], messages: readonly M[], chatId: string | null,
 ): FirstSendEntry[] {
-  return entries.filter(entry => entry.chatId !== null && entry.chatId === chatId
-    && !messages.some(message => message.id === firstSendRowId(entry.intentId))
-    && !messages.some(message => message.role === "user" && message.text.trim() === entry.userPrompt.trim()
-      && (!message.createdAt || !Number.isFinite(Date.parse(message.createdAt))
-        || Date.parse(message.createdAt) >= Date.parse(entry.createdAt) - 5_000)));
+  const mine = entries.filter(entry => entry.chatId !== null && entry.chatId === chatId
+    && !messages.some(message => message.id === firstSendRowId(entry.intentId)));
+  const echoes = firstSendEchoes(mine, messages);
+  return mine.filter(entry => !echoes.has(entry));
 }
 
 /** What the reopened room may read and do. Injected, so the decision loop runs the same in the renderer and a gate. */

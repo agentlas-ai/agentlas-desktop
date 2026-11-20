@@ -3,6 +3,9 @@ import type { ChatHostNotice } from "../../shared/types";
 import { Markdown, type LinkedFileArtifact } from "./Markdown";
 import { OneDispatchNotice } from "./one/OneDispatchNotice";
 import { automationReportDisplay } from "../lib/automation-report-display";
+import { useState } from "react";
+import { ipc } from "@/lib/ipc";
+import { IconRefresh } from "@/components/Icon";
 import { agiActionNoticeLine, hostStatusLabel, isHousekeepingHostNotice } from "../../shared/chat-host-notice";
 
 /** Historical host request, not a projection of the invocation's current state.
@@ -44,6 +47,7 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat, chatI
       style={{ alignSelf: "stretch", maxWidth: 760, margin: "6px 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5 }}
     >{label}</p>;
   }
+  if (notice?.purpose === "host-status" && notice.status === "startup-resumed") return <StartupResumedLine locale={locale} chatId={chatId ?? null} runId={notice.runId} />;
   if (notice?.purpose === "host-status") {
     // A host status that is not housekeeping (needs-owner, goal-closed, runtime-kept): the short status, then the
     // sentence as written.
@@ -82,4 +86,28 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat, chatI
   }
   // goal-continuation and any other host-written continuation request: internal, not rendered.
   return null;
+}
+
+/** "App restarted · continuing" + the conversation's one Stop (api.chat.stop); the stored sentence is for the phone. */
+function StartupResumedLine({ locale, chatId, runId }: { locale: "ko" | "en"; chatId: string | null; runId: string }) {
+  const [state, setState] = useState<"idle" | "stopping" | "stopped" | "failed">("idle");
+  const stop = () => {
+    const api = ipc();
+    if (!chatId || !api?.chat?.stop || state === "stopping") return;
+    setState("stopping");
+    void api.chat.stop(chatId).then(() => setState("stopped")).catch(() => setState("failed"));
+  };
+  const ko = locale === "ko";
+  return <p
+    data-host-notice="host-status"
+    data-host-status="startup-resumed"
+    data-run-id={runId}
+    role="status"
+    style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5, overflowWrap: "anywhere" }}
+  >
+    <IconRefresh size={12} aria-hidden="true" style={{ verticalAlign: "-2px", marginRight: 4 }} /><strong style={{ fontWeight: 600 }}>{ko ? "앱 다시 켜짐" : "App restarted"}</strong> · {ko ? "이어서 해요" : "continuing"}
+    {chatId && state !== "stopped" && <> · <button type="button" data-startup-resumed-stop="true" disabled={state === "stopping"} onClick={stop}
+      style={{ all: "unset", cursor: "pointer", textDecoration: "underline", color: "inherit" }}>{state === "failed" ? (ko ? "멈추지 못했어요 · 다시" : "Could not stop · retry") : (ko ? "멈추기" : "Stop")}</button></>}
+    {state === "stopped" && <> · {ko ? "멈췄어요" : "Stopped"}</>}
+  </p>;
 }

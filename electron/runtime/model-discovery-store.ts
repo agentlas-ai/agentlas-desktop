@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { classifyDiscovery, discoverySignInRequired, type DiscoveryOutcome, type DiscoverySource } from "../../shared/model-discovery";
+import { classifyDiscovery, discoveryEntitlementRefused, discoverySignInRequired, type DiscoveryOutcome, type DiscoverySource } from "../../shared/model-discovery";
 import { isPackagedRuntime, userDataPath } from "../runtime-paths";
 
 interface StoredRun {
@@ -170,7 +170,7 @@ const staleNoCacheWarned = new Set<string>();
 const entitlementRefusalNoted = new Set<string>();
 /** The vendor refused this account (not signed in / not entitled). That is a fact about the account, not a defect: info, once per runtime per app start. */
 function isEntitlementRefusal(reason: string | null | undefined): boolean {
-  return discoverySignInRequired(reason) || /\b(?:acp:)?40[13]\b|permission_denied|unauthori[sz]ed|not authori[sz]ed/i.test(reason ?? "");
+  return discoverySignInRequired(reason) || discoveryEntitlementRefused(reason);
 }
 export function reportDiscoveryLoudly(runtime: string, outcome: DiscoveryOutcome, log?: (message: string) => void): boolean {
   if (outcome.status !== "failed" && !outcome.yieldWarning) {

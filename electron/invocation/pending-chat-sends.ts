@@ -299,6 +299,48 @@ export function abandonWaitingRetries(
   } catch { return 0; }
 }
 
+/** A queued message the owner's Stop took back: what the window puts in the input box. */
+export interface WithdrawnQueuedSend { sendId: string; intentId: string | null; text: string; bubbleRemoved: boolean }
+
+/**
+ * The owner's Stop takes back EVERY ordinary message of the chat that has not started: queued, no run yet (waiting for a busy chat, or waiting
+ * out a retry). abandonWaitingRetries above only takes the ones with an earlier attempt; a message that was never tried stayed queued through
+ * a Stop and started by itself afterwards, while the screen said it would not (a production test). Each is set to `abandoned` (owner_stopped),
+ * the state nothing revives (the restart pass and the custody recovery read queued / held rows only), and its text is handed back.
+ * A message no run ever read (attempts = 0) also loses its saved speech bubble, so no bubble stays for a message that was not sent; one an earlier
+ * attempt had read keeps its row (that attempt's run saw it). A custody-owned input (one-use refs) and a follow-up kept under its own
+ * custody keep their own Stop (queued-owner-input-custody.ts, invocation_followup_custody) and are left alone. SQL only, never throws.
+ */
+export function withdrawQueuedSends(
+  db: { prepare(sql: string): { all(...args: unknown[]): unknown[]; get(...args: unknown[]): unknown; run(...args: unknown[]): { changes?: number } } },
+  chatId: string,
+  nowMs: number = Date.now(),
+): WithdrawnQueuedSend[] {
+  const out: WithdrawnQueuedSend[] = [];
+  try {
+    const rows = db.prepare("SELECT id, intent_id, request_json, user_row_json, attempts FROM pending_chat_sends WHERE chat_id = ? AND state = 'queued' AND run_id IS NULL ORDER BY seq")
+      .all(chatId) as Array<{ id: string; intent_id: string | null; request_json: string; user_row_json: string | null; attempts: number }>;
+    for (const row of rows) {
+      let request: { userPrompt?: unknown; oneAttachmentRef?: unknown; oneTeamPreflightRef?: unknown };
+      try { request = JSON.parse(row.request_json); } catch { continue; }
+      if (request.oneAttachmentRef || request.oneTeamPreflightRef) continue;
+      try { if (db.prepare("SELECT 1 FROM invocation_followup_custody WHERE queue_id = ? LIMIT 1").get(row.id)) continue; } catch { /* no custody table: not a custody row */ }
+      const moved = db.prepare("UPDATE pending_chat_sends SET state = 'abandoned', last_code = 'owner_stopped', updated_at = ? WHERE id = ? AND state = 'queued' AND run_id IS NULL")
+        .run(nowMs, row.id);
+      if ((moved.changes ?? 0) === 0) continue;
+      let bubbleRemoved = false;
+      if (row.attempts === 0 && row.user_row_json) {
+        try {
+          const saved = JSON.parse(row.user_row_json) as { id?: unknown };
+          if (typeof saved.id === "string") bubbleRemoved = (db.prepare("DELETE FROM chat_messages WHERE id = ? AND chat_id = ? AND role = 'user'").run(saved.id, chatId).changes ?? 0) > 0;
+        } catch { /* an unreadable saved row stays: nothing is guessed */ }
+      }
+      out.push({ sendId: row.id, intentId: row.intent_id, text: typeof request.userPrompt === "string" ? request.userPrompt : "", bubbleRemoved });
+    }
+  } catch { /* a store without the queue has nothing waiting */ }
+  return out;
+}
+
 /** The ordinary messages of a chat that are waiting out an internal retry (see abandonWaitingRetries for what that means). */
 function ordinaryWaitingRetryIds(db: { prepare(sql: string): { all(...args: unknown[]): unknown[] } }, chatId: string): string[] {
   const rows = db.prepare("SELECT id, request_json FROM pending_chat_sends WHERE chat_id = ? AND state = 'queued' AND run_id IS NULL AND attempts > 0")

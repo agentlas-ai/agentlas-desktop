@@ -674,7 +674,7 @@ export function FinanceWorkspace({ onSearch, onExport, onOpenResearch, onRefresh
         {!consentAccepted&&<><p>{l("시세는 지연될 수 있고 AI는 틀릴 수 있으며 투자 조언이 아닙니다. 계속하면 이에 동의하고 질문이 AI에 전달되는 것을 허용합니다.","Prices may be delayed, AI can be wrong, and nothing here is investment advice; by continuing you agree and allow your questions to be sent to the AI.")}</p><FinanceUsageNotices ko={ko}/></>}
         {!startFailed&&(experiencePreparing||consentAccepted)&&<p role="status" aria-live="polite" aria-busy="true"><IconRefresh size={16}/> {l("Finance를 여는 중…","Getting Finance ready…")}</p>}
         {startFailed&&<p role="alert" className={styles.notice}>{l("Finance를 시작하지 못했습니다. 다시 시도하세요.","Couldn't start Finance. Try again.")}</p>}
-        <div className={styles.actions}>{!consentAccepted&&!startFailed&&btn(l("계속","Continue"),acceptNotices,!onExperience||experiencePending,true)}{startFailed&&btn(l("다시 시도","Retry"),retryStart,experiencePending,true)}
+        <div className={styles.actions}>{!consentAccepted&&!startFailed&&btn(l("계속","Continue"),acceptNotices,!onExperience||experiencePending,true)}{btn(l("나중에","Not now"),()=>navigate("/workspace"))}{startFailed&&btn(l("다시 시도","Retry"),retryStart,experiencePending,true)}
         {experience?.monitoring.enabled&&<button type="button" className={`${styles.button} ${styles.quiet} ${styles.pushEnd}`} onClick={()=>{void updateExperience({action:"monitoring",enabled:false});}} disabled={!onExperience}>{l("정기 브리핑 중지","Stop scheduled briefings")}</button>}</div>
     </section></main>;
     }

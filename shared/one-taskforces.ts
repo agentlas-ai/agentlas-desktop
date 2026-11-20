@@ -28,11 +28,16 @@ export interface CreateOneTaskforceInput {
 
 export interface UpdateOneTaskforceInput {
   id: string;
+  /** A rename only when it differs from `expectedTitle`; the members save never writes the name. */
   title: string;
+  /** The name the form was opened with. Absent: `title` is not written. */
+  expectedTitle?: string;
   /** Optional for compatibility with pre-1.0.31 clients. */
   description?: string;
   memberAgentIds: string[];
   expectedRevision?: number;
+  /** The member list the form was opened with: the save conflicts only if the list changed since (a rename moves the revision but is no conflict). */
+  expectedMemberAgentIds?: string[];
 }
 
 export interface RemoveOneTaskforceInput {

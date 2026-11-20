@@ -245,7 +245,9 @@ export function oneSupervisor():OneSupervisorService {
     if (getDb().inTransaction) throw supervisorError('supervisor_native_uncommitted_request');
     hostOptions?.assertAuthority();owner.assert(getOneProfile().oneId);
     // Every domain's check-in admission gate (one/checkin-admission.ts) sees each review run before it starts.
-    if(req.runId)try { await (await import('./checkin-admission')).admitCheckinReview(req.runId); }
+    // An owner's own reply (its row names the user message the person wrote) is not a check-in: the shared boundary never holds it.
+    const ownerAuthored=req.runId ? Boolean((store.db.prepare("SELECT 1 FROM one_supervisor_requests WHERE run_id=? AND kind='reply' AND user_message_id IS NOT NULL LIMIT 1").get(req.runId))) : false;
+    if(req.runId)try { await (await import('./checkin-admission')).admitCheckinReview(req.runId,{ownerAuthored}); }
     catch(error) {
       const {CheckinAdmissionDenied,CheckinAdmissionDeferred}=await import('./checkin-admission');
       if(error instanceof CheckinAdmissionDenied) {

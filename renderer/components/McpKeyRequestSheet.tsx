@@ -22,12 +22,15 @@ export function McpKeyRequestSheet({
   onResolved,
   presentation = "work",
   localeOverride,
+  chatId,
 }: {
   request: McpRunKeyRequest;
   /** 시트를 닫아야 할 때 호출 — 저장/거절/만료 공통. */
   onResolved: (outcome: "provided" | "declined" | "expired") => void;
   presentation?: "work" | "one";
   localeOverride?: "ko" | "en";
+  /** The conversation whose run asked: the card is drawn in that conversation's own composer. */
+  chatId?: string | null;
 }) {
   const { locale: appLocale } = useT();
   const locale = localeOverride ?? appLocale;
@@ -385,7 +388,7 @@ export function McpKeyRequestSheet({
   );
 
   return (
-    <ComposerDecisionPortal enabled>
+    <ComposerDecisionPortal enabled chatId={chatId}>
     <div
       data-composer-decision-card="true"
       className="mkr-wrap"

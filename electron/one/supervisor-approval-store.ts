@@ -189,6 +189,7 @@ export class OneSupervisorApprovalStore {
         ...(request.agentId ? { agentId: String(request.agentId).slice(0, 200) } : {}),
         requestedAt: String(request.requestedAt ?? ""), outcome,
         ...(outcome !== "expired" && row.decision ? { choice: row.decision } : {}),
+        ...(outcome === "expired" ? { closeReason: row.reason === "run_cancelled" ? "cancelled" as const : row.reason === "owner_restarted" ? "restarted" as const : "timed_out" as const } : {}),
         decidedAt: row.decided_at ?? String(request.requestedAt ?? ""),
         // The device only for a human answer, the basis only for an automatic one; a value this build does not know is not drawn.
         ...(outcome !== "expired" && (row.handled_by === "desktop" || row.handled_by === "phone") ? { device: row.handled_by } : {}),

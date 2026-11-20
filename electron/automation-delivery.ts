@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { claimAutomationNotification, type AutomationNotificationInput } from "./automation-notifications";
+import { automationAnswerIsDeliverable, claimAutomationNotification, type AutomationNotificationInput } from "./automation-notifications";
 import { getDb } from "./store/db";
 import { getAutomation } from "./store/automations";
 import { appendChatMessage, getChat } from "./store/chats";
@@ -140,7 +140,7 @@ export function deliverAutomationResult(input: AutomationNotificationInput & { o
     const requestedSourceMessageId = origin?.originMessageId;
     const sourceMessageId = requestedSourceMessageId && db.prepare("SELECT 1 FROM chat_messages WHERE id = ? AND chat_id = ? AND role = 'user'")
       .get(requestedSourceMessageId, chatId) ? requestedSourceMessageId : null;
-    if (quietAutomationRun(input)) {
+    if (!automationAnswerIsDeliverable(automation) && quietAutomationRun(input)) {
       // Nothing outward happened, nothing failed and nobody is asked: the run stays in the
       // conversation's 자동화 tab timeline ("변화 없음"), not as a chat row.
       recordRunEvent({ runId: input.runId, automationId: automation.id, chatId,
@@ -151,7 +151,10 @@ export function deliverAutomationResult(input: AutomationNotificationInput & { o
     }
     const locale = currentUiLocale();
     const quotaNotice = quotaResetTimes.map(at => formatRuntimeQuotaReset(at, locale, automation.timezone ?? undefined)).filter(Boolean).join("\n");
-    const body = [automationOwnerReportBody(input, automationRunDigest(input.runId), locale, approvalRequiredCount),
+    // A run whose answer IS the deliverable (a once schedule, a reminder with monitor.deliverAnswer) reads as that answer, not as a machine report of the run ("No outward
+    // actions were recorded... 0 tool calls / Final step result:"). The run's own summary stays in the automation timeline (the digest is recorded there).
+    const answerIsTheReport = !ownerNeeded && input.status === "ok" && Boolean(input.output?.trim()) && automationAnswerIsDeliverable(automation);
+    const body = [automationOwnerReportBody(input, answerIsTheReport ? null : automationRunDigest(input.runId), locale, approvalRequiredCount),
       quotaNotice ? `${locale === "ko" ? "이번 실행에서 기록된 한도 안내" : "Quota information recorded during this run"}:\n${quotaNotice}` : ""].filter(Boolean).join("\n\n");
     if (!body) return true;
     // A report is host-delivered history. It must not inherit the unrelated

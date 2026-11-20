@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { listCopy, listFailureText } from "@/lib/workspace-list-copy";
 import { openChatInSpace } from "@/lib/space-store";
+import { navigate } from "@/lib/navigation";
 import { isCallOnlyHubAgent } from "@shared/call-only-agent";
 import { BUILTIN_ONE_AGENT_ID, BUILTIN_ORCHESTRATOR_AGENT_ID } from "@shared/builtin-agent-ids";
 import type { InstalledAgent } from "@/lib/types";
@@ -108,7 +109,12 @@ export function NewAgentChatDialog({ open, projectId, projectName, locale, onClo
         <div className={styles.list} role="listbox" aria-multiselectable="true" aria-label={copy.agentsLabel}>
           {agents === "loading" ? <p className={styles.note}>{copy.agentsLoading}</p>
             : agents === "failed" ? <><p className={styles.note} role="alert">{copy.agentsFailed}</p><div className={styles.retryRow}><PopupAction data-retry="true" onClick={() => setReads((count) => count + 1)}>{copy.retry}</PopupAction></div></>
-            : emptyList ? <p className={styles.note} data-empty="true">{copy.agentsNone}</p>
+            : emptyList ? <><p className={styles.note} data-empty="true">{copy.agentsNone}</p>
+              {/* the empty list said "make or install one" with nothing to press. Both ways go where the thing is made or found (the dialog closes first). */}
+              <div className={styles.retryRow} data-empty-actions="true">
+                <PopupAction data-make-agent="true" onClick={() => { close(); navigate("/build"); }}>{copy.makeAgent}</PopupAction>
+                <PopupAction data-browse-hub="true" onClick={() => { close(); navigate("/marketplace"); }}>{copy.browseHub}</PopupAction>
+              </div></>
             : shown.length === 0 ? <p className={styles.note}>{copy.agentsNoMatch}</p>
             : shown.map((agent) => {
               const checked = selected.includes(agent.id), only1to1 = callOnly.has(agent.id);

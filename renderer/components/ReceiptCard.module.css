@@ -1,0 +1,16 @@
+/* The receipt card: one quiet card per host receipt. Existing tokens only; only a problem is red, the card's own colour never changes. */
+.card { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 640px; box-sizing: border-box; margin: 6px 0; padding: 10px 14px; border: 1px solid var(--paper-edge); border-radius: 12px; background: var(--paper, transparent); color: var(--ink); font-size: 13.5px; line-height: 1.45; }
+.head { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.mark { flex: none; display: inline-flex; align-items: center; margin-top: 2px; color: var(--muted-deep, var(--ink-soft)); }
+.mark[data-tone="problem"] { color: #b3402f; }
+.line { min-width: 0; overflow-wrap: anywhere; }
+.path { padding-left: 22px; min-width: 0; overflow-wrap: anywhere; color: var(--muted-deep, var(--ink-soft)); font-size: 12px; user-select: text; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; padding-left: 22px; }
+.action { padding: 4px 12px; border: 1px solid var(--paper-edge); border-radius: 8px; background: transparent; color: var(--ink); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.action:hover, .action:focus-visible { background: var(--fill-1); outline: none; }
+.action:disabled { opacity: 0.5; cursor: default; }
+.strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; box-sizing: border-box; width: min(calc(100% - 32px), var(--chat-column-width, 740px)); margin: 4px auto; color: var(--muted-deep, var(--ink-soft)); font-size: 12.5px; }
+.stripItem { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.stripItem[data-paused="true"] { opacity: 0.7; }
+.stripAction { display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--line, rgba(127,127,127,0.35)); background: transparent; color: inherit; border-radius: 999px; width: 20px; height: 20px; padding: 0; cursor: pointer; }
+.stripAction:disabled { opacity: 0.5; cursor: default; }

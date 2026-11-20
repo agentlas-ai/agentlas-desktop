@@ -81,7 +81,8 @@ import { AUTOMATION_TAB_OPEN_EVENT, AutomationRailPanel, AutomationTabLiveDot, a
 import { GOAL_PANEL_OPEN_EVENT, GoalRailPanel, useGoalPanel } from "../goal/GoalPanel";
 import { ArtifactsRailPanel, artifactsRailCount, useArtifactsRail } from "./ArtifactsRailPanel";
 import { EarlierOutputsSection } from "./EarlierOutputsSection";
-import { PanelOverview, type OverviewRow } from "./PanelOverview";
+import { PanelOverview, type OverviewOutput, type OverviewRow } from "./PanelOverview";
+import { unboundTurnFiles, type TurnFile } from "@/lib/turn-files";
 import type { OneEarlierOutputsView } from "@/lib/one-earlier-outputs";
 import { LiveDocumentRailPanel, useLiveDocuments } from "../live-document/LiveDocumentRailPanel";
 import { WorkbookView } from "./WorkbookView";
@@ -909,6 +910,15 @@ export type TaskSidePanelProps = {
   appPreview?: OneLiveAppPreview | null;
   /** The Overview's Environment section: the project's name and its folder, when the screen knows them (absent = the section is not drawn). */
   environment?: { name: string | null; folder: string | null } | null;
+  /**
+   * The files this conversation's answers made or changed (the chip lines' own ledger, lib/chat-turn-files.ts). The Overview's Outputs list names them
+   * beside the artifacts Main bound, so a file a chip shows is never listed as "nothing yet". Absent = the list shows the bound artifacts alone.
+   */
+  files?: readonly TurnFile[];
+  /** Opens one of `files` the way a chip does (the caller's open-linked-file). Without it those rows are not drawn: they could not be opened. */
+  onOpenFile?: (file: TurnFile) => void;
+  /** Bumped when the person opens a file: the panel shows the Result view, where that file is. */
+  resultOpenRequest?: number;
 };
 
 /** Task-local view state belongs to this exact thread and chat pair. */
@@ -923,7 +933,7 @@ export function TaskSidePanel(props: TaskSidePanelProps) {
 
 /**
  * One Outputs row per file. A file edited in several turns is several artifacts (each run, even each task, binds its own), and the Overview listed
- * "notes.md" once per edit (Windows human test three rows for one file). The row keeps the place where the file first appeared and opens
+ * "notes.md" once per edit. The row keeps the place where the file first appeared and opens
  * its latest version (items are in event order, oldest first). Same kind and same name (trimmed, any case) is the same file here: the list names files
  * by their name only, so two rows with one name could not be told apart anyway.
  */
@@ -977,6 +987,9 @@ function TaskSidePanelContent({
   resultKind = "standard",
   appPreview,
   environment,
+  files,
+  onOpenFile,
+  resultOpenRequest,
   workerSelection,
   workerRun,
   onCloseWorker,
@@ -1632,6 +1645,32 @@ function TaskSidePanelContent({
       meta: item.durationMs ? elapsedLabel(item.durationMs) : undefined,
     } satisfies OverviewRow;
   }), [processes, locale]);
+  /*
+   * The Outputs list: the artifacts Main bound (they open through its verified binding and win a name clash), then the files the conversation's own answers
+   * made or changed, the same ledger the chips under the answers read. Listing only the bound ones left a conversation that had written recipes.md
+   * under "Files or sites you create appear here" while its chip said "recipes.md New".
+   */
+  const overviewOutputs = useMemo<OverviewOutput[]>(() => {
+    const bound = distinctOutputFiles(visible ? items : []);
+    const rows: OverviewOutput[] = bound.map((item) => ({ id: item.id, name: item.label, kind: item.kind, onOpen: () => openArtifact(item) }));
+    if (!visible || !files?.length || !onOpenFile) return rows;
+    for (const file of unboundTurnFiles(files, bound)) {
+      rows.push({ id: `file:${file.path}`, name: file.name, kind: file.kind === "image" ? "image" : "file", title: file.path, onOpen: () => onOpenFile(file) });
+    }
+    return rows;
+  }, [visible, items, files, onOpenFile]);
+  // The person opened a file (a chip, an Outputs row, a link in an answer): show the Result view, not the view the panel was on, and let a file or
+  // artifact opened earlier give way to this one. An open that only observes a new output never comes here.
+  const handledResultOpenRef = useRef(resultOpenRequest ?? 0);
+  useEffect(() => {
+    const request = resultOpenRequest ?? 0;
+    if (request === handledResultOpenRef.current) return;
+    handledResultOpenRef.current = request;
+    setActiveChatFileTabId(null);
+    setOpenedArtifact(null);
+    reopenRailTab("result");
+    setRailView("result");
+  }, [resultOpenRequest, reopenRailTab]);
   // Owner 2026-10-13 (Yotube vs Thread Marketing): an open panel with no view drew a blank 300px column beside the
   // chat. With nothing to show it takes no space; it reappears as soon as a view, file or worker opens.
   const empty = openTabs.length === 0 && chatFileTabs.length === 0 && !workerSelection && !result;
@@ -1879,7 +1918,7 @@ function TaskSidePanelContent({
           subagents={overviewSubagents}
           commands={overviewCommands}
           onOpenTerminal={() => openRailTab("terminal")}
-          outputs={distinctOutputFiles(visible ? items : []).map((item) => ({ id: item.id, name: item.label, kind: item.kind, onOpen: () => openArtifact(item) }))}
+          outputs={overviewOutputs}
           earlier={earlierOutputs ? <EarlierOutputsSection view={earlierOutputs} locale={locale} /> : undefined}
         >
           <ContinuityStatus chatId={screenChatId} locale={locale} detail />

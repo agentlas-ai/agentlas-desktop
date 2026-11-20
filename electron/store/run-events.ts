@@ -3237,7 +3237,9 @@ function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | nul
     : Boolean(invocationReceiptStatement("SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'origin_user_message' LIMIT 1").get(runId));
   // A deliberate direction change is already neutral; every other failed or interrupted run may have been taken over.
   let supersededByRunId: string | undefined;
-  if ((status === "failed" || status === "interrupted") && interruptionCause !== "steering") {
+  // a COMPLETED run that kept a failed step (a failure_events row: the blocked write) can also have been continued by a later run of the same
+  // request (the full-access continuation). The renderer reads this only to stop calling that step the run's state once the later run completed too.
+  if (((status === "failed" || status === "interrupted") && interruptionCause !== "steering") || (status === "completed" && failure)) {
     try { supersededByRunId = invocationSupersedingRunId(runId, receiptChatId, start.ts, startPayload); }
     catch { supersededByRunId = undefined; } // stores without chat_messages keep the plain reading
   }

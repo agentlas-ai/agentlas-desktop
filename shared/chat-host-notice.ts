@@ -4,7 +4,7 @@ import { normalizeOneDispatchPresentation } from "./one-dispatch-presentation";
 const HOST_STATUS_KINDS: readonly HostStatusKind[] = [
   "effect-checking", "effect-continuing", "wait-registered", "wait-not-scheduled", "cycle-verified", "goal-resuming",
   "effect-retrying", "goal-paused", "goal-closed", "runtime-kept", "needs-owner", "app-failed", "recovered",
-  "owner-received",
+  "owner-received", "startup-resumed",
 ];
 /** Host status lines that need nothing from the owner: housekeeping, drawn on no surface (isHousekeepingHostNotice). */
 const QUIET_HOST_STATUSES: ReadonlySet<HostStatusKind> = new Set([
@@ -57,6 +57,7 @@ export function hostStatusLabel(notice: Extract<ChatHostNotice, { purpose: "host
     case "app-failed": return ko ? "앱 문제" : "App problem";
     case "recovered": return ko ? "다음 실행이 계속함" : "Taken over by the next run";
     case "owner-received": return ko ? "받음" : "Received";
+    case "startup-resumed": return ko ? "앱이 다시 켜짐" : "App restarted";
     default: return "";
   }
 }

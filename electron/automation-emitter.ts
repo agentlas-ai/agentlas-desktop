@@ -5,7 +5,8 @@
 // v33: 모델이 (a) 구조화 스케줄({preset,time,tz} 또는 {cron,tz})과 (b) 선택적 ordered steps[]를
 // 방출할 수 있다. steps가 있으면 stepsToGraph로 WorkflowGraph를 합성하고, 없으면 graph=null(오늘의
 // 단일 프롬프트). 모델 생성 cron은 schedule.ts로 검증하고 파싱 실패는 표면화한다(조용히 드롭 X).
-import { validateCron, compilePreset, specFromStored, type SchedulePreset } from "./store/schedule";
+import { validateCron, compilePreset, specFromStored, readCronFilters, cronHasFilters, describeSchedule, EVERY_WEEKS_MAX, SKIP_DATES_MAX, type SchedulePreset } from "./store/schedule";
+import { currentUiLocale } from "./ui-locale";
 import type { ScheduleSpec, WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeType, PollSource, TriggerCondition } from "../shared/types";
 
 export const AUTOMATION_HEADING = "## Automation";
@@ -20,6 +21,12 @@ export interface EmittedSchedule {
   once?: string;
   dow?: number | string;
   day?: number;
+  /** Only every Nth week of a repeating schedule, counted from the week of `from` (YYYY-MM-DD, the first run's date). */
+  everyWeeks?: { every: number; from: string };
+  /** Local dates (YYYY-MM-DD) of `tz` on which a repeating schedule does not run. */
+  skipDates?: string[];
+  /** The last local date (YYYY-MM-DD) of `tz` a repeating schedule runs on; after it the job ends. */
+  until?: string;
 }
 
 /** 모델이 방출하는 ordered step. 앱이 좌→우 레이아웃 + 변수 배선을 소유한다. */
@@ -125,7 +132,7 @@ export interface ParseAutomationsResult {
 /** Native One needs stable tool guidance, not the entire text-emission grammar.
  * The detailed fallback can be fetched on demand for typed monitor sources. */
 export const ONE_GRAPH_PROTOCOL =
-  "Save a graph only for recurring work in which AIs act on what its steps return, or that runs on a schedule. A one-off job is done directly; a recurring graph takes the date or item as an input, never in its name. Fixed code or tool steps on an input (checks, conversions, operating an app or page) are a tool, not a graph: use a tc_ tool when one fits, otherwise toolchain_search, and toolchain_create when it keeps coming back. A queued or pending request is not a completed result.";
+  "Save a graph only for recurring work in which AIs act on what its steps return, or that runs on a schedule. A one-off job is done directly, but a reminder for later (any delay) is registered with a one-time schedule, never waited for in the reply; a recurring graph takes the date or item as an input, never in its name. Fixed code or tool steps on an input (checks, conversions, operating an app or page) are a tool, not a graph: use a tc_ tool when one fits, otherwise toolchain_search, and toolchain_create when it keeps coming back. A queued or pending request is not a completed result.";
 
 /** A Work task that may use saved Toolchains but owns no graphs (electron/toolchains/consumer.ts). */
 export const TOOLCHAIN_CONSUMER_PROTOCOL =
@@ -141,11 +148,17 @@ export function automationProtocolFor(oneTeamAttached: boolean, toolchainConsume
   return oneTeamAttached ? `${TOOLCHAIN_CONSUMER_PROTOCOL}\n${AUTOMATION_PROTOCOL_POINTER}` : AUTOMATION_PROTOCOL_POINTER;
 }
 
+/** A read-permission turn cannot register a schedule (creating one grants unattended later work, which read does not allow: client.ts
+ * `automation.permission-required`). Without this line the turn had no automation text at all, so a "remind me in 3 minutes" became a
+ * wait inside the reply that dies with the app. It says what is true instead of promising a notification. */
+export const AUTOMATION_READ_ONLY_NOTE =
+  "read-only conversation: no reminder or schedule can be created here. If asked for one, say plainly that this conversation is read-only so none is set and write permission is needed; never promise to notify, and never wait inside the reply.";
+
 /** The only automation text a turn carries without One's graph tools: the full AUTOMATION_PROTOCOL is read on demand
  * through the agentlas-ui `read_automation_protocol` tool (ui-schema/mcp-server.ts). The line says when it applies: a smaller
  * model that is told only to "call" the reader follows the line on every turn, including ones that have nothing to do with automation. */
 export const AUTOMATION_PROTOCOL_POINTER =
-  "automation (only when the user asks to schedule, watch or repeat work): call read_automation_protocol, then emit its ## Automation block";
+  "automation (only when the user asks to schedule, watch, repeat work or be reminded later, at any delay): call read_automation_protocol, then emit its ## Automation block";
 
 // Fallback for runtimes without the native host authoring tool.
 export const AUTOMATION_PROTOCOL = [
@@ -154,6 +167,7 @@ export const AUTOMATION_PROTOCOL = [
   "If the user asks to watch, monitor, check back, notify on completion, or do RECURRING/SCHEDULED work,",
   "register a durable automation now; a promise to remember or a long sleep does not register it.",
   "Monitoring runs only while the app is running (앱 실행 중 확인); never claim app-closed execution.",
+  "A reminder for later, even minutes away, is a one-time registration, never a wait inside this reply: the reply ends when the app closes or restarts and nothing would be sent. If you cannot register it, say plainly that no reminder is set.",
   'For monitoring include "monitor":{"notificationPolicy":"meaningful_changes","deadline":"optional ISO timestamp","source":{"kind":"invocation","runId":"actual observed run ID","chatId":"actual owner chat ID"},"condition":{"left":"{{value}}","op":"eq","right":"completed"},"minIntervalMs":60000,"maxIntervalMs":900000}. Omit deadline if none.',
   'Typed sources also support {"kind":"artifact","artifactId":"actual ID","chatId":"actual owner chat ID"}, stock(symbol,metric), github(repo,resource), slack(channel), notion(databaseId). Use only observed IDs; never invent them. Default condition is changed; its first sample establishes a quiet baseline.',
   "Typed source polling uses no model while unchanged. If no supported scalar source exists, omit source and supply an explicit schedule: that mode re-runs the prompt and only exact duplicate results are suppressed; do not promise zero-model checks.",
@@ -184,6 +198,7 @@ export const AUTOMATION_PROTOCOL = [
   "",
   'For irregular cadence use raw cron instead: "schedule": { "cron": "*/30 9-18 * * 1-5", "tz": "Asia/Seoul" }.',
   'For a ONE-TIME reminder ("tomorrow 9am") use "schedule": { "once": "2026-11-19T09:00", "tz": "Asia/Seoul" } (local time, runs once). A cron with a fixed month and day repeats every year.',
+  'Every other (every Nth) week: add "everyWeeks": { "every": 2, "from": "<date of the first run, YYYY-MM-DD>" }. Dates that must not run: "skipDates": ["2026-12-25"]. A repeating job that ends on a date ("every day until Dec 31"): "until": "2026-12-31" (the last day it runs; it stops by itself after it). The last Friday of a month: "cron": "0 17 * * 5#L". State only what the saved registration says (its schedule words and next run); a rule these cannot hold (a holiday calendar by name) is not stored: tell the person so and do not save a plainer job.',
   "",
   // ★반복 × 고정 페이로드는 시한폭탄이다. 실측 2026-08-19: 매시 정각 X 댓글
   // 자동화가 "exactly this text, unchanged"로 지어졌고, 첫 성공이 X의 중복
@@ -257,6 +272,8 @@ export function zonedLocalToIso(local: string, tz: string): string | null {
   return Number.isFinite(at) ? new Date(at).toISOString() : null;
 }
 
+const EMITTED_SCHEDULE_KEYS = new Set(["preset", "time", "tz", "cron", "once", "dow", "day", "everyWeeks", "skipDates", "until"]);
+
 /** 구조화 스케줄 → ScheduleSpec + 레거시 미러 토큰. cron 검증 실패는 errors로 표면화. */
 function resolveSchedule(
   emitted: unknown,
@@ -279,6 +296,27 @@ function resolveSchedule(
 
   const o = emitted as EmittedSchedule;
   const tz = typeof o.tz === "string" && o.tz.trim() ? o.tz.trim() : DEFAULT_TZ_PLACEHOLDER;
+  // A key the scheduler has no meaning for would be promised in the answer and not done ("격주" saved as every week): refused with the supported names.
+  const unknownKeys = Object.keys(o).filter((key) => !EMITTED_SCHEDULE_KEYS.has(key));
+  if (unknownKeys.length) {
+    errors.push(`Schedule rejected: ${unknownKeys.map((k) => `"${k}"`).join(", ")} is not something the scheduler does. Supported: preset/time/dow/day or cron, tz, once, everyWeeks {"every": 2-${EVERY_WEEKS_MAX}, "from": "YYYY-MM-DD"} skipDates ["YYYY-MM-DD", ...] (at most ${SKIP_DATES_MAX}) and until "YYYY-MM-DD" (the last day it runs). A rule beyond these cannot be stored: tell the person, do not save a plainer job.`);
+    return fallback;
+  }
+  const filters = readCronFilters(o as unknown as Record<string, unknown>);
+  if (filters === null) {
+    errors.push(`Schedule rejected: everyWeeks must be {"every": integer 2-${EVERY_WEEKS_MAX}, "from": "YYYY-MM-DD"} and skipDates a list of at most ${SKIP_DATES_MAX} real "YYYY-MM-DD" dates and until a real "YYYY-MM-DD" (the last day it runs)`);
+    return fallback;
+  }
+  if (cronHasFilters(filters) && typeof o.once === "string" && o.once.trim()) {
+    errors.push("Schedule rejected: everyWeeks, skipDates and until belong to a repeating schedule, not a one-time one");
+    return fallback;
+  }
+  // A filtered schedule is stored with its own words: the legacy token ("weekly-tue-19:00") would show the label without the filter.
+  const withFilters = (spec: ScheduleSpec, token: string): { spec: ScheduleSpec | null; token: string; tz: string } => {
+    if (!cronHasFilters(filters) || spec.kind !== "cron") return { spec, token, tz };
+    const filtered: ScheduleSpec = { ...spec, ...filters };
+    return { spec: filtered, token: describeSchedule(filtered, currentUiLocale() === "ko" ? "ko" : "en"), tz };
+  };
 
   if (typeof o.once === "string" && o.once.trim()) {
     const at = tz ? zonedLocalToIso(o.once, tz) : null;
@@ -300,7 +338,7 @@ function resolveSchedule(
       return fallback;
     }
     // 레거시 스케줄러 미러 토큰은 cron이면 표현이 없으므로 hourly 근사 대신 schedule_json에 의존.
-    return { spec: { kind: "cron", expr: cron, tz: tz || "UTC" }, token: `cron:${cron}`, tz };
+    return withFilters({ kind: "cron", expr: cron, tz: tz || "UTC" }, `cron:${cron}`);
   }
 
   if (o.time !== undefined && (typeof o.time !== "string" || !/^(?:[01]?\d|2[0-3]):[0-5]\d$/.test(o.time))) {
@@ -316,7 +354,7 @@ function resolveSchedule(
   }
   // 레거시 미러 토큰(기존 스케줄러가 schedule_json 없을 때 폴백으로 읽을 수 있게).
   const token = presetToLegacyToken(preset, time, o);
-  return { spec, token, tz };
+  return withFilters(spec, token);
 }
 
 const DOW_TOKEN = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];

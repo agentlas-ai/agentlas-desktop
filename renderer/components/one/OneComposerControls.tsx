@@ -1,5 +1,6 @@
 "use client";
 
+import { AGENT_PICK_ATTRS } from "../../lib/composer-agent-pick";
 import { useEffect, useId, useLayoutEffect, useMemo, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -23,6 +24,7 @@ import { ContextBreakdown } from "@/components/ContextBreakdown";
 import type { ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import { sameRuntimeIdentity, selectionText } from "@shared/runtime-selection";
 import type { RuntimeStatus } from "@shared/types";
+import { platformOfNavigator, unconfinedWriteWarning } from "@shared/runtime-confinement";
 import { tFor } from "@/lib/i18n";
 import styles from "./OneShell.module.css";
 
@@ -95,7 +97,14 @@ type Props = {
   onOpenPlugins: () => void;
   /** 플러그인 행 자체가 켜기/끄기 스위치다. 설정이 덜 된 항목은 관리 화면으로 보낸다. */
   onTogglePlugin: (id: string) => void;
-  onToggleAgent: (id: string) => void;
+  onToggleAgent: (id: string, name: string) => void;
+  /**
+   * The "@" being typed in the composer opened this list (not the "+" menu's Agents entry): the list filters by what follows the `@` in the words, has no search box
+   * and never takes the keyboard focus - typing stays in the composer. Absent = the "+" menu's list with its own search box.
+   */
+  mentionQuery?: string | null;
+  /** The row Enter would pick (arrow keys move it), by agent id. Only read with `mentionQuery`. */
+  activeAgentId?: string | null;
   onSelectModel: (runtime: RuntimeStatus, id: string) => void;
   selectionIntentId?: string;
   onSelectEffort: (id: string, runtime: RuntimeStatus | null, intentId?: string) => void;
@@ -131,6 +140,8 @@ export function OneComposerControls({
   onOpenPlugins,
   onTogglePlugin,
   onToggleAgent,
+  mentionQuery = null,
+  activeAgentId = null,
   onSelectModel,
   onSelectEffort,
   selectionIntentId,
@@ -208,7 +219,8 @@ export function OneComposerControls({
     );
     option?.focus({ preventScroll: true });
   }, [activeMenu, portalHost, permission]);
-  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const mentionMode = activeMenu === "agents" && mentionQuery !== null;
+  const normalizedQuery = (mentionMode ? mentionQuery : query).trim().toLocaleLowerCase();
   // 모델을 고르지 않았으면(빈 선택) 실제로 돌 모델 행이 체크된다 — "기본값" 행은 없다.
   const effectiveModelId = useMemo(
     () => runtime
@@ -227,8 +239,8 @@ export function OneComposerControls({
     });
   }, [models, normalizedQuery]);
   const filteredAgents = useMemo(
-    () => agents.filter((item) => !normalizedQuery || `${item.name} ${item.tagline}`.toLocaleLowerCase().includes(normalizedQuery)),
-    [agents, normalizedQuery],
+    () => agents.filter((item) => !normalizedQuery || (mentionMode ? item.name : `${item.name} ${item.tagline}`).toLocaleLowerCase().includes(normalizedQuery)),
+    [agents, normalizedQuery, mentionMode],
   );
   const efforts = (runtime?.efforts ?? []).filter((item) => (
     !normalizedQuery || `${item.label} ${item.id}`.toLocaleLowerCase().includes(normalizedQuery)
@@ -251,7 +263,7 @@ export function OneComposerControls({
         ...(anchor ? { top: popoverPosition.top, bottom: popoverPosition.top === undefined ? undefined : "auto",
           maxHeight: popoverPosition.maxHeight, display: "flex", flexDirection: "column" } : {}),
       } as CSSProperties}
-      aria-label={locale === "ko" ? "One 입력 설정" : "One composer settings"}
+      aria-label={locale === "ko" ? "입력 설정" : "Composer settings"}
     >
       {activeMenu === "context" ? (
         <div data-one-context-breakdown="true" style={{ padding: "14px 16px", minWidth: 240 }}>
@@ -341,23 +353,28 @@ export function OneComposerControls({
           <header className={styles.composerPopoverHeader}>
             <strong id="one-composer-popover-title">{activeMenu === "agents" ? (locale === "ko" ? "에이전트" : "Agents") : activeMenu === "model" ? (locale === "ko" ? "모델" : "Models") : activeMenu === "effort" ? (locale === "ko" ? "추론 강도" : "Reasoning effort") : (locale === "ko" ? "실행 모드" : "Execution mode")}</strong>
           </header>
-          {activeMenu !== "permission" && <label className={styles.composerPopoverSearch}>
+          {activeMenu !== "permission" && !mentionMode && <label className={styles.composerPopoverSearch}>
               <IconSearch size={15} />
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={locale === "ko" ? "검색..." : "Search..."} autoFocus />
             </label>}
           <div className={styles.composerPopoverDivider} />
           <div className={styles.composerPopoverScroll} data-one-composer-scroll={activeMenu}
+            {...(activeMenu === "agents" ? AGENT_PICK_ATTRS : {})}
             style={anchor ? { minHeight: 0, maxHeight: "none", flex: "1 1 auto" } : undefined}>
             {activeMenu === "agents" && filteredAgents.map((item) => (
-              <ComposerRow key={item.id} icon={<IconAtSign size={15} />} title={item.name} subtitle={item.tagline} compactDetails checked={item.selected} onClick={() => onToggleAgent(item.id)} />
+              <ComposerRow key={item.id} icon={<IconAtSign size={15} />} title={item.name} subtitle={item.tagline} compactDetails checked={mentionMode ? undefined : item.selected}
+                active={mentionMode && item.id === activeAgentId} onClick={() => onToggleAgent(item.id, item.name)} />
             ))}
+            {mentionMode && filteredAgents.length === 0 && (
+              <p style={{ margin: 0, padding: "8px 12px", opacity: 0.7, fontSize: 12 }}>{locale === "ko" ? "맞는 에이전트가 없어요." : "No matching agent."}</p>
+            )}
             {activeMenu === "model" && (
               <>
                 {filteredModels.map((item) => (
                   <ComposerRow key={oneComposerModelOptionKey(item.runtime, item.id)} icon={item.logo
                     ? /* eslint-disable-next-line @next/next/no-img-element */
                       <img src={item.logo} alt="" className={styles.modelLogo} />
-                    : <IconSparkles size={15} />} title={item.label} subtitle={item.tag} checked={sameRuntimeIdentity(runtime, item.runtime) && effectiveModelId === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
+                    : <IconSparkles size={15} />} title={item.label} subtitle={[item.tag, unconfinedWriteWarning(item.runtime, permission === "write" ? "write" : undefined, platformOfNavigator(typeof navigator === "undefined" ? "" : navigator.platform), locale === "ko" ? "ko" : "en")].filter(Boolean).join(" · ") || undefined} checked={sameRuntimeIdentity(runtime, item.runtime) && effectiveModelId === item.id} onClick={() => onSelectModel(item.runtime, item.id)} />
                 ))}
               </>
             )}
@@ -412,7 +429,7 @@ export function OneComposerControls({
   return portalHost ? createPortal(popover, portalHost) : null;
 }
 
-function ComposerRow({ icon, title, subtitle, checked, toggle, trailing, status, compactDetails, dataPermission, disabled, onClick }: { icon: React.ReactNode; title: string; subtitle?: string; checked?: boolean; toggle?: boolean; trailing?: React.ReactNode; status?: string; compactDetails?: boolean; dataPermission?: OnePermissionMode; disabled?: boolean; onClick: () => void }) {
+function ComposerRow({ icon, title, subtitle, checked, active, toggle, trailing, status, compactDetails, dataPermission, disabled, onClick }: { icon: React.ReactNode; title: string; subtitle?: string; checked?: boolean; active?: boolean; toggle?: boolean; trailing?: React.ReactNode; status?: string; compactDetails?: boolean; dataPermission?: OnePermissionMode; disabled?: boolean; onClick: () => void }) {
   const descriptionId = useId();
   return (
     <button
@@ -420,6 +437,8 @@ function ComposerRow({ icon, title, subtitle, checked, toggle, trailing, status,
       disabled={disabled}
       className={styles.composerPopoverRow}
       data-selected={checked ? "true" : undefined}
+      data-active={active ? "true" : undefined}
+      onMouseDown={active !== undefined ? (event) => event.preventDefault() : undefined}
       data-one-permission-option={dataPermission}
       aria-pressed={toggle ? checked : undefined}
       aria-describedby={subtitle ? descriptionId : undefined}

@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { failureClosesOnlyTheModel } from "../../shared/runtime-failure-scope";
 import { getDb } from "../store/db";
 import { createRuntimeRetryStore, type RetryGoal, type RetryResource } from "../store/runtime-retry";
+import { runtimeAccountFingerprint } from "./runtime-account";
+import { currentRunPriority } from "./run-priority";
 import type { Runner, RunnerRequest, RunnerResult } from "./runner";
 import { runnerRefusedBeforeDispatch, runnerResultRefusedBeforeDispatch } from "./runner-pre-dispatch";
 import { parseRetryHint } from "./runtime-cooldown";
@@ -33,7 +36,18 @@ export function durableRetryResource(selection: Selection, req?: RunnerRequest):
   let model = req?.model ?? selection.model ?? null;
   if (selection.kind === "ollama" && model && !/[@?#\s]/.test(model) && !model.includes("://")
     && !model.endsWith(":") && !model.endsWith("/") && model.lastIndexOf(":") <= model.lastIndexOf("/")) model += ":latest";
-  return { owner, kind: selection.kind, backend: selection.backend, source: selection.source, model, acpAgentId: selection.acpAgentId, configuration };
+  // The account the runtime is signed in to right now (claude-code, codex, kimi): a limit belongs to it, not to the runtime name.
+  const account = runtimeAccountFingerprint(selection.kind) ?? null;
+  return { owner, kind: selection.kind, backend: selection.backend, source: selection.source, model, acpAgentId: selection.acpAgentId, configuration, account };
+}
+
+/**
+ * May this call be the one probe a refused window allows? Only the owner's own message (run-priority.ts "owner"; a request may carry
+ * its own priority). A goal continuation, automation, graph, teammate or background step never probes: they wait for the stated time
+ * or for a signal, as before. The probe itself is metered by store.claimProbe (RUNTIME_RETRY_PROBE_GAP_MS).
+ */
+function ownerMayProbe(req: RunnerRequest): boolean {
+  return (req.runPriority ?? currentRunPriority()) === "owner";
 }
 
 /**
@@ -79,7 +93,15 @@ function invocationId(req: RunnerRequest): string | null {
 
 /** Candidate filtering is advisory; the runner boundary below always rechecks durably. */
 export function durableRuntimeWindow(selection: Selection, now = Date.now()) {
+  dropLegacyQuotaWindows();
   return store.window(durableRetryResource(selection), now);
+}
+
+let legacyQuotaWindowsDropped = false;
+/** Once per process: the store itself remembers it ran (runtime-retry.ts dropQuotaWindowsOnce). A store not open yet tries again on the next read. */
+function dropLegacyQuotaWindows(): void {
+  if (legacyQuotaWindowsDropped) return;
+  try { store.dropQuotaWindowsOnce(); legacyQuotaWindowsDropped = true; } catch { /* the store is not ready; the next read tries again */ }
 }
 
 /** Count survives a new invocation/restart, but success or a genuinely different resource has its own episode. */
@@ -113,13 +135,19 @@ export function withDurableRuntimeRetry(runner: Runner, selected: Selection,
       kind: "unavailable", runtime: selection.kind, source: "marker", providerCode: "runtime_retry_budget_exhausted",
       retryBudgetExhausted: true, message: "" } };
     }
+    dropLegacyQuotaWindows();
     const resourceWait = store.window(target);
     const goalWait = bound ? store.goalFloor(bound) : null;
     // Unrepresentable calendar floors are an external refusal, never an early call.
-    const wait = resourceWait ?? (goalWait && goalWait.until > Date.UTC(9999, 11, 31, 23, 59, 59, 999) ? goalWait : null);
+    const calendarFloor = goalWait && goalWait.until > Date.UTC(9999, 11, 31, 23, 59, 59, 999) ? goalWait : null;
+    // A stored wait is the provider's word at a past moment, not a lock: the owner's own send may test it with one real call every
+    // RUNTIME_RETRY_PROBE_GAP_MS (an upgraded plan, an early reset, a limit read wrong). Account changes never get here: the window is
+    // keyed by the account, so another account has no window at all.
+    const probing = !!resourceWait && !calendarFloor && ownerMayProbe(req) && store.claimProbe(target);
+    const wait = probing ? null : resourceWait ?? calendarFloor;
     if (wait) {
-      if (runId) store.recordRunWait(runId, wait);
-      if (bound) store.holdGoal(bound, wait.until, wait.kind, "provider-wait");
+      if (runId) store.recordRunWait(runId, wait, target);
+      if (bound) store.holdGoal(bound, wait.until, wait.kind, "provider-wait", target);
       return { text: "", turnDelivery: "not-dispatched", failure: {
       kind: wait.kind, runtime: selection.kind, source: "marker", providerCode: "runtime_retry_not_before",
       retryAfterHint: new Date(wait.until).toISOString(),
@@ -170,7 +198,7 @@ export function withDurableRuntimeRetry(runner: Runner, selected: Selection,
         const kind = status === 429 ? "rate_limit" : "unavailable";
         observedGeneration = store.failure(target, { kind, notBefore, callId, ...(bound ? { goal: bound,
           budget: { maxFailures: MAX_TRANSIENT_RETRIES + 1 } } : {}) }) ?? observedGeneration;
-        if (runId) store.recordRunWait(runId, { until: notBefore, kind });
+        if (runId) store.recordRunWait(runId, { until: notBefore, kind }, target);
       }, () => runner(req, events));
     } catch (error) {
       // A thrown refusal the runner typed as pre-dispatch (turnDelivery "not-dispatched") reached no provider. Any other
@@ -185,15 +213,23 @@ export function withDurableRuntimeRetry(runner: Runner, selected: Selection,
         && ["quota", "rate_limit", "unavailable", "timeout", "empty", "exit"].includes(result.failure.kind)) {
         const notBefore = parseRetryHint(result.failure.retryAfterHint, Date.now());
         const spentAttempt = result.turnDelivery !== "not-dispatched" || /^http_(429|5\d\d)$/.test(result.failure.providerCode ?? "");
-        store.failure(target, { kind: result.failure.kind, notBefore, callId, ...(bound && spentAttempt ? { goal: bound,
+        store.failure(target, { kind: result.failure.kind, notBefore, callId, ...(failureClosesOnlyTheModel(result.failure) ? { modelOnly: true } : {}),
+          ...(probing ? { probe: true } : {}),
+          ...(bound && spentAttempt ? { goal: bound,
           budget: { maxFailures: MAX_TRANSIENT_RETRIES + 1 } } : {}) });
-        if (runId && notBefore !== null) store.recordRunWait(runId, { until: notBefore, kind: result.failure.kind });
+        if (runId && notBefore !== null) store.recordRunWait(runId, { until: notBefore, kind: result.failure.kind }, target);
       }
       // The runner proved (turnDelivery "not-dispatched") that nothing reached the provider: the reservation is returned,
       // for every failure kind. An HTTP 429/5xx answer or a header the transport observed means the provider was reached.
       if (runnerResultRefusedBeforeDispatch(result) && observedGeneration === undefined
         && !/^http_(429|5\d\d)$/.test(result.failure.providerCode ?? "")) refundReservation();
-    } else if (bound && !req.signal?.aborted) store.success(target, bound, observedGeneration ?? generation);
+    } else {
+      // The provider answered the probe: the window it was refusing with is no longer true, for this account and every Goal tied to it.
+      if (probing && !req.signal?.aborted) {
+        try { store.clearWindow(target); if (runId) store.clearRunWait(runId); } catch { /* the window ends by its own time */ }
+      }
+      if (bound && !req.signal?.aborted) store.success(target, bound, observedGeneration ?? generation);
+    }
     req.signal?.throwIfAborted();
     if (result.failure && bound && store.budgetExhausted(target,bound)) {
       if (runId) store.closeRunBudget(runId);

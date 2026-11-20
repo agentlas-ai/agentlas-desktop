@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc, grantForDroppedFile } from "@/lib/ipc";
+import { emptyProjectName } from "@/lib/empty-project-name";
 import { useT } from "@/lib/i18n";
 import { listFailureText } from "@/lib/workspace-list-copy";
 import { readViewData, writeViewData } from "@/lib/view-data-cache";
@@ -23,7 +24,7 @@ import styles from "./NewChatStart.module.css";
 /*
  * New chat (Agentlas 2.0 F-D6, confirmed pictures workspace-v5-start-*): a pane with a centered composer and two drop-downs under it. Nothing exists
  * until the first message is sent - then the chat is made, opened in this pane, and shows in the left list with its first line.
- *   - project: the project of the conversation the person is looking at (the caller says which; none = "Empty project"). Never "the last one used".
+ *   - project: the project of the conversation the person is looking at (the caller says which; none = "No project"). Never "the last one used".
  *   - the second drop-down is always "Work session" when it opens; picking agents there starts an Agent Chat with them instead (one = 1:1, more = a group).
  *   - the first message of a Work session is handed to the new chat's surface, which sends it like any typed message; an Agent Chat room opens with the
  *     words in its composer (the room's composer belongs to the personal agent's screen, which this change does not touch).
@@ -33,7 +34,7 @@ import styles from "./NewChatStart.module.css";
 const folderName = (grant: FsPathGrant): string => grant.path.split(/[\\/]/).filter(Boolean).pop() || grant.path;
 
 export function NewChatStart({ projectId: wanted, onStarted }: {
-  /** The project to start in: an id, or null = Empty project. */
+  /** The project to start in: an id, or null = no project (a Work session with no project; nothing is created). */
   projectId: string | null;
   onStarted: (chatId: string, kind: "room" | "work") => void;
 }) {
@@ -42,6 +43,8 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
   const copy = startCopy(locale);
   const [projects, setProjects] = useState<Project[] | "failed">(() => readViewData<Project[]>("dashboard.projects")?.value ?? []);
   const [projectId, setProjectId] = useState<string | null>(wanted);
+  // An "Empty project" (a project with a folder the app makes) is made only when the person picks it here; starting with no project never makes one.
+  const [makeEmpty, setMakeEmpty] = useState(false);
   const [agents, setAgents] = useState<InstalledAgent[] | "loading" | "failed">("loading");
   const [selected, setSelected] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -50,6 +53,7 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
   const [env, setEnv] = useState<{ grant: FsPathGrant | null; busy: boolean; error: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fileNote, setFileNote] = useState(false);
   const [runtime, setRuntime] = useState<{ model: string; effort: string | null } | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -72,8 +76,9 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
     if (!api?.team?.list) setAgents("failed");
     else api.team.list().then((list) => { if (!cancelled) setAgents(pickableAgents(list)); }).catch(() => { if (!cancelled) setAgents("failed"); });
     if (api?.runtime?.detect) {
-      void api.runtime.detect().then(async (list) => {
-        const active = chipRuntimeFor(list, null);
+      // The words say what the run takes: the orchestrator pool's pick (Main's own resolution), not the legacy "active" row.
+      void Promise.all([api.runtime.detect(), api.runtime.listRoleMembers?.().then((state) => state?.picks?.orchestrator?.selection ?? null).catch(() => null) ?? Promise.resolve(null)]).then(async ([list, pick]) => {
+        const active = chipRuntimeFor(list, pick);
         if (!active || cancelled) return;
         const models = await api.runtime.listModels?.({ kind: active.kind }).catch(() => []) ?? [];
         if (cancelled) return;
@@ -87,14 +92,15 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
     return () => { cancelled = true; window.removeEventListener("agentlas:projects-changed", load); };
   }, [locale]);
 
-  // A drop-down closes on Escape and on a press outside it (events, not a clock).
+  // A drop-down closes on Escape, on a press outside it and when the keyboard focus moves outside it (events, not a clock).
   useEffect(() => {
     if (!menu) return undefined;
     const away = (event: Event) => { if (!(event.target as Element | null)?.closest?.("[data-start-menu-area]")) setMenu(null); };
     const key = (event: KeyboardEvent) => { if (event.key === "Escape") setMenu(null); };
     document.addEventListener("pointerdown", away);
+    document.addEventListener("focusin", away, true);
     document.addEventListener("keydown", key);
-    return () => { document.removeEventListener("pointerdown", away); document.removeEventListener("keydown", key); };
+    return () => { document.removeEventListener("pointerdown", away); document.removeEventListener("focusin", away, true); document.removeEventListener("keydown", key); };
   }, [menu]);
 
   const list = Array.isArray(agents) ? agents : [];
@@ -104,7 +110,7 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
   const shown = needle ? list.filter((agent) => `${agent.localDisplayName ?? ""} ${agent.name} ${agent.nameEn}`.toLocaleLowerCase().includes(needle)) : list;
   const projectList = Array.isArray(projects) ? projects : [];
   const currentProject = projectId ? projectList.find((project) => project.id === projectId) : null;
-  const projectName = currentProject?.name ?? (projectId ? "…" : copy.emptyProject);
+  const projectName = currentProject?.name ?? (projectId ? "…" : makeEmpty ? copy.emptyProject : copy.noProject);
   const sessionName = selected.length === 0 ? copy.workSession : selected.length === 1 ? nameOf(list.find((agent) => agent.id === selected[0]) ?? ({ name: "?", nameEn: "?" } as InstalledAgent)) : copy.agentCount(selected.length);
 
   const start = useCallback(async () => {
@@ -116,9 +122,10 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
     let madeProject: string | null = null;
     try {
       let target = projectId;
-      if (target === null) {
-        // "Empty project": a project whose folder Main makes and manages - made now, with the first message, never before.
-        const made = await api.projects.create({ name: copy.emptyName, sourceType: "empty" });
+      if (target === null && makeEmpty) {
+        // "Empty project" (picked on purpose): a project whose folder Main makes and manages - made now, with the first message, never before.
+        // Named by what the first message says, so the sidebar's projects can be told apart (the fixed name is the fallback).
+        const made = await api.projects.create({ name: emptyProjectName(message, copy.emptyName), sourceType: "empty" });
         madeProject = made.id; target = made.id;
         window.dispatchEvent(new Event("agentlas:projects-changed"));
       }
@@ -141,7 +148,7 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
       setBusy(false);
       setError(copy.failed(listFailureText(cause, locale)));
     }
-  }, [text, busy, projectId, selected, onStarted, copy, locale]);
+  }, [text, busy, projectId, makeEmpty, selected, onStarted, copy, locale]);
 
   const addEnvironment = async () => {
     const api = ipc();
@@ -172,7 +179,14 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
             ) : null}
           </div>
           <textarea ref={inputRef} className={styles.input} value={text} rows={1} placeholder={copy.composer} aria-label={copy.title} disabled={busy} data-new-chat-input="true" autoFocus
-            onChange={(event) => setText(event.target.value)}
+            onChange={(event) => { setText(event.target.value); if (fileNote) setFileNote(false); }}
+            onPaste={(event) => {
+              // This box starts the chat and carries words only. A file copied from Explorer / Finder / a file manager used to vanish without a word
+              //; say where files go instead (they attach in the message box of the started chat). Plain text pastes as always.
+              const clipboard = event.clipboardData;
+              if (!clipboard) return;
+              if (clipboard.files.length > 0 || Array.from(clipboard.items).some((item) => item.kind === "file")) { event.preventDefault(); setFileNote(true); }
+            }}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void start(); }
@@ -191,14 +205,18 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
                   {projects === "failed" ? <p className={styles.note} role="alert">{copy.projectsFailed}</p> : null}
                   {projectList.map((project) => (
                     <button key={project.id} type="button" role="menuitemradio" aria-checked={project.id === projectId} className={styles.item} data-project-id={project.id}
-                      onClick={() => { pickedHere.current = true; setProjectId(project.id); setMenu(null); }}>
+                      onClick={() => { pickedHere.current = true; setMakeEmpty(false); setProjectId(project.id); setMenu(null); }}>
                       <IconFolder size={15} /><span className={styles.itemText}>{project.name}</span>{project.id === projectId ? <IconCheck size={14} /> : null}
                     </button>
                   ))}
                   {projectList.length ? <div className={styles.rule} role="separator" /> : null}
-                  <button type="button" role="menuitemradio" aria-checked={projectId === null} className={styles.item} data-start-empty="true"
-                    onClick={() => { pickedHere.current = true; setProjectId(null); setMenu(null); }}>
-                    <IconCode size={15} /><span className={styles.itemText}>{copy.emptyProject}</span>{projectId === null ? <IconCheck size={14} /> : null}
+                  <button type="button" role="menuitemradio" aria-checked={projectId === null && !makeEmpty} className={styles.item} data-start-no-project="true"
+                    onClick={() => { pickedHere.current = true; setMakeEmpty(false); setProjectId(null); setMenu(null); }}>
+                    <IconCode size={15} /><span className={styles.itemText}>{copy.noProject}</span>{projectId === null && !makeEmpty ? <IconCheck size={14} /> : null}
+                  </button>
+                  <button type="button" role="menuitemradio" aria-checked={projectId === null && makeEmpty} className={styles.item} data-start-empty="true"
+                    onClick={() => { pickedHere.current = true; setMakeEmpty(true); setProjectId(null); setMenu(null); }}>
+                    <IconFolder size={15} /><span className={styles.itemText}>{copy.emptyProject}</span>{projectId === null && makeEmpty ? <IconCheck size={14} /> : null}
                   </button>
                   <button type="button" role="menuitem" className={styles.item} data-start-add-environment="true" onClick={() => { setMenu(null); setEnv({ grant: null, busy: false, error: null }); }}>
                     <IconFolder size={15} /><span className={styles.itemText}>{copy.addEnvironment}</span>
@@ -249,6 +267,7 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
         </div>
         {busy ? <p className={styles.status} role="status">{copy.working}</p> : null}
         {error ? <p className={styles.error} role="alert" data-new-chat-error="true">{error}</p> : null}
+        {fileNote ? <p className={styles.note} role="status" data-new-chat-file-note="true">{copy.pasteFilesLater}</p> : null}
       </div>
       <OneBottomSheet open={env !== null} onClose={() => setEnv(null)} closeLabel={copy.close} size="compact" title={copy.envTitle} titleId="new-chat-env-title" ariaLabelledBy="new-chat-env-title"
         description={copy.envBody} dataAttributes={{ "data-new-chat-env": "true" }}

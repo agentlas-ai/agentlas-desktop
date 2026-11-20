@@ -81,7 +81,8 @@ function Card({ row, line, waiting, working, project, ko }: { row: HomeTreeRow; 
   else if (waiting && waiting.questions > 0) sub = <><QuestionGlyph /><span>{pick(ko, COPY.question)}</span></>;
   else if (working) sub = <><i className={s.statusDot} data-tone="ok" /><span>{joined(pick(ko, COPY.working))}</span></>;
   else if (finished) sub = <><IconCheck size={13} /><span>{joined(pick(ko, COPY.done))}</span></>;
-  else sub = <span>{project || kindLabel}</span>;
+  // A quiet recent chat (nothing running, nothing waiting for the owner, no unseen result - e.g. a paused goal) says so: under "Work in progress" a bare kind label read as running.
+  else sub = <span>{`${pick(ko, COPY.idle)} · ${project || kindLabel}`}</span>;
   const faces = line?.faces ?? [];
   const visual = row.kind === "work"
     ? <span className={s.tile}><TerminalGlyph /></span>
@@ -96,7 +97,7 @@ function Card({ row, line, waiting, working, project, ko }: { row: HomeTreeRow; 
   }, [finished, needs, row.id, waiting]);
   return (
     <button type="button" className={`${s.card} ${s.wip}`} data-wip-chat-id={row.id} data-waiting={needs ? "true" : "false"} onClick={() => void open()}
-      aria-label={`${title}. ${needs ? (waiting && waiting.approvals > 0 ? pick(ko, COPY.approvalNeeded) : pick(ko, COPY.question)) : working ? pick(ko, COPY.working) : finished ? pick(ko, COPY.done) : kindLabel}`}>
+      aria-label={`${title}. ${needs ? (waiting && waiting.approvals > 0 ? pick(ko, COPY.approvalNeeded) : pick(ko, COPY.question)) : working ? pick(ko, COPY.working) : finished ? pick(ko, COPY.done) : `${pick(ko, COPY.idle)}, ${kindLabel}`}`}>
       {needs && <i className={s.alertDot} data-testid="wip-alert-dot" aria-hidden="true" />}
       {visual}
       {/* A card is not a label button: its text block is a block box, like the other card-shaped buttons of the app. */}

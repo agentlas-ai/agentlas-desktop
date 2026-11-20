@@ -78,6 +78,7 @@ const READ_TTL_MS: Record<string, number> = {
   "automations.listStrategyProposals": 0,
   "automations.runDigest": 0,
   "automations.chatActivity": 0,
+  "automations.keptRequests": 0,
   "chats.getContinuitySnapshot": 0,
   "oneSupervisor.snapshot": 0,
   "oneSupervisor.budgets": 0,

@@ -48,7 +48,7 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^onePersonalData\./, "personal sources and Page changes require their current native grant", "write"],
   // The owner's consent boundary. One granting itself (or a worker) permission would be self-escalation.
   [/^(resolveToolApproval|grantChatAlwaysApproval|revokeChatAlwaysApproval|revokeCapabilityGrant)$/, "approvals and grants are the owner's decision", "consent"],
-  [/^pluralHandoffAct$/, "the buttons of a hand-off card (cancel, retry, the answer to a confirmation) are the owner's decision", "consent"],
+  [/^plural(HandoffAct|AllowOff)$/, "the buttons of a hand-off card (cancel, retry, the answer to a confirmation or to the Allow / Always allow / Deny chip) and the switch-off of an Always allow rule are the owner's decision", "consent"],
   [/^confirm\./, "the owner answers questions agents ask", "consent"],
   // The owner's standing permission to apply learning changes without reading the diff. An agent switching it on for itself would
   // be self-escalation (the review grant exists so no tool can approve a diff), so it is the owner's own switch only.
@@ -68,6 +68,8 @@ const DENIED: Array<[RegExp, string, AppControlEffect]> = [
   [/^reach\.setExplore$/, "turning on background exploration of the owner's desktop apps (it downloads a driver and sends anonymous capability descriptions) is the owner's own switch", "consent"],
   // The handler already refuses app.call (ipc.ts invoke:returnSteeringRecovery); the policy says so before the call.
   [/^invoke\.returnSteeringRecovery$/, "taking a held owner direction back into the composer is the owner's own act", "write"],
+  // the conversation's one Stop takes back the person's unsent messages (chat:stop refuses an app caller) and the owner-input list is those messages' words.
+  [/^chat\.(stop|ownerInputs|closeQuestion|reopenQuestion|pruneQuestions|importClosedQuestions)$/, "stopping a conversation and reading the person's own unsent messages are the owner's own act; the handler refuses an app call", "write"],
   [/^(surfaces\.(approve|revokeApproval)|automations\.decideNodeApproval|browser\.resolveApproval)$/, "approvals are the owner's decision", "consent"],
   [/^(computerHistory\.setConsent|browser\.(credentialConsent|revokeCredentialConsent))$/, "consent is the owner's own act", "consent"],
   [/^science\.(toolApprovals\.(resolve|setAlwaysApproved)|approvalPolicy\.set|questions\.answer|journals\.(confirmHumanAttestation|confirmIdentity))$/, "Science approvals, attestations and answers are the owner's own act", "consent"],

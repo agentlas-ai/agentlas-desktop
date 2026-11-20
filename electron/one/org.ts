@@ -22,7 +22,8 @@ import type {
 } from "../../shared/one-org";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
-import { listInstalledAgentsReadOnly } from "../mcp/registry";
+import { listInstalledAgentsReadOnly, setAgentLocalDisplayName } from "../mcp/registry";
+import { agentDisplayName } from "../../shared/agent-display-name";
 import { archivedAgentIds, isAgentArchived } from "../archive/auto-archive";
 import { materializeAgentFiles } from "../agents/files";
 import { classifyAgentFolder } from "../agents/home";
@@ -690,8 +691,10 @@ function toMember(row: Row, now: number, installedById: ReadonlyMap<string, Inst
     id: row.id,
     agentSlug: row.agent_slug,
     installedAgentId: row.installed_agent_id,
-    displayName: row.display_name || installed?.localDisplayName || installed?.name || row.agent_slug,
-    nameEn: installed?.nameEn || installed?.name || row.agent_slug,
+    // One reader for the name: the agent's own name, else the package name. The member's `display_name` is only the last-known
+    // label of a seat whose agent is gone; it is no longer read for an installed agent (it was a copy that could disagree).
+    displayName: installed ? agentDisplayName(installed, "ko") : row.display_name || row.agent_slug,
+    nameEn: installed ? agentDisplayName(installed, "en") : row.display_name || row.agent_slug,
     icon: row.icon || "one-puppy",
     source: currentSource(row.source, installed),
     sortOrder: row.sort_order,
@@ -979,6 +982,7 @@ export async function addOneOrgMember(input: AddOneOrgMemberInput): Promise<OneO
     id, agent.slug, agent.id, displayName, icon, sortOrder, sourceFor(agent),
     leaseExpiresAt, now, now, DEFAULT_STATUS_LINE, leaseExpiresAt ? "ok" : "unknown",
   );
+  if (displayName) writeMemberAgentName(agent.id, displayName);
   // 올린 사진은 파일로 착지시킨다. 좌석 행만 바꾸면 아이콘 주소가 가리키는 실물이 없다.
   if (chosen?.image) writeOneTeamAvatar({ agentId: agent.id, slug: agent.slug, ...chosen.image });
   // A newly seated identity starts with an honest empty status; an old cache
@@ -986,6 +990,22 @@ export async function addOneOrgMember(input: AddOneOrgMemberInput): Promise<OneO
   getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?").run(agent.id);
   emitOrgChanged();
   return getOneOrgState();
+}
+
+/**
+ * The owner's name for a team member is the agent's own name (installed_agents.local_display_name), written here and nowhere else, so
+ * the org screen, the tree, the room, the phone and the occupancy snapshot all read one value. A name equal to the package's own
+ * clears the agent's name. `one_org_members.display_name` keeps the same text only as the last-known label of a seat whose agent is
+ * gone. Skipped when the agent is not installed (nothing else can show it).
+ */
+function writeMemberAgentName(installedAgentId: string, name: string): void {
+  const installed = listInstalledAgentsReadOnly().find((agent) => agent.id === installedAgentId);
+  if (!installed) return;
+  const trimmed = name.normalize("NFC").trim();
+  const sameAsPackage = trimmed === (installed.name ?? "").trim() || trimmed === (installed.nameEn ?? "").trim();
+  const wanted = sameAsPackage ? "" : trimmed;
+  if ((installed.localDisplayName ?? "").trim() === wanted) return;
+  setAgentLocalDisplayName(installedAgentId, wanted);
 }
 
 export function renameOneOrgMember(input: RenameOneOrgMemberInput): OneOrgState {
@@ -996,6 +1016,7 @@ export function renameOneOrgMember(input: RenameOneOrgMemberInput): OneOrgState 
   if (!row) throw new Error("One Team member not found.");
   assertExpectedRevision(row, input.expectedRevision);
   const now = new Date().toISOString();
+  writeMemberAgentName(row.installed_agent_id, name);
   getDb().prepare("UPDATE one_org_members SET display_name = ?, updated_at = ?, revision = revision + 1 WHERE id = ?").run(name, now, id);
   emitOrgChanged();
   return getOneOrgState();
@@ -1057,6 +1078,7 @@ export function updateOneOrgMember(input: UpdateOneOrgMemberInput): OneOrgState 
       });
     }
   }
+  writeMemberAgentName(row.installed_agent_id, displayName);
   if (chosen) {
     getDb().prepare(`
       UPDATE one_org_members
@@ -1152,6 +1174,12 @@ export async function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): Prom
       agent.slug, agent.id, row.display_name, sourceFor(agent), nextLease, now, DEFAULT_STATUS_LINE,
       nextLease ? "ok" : "unknown", note, id,
     );
+    // The seat's name the owner gave carries to the agent that takes the seat (as the copied display_name did), now as that agent's own name.
+    if (row.installed_agent_id !== agent.id) {
+      const outgoing = listInstalledAgentsReadOnly().find((item) => item.id === row.installed_agent_id);
+      const carried = (row.display_name ?? "").trim();
+      if (carried && carried !== (outgoing?.name ?? "") && carried !== (outgoing?.nameEn ?? "") && !(agent.localDisplayName ?? "").trim()) writeMemberAgentName(agent.id, carried);
+    }
     // PRD §5.27 — 들어오는 쪽만 지우고 **나가는 쪽**을 두면, 교체된 팀원의 옛 완료 요약이
     // 캐시에 남아 그 에이전트를 다시 앉힐 때 새 상태처럼 보인다. 둘 다 지운다.
     const clearCache = getDb().prepare("DELETE FROM one_org_completion_cache WHERE installed_agent_id = ?");

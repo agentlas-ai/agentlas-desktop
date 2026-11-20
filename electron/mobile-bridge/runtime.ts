@@ -34,7 +34,7 @@ import { MobileBridgeAccountPairingClient } from "./account-pairing";
 import { MobileBridgeCloudRelay, type MobileBridgeRelayAuthentication } from "./relay";
 import { loadOrCreateMobileBridgeTls, preferredMobileBridgeHost } from "./tls";
 import { getAuthSession, getSessionCookieHeader, getAuthenticatedSessionBinding, fetchWithHubSession, webBaseUrl } from "../auth";
-import { createPlacesLink, applyRemoval, PLACES_PROTOCOL_V, PLACES_REQUEST_TIMEOUT_MS, type PlacesLink } from "./places-link";
+import { createPlacesLink, applyRemoval, onPlacePathsChanged, PLACES_PROTOCOL_V, PLACES_REQUEST_TIMEOUT_MS, type PlacesLink } from "./places-link";
 import { faceIsDefault, placePresetOf, placeValuesOf, DEFAULT_PLACE_PRESET } from "../../shared/place-values";
 import { toolApprovalConsentActorBinding } from "../runtime/host-tool-permission-policy";
 import { toolApprovalActionId } from "../../shared/tool-approval-action";
@@ -481,7 +481,10 @@ async function startBridgeInternal(
       });
       places = link;
       // A changed profile (name, face) reports once; the digest keeps an unchanged value from being sent. In-process signal: the profile is written by the process that holds the bridge or is read again at the next connect.
-      const stopProfile = onDesktopStoreChange((change) => { if (change.entity === "one-profile") void link.valuesChanged(); });
+      const stopProfileStore = onDesktopStoreChange((change) => { if (change.entity === "one-profile") void link.valuesChanged(); });
+      // Connector routing: this computer's measured roads changed -> one report (the digest drops an unchanged set).
+      const stopPaths = onPlacePathsChanged(() => { void link.valuesChanged(); });
+      const stopProfile = () => { stopProfileStore(); stopPaths(); };
       // the person's shared memory (fact / identity / boundary lines) is pushed and pulled by this process too, in one run (push first, pull after). Triggers: a Personal line written here or by the other process,
       // and the plural answer above. No timer; a server whose shared-memory switch is closed (404) is asked once and then left alone.
       // loaded here, not at the top of the file: a process that only reads this module never loads the memory store

@@ -1,5 +1,6 @@
 import { KEYED_ADAPTERS } from "./keyed-provider";
 import { isCredentialStoreFailure } from "./credential-store-failure";
+import { registrableDomain } from "../../shared/public-suffix";
 
 /**
  * The keyed host route that serves the same provider as an installed connector.
@@ -12,8 +13,10 @@ import { isCredentialStoreFailure } from "./credential-store-failure";
  * the room asked the owner to re-authenticate a service their key already
  * served.
  *
- * Matching is by registrable domain: the connector host equals the provider
- * domain or is a subdomain of it, never a look-alike name.
+ * Matching is by registrable domain: the connector host and the provider host
+ * have the same registrable domain (the public suffix list, shared/public-suffix.ts;
+ * the old "last two labels" made every *.co.uk host one provider),
+ * never a look-alike name.
  */
 export async function keyedRouteForConnectorUrl(
   url: string | null | undefined,
@@ -23,8 +26,9 @@ export async function keyedRouteForConnectorUrl(
   try { host = new URL(String(url ?? "")).hostname.toLowerCase(); } catch { return null; }
   if (!host) return null;
   for (const adapter of Object.values(KEYED_ADAPTERS)) {
-    const domain = new URL(adapter.base).hostname.toLowerCase().split(".").slice(-2).join(".");
-    if (host !== domain && !host.endsWith(`.${domain}`)) continue;
+    const providerHost = new URL(adapter.base).hostname.toLowerCase();
+    const domain = registrableDomain(providerHost);
+    if (domain === null || registrableDomain(host) !== domain) continue;
     // A store that did not answer is raised (the caller says so); only a plain "no key" moves on to the next adapter.
     if (await hasKey(adapter.envKey).catch((error) => { if (isCredentialStoreFailure(error)) throw error; return false; })) return adapter.routeId;
   }

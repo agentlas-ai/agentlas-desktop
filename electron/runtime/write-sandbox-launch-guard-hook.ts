@@ -5,6 +5,7 @@
  */
 import { classifyLaunchEscape, launchEscapeDenialReason } from "../../shared/write-sandbox-launch-guard";
 import { PERMISSION_ESCALATION_MARKER } from "../../shared/permission-escalation";
+import { approvalRefusalResultText, askRegistersOsScheduler } from "./approval-rule";
 
 function deny(reason: string): void {
   process.stdout.write(JSON.stringify({
@@ -25,6 +26,8 @@ process.stdin.on("end", () => {
   // Claude's shell tools: Bash everywhere, and its PowerShell tool on Windows without Git Bash. Both carry `command`.
   if (input.tool_name !== "Bash" && input.tool_name !== "PowerShell") return;
   const command = typeof input.tool_input?.command === "string" ? input.tool_input.command : "";
+  // A scheduler registration is not something full access would allow either (os-scheduler-gate-hook.ts): the line that points at the app automation, not the escalation request.
+  if (askRegistersOsScheduler({ command })) { deny(approvalRefusalResultText({ action: "os_scheduler", cause: "app_owns_schedules" })); return; }
   const escape = classifyLaunchEscape(command);
   if (escape) deny(launchEscapeDenialReason(escape, PERMISSION_ESCALATION_MARKER));
 });

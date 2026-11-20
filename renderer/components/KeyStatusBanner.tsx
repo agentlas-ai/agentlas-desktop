@@ -6,9 +6,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
-import { deriveKeyStatus } from "@/lib/key-status";
+import { deriveKeyStatus, keyStatusWarningSummary } from "@/lib/key-status";
 import type { RuntimeStatus, UsageSnapshot } from "@/lib/types";
 import { IconBolt, IconShield, IconCheck } from "@/components/Icon";
+import { UsageMeter } from "@/components/usage/UsageMeter";
 
 // A read older than this is refreshed when the window comes back (this was the old poll interval).
 const STALE_MS = 60_000;
@@ -116,11 +117,7 @@ export function KeyStatusBanner({
   const isError = status.health === "error";
   const noticeKey = `${status.health}:${status.cause ?? ""}:${status.runRefusalCode ?? ""}:${affected}`;
   // The warning says what Main does, from the machine cause (key-status.ts), never "near" for a limit that is used up.
-  const warningSummary = status.cause === "limit_reached"
-    ? status.runRefusalCode === "subscription_credits_disabled"
-      ? (ko ? "사용량 한도에 도달했고 크레딧 자동 사용이 꺼져 있어 새 실행이 시작되지 않습니다." : "Usage limit reached and automatic credit use is off, so new runs will not start.")
-      : (ko ? "사용량 한도에 도달해 새 실행이 거부될 수 있습니다." : "Usage limit reached; new runs may be refused.")
-    : (ko ? "사용량 한도에 근접했습니다." : "Approaching usage limit.");
+  const warningSummary = keyStatusWarningSummary(status, ko ? "ko" : "en");
   if (compact) {
     if (dismissed === noticeKey) return null;
     const summary = isError
@@ -129,7 +126,9 @@ export function KeyStatusBanner({
     const detail = [summary, affected].filter(Boolean).join(" · ");
     return (
       <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, padding: "4px 12px", background: "var(--paper)", color: "var(--ink-soft)", fontSize: 11, lineHeight: "20px" }}>
-        <span title={detail} style={{ minWidth: 0, flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{detail}</span>
+        {/* Wraps (three lines at most) instead of one line cut to "…": in a narrow pane the cut dropped the part that says what happens ("…이 AI로는 새 실행이…"). The full text stays in the tooltip. */}
+        <span title={detail} data-key-status-compact-text="true" style={{ minWidth: 0, flex: 1, overflow: "hidden", display: "-webkit-box", WebkitBoxOrient: "vertical", WebkitLineClamp: 3, overflowWrap: "anywhere" }}>{detail}</span>
+        {!isError && typeof status.usedPercent === "number" && <UsageMeter variant="inline" ko={ko} percent={status.usedPercent} style={{ flexShrink: 0 }} />}
         <button type="button" onClick={() => navigate("/dashboard")} style={{ flexShrink: 0, border: 0, background: "transparent", color: "inherit", padding: "2px 4px", font: "inherit", cursor: "pointer" }}>
           {ko ? "사용량 확인" : "Check usage"}
         </button>
@@ -155,6 +154,8 @@ export function KeyStatusBanner({
             ? "내 구독/키로만 구동됩니다."
             : "Runs only on your own subscription/keys."}
         </span>
+        {/* The one usage meter: the same percent-used words as the sidebar, when the warning is about usage. */}
+        {!isError && typeof status.usedPercent === "number" && <UsageMeter variant="inline" ko={ko} percent={status.usedPercent} />}
       </div>
       <button
         type="button"

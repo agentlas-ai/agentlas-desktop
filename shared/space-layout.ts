@@ -74,6 +74,25 @@ export function columnSplit(panes: readonly { weight: number }[]): number {
 }
 
 /**
+ * How far the column line may go at a Space `width` px wide: neither column is drawn narrower than `SPACE_MIN_PANE_PX` (the same least width `paneCapacity`
+ * counts panes with), and never closer than `SPACE_MIN_WEIGHT` to either side. A Space too narrow for two columns pins the line in the middle (it is one column
+ * there and no line is drawn). An unknown width keeps only the weight floor.
+ */
+export function columnShareBounds(width: number): { min: number; max: number } {
+  const floor = SPACE_MIN_WEIGHT / SPACE_WEIGHT_TOTAL;
+  if (!Number.isFinite(width) || width <= 0) return { min: floor, max: 1 - floor };
+  const min = Math.max(floor, Math.min(0.5, SPACE_MIN_PANE_PX / width));
+  return { min, max: 1 - min };
+}
+
+/** `share` inside `columnShareBounds(width)`: what a drag, a key and the drawn grid all use, so the line, its value and its keys never disagree. */
+export function clampColumnShare(share: number, width: number): number {
+  const { min, max } = columnShareBounds(width);
+  if (!Number.isFinite(share)) return 0.5;
+  return Math.min(max, Math.max(min, share));
+}
+
+/**
  * Writes the weights of `panes` from one column share. Whole numbers summing to exactly 1000: 1 pane = 1000; 2 panes = left/right;
  * 3 panes = the top pair at 4/5 of the total and the bottom pane (across the whole width) at 1/5; 4 panes = the pair twice (each pair half the total).
  * Reading them back through `columnSplit` gives the same share to within one weight point.
@@ -237,6 +256,29 @@ export function openBlock(source: HomeLayout, ref: OpenRef, how: OpenHow = "repl
 }
 
 /**
+ * The New chat start screen asks for a pane of its own, like a chat opened with `new-pane`: refused for lack of room when no more panes fit. The start is
+ * the one request with no chat id yet, so it is asked here instead of through `openBlock`. No pane open = the start fills the Space (never refused).
+ */
+export function newChatBlock(source: HomeLayout, limits: SpaceLimits = {}): RoomBlock | null {
+  return source.space.panes.length === 0 ? null : blockForNewPane(source.space, limits);
+}
+
+/** A refusal notice is a statement about the layout as it was: once a pane has closed (or the window grew) so that one more fits, it no longer holds and must go. */
+export function blockStillApplies(paneCount: number, capacity: number): boolean {
+  return paneCount >= Math.max(1, Math.min(SPACE_MAX_PANES, capacity));
+}
+
+/**
+ * The pane the New chat start covers when no pane is free: the one it was first drawn over (`remembered`) while that pane is still open, else the focused one,
+ * else the first. Following the focus instead made the cover jump to whatever pane the person clicked next, over a conversation they were reading.
+ */
+export function coverPaneId(panes: readonly { id: string }[], focus: string | null, remembered: string | null): string | null {
+  if (panes.length === 0) return null;
+  if (remembered && panes.some((pane) => pane.id === remembered)) return remembered;
+  return panes.some((pane) => pane.id === focus) ? focus : panes[0].id;
+}
+
+/**
  * Opens a chat in Space. A chat that is already open is only brought forward (never opened twice); no pane yet makes the first one;
  * `replace-pane` puts it in the pane (the chat that was there only leaves the layout - it stays in the left list); `new-pane` makes
  * the next pane when there is room and otherwise changes nothing (`openBlock` says why).
@@ -329,20 +371,30 @@ export function placeTab(source: HomeLayout, ref: OpenRef, target: MoveTarget, l
   return openInSpace(source, ref, "replace-pane", target.paneId, limits);
 }
 
-/** The column line: moves the share of the left column by `delta` weight points (positive = the left column grows). Panes only share a column line from two panes on. */
-export function resizeColumns(source: HomeLayout, delta: number): HomeLayout {
+/**
+ * The column line: moves the share of the left column by `delta` weight points (positive = the left column grows). Panes only share a column line from two
+ * panes on. With the Space's `width` the line stops where a column would be narrower than `SPACE_MIN_PANE_PX`, and a stored line already past that point
+ * is first read back to it - so one arrow press always moves what is drawn.
+ */
+export function resizeColumns(source: HomeLayout, delta: number, width?: number): HomeLayout {
   const panes = source.space.panes;
   if (panes.length < 2 || !Number.isFinite(delta)) return source;
-  const next = columnSplit(panes) + delta / SPACE_WEIGHT_TOTAL;
-  return setColumnSplit(source, next);
+  const shown = width === undefined ? columnSplit(panes) : clampColumnShare(columnSplit(panes), width);
+  return setColumnSplit(source, shown + delta / SPACE_WEIGHT_TOTAL, width);
 }
 
-/** Sets the column line from a share 0..1 (a finished drag). Within one weight point of the same value nothing changes. */
-export function setColumnSplit(source: HomeLayout, share: number): HomeLayout {
+/** The line's end positions as weights: `min` and `max` (used by Home / End on the line). */
+export function columnLineEnds(width: number): { min: number; max: number } {
+  const { min, max } = columnShareBounds(width);
+  return { min: min * SPACE_WEIGHT_TOTAL, max: max * SPACE_WEIGHT_TOTAL };
+}
+
+/** Sets the column line from a share 0..1 (a finished drag; `width` = the Space's px width keeps both columns at least `SPACE_MIN_PANE_PX`). Within one weight point of the same value nothing changes. */
+export function setColumnSplit(source: HomeLayout, share: number, width?: number): HomeLayout {
   const panes = source.space.panes;
   if (panes.length < 2 || !Number.isFinite(share)) return source;
   const layout = clone(source);
-  applyColumnSplit(layout.space.panes, share);
+  applyColumnSplit(layout.space.panes, width === undefined ? share : clampColumnShare(share, width));
   return layout.space.panes.every((pane, index) => pane.weight === panes[index].weight) ? source : layout;
 }
 

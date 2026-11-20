@@ -384,3 +384,7 @@
 .memoryInspectorDetail dd { margin:0; overflow-wrap:anywhere; }
 .memoryInspectorDetail dd > span { display:block; }
 @media (max-width:680px) { .memoryEntryButton { grid-template-columns:20px minmax(0,1fr); } .memoryEntryButton small { grid-column:2; } .memoryInspectorDetail dl { grid-template-columns:1fr; gap:4px; } .memoryInspectorDetail dd { margin-bottom:8px; } }
+.memoryEntryRow { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:4px; }
+.memoryEntryForget { display:grid; place-items:center; width:30px; height:30px; padding:0; border:0; border-radius:8px; background:transparent; color:var(--muted-deep); cursor:pointer; }
+.memoryEntryForget:hover, .memoryEntryForget:focus-visible { color:var(--danger, #b55b58); background:var(--paper-3); }
+.memoryEntryForget:disabled { opacity:.4; cursor:default; }

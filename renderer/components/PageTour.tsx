@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconTarget } from "@/components/Icon";
+import { useWorkspaceDialog } from "@/components/agent-workspace/use-workspace-dialog";
 import { useT } from "@/lib/i18n";
 import { credentialStoreName } from "@/lib/platform-copy";
 
@@ -55,6 +56,9 @@ export function PageTour({
   const [stepIndex, setStepIndex] = useState(0);
   const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
   const lastTargetRef = useRef<HTMLElement | null>(null);
+  const calloutRef = useRef<HTMLElement | null>(null);
+  // A tour the person asked for takes the keyboard; one that opens by itself waits for the first Tab.
+  const askedRef = useRef(false);
   const scrollSnapshotRef = useRef<Array<{ element: Element; top: number; left: number }>>([]);
 
   const restoreScrollSnapshot = useCallback(() => {
@@ -85,6 +89,7 @@ export function PageTour({
   useEffect(() => {
     const onReplay = () => {
       if (!config) return;
+      askedRef.current = true;
       setStepIndex(0);
       setOpen(true);
     };
@@ -154,21 +159,29 @@ export function PageTour({
     };
   }, [open, step]);
 
+  const configId = config?.id;
+  const close = useCallback(() => {
+    askedRef.current = false;
+    setOpen(false);
+    window.requestAnimationFrame(restoreScrollSnapshot);
+    try {
+      if (configId) window.localStorage.setItem(pageTourStorageKey(configId), "1");
+    } catch {
+      // ignore
+    }
+  }, [configId, restoreScrollSnapshot]);
+
+  // Same keyboard rule as every dialog: Tab stays in the tour, Esc closes it, focus goes back to the Help button (the menu item that started it is gone by then).
+  useWorkspaceDialog(Boolean(config && open && step), calloutRef, close, {
+    autoFocus: askedRef.current,
+    returnFocus: () => document.querySelector<HTMLElement>("[data-help-trigger]"),
+  });
+
   if (!config || !open || !step) return null;
 
   const last = stepIndex >= config.steps.length - 1;
   const progress = `${stepIndex + 1}/${config.steps.length}`;
   const callout = positionCallout(targetRect);
-
-  const close = () => {
-    setOpen(false);
-    window.requestAnimationFrame(restoreScrollSnapshot);
-    try {
-      window.localStorage.setItem(pageTourStorageKey(config.id), "1");
-    } catch {
-      // ignore
-    }
-  };
 
   const go = (next: number) => {
     const safe = Math.max(0, Math.min(next, config.steps.length - 1));
@@ -191,10 +204,11 @@ export function PageTour({
         />
       )}
       <section
+        ref={calloutRef}
         id="agentlas-page-tour-callout"
         className="agentlas-tour-callout titlebar-nodrag"
         role="dialog"
-        aria-modal="false"
+        aria-modal="true"
         aria-label={ko ? `${config.labelKo} 안내` : `${config.labelEn} tour`}
         style={{ left: callout.left, top: callout.top, maxWidth:"calc(100vw - 24px)", background:"var(--paper)", borderRadius:18, boxShadow:"var(--popup-shadow)" }}
       >

@@ -29,6 +29,20 @@ const usableRunId = (value: unknown): string | undefined => (typeof value === "s
 export interface OwnerRoomMessage {
   chatId?: unknown; userPrompt?: unknown; promptOrigin?: unknown; agentAppMode?: unknown; runId?: unknown;
   permissions?: unknown; onePermissionMode?: unknown; images?: unknown; fileGroupId?: unknown;
+  /** The composer's pick for this line: the turn's agent list as orchestration targets (renderer lib/composer-agent-pick.ts). */
+  taskForceTargets?: unknown;
+  /** The composer's id for this send. */
+  clientIntentId?: unknown;
+}
+
+/** The agent ids of the composer's pick (`taskForceTargets`): agent targets only; a team/firm target is not a member of this room. */
+export function pickedAgentIdsOf(req: Pick<OwnerRoomMessage, "taskForceTargets">): string[] {
+  if (!Array.isArray(req.taskForceTargets)) return [];
+  const ids: string[] = [];
+  for (const target of req.taskForceTargets as Array<{ entityKind?: unknown; agentId?: unknown }>) {
+    if (target && target.entityKind === "agent" && typeof target.agentId === "string" && target.agentId && !ids.includes(target.agentId)) ids.push(target.agentId);
+  }
+  return ids;
 }
 
 function permissionOf(req: OwnerRoomMessage): LeadPermission {
@@ -103,7 +117,7 @@ function productionPorts(): LeadRouterPorts {
       return { title: taskforce.title, members };
     },
     appendOwnerLine(roomChatId, text, extra) {
-      const entry = chats().appendChatMessage(roomChatId, "user", text, { ...(Array.isArray(extra.images) && extra.images.length ? { images: extra.images as never } : {}), ...(extra.fileGroupId ? { fileGroupId: extra.fileGroupId } : {}) });
+      const entry = chats().appendChatMessage(roomChatId, "user", text, { ...(Array.isArray(extra.images) && extra.images.length ? { images: extra.images as never } : {}), ...(extra.fileGroupId ? { fileGroupId: extra.fileGroupId } : {}), ...(extra.clientIntentId ? { clientIntentId: extra.clientIntentId } : {}) });
       return { id: entry.id };
     },
     appendMemberPost(roomChatId, member, text, replyTo) {
@@ -138,6 +152,7 @@ function productionPorts(): LeadRouterPorts {
     markOpen: (roomChatId, ownerMessageId, extra) => markLeadRequestOpen(getDb(), roomChatId, ownerMessageId, Date.now(), undefined, extra),
     clearOpen: (roomChatId, ownerMessageIds) => clearLeadRequestOpen(getDb(), roomChatId, ownerMessageIds),
     stopMarked: (roomChatId, ownerMessageIds) => leadRequestStopMarked(getDb(), roomChatId, ownerMessageIds),
+    stopEpoch: (roomChatId) => chats().getChatStopEpoch(roomChatId),
     emit: (roomChatId) => (require("../store/change-bus") as typeof import("../store/change-bus")).emitDesktopStoreChange({ entity: "chat", id: roomChatId }), // eslint-disable-line @typescript-eslint/no-require-imports
     locale,
     async runTurn({ roomChatId, member, prompt, permission, runId, extra, ownerSpoke, chainId, earlierAttempt }) {
@@ -295,11 +310,11 @@ export function routeLeadRoomOwnerMessage(req: OwnerRoomMessage | null | undefin
   // (desktop 3, B-11). It is a refusal with a code now; the composer and the phone never send one, so no screen changes.
   if (!text.trim() && !hasFiles) throw Object.assign(new Error("A message needs words or an attachment."), { code: "room_message_empty" });
   const result = leadRouter().post({
-    chatId: req.chatId, text, origin, permission: permissionOf(req),
+    chatId: req.chatId, text, origin, permission: permissionOf(req), pickedAgentIds: pickedAgentIdsOf(req),
     // The turns that answer this line are system-origin by design; whether the owner WROTE the line is the entry's fact: the composer says so (`ownerTyped`), every
     // other route carries the marker its own owner channel set (invocation/owner-spoke.ts). A line another member posted is never routed here (origin "peer").
     ownerSpoke: origin === "owner" && (ownerTyped ?? (req as { ownerSpoke?: unknown }).ownerSpoke === true),
-    ...(usableRunId(req.runId) ? { runId: usableRunId(req.runId)! } : {}), images: req.images, ...(typeof req.fileGroupId === "string" ? { fileGroupId: req.fileGroupId } : {}),
+    ...(usableRunId(req.runId) ? { runId: usableRunId(req.runId)! } : {}), images: req.images, ...(typeof req.fileGroupId === "string" ? { fileGroupId: req.fileGroupId } : {}), ...(typeof req.clientIntentId === "string" ? { clientIntentId: req.clientIntentId } : {}),
   });
   if (result.handled) return { runId: result.runId };
   // Desktop repair 6 (area 4, a room whose members are all locked): nobody can answer and the old way let the ROOM CHAT's own agent (not a member) take the message. A lock ends by an owner action (a renewed
@@ -498,7 +513,16 @@ export function recoverInterruptedLeadRooms(deps?: LeadRecoveryDeps, onlyChatId?
  * counts): the whole request stops. Returns the room id, or null when the run is not a room's (the Stop goes on the ordinary way).
  */
 export function stopLeadRoomByRun(runId: string): string | null {
-  try { return router ? router.cancelByRun(runId) : null; } catch { return null; }
+  try {
+    const roomChatId = router ? router.cancelByRun(runId) : null;
+    // The person's Stop of a run of the room is the room's Stop: the counter moves too (the phone's and the service's Stop reach the room only here).
+    if (roomChatId) raiseRoomStopEpoch(roomChatId);
+    return roomChatId;
+  } catch { return null; }
+}
+/** The room's Stop counter, raised by a Stop that arrived by a run id (never throws). */
+function raiseRoomStopEpoch(roomChatId: string): void {
+  try { (require("../store/chats") as typeof import("../store/chats")).bumpChatStopEpoch(roomChatId); } catch { /* the in-memory Stop already ended the request */ } // eslint-disable-line @typescript-eslint/no-require-imports
 }
 /** The room's own Stop (the pane's button). True when a request was running. */
 export function stopLeadRoom(chatId: string): boolean {
@@ -605,6 +629,53 @@ export async function stopLeadRoomWhereHeld(chatId: string): Promise<boolean> {
     return stopped || marked;
   } catch { return marked; }
 }
+/** True when the chat is a group room already run by the lead router (the mark is read, never written). */
+export function isMarkedLeadRoom(chatId: unknown): boolean {
+  if (typeof chatId !== "string" || !chatId) return false;
+  try { return isLead(chatId); } catch { return false; }
+}
+const isLead = (chatId: string): boolean => isLeadRoom(getDb(), chatId);
+
+export interface RoomConversationStop {
+  /** A request of the room was running or a member run was reached. */
+  stopped: boolean;
+  /** The room's Stop counter after this Stop (chats.stop_epoch). */
+  epoch: number;
+  /** The sends the Stop took back (not sent): their words go back into the input box. */
+  withdrawn: Array<{ id: string; source: string; intentId: string | null; text: string; bubbleRemoved: boolean }>;
+  /** Run ids of the member sessions that were asked to stop here. */
+  cancelledRuns: string[];
+}
+
+/**
+ * THE Stop of a group room, whichever button asked for it (the composer's `chat.stop`, the room status line's "Stop", the phone's, the app-control Stop).
+ * the two buttons used to do half each - `chat.stop` raised the Stop counter and cancelled the room chat's own run (a lead room has none), and the
+ * status line's Stop cancelled the router's request but never wrote the Stop - so a member's answer could still be written after the person pressed Stop.
+ * Order: (1) the Stop is written (counter, time, the sends that had not started), so nothing that races with the next steps can write after it;
+ * (2) the router's request ends everywhere it is held; (3) every live run of a member session of this room is cancelled by what is registered, even one
+ * the router has lost track of. Never throws.
+ */
+export async function stopRoomConversation(chatId: string): Promise<RoomConversationStop> {
+  let epoch = 0;
+  let withdrawn: RoomConversationStop["withdrawn"] = [];
+  try {
+    const owner = (require("../chat/chat-stop") as typeof import("../chat/chat-stop")).stopChatOwnerInputs(chatId); // eslint-disable-line @typescript-eslint/no-require-imports
+    epoch = owner.epoch; withdrawn = owner.withdrawn;
+  } catch { /* the Stop of the runs below never waits on the bookkeeping */ }
+  let stopped = false;
+  try { stopped = await stopLeadRoomWhereHeld(chatId); } catch { stopped = false; }
+  const cancelledRuns: string[] = [];
+  try {
+    const inv = (require("../invocation/service") as typeof import("../invocation/service")).invocationService; // eslint-disable-line @typescript-eslint/no-require-imports
+    for (const memberChatId of roomMemberSessionIds(getDb(), chatId)) {
+      const live = inv.currentTurn(memberChatId, { includeVerification: true });
+      if (!live) continue;
+      try { if (inv.cancel(live.runId) !== "not-found") { cancelledRuns.push(live.runId); stopped = true; } } catch { /* the next one is still asked */ }
+    }
+  } catch { /* no service in this process: its runs are another process's, reached by stopLeadRoomWhereHeld */ }
+  return { stopped, epoch, withdrawn, cancelledRuns };
+}
+
 /**
  * The Stop of a run the owner sees (the phone's Stop button names the run id it was promised) that ends in "not found" because the
  * chain it belongs to is between two turns in another process: the same mark, found through the run's chat (the room itself, or a
@@ -617,7 +688,10 @@ export function markLeadRoomStopByRun(runId: string): boolean {
     if (!chatId) return false;
     const parent = db.prepare("SELECT parent_chat_id AS parentId FROM chats WHERE id = ? AND kind = 'division'").get(chatId) as { parentId: string | null } | undefined;
     const roomId = parent?.parentId || chatId;
-    return isLeadRoom(db, roomId) ? requestLeadRequestStop(db, roomId) : false;
+    if (!isLeadRoom(db, roomId)) return false;
+    const marked = requestLeadRequestStop(db, roomId);
+    if (marked) raiseRoomStopEpoch(roomId);
+    return marked;
   } catch { return false; }
 }
 

@@ -75,10 +75,10 @@ function makeCopy(ko: boolean) {
     recommended: "추천",
     trialTag: (days: number) => `${days}일 무료`,
     perMonth: "/월",
-    credits: (n: string) => `월 ${n} AI 크레딧`,
+    usage: (free: boolean) => (free ? "기본 AI 사용량" : "더 많은 AI 사용량"),
     mail: (n: string) => `에이전트 메일 ${n}개`,
     soon: "곧 출시",
-    freeNote: (credits: string | null) => `Free는 결제 없이 쓰는 플랜입니다${credits ? ` (월 ${credits} AI 크레딧)` : ""}. 내 AI 구독 연결과 로컬 실행도 Free에서 그대로 쓸 수 있어요.`,
+    freeNote: (hasUsage: boolean) => `Free는 결제 없이 쓰는 플랜입니다${hasUsage ? " (기본 AI 사용량 포함)" : ""}. 내 AI 구독 연결과 로컬 실행도 Free에서 그대로 쓸 수 있어요.`,
     scheduleTitle: "무료 체험 일정",
     sToday: "오늘",
     sTodayCard: (zero: string) => `체험 시작 · 카드 등록 필요 · 오늘 결제 금액 ${zero}`,
@@ -129,10 +129,10 @@ function makeCopy(ko: boolean) {
     recommended: "Recommended",
     trialTag: (days: number) => `${days} days free`,
     perMonth: "/mo",
-    credits: (n: string) => `${n} AI credits / month`,
+    usage: (free: boolean) => (free ? "Basic AI usage" : "More AI usage"),
     mail: (n: string) => `${n} agent mail address${n === "1" ? "" : "es"}`,
     soon: "Coming soon",
-    freeNote: (credits: string | null) => `Free needs no payment${credits ? ` and includes ${credits} AI credits a month` : ""}. Connecting your own AI subscription and running locally also work on Free.`,
+    freeNote: (hasUsage: boolean) => `Free needs no payment${hasUsage ? " and includes basic AI usage" : ""}. Connecting your own AI subscription and running locally also work on Free.`,
     scheduleTitle: "Your trial schedule",
     sToday: "Today",
     sTodayCard: (zero: string) => `Trial starts · card required · charged today: ${zero}`,
@@ -382,7 +382,7 @@ function FirstRunPaywall({ onFinish }: { onFinish: (outcome: PaywallOutcome | nu
 
   const planLine = (plan: BillingPlanOffer) => {
     const soon = new Set(plan.comingSoon ?? []);
-    const parts = [copy.credits(num(plan.monthlyCredits))];
+    const parts = [copy.usage(isFree(plan))];
     if ((plan.agentMailAddresses ?? 0) > 0) parts.push(soon.has("agentMail") ? `${copy.mail(num(plan.agentMailAddresses ?? 0))} (${copy.soon})` : copy.mail(num(plan.agentMailAddresses ?? 0)));
     return parts.join(" · ");
   };
@@ -447,7 +447,7 @@ function FirstRunPaywall({ onFinish }: { onFinish: (outcome: PaywallOutcome | nu
                     );
                   })}
                 </div>
-                <p className={styles.note} data-paywall-free-note>{copy.freeNote(freePlan ? num(freePlan.monthlyCredits) : null)}</p>
+                <p className={styles.note} data-paywall-free-note>{copy.freeNote(freePlan !== null)}</p>
               </section>
 
               {trialOnSelected && trial && (

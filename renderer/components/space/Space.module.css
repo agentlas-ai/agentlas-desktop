@@ -109,6 +109,5 @@
 /* active modes (Plan, Goal): the person can still see and clear what is on - drawn at the left of the words row. */
 .pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-active-modes) { order: -1; margin-right: auto; }
 
-/* ---- F-D6: the New chat start screen drawn over a full Space (the covered pane stays mounted underneath). ---- */
+/* ---- the New chat start screen drawn over a full Space. It covers the WHOLE pane (head included, one head), the covered pane stays mounted and inert underneath. ---- */
 .cover { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; background: var(--paper, #fcfcfb); }
-.coverBar { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; min-height: 40px; padding: 0 10px 0 14px; border-bottom: 1px solid var(--rd-hair, #e8e8e5); color: var(--rd-ink, #111); font-size: 13.5px; font-weight: 650; }

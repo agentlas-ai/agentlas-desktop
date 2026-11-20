@@ -67,6 +67,20 @@ export function hostRecoveryRequestFor(original: McpInvocationRequest, marker: H
   return { ...rest, runId: randomUUID(), hostRecovery: marker };
 }
 
+/**
+ * A request that was KEPT for hours (a wait on an outside cause) is not started again with the authority it had when the owner sent it:
+ * full access becomes write, so a delete, a send or a folder outside the project asks the owner at that moment instead of running while
+ * they are away ("delete files older than a year" kept over a usage limit must not run unasked hours later). Never wider: a read or write
+ * request is unchanged. No words are read; the same host gates that judge the actual calls ask. A retry started within seconds (no `wait`)
+ * keeps its authority: the owner is still there.
+ */
+export function keptRequestAuthority<T extends McpInvocationRequest>(request: T): T {
+  const narrowed: Record<string, unknown> = {};
+  if (request.permissions === "full") narrowed.permissions = "write";
+  if (request.onePermissionMode === "full") narrowed.onePermissionMode = "write";
+  return Object.keys(narrowed).length ? { ...request, ...narrowed } : request;
+}
+
 /** A request the host can start again exactly as the owner sent it: no one-use attachment or preflight capability. */
 export function requestIsReplayable(request: McpInvocationRequest): boolean {
   return !request.oneAttachmentRef && !request.oneTeamPreflightRef && request.agentAppMode !== true;
@@ -543,6 +557,39 @@ export function hostRecoveryClosed(db: Db, originalRunId: string): boolean {
   catch { return false; }
 }
 
+/**
+ * A request the app keeps for an outside cause belongs to the Goal whose turn failed (the claim carries the Goal's id in its evidence
+ * correlation). The owner's pause or delete of that Goal ends the request too: one action, one stopped record, so a paused Goal has no
+ * queued request that runs later (the screen said paused while the same request was still set to run at the cleared limit).
+ */
+export function hostRecoveryGoalStopped(db: Db, originalRunId: string): boolean {
+  try {
+    const row = db.prepare(`SELECT r.status AS status, r.pause_reason AS pauseReason FROM run_events e
+      JOIN long_runs r ON r.goal_id = json_extract(e.payload_json, '$.runtimeEvidence.correlation.goalId')
+      WHERE e.run_id = ? AND e.kind = ? LIMIT 1`).get(originalRunId, HOST_RECOVERY_REQUESTED) as { status: string; pauseReason: string | null } | undefined;
+    if (!row) return false;
+    return row.status === "pausing" || row.status === "cancelling" || row.status === "cancelled"
+      || (row.status === "paused" && row.pauseReason === "user");
+  } catch { return false; }
+}
+
+/** Closes every open kept request of this Goal as skipped. Terminal and unconditional; returns how many were closed. */
+export function closeKeptRequestsOfGoal(db: Db, goalId: string, reason: string): number {
+  let rows: Array<{ runId: string; chatId: string | null }> = [];
+  try {
+    rows = db.prepare(`SELECT run_id AS runId, chat_id AS chatId FROM run_events r WHERE kind = ?
+      AND json_extract(payload_json, '$.runtimeEvidence.correlation.goalId') = ?
+      AND NOT EXISTS (SELECT 1 FROM run_events o WHERE o.run_id = r.run_id AND o.kind = ?)`).all(HOST_RECOVERY_REQUESTED, goalId, HOST_RECOVERY_OUTCOME) as typeof rows;
+  } catch { return 0; }
+  let closed = 0;
+  for (const row of rows) {
+    if (!row.chatId) continue;
+    recordHostRecoveryOutcome(row.runId, row.chatId, "skipped", reason);
+    if (hostRecoveryClosed(db, row.runId)) closed += 1;
+  }
+  return closed;
+}
+
 /** The version of the running app, read where Desktop Main and the background service both have it. */
 export function hostAppVersion(): string {
   try {
@@ -777,6 +824,8 @@ export function scheduleHostRecovery(ports: HostRecoveryPorts, job: {
       // Another process (or an earlier life of this one) already closed this recovery: nothing is said twice.
       if (hostRecoveryClosed(getDb(), originalRunId)) { close(); return; }
       if (ownerSpokeAfter(getDb(), chatId, userMessageId, startedAtIso)) { finish("skipped", "newer", "owner_wrote_newer"); return; }
+      // The Goal this request belonged to was paused or deleted by the owner: nothing starts.
+      if (hostRecoveryGoalStopped(getDb(), originalRunId)) { finish("skipped", "newer", "goal_stopped_by_owner"); return; }
       if (ports.ownerPending?.(chatId)) { finish("skipped", "newer", "owner_message_waiting"); return; }
       if (ports.chatBusy(chatId)) return; // the chat leaving its turn wakes this again; nothing is counted
       // A kept request starts only when what stopped it changed: a runtime signal, the time the provider stated, a restart, or a timed
@@ -811,7 +860,7 @@ export function scheduleHostRecovery(ports: HostRecoveryPorts, job: {
       const marker: HostRecoveryMarker = { ofRunId: originalRunId, userMessageId, ordinal: 1 };
       // A retry the restart cut short while tools may already have run goes on from what exists (the existing earlier-attempt
       // line: read the history, finish what remains, repeat nothing); a blind replay is only for a retry that provably acted on nothing.
-      const baseRequest = hostRecoveryRequestFor(request, marker);
+      const baseRequest = hostRecoveryRequestFor(wait ? keptRequestAuthority(request) : request, marker);
       const recoveryRequest = hostRecoveryEarlierAttempt(getDb(), originalRunId) ? withEarlierAttempt(baseRequest) : baseRequest;
       let started: { runId: string };
       // At most one start across restarts and processes: the one that did not get the claim leaves the recovery to the other.

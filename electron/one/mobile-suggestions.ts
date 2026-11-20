@@ -28,6 +28,7 @@ import {
 } from "./suggestions";
 import { getOneValueClosureState } from "./value-closure";
 import { oneText } from "./one-copy";
+import { agentDisplayName } from "../../shared/agent-display-name";
 
 const HOST_REF_RE = /^host_[a-f0-9]{32}$/;
 const SUGGESTION_REF_RE = /^one_suggestion_[a-f0-9]{32}$/;
@@ -127,8 +128,8 @@ function teamMembers(suggestion: OneEcosystemSuggestion): OneMobileSuggestionMem
     return {
       memberRef: stableRef("member", suggestion.id, identity, String(index)),
       roleRef: stableRef("role", suggestion.id, roleIdentity, String(index)),
-      displayNameKo: safeDisplay(agent?.localDisplayName || agent?.name, fallbackKo),
-      displayNameEn: safeDisplay(agent?.nameEn || agent?.localDisplayName || agent?.name, fallbackEn),
+      displayNameKo: safeDisplay(agentDisplayName(agent, "ko"), fallbackKo),
+      displayNameEn: safeDisplay(agentDisplayName(agent, "en"), fallbackEn),
       sourceStatus,
     };
   });

@@ -29,7 +29,7 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { pendingConfirmationHref } from "@/lib/open-pending-confirmation";
 import { navigate } from "@/lib/navigation";
 import { askUserQueueSnapshot, subscribeAskUserQueue } from "@/lib/ask-user-queue";
-import { subscribeToolApprovals, toolApprovalsSnapshot } from "@/lib/tool-approvals";
+import { subscribeToolApprovals, toolApprovalIsWaiting, toolApprovalsSnapshot } from "@/lib/tool-approvals";
 import type { BrowserApprovalRequestEvent, PendingConfirmation } from "@/lib/types";
 import type { OneOrgMember } from "@shared/one-org";
 import { isPendingConfirmationSnoozed } from "@shared/one-decision";
@@ -124,7 +124,8 @@ function rebuild(): void {
     }
     items.push({ key, kind, chatId, surface: known?.surface ?? fallbackSurface, href, label: known?.title ?? label });
   };
-  for (const request of tool.queue) pushChat(`tool:${request.id}`, "approval", request.chatId ?? null);
+  // A card that expired (or was settled elsewhere) is a closed record the person only dismisses: it is not "waiting".
+  for (const request of tool.queue) if (toolApprovalIsWaiting(request.id, tool.actions)) pushChat(`tool:${request.id}`, "approval", request.chatId ?? null);
   for (const question of askUserQueueSnapshot()) pushChat(`ask:${question.requestId}`, "approval", question.chatId ?? null);
   for (const request of browserApprovals.values()) {
     const owner = request.owner;

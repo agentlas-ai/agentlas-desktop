@@ -308,8 +308,13 @@ export function RuntimeReadiness() {
     const deferredPlugins = userPluginStates.filter((plugin) => plugin.deferred === "interactive");
     const pluginProblems = userPluginStates.filter((plugin) => !plugin.connected && plugin.deferred !== "interactive");
     const pluginNames = new Map(userPlugins.map((plugin) => [plugin.id, plugin.name || plugin.nameEn || plugin.id]));
+    // "notion:notion" (plugin:connector with the same word twice) reads "Notion"; "slack:slack" "Slack"; a name that already reads as a name is left as it is.
+    const readableName = (name: string): string => {
+      const twice = /^([A-Za-z0-9_-]+):\1$/i.exec(name.trim());
+      return twice ? twice[1].charAt(0).toUpperCase() + twice[1].slice(1) : name;
+    };
     const disconnectedNames = pluginProblems
-      .map((plugin) => pluginNames.get(plugin.id) ?? plugin.id)
+      .map((plugin) => readableName(pluginNames.get(plugin.id) ?? plugin.id))
       .slice(0, 3)
       .join(" · ");
 
@@ -528,7 +533,8 @@ export function RuntimeReadiness() {
         for (const action of item.actions ?? []) {
           buttons.push({ key: action.actionId, label: recoveryActionBusy === action.actionId ? (ko ? "확인 중…" : "Checking…") : action.label, onClick: () => void runRecoveryAction(action), disabled: recoveryActionBusy !== null });
         }
-        if (item.id === "plugins") buttons.push({ key: "settings", label: ko ? "설정 열기" : "Open settings", onClick: () => navigate("/settings") });
+        // The MCP and plugin page itself (the sidebar's "MCP, Plugin"), not the general Settings: "Open settings" landed on a page that does not list the failing connectors.
+        if (item.id === "plugins") buttons.push({ key: "connections", label: ko ? "연결 고치기" : "Fix connections", onClick: () => navigate("/library/mcps") });
         if (item.todo === "reopen") buttons.push({ key: "reopen", label: ko ? "다시 열기" : "Reopen", onClick: () => void reopenToUpdate(), disabled: updateBusy });
         if (item.todo === "download") buttons.push({ key: "download", label: ko ? "내려받기" : "Download", onClick: () => void ipc()?.updater.openManualDownload() });
         return (

@@ -2,6 +2,7 @@
 
 import { useSyncExternalStore } from "react";
 import { clearPaneDrafts } from "@/lib/pane-drafts";
+import { closeNewChatStart } from "@/lib/new-chat-start";
 import { appUiPreferenceDefinitions, appUiPreferenceStorageKey, claimLegacyAppUiPreference, readAppUiPreference, setAppUiPreferenceScope, subscribeAppUiPreference, writeAppUiPreference } from "@/lib/app-ui-preferences";
 import {
   emptyHomeLayout, openBlock, openInSpace, placeBlock, placeTab, sameLayout, SPACE_MAX_PANES,
@@ -184,8 +185,10 @@ const toSpace = (): void => { if (typeof window !== "undefined" && window.locati
 
 /** Opens a chat in Space from anywhere (the left tree, a notification) and goes to Space when it is not on screen. `replace-pane` fills the focused pane (or `paneId`); `new-pane` opens the next one when there is room. */
 export function openChatInSpace(ref: OpenRef, how: OpenHow = "replace-pane", paneId?: string): void {
-  const replace = () => { updateSpaceLayout((source) => openInSpace(source, ref, "replace-pane", paneId, limits())); toSpace(); };
-  if (reportOpen(layout(), ref, how, paneId, replace)) { updateSpaceLayout((source) => openInSpace(source, ref, how, paneId, limits())); toSpace(); }
+  // The New chat start covers the pane a replace fills. Opening a conversation there is the person leaving the start: close it, or the chat lands under
+  // the cover and every click in the list seems to do nothing. The start holds no chat until its first message, so nothing is lost.
+  const replace = () => { closeNewChatStart(); updateSpaceLayout((source) => openInSpace(source, ref, "replace-pane", paneId, limits())); toSpace(); };
+  if (reportOpen(layout(), ref, how, paneId, replace)) { if (how === "replace-pane") closeNewChatStart(); updateSpaceLayout((source) => openInSpace(source, ref, how, paneId, limits())); toSpace(); }
   else toSpace(); // the notice is shown where Space is
 }
 

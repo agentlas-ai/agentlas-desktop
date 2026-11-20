@@ -23,9 +23,11 @@ import type { LocalModelHubSnapshot, LocalModelInstallationReceipt } from "@shar
 import { Select } from "@/components/Select";
 import { IconClose, IconImage, IconNetwork, IconPlus, IconUsers, IconWand } from "@/components/Icon";
 import { COPY, pick } from "./dashboard-copy";
+import { UsageMeter } from "@/components/usage/UsageMeter";
+import { usageSkippedLine } from "@/lib/usage-copy";
 import s from "./Dashboard.module.css";
 import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
-import { discoverySignInRequired } from "@shared/model-discovery";
+import { discoveryEntitlementRefused, discoverySignInRequired } from "@shared/model-discovery";
 
 // resolvedId: 별칭이 실제로 어느 모델로 풀렸는지(실행이 알려준 값). 없으면 모르는 것.
 type ModelRow = { id: string; label: string; tag?: string; resolvedId?: string };
@@ -168,6 +170,17 @@ export function modelDiscoveryNotes(runtimes: RuntimeStatus[], ko: boolean): Dis
           ? (ko ? `${label}: 로그인이 필요해요.` : `${label}: sign in required.`)
           : (ko ? `${label}: 로그인이 필요해요. 이 에이전트의 로그인 명령으로 로그인한 뒤 다시 확인해 주세요.`
             : `${label}: sign in required. Sign in with this agent's own login command, then check again.`),
+      });
+      continue;
+    }
+    // The runtime answered that this account may not use it (401/403): the same fact the Dashboard's Connections row states for it, in the same words
+    // (shared/runtime-connection.ts) - not a broken listing, and not "connected".
+    if (discoveryEntitlementRefused(runtime.modelDiscovery.reason)) {
+      notes.push({
+        key,
+        text: ko
+          ? `${label}: 이 계정은 사용 권한이 없다고 답했어요. 구독을 확인한 뒤 다시 확인해 주세요.`
+          : `${label}: this account is not authorized to use it. Check the subscription, then check again.`,
       });
       continue;
     }
@@ -823,7 +836,7 @@ export function RuntimeControl() {
     if (duplicate) return pick(ko, COPY.duplicate);
     const skip = pool?.picks[role]?.skipped.find((entry) => entry.position === position);
     if (!skip) return null;
-    return pick(ko, skip.reason === "quota-exceeded" ? COPY.skippedQuota : skip.reason === "model-unavailable" ? COPY.skippedModel : COPY.skippedMissing);
+    return skip.reason === "quota-exceeded" ? usageSkippedLine(ko) : pick(ko, skip.reason === "model-unavailable" ? COPY.skippedModel : COPY.skippedMissing);
   }
 
   // F-D2b A: a line is dragged by its handle (only a role with two or more lines has handles). The order is the priority and a drop saves at once
@@ -981,7 +994,7 @@ export function RuntimeControl() {
                   <span>{localModelOn ? "ON" : "OFF"}</span>
                 </button>
               )}
-              {note && <p className={s.mnote}>{note}</p>}
+              {note && <p className={s.mnote}>{note === usageSkippedLine(ko) ? <UsageMeter variant="note" ko={ko} note={note} /> : note}</p>}
             </div>
           );
         })}

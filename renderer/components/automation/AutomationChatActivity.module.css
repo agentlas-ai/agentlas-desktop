@@ -36,7 +36,7 @@
 .actionMuted { color: var(--muted); font-size: 12px; }
 
 /* Thread: live row */
-.liveStack { display: grid; gap: 8px; align-self: stretch; max-width: 760px; margin: 8px 0 4px; }
+.liveStack { display: grid; gap: 8px; align-self: stretch; box-sizing: border-box; width: min(var(--chat-column-width, 740px), 100%); margin: 8px auto 4px; }
 .liveRow {
   display: grid;
   gap: 6px;

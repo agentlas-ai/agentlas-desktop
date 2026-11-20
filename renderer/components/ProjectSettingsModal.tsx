@@ -27,6 +27,10 @@ export function ProjectSourceChoices({ onSelect }: { onSelect: (source: NewProje
   </div>;
 }
 
+/** What the two fields hold. The browser cuts longer input without a word, so a field near its limit says how much it holds (the store keeps a goal of at most 1,200 too). */
+export const PROJECT_NAME_LIMIT = 160;
+export const PROJECT_GOAL_LIMIT = 1200;
+
 export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundError }: {
   request: ProjectSettingsRequest;
   onClose: () => void;
@@ -204,12 +208,17 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
     }
   }
 
+  // A field with a length limit says so: the browser cuts a longer paste silently, and the person reads a short name where they typed a long one.
+  const limitNote = (length: number, limit: number) => length >= Math.floor(limit * 0.8)
+    ? <small className={styles.count} data-limit={length >= limit ? "true" : undefined} data-project-limit={limit} aria-live="polite">{length.toLocaleString()} / {limit.toLocaleString()}{length >= limit ? (ko ? " · 여기까지만 저장돼요" : " · this is the most that is kept") : ""}</small> : null;
   const nameField = <label className={styles.field}><span>{ko ? "프로젝트 이름" : "Project name"}</span>
-    <input value={name} maxLength={160} onChange={(event) => { nameEdited.current = true; setName(event.target.value); }} placeholder={ko ? "예: 고양이 왕국" : "e.g. Cat Kingdom"} disabled={Boolean(pending)} />
+    <input value={name} maxLength={PROJECT_NAME_LIMIT} onChange={(event) => { nameEdited.current = true; setName(event.target.value); }} placeholder={ko ? "예: 고양이 왕국" : "e.g. Cat Kingdom"} disabled={Boolean(pending)} />
+    {limitNote(name.length, PROJECT_NAME_LIMIT)}
   </label>;
   // Work 자동 팀(PLAN §6)은 이름과 목표로 역할을 정한다. 목표는 project.description 에 저장된다.
   const goalField = <label className={`${styles.field} ${styles.goalField}`}><span>{ko ? "프로젝트 목표" : "Project goal"}</span>
-    <textarea value={goal} rows={2} maxLength={1200} onChange={(event) => setGoal(event.target.value)} placeholder={ko ? "예: 쇼핑몰 홈페이지를 새로 만들고 SNS로 알리기" : "e.g. Rebuild my store homepage and promote it on social media"} disabled={Boolean(pending)} data-project-goal />
+    <textarea value={goal} rows={2} maxLength={PROJECT_GOAL_LIMIT} onChange={(event) => setGoal(event.target.value)} placeholder={ko ? "예: 쇼핑몰 홈페이지를 새로 만들고 SNS로 알리기" : "e.g. Rebuild my store homepage and promote it on social media"} disabled={Boolean(pending)} data-project-goal />
+    {limitNote(goal.length, PROJECT_GOAL_LIMIT)}
   </label>;
   const instructionField = <details className={styles.instructions}>
     <summary>{ko ? "프로젝트 지시" : "Project instructions"}<span>{ko ? "선택" : "Optional"}</span></summary>
@@ -236,12 +245,15 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
     {source === "github" || source === "local" ? <div className={styles.folder} data-connected={Boolean(folderPath)}>
       <span className={styles.folderIcon}><IconFolder size={26} /></span>
       <div><strong>{folderPath ? folderPath.split(/[\\/]/).filter(Boolean).at(-1) : (ko ? "연결된 폴더가 없어요" : "No folder connected")}</strong><span>{folderPath || (ko ? "프로젝트에 사용할 폴더를 선택해 주세요." : "Choose a folder for this project.")}</span></div>
+      {folderPath ? <button type="button" className={styles.secondary} data-project-open-folder="true" onClick={() => void ipc()?.fs?.openPath(folderPath).catch(() => undefined)}>{ko ? "폴더 열기" : "Open folder"}</button> : null}
       {source === "local" ? <button type="button" className={styles.secondary} onClick={() => void chooseFolder()} disabled={Boolean(pending)}>{pending === "folder" ? (ko ? "선택 중…" : "Selecting…") : folderPath ? (ko ? "변경" : "Change") : (ko ? "폴더 선택" : "Choose folder")}</button> : folderPath ? <IconCheck size={18} /> : null}
-    </div> : <p className={styles.hint}>{project?.folderPath || (ko ? "만들기를 누르면 ~/.agentlas/projects/에 전용 폴더를 준비합니다. 폴더는 나중에 바꿀 수 있어요." : "Creating the project prepares its own folder in ~/.agentlas/projects/. You can change the folder later.")}</p>}
+    </div> : <p className={styles.hint}>{project?.folderPath ? <button type="button" className={styles.secondary} data-project-open-folder="true" onClick={() => void ipc()?.fs?.openPath(project.folderPath as string).catch(() => undefined)}>{ko ? "폴더 열기" : "Open folder"}</button> : null}{project?.folderPath || (ko ? "만들기를 누르면 ~/.agentlas/projects/에 전용 폴더를 준비합니다. 폴더는 나중에 바꿀 수 있어요." : "Creating the project prepares its own folder in ~/.agentlas/projects/. You can change the folder later.")}</p>}
   </div>;
 
   return (
-    <section ref={pageRef} tabIndex={-1} className={styles.dialog} aria-labelledby="project-settings-title" aria-busy={Boolean(pending)} data-project-settings>
+    <section ref={pageRef} tabIndex={-1} className={styles.dialog} aria-labelledby="project-settings-title" aria-busy={Boolean(pending)} data-project-settings
+      // Esc is the keyboard's Cancel: nothing is saved and the page closes, as the Cancel button does. A key an input method is still composing is not Esc.
+      onKeyDown={(event) => { if (event.key === "Escape" && !event.defaultPrevented && !event.nativeEvent.isComposing) { event.preventDefault(); requestClose(); } }}>
       <div className={styles.layout}>
         <aside className={styles.nav}>
           <button className={styles.back} type="button" onClick={requestClose}><IconArrowLeft size={16} />{ko ? "뒤로" : "Back"}</button>

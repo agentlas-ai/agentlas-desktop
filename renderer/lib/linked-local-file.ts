@@ -79,8 +79,10 @@ const ABSOLUTE_REF = /(?:^|[\s(<`'"])((?:file:\/\/)?(?:\/(?:[^\s`'"<>)\]]+\/)+|[
  */
 export function localFileRefsFromText(text: string | null | undefined, limit = 8): string[] {
   if (!text || !/[\\/]/.test(text)) return [];
+  // The host's "file does not exist" correction lists where it looked: those are not files of this answer.
+  const readable = text.replace(/\n?\*\*(?:호스트 확인|Host check):\*\*[^\n]*(?:\n- [^\n]*)*/g, "");
   const out: string[] = [];
-  for (const match of text.matchAll(ABSOLUTE_REF)) {
+  for (const match of readable.matchAll(ABSOLUTE_REF)) {
     const absolute = asLocalAbsolute(match[1]);
     if (absolute && !out.includes(absolute)) out.push(absolute);
     if (out.length >= limit) break;

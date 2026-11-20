@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { homeBridge, rowDisplayName, type HomeTreeParticipant } from "@/lib/home-tree";
@@ -15,8 +15,9 @@ import { forgetPaneDrafts } from "@/lib/pane-drafts";
 import { closeNewChatStart, takeFirstMessage, useNewChatStart } from "@/lib/new-chat-start";
 import { chatBelongsToOne } from "@shared/chat-surface";
 import {
-  closeOtherPanes, closeTab, columnSplit, dropChats, paneCapacity, relabelTabs, resizeColumns, setColumnSplit, setFocus, togglePin,
-  SPACE_MIN_PANE_HEIGHT_PX, SPACE_MIN_PANE_PX, SPACE_MIN_WEIGHT, SPACE_WEIGHT_TOTAL, type SpacePane, type SpaceTab,
+  blockStillApplies, clampColumnShare, closeOtherPanes, closeTab, columnLineEnds, columnShareBounds, columnSplit, coverPaneId, dropChats, paneCapacity, relabelTabs,
+  resizeColumns, setColumnSplit, setFocus, togglePin,
+  SPACE_MIN_PANE_HEIGHT_PX, SPACE_MIN_PANE_PX, SPACE_WEIGHT_TOTAL, type SpacePane, type SpaceTab,
 } from "@shared/space-layout";
 import { ErrorBoundary } from "../ErrorBoundary";
 import { AgentAvatar } from "../AgentAvatar";
@@ -27,6 +28,8 @@ import { WorkspacePaneProvider, type PaneActions, type WorkspacePane } from "./p
 import { PinIcon } from "./PinIcon";
 import { NewChatStart } from "./NewChatStart";
 import { SpaceMenu, type SpaceMenuItem } from "./SpaceMenu";
+import { RenameChatDialog } from "../RenameChatDialog";
+import { listCopy } from "@/lib/workspace-list-copy";
 import { hasChatDrag, readChatDrag, spaceCopy, startCopy, type SpaceLocale } from "./copy";
 import styles from "./Space.module.css";
 
@@ -183,6 +186,8 @@ export function Space() {
   const [menu, setMenu] = useState<{ x: number; y: number; paneId: string; kind: "title" | "more" | "lead"; anchor: HTMLElement | null } | null>(null);
   // The members of the group room whose title menu is open (workspace-v2-pop-pane 9): read when that menu opens, never on a clock.
   const [roomMembers, setRoomMembers] = useState<{ chatId: string; list: HomeTreeParticipant[] } | null>(null);
+  // The rename field of the title menu (the sidebar's right-click rename is the same dialog and the same chats.rename).
+  const [renaming, setRenaming] = useState<{ chatId: string; current: string } | null>(null);
   const menuChatId = menu ? (layout.space.panes.find((item) => item.id === menu.paneId)?.active ?? layout.space.panes.find((item) => item.id === menu.paneId)?.tabs[0]?.chatId ?? "") : "";
   const menuIsGroup = (() => { const entry = info.get(menuChatId); return entry?.state === "ok" && entry.kind === "room" && entry.group; })();
   const menuKind = menu?.kind;
@@ -222,6 +227,11 @@ export function Space() {
     return () => observer.disconnect();
   }, [panes.length === 0]);
   useEffect(() => { setSpacePaneCapacity(capacity); }, [capacity]);
+  // A refusal notice speaks of the layout as it was: when a pane closes (or the window grows) so that one more fits, it is no longer true and goes.
+  // Only once the Space has measured itself: before that the capacity is "unknown = four" and would clear a narrow-window notice that was raised before this screen was drawn.
+  useEffect(() => { if (notice && box.width > 0 && !blockStillApplies(panes.length, capacity)) setSpaceNotice(null); }, [notice, panes.length, capacity, box.width]);
+  // The pane the New chat start covers when the Space is full: fixed when the start is drawn (a new start asks again), not following the focus.
+  const coverRef = useRef<{ nonce: number; paneId: string } | null>(null);
 
   // A drag from the left list is on screen: show where it can land. Cleared on any end of the drag.
   useEffect(() => {
@@ -276,6 +286,9 @@ export function Space() {
         },
       }));
     }
+    const known = info.get(chatId);
+    const renameItem: SpaceMenuItem = { id: "rename", label: listCopy(locale).rename, dividerBefore: true,
+      onSelect: () => setRenaming({ chatId, current: known?.state === "ok" && known.title.trim() !== "New chat" ? known.title.trim() : "" }) };
     if (menu.kind === "title" && menuIsGroup && members.length > 0) {
       // The room's own member dialog (the one the "N명" mark opens) adds members; when the room has not drawn it, the person is told instead of nothing happening.
       const addMembers = () => { const button = document.querySelector<HTMLElement>(`[data-space-body="${pane.id}"] [data-one-taskforce-badge]`)?.closest("button"); if (button) button.click(); else say(ko ? "멤버 관리를 열지 못했어요." : "Could not open the member list."); };
@@ -285,12 +298,13 @@ export function Space() {
           badge: index === 0 ? (ko ? "팀장" : "lead") : undefined, onSelect: () => undefined,
         })),
         { id: "add-member", label: ko ? "멤버 추가" : "Add member", dividerBefore: true, onSelect: addMembers },
+        renameItem,
         { id: "change-lead", label: ko ? "팀장 바꾸기" : "Change lead", disabled: members.length < 2, onSelect: () => { const anchor = menu.anchor; const box = anchor?.getBoundingClientRect(); setMenu({ x: box?.left ?? menu.x, y: box?.bottom ?? menu.y, paneId: menu.paneId, kind: "lead", anchor }); } },
       ];
     }
     if (menu.kind === "title") {
       const isPinned = pinned.has(chatId);
-      return [{ id: "pin", label: isPinned ? copy.unpin : copy.pin, onSelect: () => updateSpaceLayout((source) => togglePin(source, chatId)) }];
+      return [{ id: "pin", label: isPinned ? copy.unpin : copy.pin, onSelect: () => updateSpaceLayout((source) => togglePin(source, chatId)) }, { ...renameItem, dividerBefore: false }];
     }
     // The conversation's own rows first (New session, Clear history, the two panels the old head held), then the pane's.
     const actions = resolvePaneActions(pane.id, info.get(chatId), paneActions[pane.id]);
@@ -309,29 +323,37 @@ export function Space() {
 
   if (panes.length === 0) return <EmptySpace dragging={dragging} locale={locale} projectId={start?.projectId ?? null} />;
 
-  const share = columnSplit(panes);
+  // The line as drawn: inside the bounds this Space's width allows (neither column under SPACE_MIN_PANE_PX), the same value the grid, the separator and its keys use.
+  const share = clampColumnShare(columnSplit(panes), box.width);
   const canOpenNew = panes.length < Math.min(capacity, 4);
-  // New chat (F-D6): the start screen is a pane of its own while there is room for one more; when the Space is full it covers the focused pane
-  // (that pane stays mounted underneath and comes back when the start is closed or begun).
-  const draft: "extra" | "cover" | null = start && start.projectId !== "current" ? (canOpenNew ? "extra" : "cover") : null;
-  const drawn = panes.length + (draft === "extra" ? 1 : 0);
+  // New chat: the start screen REPLACES the focused pane (it covers that whole pane: one head, one composer; the old conversation stays in the left list and
+  // comes back with the close button). It no longer opens as a second pane beside the old chat: people typed into the old chat's identical composer and the message went into
+  // an old project conversation. Splitting stays an explicit action (drag a chat to the right edge of a pane). Not an decision: the owner only fixed the start screen's CONTENT.
+  const draft: "cover" | null = start && start.projectId !== "current" ? "cover" : null;
+  let coverId: string | null = null;
+  if (draft === "cover" && start) {
+    const remembered = coverRef.current && coverRef.current.nonce === start.nonce ? coverRef.current.paneId : null;
+    coverId = coverPaneId(panes, focus, remembered);
+    coverRef.current = coverId ? { nonce: start.nonce, paneId: coverId } : null;
+  }
+  const drawn = panes.length;
   return (
     <div ref={rowRef} className={styles.space} role="group" aria-label={copy.spaceLabel} data-space="true" data-pane-count={drawn} data-cols={cols}>
       <div className={styles.grid} data-space-grid="true" style={gridFor(drawn, cols, share)}>
       {panes.map((pane, index) => (
-        <PaneView key={pane.id} pane={pane} index={index} across={drawn === 3 && index === 2 && cols === 2} canOpenNew={canOpenNew}
-          cover={draft === "cover" && focus === pane.id ? start : null} onStarted={(chatId, kind) => { closeNewChatStart(); openChatInSpace({ chatId, kind }, "replace-pane", pane.id); }}
-          focused={focus === pane.id} info={info} running={running} pinned={pinned} dragging={dragging} locale={locale}
-          actions={paneActions[pane.id]} setActions={setActionsOf}
-          onClose={closeChat} onMenu={(paneId, kind, x, y, anchor) => setMenu({ paneId, kind, x, y, anchor })} onRetry={retry} />
+        <Fragment key={pane.id}>
+          <PaneView pane={pane} index={index} across={drawn === 3 && index === 2 && cols === 2} canOpenNew={canOpenNew}
+            cover={coverId === pane.id ? start : null} onStarted={(chatId, kind) => { closeNewChatStart(); openChatInSpace({ chatId, kind }, "replace-pane", pane.id); }}
+            focused={focus === pane.id} info={info} running={running} pinned={pinned} dragging={dragging} locale={locale}
+            actions={paneActions[pane.id]} setActions={setActionsOf}
+            onClose={closeChat} onMenu={(paneId, kind, x, y, anchor) => setMenu({ paneId, kind, x, y, anchor })} onRetry={retry} />
+          {/* The line between the columns sits right after the first pane in reading and Tab order (it was the last thing in the Space, a screenful of Tab stops away). */}
+          {index === 0 && cols === 2 && drawn > 1 ? <Border share={share} short={drawn === 3} width={box.width} locale={locale} /> : null}
+        </Fragment>
       ))}
-      {draft === "extra" && start ? (
-        <DraftPane key={start.nonce} across={drawn === 3 && cols === 2} projectId={start.projectId} locale={locale} onClose={closeNewChatStart}
-          onStarted={(chatId, kind) => { closeNewChatStart(); openChatInSpace({ chatId, kind }, "new-pane"); }} />
-      ) : null}
       </div>
-      {cols === 2 && drawn > 1 ? <Border share={share} short={drawn === 3} rowRef={rowRef} locale={locale} /> : null}
       {menu ? <SpaceMenu x={menu.x} y={menu.y} label={copy.menuFor} items={menuItems} returnFocus={menu.anchor} onClose={() => setMenu(null)} /> : null}
+      {renaming ? <RenameChatDialog chatId={renaming.chatId} current={renaming.current} locale={locale} onClose={() => setRenaming(null)} /> : null}
       {toast ? <div className={styles.toast} role="status" data-space-toast="true">{toast}</div> : null}
       {notice ? <SpaceNoticeBar notice={notice} info={info} locale={locale} /> : null}
     </div>
@@ -380,7 +402,7 @@ function EmptySpace({ dragging, locale, projectId }: { dragging: boolean; locale
         event.preventDefault();
         openChatInSpace(drag, "replace-pane");
       }}>
-      {/* No pane is open: the start screen is the Space (F-D6) - the project of nothing on screen is "Empty project". */}
+      {/* No pane is open: the start screen is the Space - the project of nothing on screen is "No project". */}
       <DraftPane across={false} projectId={projectId} locale={locale} fills
         onStarted={(chatId, kind) => { closeNewChatStart(); openChatInSpace({ chatId, kind }, "replace-pane"); }} />
       {dragging || over ? <div className={styles.emptyDrop} aria-hidden="true">{copy.dropEmpty}</div> : null}
@@ -393,13 +415,13 @@ function EmptySpace({ dragging, locale, projectId }: { dragging: boolean; locale
  * No chat exists yet, so the title menu and the pane menu hold the one thing that is true of a pane with nothing in it - close it - and the side panel
  * button is drawn off (it opens once the chat exists, like a conversation head that has nothing to show).
  */
-function DraftHead({ locale, onClose, cover = false }: { locale: SpaceLocale; onClose?: () => void; cover?: boolean }) {
+function DraftHead({ locale, onClose }: { locale: SpaceLocale; onClose?: () => void }) {
   const copy = spaceCopy(locale);
   const title = startCopy(locale).title;
   const [menu, setMenu] = useState<{ x: number; y: number; anchor: HTMLElement } | null>(null);
   const open = (event: React.MouseEvent<HTMLButtonElement>) => { const box = event.currentTarget.getBoundingClientRect(); setMenu({ x: box.left, y: box.bottom, anchor: event.currentTarget }); };
   return (
-    <header className={cover ? styles.coverBar : styles.paneHead} data-space-draft-head="true">
+    <header className={styles.paneHead} data-space-draft-head="true">
       <span className={styles.paneKind} aria-hidden="true"><IconCode size={13} /></span>
       <button type="button" className={styles.paneTitle} aria-haspopup="menu" aria-expanded={menu !== null} title={title} data-space-draft-title="true" onClick={open}>
         <span className={styles.paneTitleText}>{title}</span><IconChevronDown size={14} />
@@ -477,7 +499,7 @@ const PaneView = memo(function PaneView({ pane, index, across, canOpenNew, focus
       aria-label={copy.paneLabel(index + 1)}
       onPointerDownCapture={() => { if (!focused) updateSpaceLayout((source) => setFocus(source, pane.id)); }}
       onFocusCapture={() => { if (!focused) updateSpaceLayout((source) => setFocus(source, pane.id)); }}>
-      <header className={styles.paneHead} data-space-pane-head={pane.id}>
+      <header className={styles.paneHead} data-space-pane-head={pane.id} inert={cover ? true : undefined}>
         <span className={styles.paneKind} aria-hidden="true">{running.has(active.chatId) ? <span className={styles.running} role="img" aria-label={copy.running} /> : <KindIcon kind={active.kind} group={ok?.group ?? false} names={ok?.names ?? []} />}</span>
         <button type="button" className={styles.paneTitle} aria-haspopup="menu" title={title} data-space-pane-title={pane.id} onClick={open("title")}>
           <span className={styles.paneTitleText}>{title}</span>
@@ -497,20 +519,13 @@ const PaneView = memo(function PaneView({ pane, index, across, canOpenNew, focus
         <button type="button" className={styles.paneIcon} aria-label={copy.paneMenu} aria-haspopup="menu" data-space-pane-menu={pane.id} onClick={open("more")}><IconMoreHorizontal size={15} /></button>
         <button type="button" className={styles.paneIcon} aria-label={`${copy.closePane}: ${title}`} data-space-pane-close={pane.id} onClick={() => onClose(active.chatId)}><IconClose size={15} /></button>
       </header>
-      <div className={styles.body} data-space-chat={active.chatId} data-space-body={pane.id}>
+      <div className={styles.body} data-space-chat={active.chatId} data-space-body={pane.id} inert={cover ? true : undefined}>
         {/* One conversation that fails to draw must not blank the other panes (or the app). */}
         <ErrorBoundary resetKey={active.chatId}>
           <WorkspacePaneProvider value={paneContext}>
             <PaneBody key={active.chatId} tab={active} paneId={pane.id} entry={entry} focused={focused} locale={locale} onRetry={onRetry} onClose={onClose} />
           </WorkspacePaneProvider>
         </ErrorBoundary>
-        {cover ? (
-          // The Space is full: the start screen covers this (focused) pane; the pane stays mounted underneath.
-          <div className={styles.cover} data-space-cover="true">
-            <DraftHead locale={locale} onClose={closeNewChatStart} cover />
-            <NewChatStart key={cover.nonce} projectId={cover.projectId === "current" ? null : cover.projectId} onStarted={onStarted} />
-          </div>
-        ) : null}
         {dragging ? (
           <div className={styles.dropLayer} data-space-drop-layer={pane.id}
             onDragOver={(event) => {
@@ -535,22 +550,34 @@ const PaneView = memo(function PaneView({ pane, index, across, canOpenNew, focus
           </div>
         ) : null}
       </div>
+      {cover ? (
+        // The Space is full and the person chose to put the start here: it covers this WHOLE pane (one head, not two); the pane stays mounted underneath, inert.
+        <div className={styles.cover} data-space-cover="true" data-space-cover-pane={pane.id}>
+          <DraftHead locale={locale} onClose={closeNewChatStart} />
+          <div className={styles.body}><NewChatStart key={cover.nonce} projectId={cover.projectId === "current" ? null : cover.projectId} onStarted={onStarted} /></div>
+        </div>
+      ) : null}
     </section>
   );
 });
 
-/** The line between the columns: drag it, or use ←/→ (Shift = bigger steps). The layout moves live and is written once at the end. */
-function Border({ share, short, rowRef, locale }: { share: number; short: boolean; rowRef: React.RefObject<HTMLDivElement | null>; locale: SpaceLocale }) {
+/**
+ * The line between the columns: drag it, or focus it (Tab, or a click) and use ←/→ (Shift = bigger steps; Home / End = the ends). It is a real keyboard
+ * stop (a window splitter): a press on it takes the focus - the press is otherwise cancelled to keep a drag from selecting text, which also kept the focus
+ * on whatever was in the pane beside it, so the arrow keys never reached the line. Neither column goes under `SPACE_MIN_PANE_PX`. The layout moves live and
+ * is written once at the end.
+ */
+function Border({ share, short, width, locale }: { share: number; short: boolean; width: number; locale: SpaceLocale }) {
   const copy = spaceCopy(locale);
   const [dragging, setDragging] = useState(false);
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
-    const width = rowRef.current?.clientWidth || 1;
-    const startX = event.clientX, startShare = share;
     const target = event.currentTarget;
+    target.focus({ preventScroll: true });
+    const startX = event.clientX, startShare = share, span = width || 1;
     target.setPointerCapture(event.pointerId);
     setDragging(true);
-    const move = (moveEvent: PointerEvent) => { updateSpaceLayout((source) => setColumnSplit(source, startShare + (moveEvent.clientX - startX) / width), { persist: false }); };
+    const move = (moveEvent: PointerEvent) => { updateSpaceLayout((source) => setColumnSplit(source, startShare + (moveEvent.clientX - startX) / span, width), { persist: false }); };
     const up = () => {
       target.removeEventListener("pointermove", move);
       target.removeEventListener("pointerup", up);
@@ -562,15 +589,22 @@ function Border({ share, short, rowRef, locale }: { share: number; short: boolea
     target.addEventListener("pointerup", up);
     target.addEventListener("pointercancel", up);
   };
+  const bounds = columnShareBounds(width);
   return (
     <div className={styles.border} role="separator" aria-orientation="vertical" tabIndex={0} aria-label={copy.resize} style={{ left: `${share * 100}%`, height: short ? "50%" : "100%" }}
-      aria-valuenow={Math.round(share * SPACE_WEIGHT_TOTAL)} aria-valuemin={SPACE_MIN_WEIGHT} aria-valuemax={SPACE_WEIGHT_TOTAL - SPACE_MIN_WEIGHT} data-space-border="0" data-dragging={dragging ? "true" : undefined}
+      aria-valuenow={Math.round(share * SPACE_WEIGHT_TOTAL)} aria-valuemin={Math.round(bounds.min * SPACE_WEIGHT_TOTAL)} aria-valuemax={Math.round(bounds.max * SPACE_WEIGHT_TOTAL)} data-space-border="0" data-dragging={dragging ? "true" : undefined}
       onPointerDown={onPointerDown}
       onKeyDown={(event) => {
+        if (event.key === "Home" || event.key === "End") {
+          event.preventDefault();
+          const ends = columnLineEnds(width);
+          updateSpaceLayout((source) => setColumnSplit(source, (event.key === "Home" ? ends.min : ends.max) / SPACE_WEIGHT_TOTAL, width));
+          return;
+        }
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault();
         const step = (event.shiftKey ? 100 : 20) * (event.key === "ArrowRight" ? 1 : -1);
-        updateSpaceLayout((source) => resizeColumns(source, step));
+        updateSpaceLayout((source) => resizeColumns(source, step, width));
       }}>
       <span className={styles.grip} aria-hidden="true"><svg width="8" height="14" viewBox="0 0 8 14" fill="currentColor"><circle cx="2" cy="3" r="1" /><circle cx="6" cy="3" r="1" /><circle cx="2" cy="7" r="1" /><circle cx="6" cy="7" r="1" /><circle cx="2" cy="11" r="1" /><circle cx="6" cy="11" r="1" /></svg></span>
     </div>
