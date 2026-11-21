@@ -533,8 +533,9 @@ export function HomeTree({ locale }: { locale: Locale }) {
     return (
       <div className="project-sidebar-project" key={key} data-home-project={projectId}>
         <div className="project-sidebar-project-row" data-folded={isCollapsed ? "true" : undefined}>
-          <button type="button" className="project-sidebar-project-link" data-active={currentProject === projectId && pathname.startsWith("/project")}
-            onClick={() => navigate(`/project/detail?id=${encodeURIComponent(projectId)}`)}>
+          {/* A project has no page of its own: its row folds the chats under it, or - with none yet - starts the first one in it. */}
+          <button type="button" className="project-sidebar-project-link" data-home-project-link={projectId} aria-expanded={count > 0 ? !isCollapsed : undefined}
+            onClick={() => { if (count > 0) toggleCollapsed(key); else requestNewChat({ projectId, projectName: name }); }}>
             <IconFolder size={15} /><span>{name}</span>
           </button>
           <button type="button" className={`project-sidebar-collapse ${styles.rowPlus}`} data-home-new={name} onClick={() => requestNewChat({ projectId, projectName: name })}

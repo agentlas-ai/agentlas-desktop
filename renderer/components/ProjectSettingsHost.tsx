@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { PROJECT_SETTINGS_EVENT, type ProjectSettingsRequest } from "@/lib/project-settings";
 import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
+import { openNewChatStart } from "@/lib/new-chat-start";
 import dynamic from "next/dynamic";
 import styles from "./ProjectSettingsModal.module.css";
 
@@ -59,7 +60,11 @@ export function ProjectSettingsHost({ onVisibilityChange }: { onVisibilityChange
       onBackgroundError={setBackgroundError}
       onSaved={(project) => {
         close();
-        if (request.mode === "create") navigate(`/project/detail?id=${encodeURIComponent(project.id)}`);
+        // A project has no page of its own: a new one lands in the Workspace on the start screen for it (the first chat is made when its first message is sent).
+        if (request.mode === "create") {
+          openNewChatStart({ projectId: project.id, projectName: project.name });
+          if (typeof window !== "undefined" && window.location.pathname.replace(/\/+$/, "") !== "/workspace") navigate("/workspace");
+        }
       }} /> : null}
     {backgroundError ? <div className={styles.backgroundError} role="alert">
       <span>{backgroundError}</span>

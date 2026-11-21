@@ -7579,10 +7579,11 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
           type="button"
           className="project-detail-back titlebar-nodrag"
           data-work-dashboard-return="task-header"
-          onClick={() => router.push(project ? `/project/detail?id=${project.id}` : "/workspace")}
-          aria-label={project ? (locale === "ko" ? "프로젝트 열기" : "Open project") : (locale === "ko" ? "홈으로 돌아가기" : "Back to Home")}
+          // A project has no page of its own: this goes back to the Workspace, where the project's chats are listed.
+          onClick={() => router.push("/workspace")}
+          aria-label={locale === "ko" ? "홈으로 돌아가기" : "Back to Home"}
           // The label is hidden in this header (icon only, beside the Files panel's folder icon), so say on hover where it goes.
-          title={project ? (locale === "ko" ? `프로젝트 열기: ${project.name}` : `Open project: ${project.name}`) : (locale === "ko" ? "홈으로 돌아가기" : "Back to Home")}
+          title={locale === "ko" ? "홈으로 돌아가기" : "Back to Home"}
         >
           <IconFolder size={16} />
           <span>{project?.name || (locale === "ko" ? "대시보드" : "Dashboard")}</span>
@@ -7599,22 +7600,8 @@ function ChatPage({ externalChatId, embedded = false, onNewSession, scopeActive 
                 letterSpacing: 0.6,
               }}
             >
-              {/*
-                * ★마우스로만 되던 자리 (실측 2026-09-08). 프로젝트로 가는 유일한 길인데
-                *   <span onClick> 이라 Tab 으로 닿지도, Enter 로 눌리지도 않았다.
-                *   진짜 단추로 바꾼다 — 모양은 그대로 두고 기본 단추 스타일만 지운다.
-                */}
-              <button
-                type="button"
-                onClick={() => router.push(`/project/detail?id=${project.id}`)}
-                style={{
-                  cursor: "pointer", color: "var(--accent)", fontWeight: 600,
-                  border: 0, background: "transparent", padding: 0, font: "inherit",
-                }}
-                className="titlebar-nodrag"
-              >
-                {project.name}
-              </button>
+              {/* The project's name, as a label: a project has no page of its own to open. */}
+              <span style={{ color: "var(--accent)", fontWeight: 600 }}>{project.name}</span>
             </div>
           )}
           {editingTitle ? (

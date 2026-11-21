@@ -6,18 +6,18 @@ import { emptyProjectName } from "@/lib/empty-project-name";
 import { useT } from "@/lib/i18n";
 import { listFailureText } from "@/lib/workspace-list-copy";
 import { readViewData, writeViewData } from "@/lib/view-data-cache";
-import { chipRuntimeFor } from "@/lib/one-runtime-chip";
 import { holdFirstMessage } from "@/lib/new-chat-start";
 import { openProjectSettings } from "@/lib/project-settings";
 import { isCallOnlyHubAgent } from "@shared/call-only-agent";
-import type { FsPathGrant, InstalledAgent, Project, RuntimeStatus } from "@/lib/types";
+import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
+import type { FsPathGrant, InstalledAgent, Project, RuntimeSelection } from "@/lib/types";
 import { pickableAgents, toggleSelection } from "../NewAgentChatDialog";
 import { IconArrowUp, IconCheck, IconPlus, IconChevronDown, IconCode, IconFolder, IconGithub, IconSearch, IconUsers } from "../Icon";
 import { OneVoiceInputHelp } from "../one/OneVoiceInputHelp";
 import { OneAgentPortrait } from "../one/OneAgentPortrait";
+import { OneRuntimeChips } from "../one/OneRuntimeChips";
 import { OneBottomSheet } from "../one/OneBottomSheet";
 import { PopupAction } from "../Popup";
-import { runtimeEffectiveModelId, runtimeModelDisplayLabel } from "../dashboard/RuntimeModelPicker";
 import { startCopy, type SpaceLocale } from "./copy";
 import styles from "./NewChatStart.module.css";
 
@@ -28,7 +28,9 @@ import styles from "./NewChatStart.module.css";
  *   - the second drop-down is always "Work session" when it opens; picking agents there starts an Agent Chat with them instead (one = 1:1, more = a group).
  *   - the first message of a Work session is handed to the new chat's surface, which sends it like any typed message; an Agent Chat room opens with the
  *     words in its composer (the room's composer belongs to the personal agent's screen, which this change does not touch).
- * Words under the box say what the session will run with (read from the same runtime list the composer reads); they are not a second setting.
+ * The box is the personal agent's own composer (the round + beside a thin-bordered pill, the mic and the send arrow only when there is something to send),
+ * and under it sit the personal agent's own model and effort chips (OneRuntimeChips in its draft form): a pick is kept here and pinned to the chat the
+ * moment it is made; with no pick the chips show what the run takes (the orchestrator pool's pick), so nothing is claimed that is not so.
  */
 
 const folderName = (grant: FsPathGrant): string => grant.path.split(/[\\/]/).filter(Boolean).pop() || grant.path;
@@ -38,7 +40,7 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
   projectId: string | null;
   onStarted: (chatId: string, kind: "room" | "work") => void;
 }) {
-  const { locale: appLocale, t } = useT();
+  const { locale: appLocale } = useT();
   const locale: SpaceLocale = appLocale === "ko" ? "ko" : "en";
   const copy = startCopy(locale);
   const [projects, setProjects] = useState<Project[] | "failed">(() => readViewData<Project[]>("dashboard.projects")?.value ?? []);
@@ -54,7 +56,8 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileNote, setFileNote] = useState(false);
-  const [runtime, setRuntime] = useState<{ model: string; effort: string | null } | null>(null);
+  // A model / effort the person picked on this screen (null = the run takes the pool's pick, which the chips show). Pinned to the chat when it is made.
+  const [pickedRuntime, setPickedRuntime] = useState<RuntimeSelection | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const attempt = useRef(0);
@@ -75,22 +78,8 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
     window.addEventListener("agentlas:projects-changed", load);
     if (!api?.team?.list) setAgents("failed");
     else api.team.list().then((list) => { if (!cancelled) setAgents(pickableAgents(list)); }).catch(() => { if (!cancelled) setAgents("failed"); });
-    if (api?.runtime?.detect) {
-      // The words say what the run takes: the orchestrator pool's pick (Main's own resolution), not the legacy "active" row.
-      void Promise.all([api.runtime.detect(), api.runtime.listRoleMembers?.().then((state) => state?.picks?.orchestrator?.selection ?? null).catch(() => null) ?? Promise.resolve(null)]).then(async ([list, pick]) => {
-        const active = chipRuntimeFor(list, pick);
-        if (!active || cancelled) return;
-        const models = await api.runtime.listModels?.({ kind: active.kind }).catch(() => []) ?? [];
-        if (cancelled) return;
-        const status = active as RuntimeStatus;
-        const id = runtimeEffectiveModelId(status, models);
-        const label = id ? runtimeModelDisplayLabel(status, locale, models) : status.kind;
-        const effort = active.effort ? (active.efforts?.find((item) => item.id === active.effort)?.label ?? active.effort) : null;
-        setRuntime({ model: label, effort });
-      }).catch(() => undefined);
-    }
     return () => { cancelled = true; window.removeEventListener("agentlas:projects-changed", load); };
-  }, [locale]);
+  }, []);
 
   // A drop-down closes on Escape, on a press outside it and when the keyboard focus moves outside it (events, not a clock).
   useEffect(() => {
@@ -120,6 +109,7 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
     const mine = ++attempt.current;
     setBusy(true); setError(null);
     let madeProject: string | null = null;
+    let madeChat: string | null = null;
     try {
       let target = projectId;
       if (target === null && makeEmpty) {
@@ -129,26 +119,39 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
         madeProject = made.id; target = made.id;
         window.dispatchEvent(new Event("agentlas:projects-changed"));
       }
+      // A model / effort picked here is the chat's own pin from its first turn on: Main must acknowledge exactly what was asked, or nothing starts.
+      const pinPick = async (chatId: string) => {
+        if (!pickedRuntime) return;
+        const updated = await api.chats.setRuntimeSelection(chatId, pickedRuntime);
+        if (!updated || updated.id !== chatId || !runtimeSelectionReceiptMatches(pickedRuntime, updated.runtimeSelection)) throw new Error("runtime_selection_unacknowledged");
+      };
       if (selected.length === 0) {
         const chat = await api.chats.create({ projectId: target });
+        madeChat = chat.id;
+        if (mine !== attempt.current) return;
+        await pinPick(chat.id);
         if (mine !== attempt.current) return;
         holdFirstMessage(chat.id, message);
         onStarted(chat.id, "work");
       } else {
         if (!api.chats.createAgentChat) throw new Error("unavailable");
         const made = await api.chats.createAgentChat({ agentIds: selected, projectId: target });
+        madeChat = made.chat.id;
+        if (mine !== attempt.current) return;
+        await pinPick(made.chat.id);
         if (mine !== attempt.current) return;
         holdFirstMessage(made.chat.id, message);
         onStarted(made.chat.id, "room");
       }
     } catch (cause) {
       if (mine !== attempt.current) return;
-      // A project made for this start that no chat came out of is not left behind.
+      // A chat made for this start that never opened (its model pick was refused) and a project made for it are not left behind.
+      if (madeChat) { void api.chats.remove(madeChat).catch(() => undefined); }
       if (madeProject) { void api.projects.remove(madeProject).then(() => window.dispatchEvent(new Event("agentlas:projects-changed"))).catch(() => undefined); }
       setBusy(false);
       setError(copy.failed(listFailureText(cause, locale)));
     }
-  }, [text, busy, projectId, makeEmpty, selected, onStarted, copy, locale]);
+  }, [text, busy, projectId, makeEmpty, selected, pickedRuntime, onStarted, copy, locale]);
 
   const addEnvironment = async () => {
     const api = ipc();
@@ -167,11 +170,11 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
   return (
     <div ref={root} className={styles.start} data-new-chat-start="true" aria-busy={busy ? "true" : "false"}>
       <div className={styles.column}>
-        <div className={styles.pill}>
+        <div className={styles.composer} data-new-chat-composer="true" data-ready={text.trim() ? "true" : "false"}>
           <div className={styles.plusWrap} data-start-menu-area="true">
-            <button type="button" className={styles.plus} aria-haspopup="menu" aria-expanded={menu === "plus"} aria-label={copy.plus} title={copy.plus} disabled={busy} data-new-chat-plus="true" onClick={() => setMenu(menu === "plus" ? null : "plus")}><IconPlus size={16} /></button>
+            <button type="button" className={styles.plus} aria-haspopup="menu" aria-expanded={menu === "plus"} aria-label={copy.plus} title={copy.plus} disabled={busy} data-new-chat-plus="true" onClick={() => setMenu(menu === "plus" ? null : "plus")}><IconPlus size={20} /></button>
             {menu === "plus" ? (
-              <div className={styles.menu} role="menu" aria-label={copy.plus}>
+              <div className={`${styles.menu} ${styles.menuUp}`} role="menu" aria-label={copy.plus}>
                 <button type="button" role="menuitem" className={styles.item} data-start-attach-folder="true" onClick={() => { setMenu(null); setEnv({ grant: null, busy: false, error: null }); }}>
                   <IconFolder size={15} /><span className={styles.itemText}>{copy.attachFolder}</span>
                 </button>
@@ -192,7 +195,7 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
               if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void start(); }
             }} />
           <span className={styles.voice} data-new-chat-voice="true"><OneVoiceInputHelp locale={locale} composerRef={inputRef} disabled={busy} surface="work" /></span>
-          <button type="button" className={styles.send} aria-label={copy.send} title={copy.send} disabled={busy || !text.trim()} data-new-chat-send="true" onClick={() => void start()}><IconArrowUp size={16} /></button>
+          <button type="button" className={styles.send} aria-label={copy.send} title={copy.send} disabled={busy || !text.trim()} data-new-chat-send="true" onClick={() => void start()}><IconArrowUp size={20} strokeWidth={2} /></button>
         </div>
         <div className={styles.row}>
           <div className={styles.drops} data-start-menu-area="true">
@@ -259,10 +262,8 @@ export function NewChatStart({ projectId: wanted, onStarted }: {
               ) : null}
             </div>
           </div>
-          <div className={styles.words} data-start-words="true">
-            <span>{runtime?.model ?? copy.modelUnknown}</span>
-            {runtime?.effort ? <span>{runtime.effort}</span> : null}
-            <span>{t("chatinput.perm.write")}</span>
+          <div className={styles.trail} data-start-words="true">
+            <OneRuntimeChips chatId={null} locale={locale} disabled={busy} draftSelection={{ value: pickedRuntime, onChange: setPickedRuntime }} />
           </div>
         </div>
         {busy ? <p className={styles.status} role="status">{copy.working}</p> : null}

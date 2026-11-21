@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { invalidateViewData } from "@/lib/view-data-cache";
+import { confirmPopup } from "@/lib/popup";
 import { projectAgentLimitMessage } from "@/lib/project-agent-roster";
 import type { NewProjectSource, ProjectSettingsRequest } from "@/lib/project-settings";
 import type { FsPathGrant, Project, ProjectAgentPoolMember } from "@/lib/types";
@@ -37,11 +38,11 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
   onSaved: (project: Project) => void;
   onBackgroundError?: (message: string) => void;
 }) {
-  const { locale } = useT();
+  const { locale, t } = useT();
   const ko = locale === "ko";
   const editing = request.mode === "edit";
   // One screen: name, folder, goal. A new project starts as "decide the folder later" (the app prepares its own folder, as the
-  // empty project always did) unless the caller chose a source. Which agents belong to a project is edited on the project's page.
+  // empty project always did) unless the caller chose a source. A project has no page of its own, so deleting it is here too.
   const [source, setSource] = useState<NewProjectSource | "sample" | null>(request.mode === "create" ? request.sourceType ?? "empty" : null);
   const [project, setProject] = useState<Project | null>(null);
   const [loading, setLoading] = useState(editing);
@@ -208,6 +209,31 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
     }
   }
 
+  // The one place a project is deleted. Its chats keep their rows under "No project"; the folder is never touched (the confirm text says so).
+  async function removeProject() {
+    if (!project || operation.current) return;
+    if (!await confirmPopup(t("project.confirm_delete", { name: project.name }), { locale, tone: "danger", confirmLabel: ko ? "삭제" : "Delete" })) return;
+    if (operation.current) return;
+    operation.current = true;
+    setPending("save"); setError("");
+    try {
+      const api = ipc();
+      if (!api) throw new Error("bridge unavailable");
+      await api.projects.remove(project.id);
+      invalidateViewData("dashboard.projects");
+      window.dispatchEvent(new CustomEvent("agentlas:projects-changed", { detail: { projectId: project.id } }));
+      onCloseRef.current();
+    } catch {
+      reportFailure(
+        ko ? "삭제하지 못했습니다. 프로젝트는 그대로 있어요. 다시 시도해 주세요." : "Could not delete. The project is unchanged; please try again.",
+        ko ? "백그라운드 삭제에 실패했습니다. 프로젝트 설정을 다시 열어 시도해 주세요." : "The background delete failed. Reopen project settings to try again.",
+      );
+    } finally {
+      operation.current = false;
+      if (mounted.current) setPending(null);
+    }
+  }
+
   // A field with a length limit says so: the browser cuts a longer paste silently, and the person reads a short name where they typed a long one.
   const limitNote = (length: number, limit: number) => length >= Math.floor(limit * 0.8)
     ? <small className={styles.count} data-limit={length >= limit ? "true" : undefined} data-project-limit={limit} aria-live="polite">{length.toLocaleString()} / {limit.toLocaleString()}{length >= limit ? (ko ? " · 여기까지만 저장돼요" : " · this is the most that is kept") : ""}</small> : null;
@@ -278,6 +304,7 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
           </div>
           {source && !loading && (!editing || project) && <footer className={styles.footer}>
             <div className={styles.feedback} aria-live="polite">{error ? <span role="alert" className={styles.error}>{error}</span> : pending ? (ko ? "닫아도 작업은 백그라운드에서 계속됩니다." : "You can close this window; the operation will continue in the background.") : !name.trim() ? (ko ? "프로젝트 이름을 적어 주세요." : "Give your project a name.") : !sourceReady ? (ko ? "폴더를 연결하거나 '나중에 정하기'를 고르세요." : "Connect a folder, or choose “Decide later”.") : ""}</div>
+            {editing && project ? <button className={styles.danger} type="button" data-project-delete="true" onClick={() => void removeProject()} disabled={Boolean(pending)}>{ko ? "프로젝트 삭제" : "Delete project"}</button> : null}
             <button className={styles.secondary} type="button" onClick={requestClose}>{pending ? (ko ? "백그라운드에서 계속" : "Continue in background") : (ko ? "취소" : "Cancel")}</button>
             <button className={styles.primary} type="button" onClick={() => void save()} disabled={!canSave}>{pending === "save" ? (ko ? "저장 중…" : "Saving…") : editing ? (ko ? "저장" : "Save changes") : (ko ? "프로젝트 만들기" : "Create project")}</button>
           </footer>}

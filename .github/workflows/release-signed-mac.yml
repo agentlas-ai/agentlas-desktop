@@ -300,7 +300,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ed641495335179a5b2fefba85a2254f5797eeaadcb041bf685a97c575ee81e1b') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '3f1cbc661746751525799310e997af20de926288fe55fff99332b9ceb6e74d3f') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -334,7 +334,7 @@ jobs:
             "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
             "scripts/test-one-activity-contract.cjs": "d158c195da51fad2e81f97bd50d978a0e77f33e0b41fe6bad29a7949204b7567",
             "scripts/test-one-sidebar-contract.cjs": "2e300246b0bd93d71c00ee8ed41560ba9115608a6257f2f3b8802d8ca79f23b4",
-            "scripts/test-project-first-v84.cjs": "2b1d30055ddef77782c154dfaba9a5a1e9d69cb538f2fee7b38994e1750e433c",
+            "scripts/test-project-first-v84.cjs": "944e9dba50fbfbfcfe9578f4d7330e87245342ac09fe7074d0dc07b63f19b966",
             "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",
             "scripts/test-system-agent-taste-runtime.cjs": "be6a377c460d29adeb2bb5198ad5727cbbf42f5f3e54aac6864217adb374a3e3",
             "scripts/test-taste-chip-workflow.cjs": "d0f83459c5f4d34f9d969451d2217e6eb8cd465b7bc9d6cd943e5ce5c9ccd19e",
@@ -659,7 +659,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ed641495335179a5b2fefba85a2254f5797eeaadcb041bf685a97c575ee81e1b') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '3f1cbc661746751525799310e997af20de926288fe55fff99332b9ceb6e74d3f') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -693,7 +693,7 @@ jobs:
             "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
             "scripts/test-one-activity-contract.cjs": "d158c195da51fad2e81f97bd50d978a0e77f33e0b41fe6bad29a7949204b7567",
             "scripts/test-one-sidebar-contract.cjs": "2e300246b0bd93d71c00ee8ed41560ba9115608a6257f2f3b8802d8ca79f23b4",
-            "scripts/test-project-first-v84.cjs": "2b1d30055ddef77782c154dfaba9a5a1e9d69cb538f2fee7b38994e1750e433c",
+            "scripts/test-project-first-v84.cjs": "944e9dba50fbfbfcfe9578f4d7330e87245342ac09fe7074d0dc07b63f19b966",
             "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",
             "scripts/test-system-agent-taste-runtime.cjs": "be6a377c460d29adeb2bb5198ad5727cbbf42f5f3e54aac6864217adb374a3e3",
             "scripts/test-taste-chip-workflow.cjs": "d0f83459c5f4d34f9d969451d2217e6eb8cd465b7bc9d6cd943e5ce5c9ccd19e",
@@ -1064,7 +1064,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ed641495335179a5b2fefba85a2254f5797eeaadcb041bf685a97c575ee81e1b') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '3f1cbc661746751525799310e997af20de926288fe55fff99332b9ceb6e74d3f') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1098,7 +1098,7 @@ jobs:
             "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
             "scripts/test-one-activity-contract.cjs": "d158c195da51fad2e81f97bd50d978a0e77f33e0b41fe6bad29a7949204b7567",
             "scripts/test-one-sidebar-contract.cjs": "2e300246b0bd93d71c00ee8ed41560ba9115608a6257f2f3b8802d8ca79f23b4",
-            "scripts/test-project-first-v84.cjs": "2b1d30055ddef77782c154dfaba9a5a1e9d69cb538f2fee7b38994e1750e433c",
+            "scripts/test-project-first-v84.cjs": "944e9dba50fbfbfcfe9578f4d7330e87245342ac09fe7074d0dc07b63f19b966",
             "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",
             "scripts/test-system-agent-taste-runtime.cjs": "be6a377c460d29adeb2bb5198ad5727cbbf42f5f3e54aac6864217adb374a3e3",
             "scripts/test-taste-chip-workflow.cjs": "d0f83459c5f4d34f9d969451d2217e6eb8cd465b7bc9d6cd943e5ce5c9ccd19e",

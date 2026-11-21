@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.10 — 2026-11-22
+
+- New chat: the box that starts a chat is now the same box as the personal agent's, with its model and effort chips under it; pick them before the first message and the chat starts on them.
+- Projects: a project in the left list folds its chats, or starts its first chat; the project page is gone, and a project is deleted from Project settings.
+- Engine: the app ships Agentlas OS 1.2.99.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.9 — 2026-11-21
 
 - macOS: The app no longer refuses to open on macOS after a coding CLI updates itself inside it; updates install more reliably on quit.

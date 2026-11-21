@@ -36,9 +36,12 @@
 .folder>div { flex:1; min-width:0; display:grid; gap:7px; }
 .folder strong { font-size:13px; overflow-wrap:anywhere; }
 .folder>div>span { font-size:11px; color:var(--muted-deep); line-height:1.6; overflow-wrap:anywhere; }
-.secondary,.primary { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:9px 14px; min-height:36px; font:inherit; font-size:12px; font-weight:550; border-radius:8px; white-space:nowrap; cursor:pointer; }
+.secondary,.primary,.danger { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:9px 14px; min-height:36px; font:inherit; font-size:12px; font-weight:550; border-radius:8px; white-space:nowrap; cursor:pointer; }
 .secondary { color:var(--ink); background:var(--paper); border:1px solid var(--paper-edge); }
 .secondary:hover { color: var(--ink); }
+.danger { color:var(--danger); background:var(--paper); border:1px solid var(--paper-edge); }
+.danger:hover { background:color-mix(in srgb, var(--danger) 8%, var(--paper)); }
+.danger:disabled { opacity:.5; cursor:default; }
 .primary { background:var(--accent); color:var(--white,white); border:1px solid var(--accent); }
 .instructions { border-top:1px solid var(--paper-edge); padding-top:18px; margin-top:4px; }
 .instructions summary { font-size:12px; cursor:pointer; padding:0 0 12px; }
