@@ -7,7 +7,7 @@
  * words did not change writes nothing. Pure of Electron: the daemon loads it.
  */
 import type { SentCard } from "./plural-handoff-wire";
-import { HANDOFF_RECV_ROW_PREFIX, HANDOFF_SENT_ROW_PREFIX, HANDOFF_RESULT_CHARS, decodeHandoffCard, encodeHandoffCard, type HandoffAnswerLine, type HandoffCardState, type HandoffCardValue, type HandoffConsentEnd } from "../../shared/plural-handoff-card";
+import { HANDOFF_RECV_ROW_PREFIX, HANDOFF_SENT_ROW_PREFIX, HANDOFF_RESULT_CHARS, decodeHandoffCard, encodeHandoffCard, handoffStages, type HandoffConsentStage, type HandoffDeliveryStage, type HandoffAnswerLine, type HandoffCardState, type HandoffCardValue, type HandoffConsentEnd } from "../../shared/plural-handoff-card";
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const req = <T>(id: string): T => require(id) as T;
@@ -281,14 +281,14 @@ export function onSentQuestion(listener: (q: { rowId: string; qid: string; chatI
  * asking, denied and unanswered: nothing reached it). The model used to answer "still waiting" from its earlier `asking` result after the person denied or allowed; this is
  * the one record it reads instead: the sender's live rows (the server's word) over the card rows of this conversation (what the person sees).
  */
-export interface HandOffStateView { id: string; state: HandoffCardState; open: boolean; sent: boolean; place?: string; consent?: HandoffConsentEnd; brief: string; at?: string }
+export interface HandOffStateView { id: string; state: HandoffCardState; consent_stage: HandoffConsentStage; delivery: HandoffDeliveryStage; open: boolean; sent: boolean; place?: string; consent?: HandoffConsentEnd; brief: string; at?: string }
 const OPEN_STATES: ReadonlySet<string> = new Set(["asking", "reserved", "waiting_desktop_off", "waiting_phone_app", "claimed", "claimed_desktop_off", "approval"]);
 const BRIEF_FOR_MODEL = 80;
 
 function stateViewOf(value: HandoffCardValue): HandOffStateView {
   const neverSent = value.state === "asking" || (value.state === "cancelled" && value.consent === "deny") || (value.state === "expired" && value.consent === "unanswered");
   const place = value.phone ? "phone" : value.place;
-  return { id: value.id, state: value.state, open: OPEN_STATES.has(value.state), sent: !neverSent,
+  return { id: value.id, state: value.state, ...(() => { const g = handoffStages(value); return { consent_stage: g.consent, delivery: g.delivery }; })(), open: OPEN_STATES.has(value.state), sent: !neverSent,
     ...(place ? { place } : {}), ...(value.consent ? { consent: value.consent } : {}),
     brief: [...value.brief.replace(/\s+/g, " ").trim()].slice(0, BRIEF_FOR_MODEL).join(""), ...(value.at ? { at: value.at } : {}) };
 }
@@ -351,19 +351,6 @@ export async function handOffToolAction(input: { action: "list" | "cancel"; id?:
   return { ok: true, state: "cancelled", id: input.id };
 }
 
-/** The state words of the facts block: closed English words the model reads (not screen text). */
-function factWord(h: HandOffStateView): string {
-  if (h.state === "asking") return "asking (a chip waits for the person; nothing sent)";
-  if (h.state === "cancelled" && h.consent === "deny") return "denied by the person (nothing sent)";
-  if (h.state === "expired" && h.consent === "unanswered") return "never answered (nothing sent)";
-  if (h.state === "cancelled") return "cancelled";
-  if (h.state === "reserved") return "sent (the other agent has it)";
-  if (h.state === "waiting_desktop_off" || h.state === "waiting_phone_app") return "sent (waiting for the other side to open)";
-  if (h.state === "claimed" || h.state === "claimed_desktop_off") return "in progress";
-  if (h.state === "approval") return "in progress (a question waits)";
-  if (h.state === "done") return "done";
-  return h.state;
-}
 /** Hand-offs shown to the model each turn: the open ones and the ones that ended in the last day; at most this many. */
 export const HANDOFF_FACTS_MAX = 5;
 const HANDOFF_FACTS_WINDOW_MS = 24 * 3_600_000;
@@ -378,7 +365,7 @@ export function handOffFactsSection(chatId: string | null | undefined, now = Dat
   try {
     const recent = listHandOffStates(chatId, [], 12, db).filter((h) => h.open || !h.at || now - Date.parse(h.at) < HANDOFF_FACTS_WINDOW_MS).slice(0, HANDOFF_FACTS_MAX);
     if (!recent.length) return null;
-    const lines = recent.map((h) => `- ${h.id} -> ${h.place ?? "another agent"}: ${factWord(h)}; "${h.brief.slice(0, 50)}"`);
-    return ["Hand-offs of this conversation, the host's record right now (newer than anything said earlier, tool results included). Ask or cancel through hand_off; call a request a duplicate only when a row below has the same words, and name its id.", ...lines].join("\n");
+    const lines = recent.map((h) => `- ${h.id} -> ${h.place ?? "another agent"}: consent=${h.consent_stage}; delivery=${h.delivery}; "${h.brief.slice(0, 50)}"`);
+    return ["Hand-offs of this conversation, the host's record right now (newer than anything said earlier, tool results included). consent = the person's chip answer, delivery = where the work is (allowed + running/sent/done is delivered, not waiting for the chip). Ask or cancel through hand_off; call a request a duplicate only when a row below has the same words, and name its id.", ...lines].join("\n");
   } catch { return null; }
 }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.8 — 2026-11-21
+
+- Hand-offs: the personal agent now says correctly whether a hand-off was delivered.
+- Engine: the app ships Agentlas OS 1.2.99.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.7 — 2026-11-21
 
 - Reminders: a reminder you asked for now reaches you in the conversation where you asked, instead of staying in the hidden automation chat. Reminders you set from your phone keep their skipped dates, and an automation can end on a date you pick. Closing the window while reminders are waiting now asks first, and a conversation that only reads says plainly that it cannot schedule.

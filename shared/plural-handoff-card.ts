@@ -177,6 +177,29 @@ function stoppedWords(card: HandoffCardValue, ko: boolean): string {
   }
 }
 
+/**
+ * The two stages of one hand-off as closed words: the person's chip (consent) and where the work is (delivery). The card's own state is the one input, so the facts the model
+ * reads and the card the person sees come from the same record; a model never has to guess "in progress" means a chip waits. Allowed + running is delivered, never "waiting for the chip".
+ */
+export type HandoffConsentStage = "asked" | "allowed" | "denied" | "unanswered" | "cancelled";
+export type HandoffDeliveryStage = "not_sent" | "sent" | "waiting_other_side" | "running" | "question_waits" | "done" | "failed" | "stopped" | "expired" | "cancelled";
+export function handoffStages(card: Pick<HandoffCardValue, "state" | "consent" | "late">): { consent: HandoffConsentStage; delivery: HandoffDeliveryStage } {
+  switch (card.state) {
+    case "asking": return { consent: "asked", delivery: "not_sent" };
+    case "reserved": return { consent: "allowed", delivery: "sent" };
+    case "waiting_desktop_off": case "waiting_phone_app": return { consent: "allowed", delivery: "waiting_other_side" };
+    case "claimed": case "claimed_desktop_off": return { consent: "allowed", delivery: "running" };
+    case "approval": return { consent: "allowed", delivery: "question_waits" };
+    case "done": return { consent: "allowed", delivery: "done" };
+    case "failed": return { consent: "allowed", delivery: "failed" };
+    case "stopped": return { consent: "allowed", delivery: "stopped" };
+    case "expired": return card.consent === "unanswered" ? { consent: "unanswered", delivery: "not_sent" } : { consent: "allowed", delivery: "expired" };
+    case "cancelled":
+      if (card.consent === "deny") return { consent: "denied", delivery: "not_sent" };
+      return card.late ? { consent: "allowed", delivery: "done" } : { consent: "cancelled", delivery: "cancelled" };
+  }
+}
+
 export function handoffCardView(card: HandoffCardValue, ctx: HandoffCopyContext): HandoffCardView {
   const { ko } = ctx;
   const place = placeOf(card, ko);
