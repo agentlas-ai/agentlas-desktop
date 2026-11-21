@@ -59,7 +59,7 @@ One, the personal agent. Mobile for your phone. Finance for investment research.
 <table>
 <tr>
 <td width="50%" valign="top"><a href="https://agentlas.cloud/docs/introduction/agentlas-one"><img src="assets/readme/desktop-work-result.png" alt="Agentlas One on the Desktop"></a><br><strong>One</strong><br>A personal agent that runs on your computer. It opens a Work session, assigns agents, sends question cards, and attaches results as files.</td>
-<td width="50%" valign="top"><a href="https://agentlas.cloud/docs/introduction/agentlas-one"><img src="https://agentlas.cloud/landing/v3/readme-mobile-en.jpg" alt="Agentlas Mobile"></a><br><strong>Mobile</strong><br>Agentlas Desktop runs the work on your paired computer. The phone reads the same conversation and answers question cards.</td>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/docs/introduction/agentlas-one"><img src="assets/readme/mobile-agents-en.png" alt="Agentlas Mobile: an agent for each computer, switched by swiping the faces at the top"></a><br><strong>Mobile</strong><br>Agentlas Desktop runs the work on your paired computer. The phone reads the same conversation and answers question cards.</td>
 </tr>
 <tr>
 <td width="50%" valign="top"><a href="https://agentlas.cloud/updates/agentlas-finance-build-your-own-analyst"><img src="assets/readme/desktop-finance.png" alt="Agentlas Finance"></a><br><strong>Finance</strong><br>Save research criteria as an Analyst. Reports keep the inputs behind each calculation.</td>
