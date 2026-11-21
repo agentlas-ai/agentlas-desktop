@@ -9,7 +9,7 @@
   <sub>Any model. Any runtime. For companies and individuals alike, Agentlas headhunts specialist teams and drives long-horizon projects through every checkpoint to completion.</sub>
 </p>
 
-<p align="center"><a href="https://agentlas.cloud"><img src="https://agentlas.cloud/landing/v3/readme-hero-en.gif" alt="One working through spreadsheet, slide, chat, photo, video, and 3D apps on a desktop" width="860"></a></p>
+<p align="center"><a href="https://agentlas.cloud"><img src="assets/readme/desktop-one-handoff.png" alt="Agentlas Desktop: the personal agent hands a spreadsheet job to an agent on another desktop and takes a booking from the phone agent, with a hand-off card for each" width="860"></a></p>
 
 <!-- ── Download (primary action) ───────────────────────────────────────── -->
 <p align="center">
@@ -58,16 +58,16 @@ One, the personal agent. Mobile for your phone. Finance for investment research.
 
 <table>
 <tr>
-<td width="50%" valign="top"><a href="https://agentlas.cloud/docs/introduction/agentlas-one"><img src="https://agentlas.cloud/landing/v3/one-desktop.jpg" alt="Agentlas One on the Desktop"></a><br><strong>One</strong><br>A personal agent that runs on your computer. It opens a Work session, assigns agents, sends question cards, and attaches results as files.</td>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/docs/introduction/agentlas-one"><img src="assets/readme/desktop-work-result.png" alt="Agentlas One on the Desktop"></a><br><strong>One</strong><br>A personal agent that runs on your computer. It opens a Work session, assigns agents, sends question cards, and attaches results as files.</td>
 <td width="50%" valign="top"><a href="https://agentlas.cloud/docs/introduction/agentlas-one"><img src="https://agentlas.cloud/landing/v3/readme-mobile-en.jpg" alt="Agentlas Mobile"></a><br><strong>Mobile</strong><br>Agentlas Desktop runs the work on your paired computer. The phone reads the same conversation and answers question cards.</td>
 </tr>
 <tr>
-<td width="50%" valign="top"><a href="https://agentlas.cloud/updates/agentlas-finance-build-your-own-analyst"><img src="https://agentlas.cloud/landing/v3/finance-en.jpg" alt="Agentlas Finance"></a><br><strong>Finance</strong><br>Save research criteria as an Analyst. Reports keep the inputs behind each calculation.</td>
+<td width="50%" valign="top"><a href="https://agentlas.cloud/updates/agentlas-finance-build-your-own-analyst"><img src="assets/readme/desktop-finance.png" alt="Agentlas Finance"></a><br><strong>Finance</strong><br>Save research criteria as an Analyst. Reports keep the inputs behind each calculation.</td>
 <td width="50%" valign="top"><a href="https://agentlas.cloud/science"><img src="https://agentlas.cloud/landing/v3/science.jpg" alt="Agentlas Science"></a><br><strong>Science</strong><br>Molecular views and typeset manuscripts in one app, as a signed Agentlas Desktop extension.</td>
 </tr>
 <tr>
 <td width="50%" valign="top"><a href="https://agentlas.cloud/business"><img src="https://agentlas.cloud/landing/v3/business-en.jpg" alt="Agentlas Business"></a><br><strong>Business</strong><br>Members, API keys, usage policies, and billing for a team. $18 per seat per month, from 2 seats.</td>
-<td width="50%" valign="top"><a href="https://agentlas.cloud/desktop"><img src="https://agentlas.cloud/landing/v3/goal-tree-en.jpg" alt="Goal Tree on Agentlas Desktop"></a><br><strong>Goal Tree</strong><br>Long goals split into strategic goals and sub-goals, and the plan can change mid-run.</td>
+<td width="50%" valign="top"><strong>Goal Tree</strong><br>Long goals split into strategic goals and sub-goals, and the plan can change mid-run.</td>
 </tr>
 </table>
 
