@@ -38,6 +38,8 @@ export interface AutostartRuntime {
   platform?: NodeJS.Platform; home?: string; uid?: number;
   /** Private tests inject this; never redirect the real user's HOME. */
   run?: (executable: string, args: string[]) => { code: number; stdout: string; stderr: string };
+  /** Private tests inject this to make the unload wait instant. */
+  sleepSync?: (ms: number) => void;
   /** Windows login entry store; defaults to Electron's login item settings in Main. */
   windowsRunKey?: WindowsRunKey;
 }
@@ -259,7 +261,20 @@ export function suspendAutostart(plan: AutostartPlan, runtime: AutostartRuntime 
     if (command(runtime, "/bin/launchctl", ["disable", target]).code !== 0) fail("daemon_autostart_suspend_failed");
     if (loaded && command(runtime, "/bin/launchctl", ["bootout", target]).code !== 0) fail("daemon_autostart_bootout_failed");
   } else if (command(runtime, "systemctl", ["--user", "disable", "--now", `${plan.label}.service`]).code !== 0) fail("daemon_autostart_suspend_failed");
-  if (autostartLoaded(plan, runtime)) fail("daemon_autostart_still_loaded");
+  // `launchctl bootout` can return while the job is still being torn down, and `print` keeps
+  // answering 0 until it is gone (install on quit refused once with
+  // daemon_autostart_still_loaded, and the next quit installed). Give the supervisor a short,
+  // bounded moment to finish before calling it a failure.
+  const deadline = Date.now() + AUTOSTART_UNLOAD_SETTLE_MS;
+  while (autostartLoaded(plan, runtime)) {
+    if (Date.now() >= deadline) fail("daemon_autostart_still_loaded");
+    (runtime.sleepSync ?? sleepSync)(AUTOSTART_UNLOAD_POLL_MS);
+  }
+}
+const AUTOSTART_UNLOAD_SETTLE_MS = 5_000;
+const AUTOSTART_UNLOAD_POLL_MS = 100;
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 /** The plan an earlier launch or version of this same installation published, when the installed definition is exactly it. */
 function previousOwnedPlan(plan: AutostartPlan, runtime: AutostartRuntime): AutostartPlan | null {

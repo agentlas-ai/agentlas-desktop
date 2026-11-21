@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   inspectMacInstalledAppTrust,
   repairMacInstalledAppGeneratedPythonCaches,
+  repairMacInstalledAppNpmGlobals,
 } from "../updater/mac-app-trust";
 import {
   clearMacRuntimeTrustCache,
@@ -21,6 +22,8 @@ export type MacRuntimeSealResult = {
   changedEntries: number;
   alreadySealed: boolean;
   repairedGeneratedCaches: boolean;
+  /** npm packages a CLI's own updater installed into the bundled Node were moved out (see repairMacInstalledAppNpmGlobals). */
+  movedNpmGlobals?: boolean;
   /** "hit": a PASS for this exact bundle identity was reused; the full gate did not run. */
   trustCache?: "hit" | "miss" | "disabled";
 };
@@ -34,6 +37,11 @@ export type MacRuntimeSealInput = {
    * full gate (tests, non-startup callers).
    */
   trustCachePath?: string;
+  /**
+   * Where npm packages found inside the bundled Node are moved (the updater's recovery folder under
+   * userData). Absent = no npm repair, and such a bundle is refused as before.
+   */
+  npmRecoveryRoot?: string;
   /** Test seam: replaces the full `inspectMacInstalledAppTrust` gate. */
   inspectTrust?: typeof inspectMacInstalledAppTrust;
   /** Test seam: replaces identity collection. */
@@ -321,6 +329,7 @@ export async function prepareMacRuntimeResourcesForExecution(
   };
 
   let repairedGeneratedCaches = false;
+  let movedNpmGlobals = false;
   let trust = await gate();
   if (!trust.ok) {
     if (trust.diagnostic.category !== "source-seal") {
@@ -330,7 +339,17 @@ export async function prepareMacRuntimeResourcesForExecution(
       bundlePath: realBundle,
       diagnostic: trust.diagnostic,
     });
-    if (!repairedGeneratedCaches) {
+    // A provider CLI's self-update can `npm i -g` into the bundled Node while the app runs
+    // (seen with grok, four times). The updater already moved those out before an
+    // install; start-up refused the same bundle with no window (exit 78) until 2.0.9.
+    movedNpmGlobals = input.npmRecoveryRoot
+      ? await repairMacInstalledAppNpmGlobals({
+        bundlePath: realBundle,
+        diagnostic: trust.diagnostic,
+        recoveryRoot: input.npmRecoveryRoot,
+      })
+      : false;
+    if (!repairedGeneratedCaches && !movedNpmGlobals) {
       throw trustFailure("generated-cache repair", trust.diagnostic.category);
     }
     trust = await gate();
@@ -346,6 +365,7 @@ export async function prepareMacRuntimeResourcesForExecution(
       ...sealed,
       alreadySealed: true,
       repairedGeneratedCaches,
+      movedNpmGlobals,
       trustCache: cachePath ? "miss" : "disabled",
     };
   }
@@ -357,6 +377,7 @@ export async function prepareMacRuntimeResourcesForExecution(
     ...sealed,
     alreadySealed: false,
     repairedGeneratedCaches,
+    movedNpmGlobals,
     trustCache: cachePath ? "miss" : "disabled",
   };
 }

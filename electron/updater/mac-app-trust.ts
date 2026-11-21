@@ -162,8 +162,15 @@ function sealedResourcePaths(bundleRoot: string, contentsRoot: string): Set<stri
 }
 
 /** Preserve npm globals accidentally installed into the signed Node runtime.
- * Only known, wholly unsealed package roots and their internal bin links may
- * move. The caller must reverify the complete app signature after this repair.
+ * A provider CLI's own updater (grok 1.0.70, 1.0.77, 1.0.89 and 1.0.92) runs
+ * `npm i -g` with the bundled npm first on PATH, and npm's default global prefix is that runtime.
+ * Which packages land there is not ours to know, so the candidates come from the signature, not
+ * from a name list: every package root under node-runtime/lib/node_modules (scoped or not) with no
+ * sealed entry at or below it, plus every unsealed bin symlink that points into one of them.
+ * Anything else unsealed is left alone and the caller's full trust check decides.
+ * The caller must reverify the complete app signature after this repair.
+ * Older npm-seal-* copies in the recovery root are removed (each one is a public npm package of
+ * about 230 MB, and one copy is enough to show what was moved).
  */
 export async function repairMacInstalledAppNpmGlobals(input: {
   bundlePath: string;
@@ -174,14 +181,12 @@ export async function repairMacInstalledAppNpmGlobals(input: {
   const bundleRoot = path.resolve(input.bundlePath);
   const contentsRoot = path.join(bundleRoot, "Contents");
   const runtimeRoot = path.join(contentsRoot, "Resources", "node-runtime");
+  const modulesRoot = path.join(runtimeRoot, "lib", "node_modules");
+  const binRoot = path.join(runtimeRoot, "bin");
   const recoveryRoot = path.resolve(input.recoveryRoot);
   if (recoveryRoot === bundleRoot || recoveryRoot.startsWith(`${bundleRoot}${path.sep}`)) return false;
   const sealed = sealedResourcePaths(bundleRoot, contentsRoot);
   if (!sealed) return false;
-  const packages = [
-    ["@anthropic-ai/claude-code", "claude"],
-    ["@xai-official/grok", "grok"],
-  ] as const;
   const candidates: Array<{ source: string; relative: string; dev: number; ino: number }> = [];
   const parents = new Map<string, { dev: number; ino: number }>();
   const rememberParents = (leaf: string): void => {
@@ -197,29 +202,48 @@ export async function repairMacInstalledAppNpmGlobals(input: {
     const relative = path.relative(contentsRoot, source).split(path.sep).join("/");
     return ![...sealed].some((entry) => entry === relative || entry.startsWith(`${relative}/`) || relative.startsWith(`${entry}/`));
   };
+  const scopesToDrop: string[] = [];
   try {
-    for (const [packageName, binName] of packages) {
-      const source = path.join(runtimeRoot, "lib", "node_modules", packageName);
-      if (!fs.existsSync(source)) continue;
-      rememberParents(source);
-      const stat = fs.lstatSync(source);
-      if (!stat.isDirectory() || stat.isSymbolicLink() || !whollyUnsealed(source)) return false;
-      const manifestPath = path.join(source, "package.json");
+    if (!fs.existsSync(modulesRoot)) return false;
+    const packageRoots: Array<{ dir: string; name: string }> = [];
+    for (const entry of fs.readdirSync(modulesRoot)) {
+      const entryPath = path.join(modulesRoot, entry);
+      if (entry.startsWith("@")) {
+        const scopeStat = fs.lstatSync(entryPath);
+        if (!scopeStat.isDirectory() || scopeStat.isSymbolicLink()) continue;
+        let movedAll = whollyUnsealed(entryPath);
+        for (const child of fs.readdirSync(entryPath)) {
+          const childPath = path.join(entryPath, child);
+          if (whollyUnsealed(childPath)) packageRoots.push({ dir: childPath, name: `${entry}/${child}` });
+          else movedAll = false;
+        }
+        if (movedAll) scopesToDrop.push(entryPath);
+      } else if (!entry.startsWith(".") && whollyUnsealed(entryPath)) {
+        packageRoots.push({ dir: entryPath, name: entry });
+      }
+    }
+    const moving: string[] = [];
+    for (const { dir, name } of packageRoots) {
+      rememberParents(dir);
+      const stat = fs.lstatSync(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      const manifestPath = path.join(dir, "package.json");
       const manifestStat = fs.lstatSync(manifestPath);
       if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.nlink !== 1) return false;
-      if (JSON.parse(fs.readFileSync(manifestPath, "utf8")).name !== packageName) return false;
-      candidates.push({ source, relative: path.relative(runtimeRoot, source), dev: stat.dev, ino: stat.ino });
-      const bin = path.join(runtimeRoot, "bin", binName);
-      let binStat: fs.Stats;
-      try { binStat = fs.lstatSync(bin); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
+      if (JSON.parse(fs.readFileSync(manifestPath, "utf8")).name !== name) return false;
+      candidates.push({ source: dir, relative: path.relative(runtimeRoot, dir), dev: stat.dev, ino: stat.ino });
+      moving.push(dir);
+    }
+    if (fs.existsSync(binRoot) && moving.length) {
+      for (const entry of fs.readdirSync(binRoot)) {
+        const bin = path.join(binRoot, entry);
+        const binStat = fs.lstatSync(bin);
+        if (!binStat.isSymbolicLink() || !whollyUnsealed(bin)) continue;
+        const target = path.resolve(binRoot, fs.readlinkSync(bin));
+        if (!moving.some((dir) => target.startsWith(`${dir}${path.sep}`))) continue;
+        rememberParents(bin);
+        candidates.push({ source: bin, relative: path.relative(runtimeRoot, bin), dev: binStat.dev, ino: binStat.ino });
       }
-      rememberParents(bin);
-      if (!binStat.isSymbolicLink() || !whollyUnsealed(bin)) return false;
-      const target = path.resolve(path.dirname(bin), fs.readlinkSync(bin));
-      if (!target.startsWith(`${source}${path.sep}`)) return false;
-      candidates.push({ source: bin, relative: path.relative(runtimeRoot, bin), dev: binStat.dev, ino: binStat.ino });
     }
     if (!candidates.length) return false;
     fs.mkdirSync(recoveryRoot, { recursive: true, mode: 0o700 });
@@ -244,13 +268,34 @@ export async function repairMacInstalledAppNpmGlobals(input: {
         fs.renameSync(candidate.source, target);
         moved += 1;
       }
+      // An unsealed scope folder emptied by the move goes too (rmdir fails on anything left inside).
+      for (const scope of scopesToDrop) {
+        try { fs.rmdirSync(scope); } catch { /* not empty or already gone: the trust check decides */ }
+      }
     } finally {
-      // No executable is run from quarantine and no package is deleted.
+      // No executable is run from quarantine.
       if (moved) console.info(`[updater] preserved ${moved} unsealed npm entries outside the app bundle`);
     }
+    if (moved > 0) pruneOlderNpmSealCopies(realRecovery, destination);
     return moved > 0;
   } catch {
     return false;
+  }
+}
+
+/** Keep only the newest npm-seal-* copy. Only real folders this repair made (mkdtemp "npm-seal-") are touched. */
+function pruneOlderNpmSealCopies(recoveryRoot: string, keep: string): void {
+  try {
+    for (const entry of fs.readdirSync(recoveryRoot)) {
+      if (!/^npm-seal-[A-Za-z0-9]{6}$/.test(entry)) continue;
+      const candidate = path.join(recoveryRoot, entry);
+      if (candidate === keep) continue;
+      const stat = fs.lstatSync(candidate);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
+      fs.rmSync(candidate, { recursive: true, force: true });
+    }
+  } catch (error) {
+    console.warn("[updater] older npm recovery copies were not removed", error instanceof Error ? error.message : String(error));
   }
 }
 

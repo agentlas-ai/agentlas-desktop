@@ -2571,12 +2571,15 @@ app.whenReady().then(async () => {
         policyPath: path.join(process.resourcesPath, "macos-release-signing-policy.json"),
         // PASS-only; keyed by the exact bundle identity (mac-runtime-trust-cache.ts).
         trustCachePath: userDataPath("security", "mac-runtime-seal-pass.v1.json"),
+        // Same folder the updater uses (updater.ts repairInstalledAppTrust).
+        npmRecoveryRoot: userDataPath("updater", "recovery"),
       });
       console.info(
         `[runtime-seal] packaged Python/runtime resources ready `
           + `(${sealed.directories} directories, ${sealed.files} files, `
           + `${sealed.alreadySealed ? "already sealed" : `${sealed.changedEntries} sealed`}, `
           + `${sealed.repairedGeneratedCaches ? "generated caches repaired" : "clean seal"}, `
+          + `${sealed.movedNpmGlobals ? "stray npm packages moved out, " : ""}`
           + `trust ${sealed.trustCache === "hit" ? "cached PASS for identical bundle" : "full check"})`,
       );
     } catch (error) {
