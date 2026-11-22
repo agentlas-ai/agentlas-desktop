@@ -91,6 +91,10 @@
 .pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-voice button) { width: 30px !important; height: 30px !important; min-height: 30px !important; }
 .pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-send-button),
 .pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-stop-button) { position: absolute; right: 10px; bottom: var(--pane-btn-bottom); z-index: 1; }
+/* --pane-btn-bottom centres a 30px button in the 44px pill, but both buttons carry an inline 38px size (ChatInput.tsx); at 38px the circle sat 4px high, poked over the pill's top edge and hung off its right end. The inline size needs !important to give way. */
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-send-button),
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-stop-button) { width: 30px !important; height: 30px !important; min-height: 30px !important; flex: 0 0 30px !important; }
+.pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-send-button svg) { width: 14px; height: 14px; }
 /* The History pill and the Run-with-HEP caret are not in the picture: New session / Clear history are in the pane's "..." menu, the caret's rows left the "+" menu. */
 .pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-context-control),
 .pane :global(.chat-input-shell[data-pane-composer="true"] .chat-input-hep-caret) { display: none; }
