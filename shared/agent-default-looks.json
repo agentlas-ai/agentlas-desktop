@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "version": "2026-11-24.2",
+  "notes": "Default face of an agent that has no chosen appearance. seed = the agent's display name with surrounding white space removed (no case folding, no Unicode normalisation); hash = FNV-1a 32-bit over the seed's UTF-8 bytes; look = looks[hash % looks.length]. Every surface (phone, desktop, web) reads this list and passes these vectors. Pictures: mobile assets/one/characters/look-<id>.webp, desktop and web /brand/one-characters/looks/<id>.webp; 512x512 round pictures (square file, circle of content, transparent outside).",
+  "looks": [
+    "apple",
+    "otter",
+    "rex-red",
+    "heart-mint",
+    "apple-dino",
+    "diplo-green",
+    "flame",
+    "cloud-lilac",
+    "stego",
+    "carrot",
+    "elephant",
+    "penguin",
+    "sailback",
+    "star-pink",
+    "rex-scout",
+    "ptero",
+    "panda",
+    "red-panda",
+    "feather-bird",
+    "star-wink",
+    "rabbit",
+    "hex-violet",
+    "ankylo",
+    "bear",
+    "tiger",
+    "drop-sky",
+    "giraffe",
+    "capybara",
+    "parasaur",
+    "rex-pilot",
+    "trike",
+    "fox",
+    "brachio-lilac",
+    "cloud-yellow",
+    "cloud-sky",
+    "dino-raincoat",
+    "mammoth"
+  ],
+  "vectors": [
+    {
+      "name": "Hope",
+      "seed": "Hope",
+      "hash": 790901815,
+      "look": "capybara"
+    },
+    {
+      "name": "Luna",
+      "seed": "Luna",
+      "hash": 2234485159,
+      "look": "rex-pilot"
+    },
+    {
+      "name": "Research Desk",
+      "seed": "Research Desk",
+      "hash": 3324593725,
+      "look": "red-panda"
+    },
+    {
+      "name": "창업 공고 비서",
+      "seed": "창업 공고 비서",
+      "hash": 2628107913,
+      "look": "ankylo"
+    },
+    {
+      "name": "수석 비서",
+      "seed": "수석 비서",
+      "hash": 230010746,
+      "look": "tiger"
+    },
+    {
+      "name": "데이터 분석",
+      "seed": "데이터 분석",
+      "hash": 2976655491,
+      "look": "ptero"
+    },
+    {
+      "name": "SQL 작성기",
+      "seed": "SQL 작성기",
+      "hash": 1732994609,
+      "look": "diplo-green"
+    },
+    {
+      "name": "paper-reviewer",
+      "seed": "paper-reviewer",
+      "hash": 3773727735,
+      "look": "feather-bird"
+    },
+    {
+      "name": "A",
+      "seed": "A",
+      "hash": 3289118412,
+      "look": "stego"
+    },
+    {
+      "name": "",
+      "seed": "",
+      "hash": 2166136261,
+      "look": "elephant"
+    },
+    {
+      "name": "  Hope  ",
+      "seed": "Hope",
+      "hash": 790901815,
+      "look": "capybara"
+    },
+    {
+      "name": "日本語のエージェント",
+      "seed": "日本語のエージェント",
+      "hash": 3658833440,
+      "look": "elephant"
+    },
+    {
+      "name": "Über Agent",
+      "seed": "Über Agent",
+      "hash": 3289685342,
+      "look": "tiger"
+    },
+    {
+      "name": "agent-0042",
+      "seed": "agent-0042",
+      "hash": 1114407967,
+      "look": "carrot"
+    },
+    {
+      "name": "Marketing Agent Team",
+      "seed": "Marketing Agent Team",
+      "hash": 3890414875,
+      "look": "mammoth"
+    },
+    {
+      "name": "영업 어시스턴트",
+      "seed": "영업 어시스턴트",
+      "hash": 2069108893,
+      "look": "mammoth"
+    }
+  ]
+}

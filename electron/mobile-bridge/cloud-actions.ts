@@ -221,10 +221,11 @@ export function mobileBuildsParent(documents: () => string): string {
   return home === path.join(os.homedir(), ".agentlas") ? path.join(documents(), "Agentlas Mobile Builds") : path.join(home, "mobile-builds");
 }
 
-async function createMobileBuildWorkspace(): Promise<string> {
+async function createMobileBuildWorkspace(signal?: AbortSignal): Promise<string> {
   // Lazy electron import keeps this module loadable by plain-node tooling that
   // injects fake build actions and never calls the desktop default.
   const { app } = await import("electron");
+  signal?.throwIfAborted();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const workspace = path.join(
     mobileBuildsParent(() => app.getPath("documents")),
@@ -240,7 +241,7 @@ export function createDesktopMobileBridgeBuildActions(options: DesktopBuildActio
     turnEnv: () => phoneBuildTurnEnv(),
     trackedDeps: () => trackedBuildDepsOrNull(),
     agentBusy: (folder) => buildTurnRefusal(folder),
-    createWorkspace: () => createMobileBuildWorkspace(),
+    createWorkspace: (signal) => createMobileBuildWorkspace(signal),
     grantFolder: (folder) => { const { grantPath } = require("../fs/access") as typeof import("../fs/access"); return grantPath(folder, { durable: false }); },
     grantFile: (file) => { const { grantPath } = require("../fs/access") as typeof import("../fs/access"); return grantPath(file, { durable: false, exactFile: true }); },
     newId: () => randomUUID(),

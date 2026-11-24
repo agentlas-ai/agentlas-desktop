@@ -280,7 +280,9 @@ export const MOBILE_BRIDGE_METHODS = [
   "agents.cloudDelete",
   "build.start",
   "build.status",
+  "build.active",
   "build.answer",
+  "build.cancel",
   // One 메일함 미러(2026-09-26). 폰은 웹 메일 API 를 직접 부르지 않는다 — 데스크탑 Main 이
   // 세션 쿠키로 대신 부르고, 여기 목록은 그 투영의 닫힌 입구다. 다섯 곳이 함께 움직인다:
   // 이 목록·WRITE·EMPTY·validateParams / authority.ts / PROTOCOL·BRIDGE-WIRING / Flutter
@@ -612,6 +614,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "agents.cloudDelete",
   "build.start",
   "build.answer",
+  "build.cancel",
   "workspace2.command",
   "build2.preview.send",
   "build2.preview.restart",
@@ -1341,6 +1344,12 @@ export interface MobileBridgeRuntimeDto {
   active: boolean;
   /** Secret-free marker for a retained runtime whose credential cannot be read. */
   credentialUnavailable?: boolean;
+  /** Present and true only while this runtime needs the owner to sign in again (`RuntimeStatus.signInRequired`); absent = no such mark (an older computer sends none). The phone does not offer it as a model to pick. */
+  signInRequired?: boolean;
+  /** Model id the engine runs when no model is picked (its own settings file, else the model its last run reported). Present only for an engine this computer can name that for; absent = unknown, the phone shows the engine name alone (an older computer sends none). */
+  defaultModel?: string;
+  /** The same model as this computer's own model chip names it; always sent together with `defaultModel`. */
+  defaultModelLabel?: string;
   model: string | null;
   effort: string | null;
   efforts: Array<{ id: string; label: string }>;
@@ -2981,6 +2990,7 @@ const ONE_HOME_HOST_ID_RE = /^host_[a-f0-9]{32}$/;
 export const ONE_HOME_POSSESSION_HOST_CAPABILITY = "deviceKey.possessionHost";
 const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "one.companion.publicKey",
+  "build.active",
   "one.supervisor.snapshot",
   "snapshot.get",
   "one.home.status",
@@ -4451,13 +4461,16 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           )
         : "agents.cloudDelete accepts only slug and idempotencyKey";
     case "build.start":
-      return hasOnlyKeys(params, ["goal", "idempotencyKey", "buildKey", "seenUpdatedAt"])
+      return hasOnlyKeys(params, ["goal", "idempotencyKey", "clientRunId", "buildKey", "seenUpdatedAt"])
         ? firstError(
             requiredText(params, "goal", 20_000),
             requiredString(params, "idempotencyKey", 160),
+            optionalString(params, "clientRunId", 160),
             validateMobileBuildContinuation(params),
         )
-        : "build.start accepts only goal, idempotencyKey and an optional buildKey with seenUpdatedAt";
+        : "build.start accepts only goal, idempotencyKey, optional clientRunId and an optional buildKey with seenUpdatedAt";
+    case "build.cancel":
+      return hasOnlyKeys(params, ["runId"]) ? requiredString(params, "runId", 160) : "build.cancel accepts only runId";
     case "build.answer": {
       if (!hasOnlyKeys(params, ["runId", "questionSetId", "answers", "idempotencyKey", "questionSetRevision"])) {
         return "build.answer contains unsupported fields";

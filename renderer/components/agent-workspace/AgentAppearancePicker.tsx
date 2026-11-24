@@ -3,11 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { AGENT_APPEARANCE_CHARACTERS, AGENT_APPEARANCE_GLYPHS, AGENT_APPEARANCE_COLORS, type AgentAppearance, type AgentAppearanceView } from "@shared/agent-appearance";
 import { IconWand, IconFolder, IconBolt } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { oneCharacterSrcForId } from "@/lib/one-characters";
 import styles from "./AgentWorkspace.module.css";
 const colors: Record<typeof AGENT_APPEARANCE_COLORS[number], string> = { red:"#c74444", slate:"#495566", amber:"#b18119", green:"#278348", blue:"#316fba", purple:"#8054b5", pink:"#bf438a", gray:"#6b7280" };
 const glyphs = { wand: IconWand, folder: IconFolder, bolt: IconBolt };
 export function AgentAppearanceImage({ value, size = 32 }: { value: AgentAppearance; size?: number }) {
-  if (value.kind === "character") return <img src={`/brand/one-characters/${value.id}.png`} alt="" width={size} height={size} />;
+  if (value.kind === "character") return <img src={oneCharacterSrcForId(value.id) ?? ""} alt="" width={size} height={size} style={{ borderRadius: "50%" }} />;
   const Glyph = glyphs[value.id]; return <span style={{ color: colors[value.color], display: "inline-flex" }}><Glyph size={Math.max(12, size - 6)} /></span>;
 }
 export function AgentAppearanceEditor({ agentId, ko }: { agentId: string; ko: boolean }) {

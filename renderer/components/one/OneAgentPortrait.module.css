@@ -13,6 +13,7 @@
 .large { width: 72px; height: 72px; }
 
 .character { width: 100%; height: 100%; object-fit: contain; transform: translateY(1px); }
+.root:not([data-tone="custom"]) .character { border-radius: 50%; object-fit: cover; transform: none; }
 .root[data-state="locked"] { filter: grayscale(.75); opacity: .7; }
 .root[data-state="failed"] .character { filter: grayscale(.5); opacity: .72; }
 .root[data-state="working"] .character { filter: saturate(1.05); }

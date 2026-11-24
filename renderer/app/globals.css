@@ -324,6 +324,8 @@
   --attention: #2a78d6;
   --info-soft: #eaf0ef;
   --purple-soft: #eeefec;
+  /* 빌드 화면 배너 — 그림이 못 뜰 때의 바탕. 테마와 무관하게 고정(흰 글자·흰 카드가 올라간다). */
+  --build-banner-bg: #087cff;
   /* 랜딩 히어로 — 테마와 무관하게 고정된 브랜드 팔레트(캔버스에서도 이 값을 읽는다). */
   --landing-bg: #06080b;
   --landing-ink: #eaf3f2;

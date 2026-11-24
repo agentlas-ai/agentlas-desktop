@@ -790,8 +790,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
             {(markdownText||ownedUi.length>0)&&<MessageActions messageId={sourceMessageId} author={message.role==="user"?copy("나","You"):name} text={row.cadence?.sourceText ?? displayedText} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role={message.role} data-run-id={turn?.runId}>
               <AnswerCardsForTurns chatId={snapshot?.conversationChatId} turnIds={turn?[turn.runId]:[]} disabled={message.role!=="assistant"}>
               {message.role==="assistant"&&turn
-                ?<StreamingMarkdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={prepareUiFollowup} uiActionsDisabled={Boolean(activeReply||attachmentBusy)} growing={activeReply?.runId===turn.runId}/>
-                :<Markdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={message.role==="assistant"?prepareUiFollowup:undefined} uiActionsDisabled={Boolean(activeReply||attachmentBusy)}/>}
+                ?<StreamingMarkdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={prepareUiFollowup} uiActionsDisabled={Boolean(activeReply||attachmentBusy)} growing={activeReply?.runId===turn.runId} bareLinkLabel/>
+                :<Markdown text={markdownText} messageId={contentId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={openConversationFile} onUiFollowup={message.role==="assistant"?prepareUiFollowup:undefined} uiActionsDisabled={Boolean(activeReply||attachmentBusy)} bareLinkLabel={message.role==="assistant"}/>}
               </AnswerCardsForTurns>
               <InlineUiInstances chatId={snapshot?.conversationChatId} instances={ownedUi} turnIds={turn?[turn.runId]:[]} locale={ko?"ko":"en"}/>
             </article></MessageActions>}

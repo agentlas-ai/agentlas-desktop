@@ -7,12 +7,11 @@ import {
   IconImage,
   IconPlus,
   IconUsers,
-  IconSparkles,
   IconWand,
 } from "@/components/Icon";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { ipc } from "@/lib/ipc";
-import { ONE_CHARACTER_OPTIONS, type OneCharacterId } from "@/lib/one-characters";
+import { ONE_CHARACTER_OPTIONS, oneCharacterBaseId, type OneCharacterId } from "@/lib/one-characters";
 import type { CreateOneTeamAgentResult, OneOrgCollaborationStyle } from "@shared/one-org";
 import { nameSaveAllowed, nextNameInput } from "@shared/one-agent-name";
 import type { RuntimeSelection, RuntimeStatus } from "@shared/types";
@@ -27,7 +26,7 @@ import { tFor } from "@/lib/i18n";
 import styles from "./OneCreateAgentDialog.module.css";
 import { Select } from "@/components/Select";
 
-type AvatarMode = "original" | "sketch" | "generated" | "upload";
+type AvatarMode = "original" | "generated" | "upload";
 type DraftStatus = "idle" | "saving" | "saved" | "error";
 
 export type OneCreateAgentSeed = {
@@ -62,7 +61,7 @@ const ONE_SELF_AVATAR_SRC = "agentlas://one-avatar/self";
 
 const DRAFT_KEY = "agentlas.one.new-agent-draft.v2";
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
-const MODES = new Set<AvatarMode>(["original", "sketch", "generated", "upload"]);
+const MODES = new Set<AvatarMode>(["original", "generated", "upload"]);
 const CHARACTER_IDS = new Set<string>(ONE_CHARACTER_OPTIONS.map((item) => item.id));
 
 /** 협업 말투 — 문구는 조직원 설정 창에 있던 것을 그대로 옮겼다(사람이 배운 말이 바뀌지 않게). */
@@ -205,8 +204,8 @@ async function normalizeImageSource(source: string): Promise<string> {
   return normalizeImage(await response.blob());
 }
 
-function modeStyle(mode: AvatarMode): "original" | "sketch" | null {
-  if (mode === "original" || mode === "sketch") return mode;
+function modeStyle(mode: AvatarMode): "original" | null {
+  if (mode === "original") return mode;
   return null;
 }
 
@@ -531,7 +530,7 @@ export function OneCreateAgentDialog({
     avatarTouchedRef.current = true;
     setAvatarMode(nextMode);
     setError(null);
-    if (nextMode === "original" || nextMode === "sketch") {
+    if (nextMode === "original") {
       const current = ONE_CHARACTER_OPTIONS.find((item) => item.id === characterId);
       if (current?.style !== nextMode) {
         const first = ONE_CHARACTER_OPTIONS.find((item) => item.style === nextMode);
@@ -630,10 +629,9 @@ export function OneCreateAgentDialog({
     setRuntimeSelection(edit.runtimeSelection);
     setCollaborationStyle(edit.collaborationStyle);
     const preset = edit.icon.startsWith("character:") ? edit.icon.slice("character:".length) : null;
-    if (preset && CHARACTER_IDS.has(preset)) {
-      setCharacterId(preset as OneCharacterId);
-      const character = ONE_CHARACTER_OPTIONS.find((option) => option.id === preset);
-      setAvatarMode(character?.style === "sketch" ? "sketch" : "original");
+    if (preset && CHARACTER_IDS.has(oneCharacterBaseId(preset))) {
+      setCharacterId(oneCharacterBaseId(preset) as OneCharacterId);
+      setAvatarMode("original");
       setUploadedSrc(null);
       setGeneratedSrc(null);
     }
@@ -659,10 +657,9 @@ export function OneCreateAgentDialog({
     const preset = editOne.avatarIcon.startsWith("character:")
       ? editOne.avatarIcon.slice("character:".length)
       : "";
-    if (preset && CHARACTER_IDS.has(preset)) {
-      setCharacterId(preset as OneCharacterId);
-      const character = ONE_CHARACTER_OPTIONS.find((option) => option.id === preset);
-      setAvatarMode(character?.style === "sketch" ? "sketch" : "original");
+    if (preset && CHARACTER_IDS.has(oneCharacterBaseId(preset))) {
+      setCharacterId(oneCharacterBaseId(preset) as OneCharacterId);
+      setAvatarMode("original");
       setUploadedSrc(null);
       setGeneratedSrc(null);
       return;
@@ -805,7 +802,6 @@ export function OneCreateAgentDialog({
 
   const tabs: Array<{ id: AvatarMode; label: string; icon: ReactNode }> = [
     { id: "original", label: ko ? "기본" : "Original", icon: <IconImage size={14} /> },
-    { id: "sketch", label: ko ? "2D 스케치" : "2D Sketch", icon: <IconSparkles size={14} /> },
     { id: "generated", label: ko ? "생성" : "Generated", icon: <IconWand size={14} /> },
     { id: "upload", label: ko ? "업로드" : "Upload", icon: <IconFileUp size={14} /> },
   ];
@@ -881,7 +877,7 @@ export function OneCreateAgentDialog({
           {tabs.filter(tab=>!identityOnly || tab.id!=="generated").map((tab) => <button key={tab.id} type="button" role="tab" aria-selected={mode === tab.id} data-active={mode === tab.id ? "true" : "false"} onClick={() => chooseMode(tab.id)}>{tab.icon}{tab.label}</button>)}
         </div>
 
-        {selectedStyle && <div className={styles.characterLibrary} aria-label={selectedStyle === "original" ? "Original characters" : "2D Sketch characters"}>
+        {selectedStyle && <div className={styles.characterLibrary} aria-label="Characters">
           <div className={styles.characterGrid} role="list">
             {visibleCharacters.map((character) => <button key={character.id} type="button" role="listitem" data-active={selectedCharacter.id === character.id ? "true" : "false"} onClick={() => { avatarTouchedRef.current = true; setCharacterId(character.id); }}>
               {/* eslint-disable-next-line @next/next/no-img-element */}

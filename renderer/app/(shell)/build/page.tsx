@@ -9,6 +9,7 @@ import {
   IconUsers,
   IconWand,
   IconFolder,
+  IconPaperclip,
   IconRoute,
   IconSearch,
   IconShield,
@@ -1232,7 +1233,7 @@ export default function BuildPage() {
                 />
                 <div className="build-attach-row">
                   <button type="button" className="build-attach-button titlebar-nodrag" disabled={editingLocked} onClick={() => fileInputRef.current?.click()}>
-                    📎 {ko ? "파일 첨부" : "Attach files"}
+                    <IconPaperclip size={12} /> {ko ? "파일 첨부" : "Attach files"}
                   </button>
                   <button type="button" className="build-attach-button titlebar-nodrag" disabled={editingLocked} onClick={() => void attachFolder()}>
                     <IconFolder size={12} /> {ko ? "폴더 첨부" : "Attach folder"}
@@ -1371,7 +1372,7 @@ export default function BuildPage() {
             </div>
               </div>
               <div id="build-preview-panel" role="tabpanel" aria-labelledby="build-preview-tab" hidden={inspectorTab !== "preview"} className={styles.previewPanel}>
-                <img src="/brand/one-characters/blue-wave.png" className={styles.previewAvatar} alt="" />
+                <img src="/brand/one-characters/blue-wave.webp" className={styles.previewAvatar} alt="" />
                 <h2>{registeredEntity?.name || (ko ? "새 에이전트" : "New agent")}</h2>
                 <p>{request || (ko ? "아직 요청을 입력하지 않았습니다." : "No request entered yet.")}</p>
                 {!result && <div className={styles.previewEmpty}><IconFolder size={24} /><strong>{ko ? "실제 결과물이 여기에 표시됩니다" : "Your real deliverable appears here"}</strong><span>{ko ? "제작 완료 후 생성된 로컬 파일과 검증 결과를 확인할 수 있습니다." : "After building, inspect the generated local files and verification results."}</span></div>}

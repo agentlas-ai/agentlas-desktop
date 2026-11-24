@@ -26,6 +26,7 @@ import { automationRunPresentation } from "../../shared/automation-run-presentat
 import { listMyAgentsCached } from "../marketplace";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { detectRuntimes } from "../runtime/detect";
+import { cliModels, runtimeUsesEngineModelSetting } from "../../shared/models";
 import {
   getAutomationLiveRunId,
   getAutomationLiveRunState,
@@ -2045,6 +2046,24 @@ function runtimeCredentialUnavailable(runtime: RuntimeStatus): boolean {
   return access?.status === "unavailable";
 }
 
+/**
+ * The model an engine runs when no model is picked, named the way this computer's own model chip names it
+ * (renderer `runtimeEffectiveModelId` / `runtimeModelDisplayLabel`): the engine's settings-file model, else the
+ * model its last run reported, looked up in the engine's model list for the label. Engines that always need an
+ * explicit model, and ACP agents (their last-run record is per kind, not per agent), have no such default; an
+ * engine with no recorded value yields nothing rather than a guess.
+ */
+function runtimeDefaultModelFields(runtime: RuntimeStatus): { defaultModel?: string; defaultModelLabel?: string } {
+  if (runtime.kind === "acp" || !runtimeUsesEngineModelSetting(runtime.kind)) return {};
+  const id = runtime.cliDefaultModel?.trim() || runtime.observedDefaultModel?.trim();
+  if (!id) return {};
+  const row = cliModels(runtime.kind).find((option) => option.id === id || option.resolvedId === id);
+  return {
+    defaultModel: displayText(id, 160),
+    defaultModelLabel: displayText(row?.label ?? id, 256),
+  };
+}
+
 export function projectMobileBridgeRuntimes(
   runtimes: readonly RuntimeStatus[],
 ): MobileBridgeRuntimeDto[] {
@@ -2058,6 +2077,10 @@ export function projectMobileBridgeRuntimes(
     ...(runtimeCredentialUnavailable(runtime)
       ? { credentialUnavailable: true }
       : {}),
+    // The sign-in mark of the owner's own detect (detect.ts): a runtime that cannot run until the owner signs in again. A fact, no
+    // message and no time (nothing the phone has to show beyond "needs sign-in").
+    ...(runtime.signInRequired ? { signInRequired: true } : {}),
+    ...runtimeDefaultModelFields(runtime),
     model: runtime.model ?? null,
     effort: runtime.effort ?? null,
     efforts: (runtime.efforts ?? []).slice(0, 20).map((effort) => ({

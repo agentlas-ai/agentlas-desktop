@@ -41,6 +41,8 @@ export interface SelectProps {
   autoFocus?: boolean;
   "aria-label"?: string;
   selectRef?: Ref<HTMLButtonElement>;
+  /** 모달 <dialog>(top layer) 안에서 쓸 때: 목록을 body 가 아니라 그 dialog 에 붙인다. 없으면 body. */
+  menuHost?: HTMLElement | null;
   [data: `data-${string}`]: string | boolean | undefined;
 }
 
@@ -49,7 +51,7 @@ export interface SelectProps {
  * 쓰는 법은 <select> 와 같다(value·onChange·<option>·<optgroup>), onChange 는 target.value 를 준다.
  */
 export function Select(props: SelectProps) {
-  const { value, onChange, children, className, style, disabled, id, title, name, autoFocus, selectRef, ...rest } = props;
+  const { value, onChange, children, className, style, disabled, id, title, name, autoFocus, selectRef, menuHost, ...rest } = props;
   const items = useMemo(() => { const out: Item[] = []; collect(children, out); return out; }, [children]);
   const options = items.filter((item): item is Extract<Item, { kind: "option" }> => item.kind === "option");
   const current = options.find((option) => option.value === String(value ?? ""));
@@ -166,6 +168,6 @@ export function Select(props: SelectProps) {
             {selected && <IconCheck size={14} />}
           </div>;
         })}
-      </div>, document.body)}
+      </div>, menuHost ?? document.body)}
   </>;
 }

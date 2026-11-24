@@ -300,7 +300,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '3f1cbc661746751525799310e997af20de926288fe55fff99332b9ceb6e74d3f') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '00926b9aa574b6c2325d291a29238eeefc18c5722caf371895a4795677c91f45') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -346,7 +346,7 @@ jobs:
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "9f37775f6caacbe72d6ed5a763cbef4feff9a0fe44504936cf602158803b76c3",
-            "scripts/verify-one-team-surface.mjs": "d03f0a9b5b30bb2d9aaccc8e5c801abbef1083982b5d01bb5f1fcc4efac85115",
+            "scripts/verify-one-team-surface.mjs": "f69cdeb95811832322f33031e6e5282e7b65699c82e6c9195a6e0ee1a69a8f98",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
             "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861",
@@ -659,7 +659,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '3f1cbc661746751525799310e997af20de926288fe55fff99332b9ceb6e74d3f') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '00926b9aa574b6c2325d291a29238eeefc18c5722caf371895a4795677c91f45') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -705,7 +705,7 @@ jobs:
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "9f37775f6caacbe72d6ed5a763cbef4feff9a0fe44504936cf602158803b76c3",
-            "scripts/verify-one-team-surface.mjs": "d03f0a9b5b30bb2d9aaccc8e5c801abbef1083982b5d01bb5f1fcc4efac85115",
+            "scripts/verify-one-team-surface.mjs": "f69cdeb95811832322f33031e6e5282e7b65699c82e6c9195a6e0ee1a69a8f98",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
             "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861",
@@ -1064,7 +1064,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '3f1cbc661746751525799310e997af20de926288fe55fff99332b9ceb6e74d3f') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '00926b9aa574b6c2325d291a29238eeefc18c5722caf371895a4795677c91f45') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1110,7 +1110,7 @@ jobs:
             "scripts/verify-builtin-plugins-degrade.mjs": "47801c16ef3dd39c0da35d56103f8ba3eca3d179f4ce5ca8b73a8f556324eaaf",
             "scripts/verify-one-composer-surface.mjs": "4dc0eec040819d5db15d1e0e48ee866a139e33d8f3ff525cb25b3c75e5445f08",
             "scripts/verify-one-team-permission-boundary.mjs": "9f37775f6caacbe72d6ed5a763cbef4feff9a0fe44504936cf602158803b76c3",
-            "scripts/verify-one-team-surface.mjs": "d03f0a9b5b30bb2d9aaccc8e5c801abbef1083982b5d01bb5f1fcc4efac85115",
+            "scripts/verify-one-team-surface.mjs": "f69cdeb95811832322f33031e6e5282e7b65699c82e6c9195a6e0ee1a69a8f98",
             "scripts/current-sidebar-route-contract.cjs": "46d8f58f57e0a7a93cbde54582387d4f937e9f2bf07cd50956eb6520eb004f37",
             "scripts/verify-unanswerable-questions-hidden.mjs": "9fb5dbc618cf61511c52b171273939ab6d024bf152039ccf2c8c949c70d8b554",
             "scripts/verify-updater-withdrawn-release-guard.mjs": "71eb64235395257297ee37ddc26d3cee486c9b5bb355310d52fcfd7b6d716861",

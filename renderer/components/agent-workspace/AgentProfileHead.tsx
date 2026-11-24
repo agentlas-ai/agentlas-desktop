@@ -7,6 +7,7 @@ import { IconCamera, IconClock, IconCloud, IconEdit, IconChat, IconChevronDown, 
 import { AgentAppearanceImage } from "./AgentAppearancePicker";
 import { useAgentAppearance } from "@/lib/agent-appearance";
 import { ipc } from "@/lib/ipc";
+import { oneCharacterBaseId, oneCharacterSrcForId } from "@/lib/one-characters";
 import { AGENT_APPEARANCE_CHARACTERS, type AgentAppearance, type AgentAppearanceView } from "@shared/agent-appearance";
 import styles from "./AgentManage.module.css";
 
@@ -73,7 +74,7 @@ export function AgentEditDialog({ agentId, name, ko, onRename, onClose, onSaved 
   const file = useRef<HTMLInputElement>(null);
   useEffect(() => { const key = (event: KeyboardEvent) => { if (event.key === "Escape" && !busy) onClose(); }; window.addEventListener("keydown", key); return () => window.removeEventListener("keydown", key); }, [busy, onClose]);
   const shown = picked === undefined ? stored : picked;
-  const isChar = (id: string) => shown?.kind === "character" && shown.id === id && !upload;
+  const isChar = (id: string) => shown?.kind === "character" && oneCharacterBaseId(shown.id) === id && !upload;
   const save = async () => {
     setBusy(true); setError("");
     try {
@@ -110,7 +111,7 @@ export function AgentEditDialog({ agentId, name, ko, onRename, onClose, onSaved 
       </div>
       <div style={{ marginTop: 22 }}><span className={styles.fieldLab}>{ko ? "사진" : "Photo"}</span>
         <div className={styles.photoGrid} role="group" aria-label={ko ? "사진" : "Photo"}>
-          {AGENT_APPEARANCE_CHARACTERS.map((id) => <button key={id} type="button" className={styles.photo} aria-label={id} aria-pressed={isChar(id)} onClick={() => { setUpload(null); setPicked({ kind: "character", id }); }}><img src={`/brand/one-characters/${id}.png`} alt="" /></button>)}
+          {AGENT_APPEARANCE_CHARACTERS.filter((id) => !id.endsWith("-2d")).map((id) => <button key={id} type="button" className={styles.photo} aria-label={id} aria-pressed={isChar(id)} onClick={() => { setUpload(null); setPicked({ kind: "character", id }); }}><img src={oneCharacterSrcForId(id) ?? ""} alt="" /></button>)}
           <button type="button" className={styles.photo} aria-label={ko ? "사진 올리기" : "Upload a photo"} aria-pressed={Boolean(upload)} onClick={() => file.current?.click()}><IconCamera size={24} /></button>
           <button type="button" className={styles.photo} aria-label={ko ? "기본 아이콘" : "Default icon"} aria-pressed={!upload && shown?.kind === "glyph"} onClick={() => { setUpload(null); setPicked({ kind: "glyph", id: "wand", color: "blue" }); }}><IconWand size={24} /></button>
         </div>

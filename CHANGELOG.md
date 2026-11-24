@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.12 — 2026-11-24
+
+- Agents: every agent character is redrawn as a round, flat picture with a face, and an agent without a chosen look now gets a default character face instead of a grey initial circle.
+- Personal agent: web addresses in its replies show as the site's name (a link to the full address).
+- Build: the /build home is reworked with a black create button, a quiet link row, example prompts, an agent fan and a two-pane agent gallery.
+- Phone: the computer answers the phone's build progress and stop requests, and tells the phone which models need sign-in and which model is the default.
+- Science: the research workspace gets a one-line chat header, named stages, a title menu and slimmer project cards.
+- Engine: the app ships Agentlas OS 1.2.99.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.11 — 2026-11-22
 
 - Chat: the send button in a conversation's message box sits inside the box again, centred beside the microphone, instead of hanging off its right end.

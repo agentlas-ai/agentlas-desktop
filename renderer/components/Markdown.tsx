@@ -28,6 +28,7 @@ import { AnswerCardsHold, ListWithSteps, TableWithChart } from "./AnswerCards";
 import { IntellectUiActions, type IntellectUiFollowup } from "@/lib/intellect-ui-actions";
 import { INTELLECT_UI_LIMITS } from "@shared/intellect-ui";
 import { withoutEmptyCommentShells } from "@/lib/empty-comment-shell";
+import { bareLinkLabelsFor, shownLinkLabel, stableLabels } from "@/lib/bare-link-labels";
 
 export interface CodeArtifact {
   /** 채팅 내 안정적 id — 메시지id + 블록 인덱스 조합 */
@@ -79,7 +80,13 @@ export const Markdown = memo(function Markdown({
   uiActionsDisabled,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
   mentionNames,
+  bareLinkLabel = false,
+  bareLinkLabels,
 }: {
+  /** 개인 에이전트 답처럼 주소를 사이트 이름 글로 보인다(가는 곳·title 의 전체 주소는 그대로). 기본 꺼짐 = 주소 전문. */
+  bareLinkLabel?: boolean;
+  /** 스트리밍처럼 답 전체에서 미리 정한 지도(주소 -> 보일 글). 있으면 이 글에서 다시 정하지 않는다. */
+  bareLinkLabels?: ReadonlyMap<string, string> | null;
   /** Names a group room knows; `@Name` for one of them is highlighted. Omitted outside a room. */
   mentionNames?: readonly string[];
   /** Exact chat scope for links without an owning callback. Unbound links cannot select another task panel. */
@@ -110,13 +117,15 @@ export const Markdown = memo(function Markdown({
     [text, mediaBasePaths],
   );
   const blocks = useMemo(() => parseBlocks(withoutEmptyCommentShells(text), messageId), [text, messageId]);
+  const ownBareLinks = useMemo(() => (bareLinkLabel && !bareLinkLabels ? bareLinkLabelsFor(text) : null), [bareLinkLabel, bareLinkLabels, text]);
+  const bareLinks = bareLinkLabels ?? ownBareLinks;
   const uiActions = useMemo(() => ({ prepareFollowup: onUiFollowup, disabled: uiActionsDisabled }), [onUiFollowup, uiActionsDisabled]);
   const body = (
     <div
       {...designOutputSurfaceProps("report")}
       style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--design-font-sans)", overflowWrap: "anywhere" }}
     >
-      {renderWithMentions(mentionNames, () => blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, openLinkedFile, resolvedMediaBasePaths)))}
+      {renderWithMentions(mentionNames, () => blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, openLinkedFile, resolvedMediaBasePaths, bareLinks)))}
     </div>
   );
   // 차트·시각물이 "이 대화"의 산출물 탭에 알리려면 대화 id 가 필요하다. 셸이 준 것을 넘긴다.
@@ -134,6 +143,7 @@ export const MarkdownSegment = memo(function MarkdownSegment({
   onOpenMedia,
   onOpenLinkedFile,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
+  bareLinkLabels,
 }: {
   text: string;
   messageId: string;
@@ -141,10 +151,12 @@ export const MarkdownSegment = memo(function MarkdownSegment({
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
   mediaBasePaths?: string[];
+  bareLinkLabels?: ReadonlyMap<string, string> | null;
 }) {
   return (
     <Markdown
       text={text}
+      bareLinkLabels={bareLinkLabels}
       messageId={messageId}
       onOpenArtifact={onOpenArtifact}
       onOpenMedia={onOpenMedia}
@@ -168,7 +180,10 @@ export function StreamingMarkdown({
   uiActionsDisabled,
   growing = true,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
+  bareLinkLabel = false,
 }: {
+  /** 개인 에이전트 답: 주소를 사이트 이름 글로 보인다. 지도는 답 전체에서 한 번 정해 모든 조각에 같이 준다. */
+  bareLinkLabel?: boolean;
   /** 차트·시각물이 이 대화의 산출물 탭에 알릴 때 쓰는 대화 id. */
   chatId?: string | null;
   text: string;
@@ -203,6 +218,8 @@ export function StreamingMarkdown({
   if (cacheRef.current.msgId !== messageId) cacheRef.current = { msgId: messageId, cache: null };
   const { segments, cache } = splitStreamingSegments(shownText, cacheRef.current.cache);
   cacheRef.current.cache = cache;
+  const labelsRef = useRef<ReadonlyMap<string, string> | null>(null);
+  const bareLinkLabels = bareLinkLabel ? (labelsRef.current = stableLabels(labelsRef.current, bareLinkLabelsFor(shownText, { holdTrailing: growing }))) : null;
   const body = (
     <>
       {segments.map((seg, i) => (
@@ -214,6 +231,7 @@ export function StreamingMarkdown({
             onOpenMedia={stableMedia}
             onOpenLinkedFile={stableLinkedFile}
             mediaBasePaths={mediaBasePaths}
+            bareLinkLabels={bareLinkLabels}
           />
         </AnswerCardsHold>
       ))}
@@ -519,6 +537,7 @@ function renderBlock(
   onOpenMedia?: (a: MediaArtifact) => void,
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void,
   mediaBasePaths: string[] = [],
+  bareLinks?: ReadonlyMap<string, string> | null,
 ) {
   switch (b.type) {
     case "math":
@@ -559,7 +578,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}
         </h1>
       );
     case "h2":
@@ -574,7 +593,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}
         </h2>
       );
     case "h3":
@@ -589,7 +608,7 @@ function renderBlock(
             color: "var(--ink)",
           }}
         >
-          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+          {inline(b.text, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}
         </h3>
       );
     case "ul":
@@ -604,7 +623,7 @@ function renderBlock(
             {task ? <TaskCheckbox initial={task.checked} label={media.text.split("\n")[0] || "task"} /> : null}
             {media.text ? media.text.split("\n").map((line, k, all) => (
               <span key={k}>
-                {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+                {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}
                 {k < all.length - 1 ? <br /> : null}
               </span>
             )) : null}
@@ -620,7 +639,7 @@ function renderBlock(
                       {childTask ? <TaskCheckbox initial={childTask.checked} label={childLines[0] || "task"} /> : null}
                       {childLines.map((line, l) => (
                         <span key={l}>
-                          {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+                          {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}
                           {l < childLines.length - 1 ? <br /> : null}
                         </span>
                       ))}
@@ -639,7 +658,7 @@ function renderBlock(
     case "hr":
       return <hr key={i} style={{ border: 0, borderTop: "var(--hairline, 1px solid var(--paper-3))", margin: "12px 0" }} />;
     case "table":
-      return <TableWithChart key={i} block={b}><TableBlock block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} /></TableWithChart>;
+      return <TableWithChart key={i} block={b}><TableBlock block={b} onOpenMedia={onOpenMedia} onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} bareLinks={bareLinks} /></TableWithChart>;
     case "quote":
       return (
         <blockquote
@@ -655,7 +674,7 @@ function renderBlock(
           }}
         >
           {b.text.split("\n").map((line, j) => (
-            <div key={j}>{inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}</div>
+            <div key={j}>{inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}</div>
           ))}
         </blockquote>
       );
@@ -670,7 +689,7 @@ function renderBlock(
             <p style={{ margin: "6px 0" }}>
               {lines.map((line, j) => (
                 <span key={j}>
-                  {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+                  {inline(line, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}
                   {j < lines.length - 1 ? <br /> : null}
                 </span>
               ))}
@@ -689,7 +708,9 @@ function TableBlock({
   onOpenMedia,
   onOpenLinkedFile,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
+  bareLinks,
 }: {
+  bareLinks?: ReadonlyMap<string, string> | null;
   block: { type: "table"; header: string[]; align: TableAlign[]; rows: string[][] };
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
@@ -738,7 +759,7 @@ function TableBlock({
                   whiteSpace: "nowrap",
                 }}
                 >
-                  {inline(h, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+                  {inline(h, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}
                 </th>
             ))}
           </tr>
@@ -765,7 +786,7 @@ function TableBlock({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {inline(cell, onOpenMedia, onOpenLinkedFile, mediaBasePaths)}
+                  {inline(cell, onOpenMedia, onOpenLinkedFile, mediaBasePaths, bareLinks)}
                 </td>
               ))}
             </tr>
@@ -988,6 +1009,7 @@ function inline(
   onOpenMedia?: (a: MediaArtifact) => void,
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void,
   mediaBasePaths: string[] = [],
+  bareLinks?: ReadonlyMap<string, string> | null,
 ): React.ReactNode {
   // 토큰화 — `code` > **bold** > *italic* > [text](url) 순서대로 처리
   const out: React.ReactNode[] = [];
@@ -1077,7 +1099,7 @@ function inline(
       },
       {
         regex: /^\[([^\]]+)\]\(([^)]+)\)/,
-        render: (m) => renderInlineLink(key++, m[1], m[2].trim(), onOpenLinkedFile, mediaBasePaths),
+        render: (m) => renderInlineLink(key++, m[1], m[2].trim(), onOpenLinkedFile, mediaBasePaths, bareLinks),
       },
       {
         /*
@@ -1087,7 +1109,7 @@ function inline(
          *   ★끝의 문장부호는 주소에서 뺀다: "…/link." 의 마침표까지 삼키면 열리지 않는다.
          */
         regex: /^(https?:\/\/[^\s<>"'`)\]]+[^\s<>"'`)\].,;:!?])/i,
-        render: (m) => renderInlineLink(key++, m[1], m[1], onOpenLinkedFile, mediaBasePaths),
+        render: (m) => renderInlineLink(key++, m[1], m[1], onOpenLinkedFile, mediaBasePaths, bareLinks),
       },
     ];
 
@@ -1190,6 +1212,7 @@ function renderInlineLink(
   rawHref: string,
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void,
   mediaBasePaths: string[] = [],
+  bareLinks?: ReadonlyMap<string, string> | null,
 ): React.ReactNode {
   const href = cleanLinkHref(rawHref);
   const localTargets = localPathsFromFileRef(href, mediaBasePaths);
@@ -1216,7 +1239,7 @@ function renderInlineLink(
       style={{ color: "var(--accent)", textDecoration: "underline", cursor: (isLocalFile || isHttpLink) ? "pointer" : undefined }}
       title={isLocalFile && localTargets[0] ? localTargets[0] : href}
     >
-      {label}
+      {bareLinks && isHttpLink ? shownLinkLabel(label, href, bareLinks) : label}
     </a>
   );
 }

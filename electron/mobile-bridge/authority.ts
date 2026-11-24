@@ -2709,6 +2709,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly terminalLeaseTimers = new Map<string, NodeJS.Timeout>();
   private readonly buildRuns = new Map<string, {
     status: InternalMobileBuildStatus;
+    /** Only the initiating paired device may rediscover a build after restart. */
+    deviceId: string;
     /** True until the builder promise settles, even after a terminal event. */
     active: boolean;
     summary: string | null;
@@ -2723,6 +2725,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     lastPrompt: string;
     questionSetId: string | null;
     answerInFlight: boolean;
+    /** Terminal events are published only after the runner has released ownership. */
+    pendingTerminal: HephaestusBuildEvent | null;
   }>();
   private upstreamUnsubscribers: Array<() => void> = [];
   private refreshQueued = false;
@@ -6074,7 +6078,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       // reads the bounded in-process registry. Workspace paths, runtime session
       // ids, and raw build results never cross the bridge.
       case "build.start": {
-        const params = guardedParams(request, ["goal", "idempotencyKey", "buildKey", "seenUpdatedAt"]);
+        const params = guardedParams(request, ["goal", "idempotencyKey", "clientRunId", "buildKey", "seenUpdatedAt"]);
         const goal = requiredText(params, "goal", 20_000);
         this.consumeWriteIdempotencyKey(request, params);
         const continuationProblem = validateMobileBuildContinuation(params);
@@ -6090,12 +6094,14 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           // A new Build is also refused while the Build window (or another phone run) has a Build turn running: one Build at a time. The sentence is the one phones already read.
           throw new Error("A Mobile build is already running on this Desktop");
         }
-        const runId = randomUUID();
+        const runId = params.clientRunId === undefined ? randomUUID() : requiredIdentifier(params, "clientRunId", RUN_ID_RE);
+        if (this.buildRuns.has(runId)) throw new Error("build_run_id_already_used");
         const buildFiles = this.claimMobileBuildFiles(context.deviceId, media.fileGroupId, runId);
         const controller = new AbortController();
         const locale: "ko" | "en" = HANGUL_RE.test(goal) ? "ko" : "en";
         this.buildRuns.set(runId, {
           status: "awaiting-approval",
+          deviceId: context.deviceId,
           active: true,
           summary: null,
           questions: [],
@@ -6109,6 +6115,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           lastPrompt: goal,
           questionSetId: null,
           answerInFlight: false,
+          pendingTerminal: null,
         });
         this.pruneBuildRuns();
         // A phone whose pairing this computer vouches for (made at its screen, or confirmed by the owner) needs no approval window: it works on this computer without one already.
@@ -6118,10 +6125,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const reserved = this.buildRuns.get(runId);
         if (!approval.approved || !reserved || controller.signal.aborted || this.disposed) {
           this.attachmentUploads.releaseBuild(runId);
-          this.buildRuns.delete(runId);
           const refusal = this.buildApprovalRefusal(
             approval.approved ? "desktop_approval_unavailable" : approval.code,
           );
+          if (reserved && controller.signal.aborted) {
+            reserved.active = false;
+          } else if (reserved && !this.disposed) {
+            // A phone may have reconnected while the approval was pending.
+            // Publish and retain the refusal so its recovered UI settles too.
+            reserved.refusal = refusal;
+            reserved.summary = refusal.message;
+            this.finalizeBuildRun(runId, null);
+          } else {
+            this.buildRuns.delete(runId);
+          }
           return asJsonValue({ refusal }, request.method);
         }
         reserved.status = "running";
@@ -6140,6 +6157,34 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           (error) => this.finalizeBuildRun(runId, errorOf(error)),
         );
         return asJsonValue({ runId, replayable: false }, request.method);
+      }
+      case "build.active": {
+        noParams(request);
+        const current = [...this.buildRuns.entries()]
+          .filter(([, run]) => run.deviceId === context.deviceId && !run.controller.signal.aborted
+            && (run.active || run.status === "awaiting-input"))
+          .sort(([, a], [, b]) => b.startedAt - a.startedAt)[0];
+        // Identity only; status/questions use the existing bounded status API.
+        return asJsonValue({ runId: current?.[0] ?? null }, request.method);
+      }
+      case "build.cancel": {
+        const params = guardedParams(request, ["runId"]);
+        const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
+        const run = this.buildRuns.get(runId);
+        // The builder lives in this process. A run it does not hold is over (Desktop restarted); cancelling it succeeds.
+        if (!run) return asJsonValue({ runId, stopRequested: true, alreadyTerminal: true }, request.method);
+        const alreadyTerminal = run.status === "done" || run.status === "failed";
+        // Abort even when the runner is cleaning up after a terminal event.
+        run.controller.abort();
+        if (!alreadyTerminal) {
+          run.status = "failed";
+          run.summary = run.locale === "ko" ? "빌드 중지를 요청했습니다." : "Build stop requested.";
+          run.questions = [];
+          run.questionSetId = null;
+          run.refusal = null;
+          this.emitBuildEvent({ runId, kind: "error", status: "failed", text: run.summary });
+        }
+        return asJsonValue({ runId, stopRequested: true, alreadyTerminal }, request.method);
       }
       case "build.answer": {
         const params = guardedParams(request, ["runId", "questionSetId", "answers", "idempotencyKey", "questionSetRevision"]);
@@ -6223,11 +6268,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           .then(
             () => this.finalizeBuildRun(runId, null),
             (error) => this.finalizeBuildRun(runId, errorOf(error)),
-          )
-          .finally(() => {
-            const current = this.buildRuns.get(runId);
-            if (current) current.answerInFlight = false;
-          });
+          );
         return asJsonValue({ status: "running", summary: run.summary }, request.method);
       }
       case "build.status": {
@@ -6902,7 +6943,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   /** DESKTOP_MOBILE_BRIDGE: Builder events cross the bridge as sanitized display copy only. */
   private handleBuildEvent(runId: string, event: HephaestusBuildEvent): void {
     const run = this.buildRuns.get(runId);
-    if (!run) return;
+    // A late builder event can never resurrect a stopped run.
+    if (!run || run.controller.signal.aborted) return;
+    if (run.active && (event.kind === "done" || event.kind === "error")) {
+      run.pendingTerminal = event;
+      return;
+    }
     // Heartbeats are Desktop-local liveness for one live status row; they carry
     // no build content. The v1 bridge DTO has no such kind and already exposes
     // `run.status`, so forwarding them would be a silent wire-contract change.
@@ -6996,6 +7042,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     const run = this.buildRuns.get(runId);
     if (!run) return;
     run.active = false;
+    run.answerInFlight = false;
+    const terminal = run.pendingTerminal;
+    run.pendingTerminal = null;
+    if (terminal && !run.controller.signal.aborted) this.handleBuildEvent(runId, terminal);
     if (activeMobileBuildStatus(run.status)) {
       // The builder settled without a terminal done/error event (startup
       // failure, abort, or crash). Never leave the phone believing it runs.
