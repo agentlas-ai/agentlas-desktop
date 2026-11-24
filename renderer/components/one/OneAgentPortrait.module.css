@@ -18,6 +18,10 @@
 .root[data-state="failed"] .character { filter: grayscale(.5); opacity: .72; }
 .root[data-state="working"] .character { filter: saturate(1.05); }
 
+/* The agent's own face fills the portrait's box, whatever size a list gives the box (the group rows shrink it). */
+.agentFace { display: block; width: 100%; height: 100%; }
+.agentFace > span, .agentFace img { width: 100% !important; height: 100% !important; }
+
 .dot {
   position: absolute;
   right: 2px;

@@ -3,6 +3,7 @@ import type { OneArtifactBindingRequestV1 } from "@shared/one-artifacts";
 import { classifyToolFailure, isToolFailureCode, type ToolFailureCode } from "@shared/tool-failure";
 import { decodeToolInvocationOrigin, type ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 import type { InvocationPlanEntry } from "@shared/invocation-plan";
+import { parseWebSources, webSourcesFromTool, type WebSource } from "@shared/web-search/web-sources";
 
 export type OneActivityStatus = "running" | "cancelling" | "waiting_input" | "completed" | "failed" | "cancelled" | "info";
 export type OneActivityKind = "run" | "reasoning" | "tool" | "agent" | "notice" | "result" | "terminal";
@@ -115,6 +116,21 @@ export interface OneActivitySource {
   label: string;
   toolName: string;
   status: OneActivityStatus;
+  /** Present when a web tool opened or listed this page (shared/web-search/web-sources.ts): the page's own title, site name, listing snippet. */
+  title?: string;
+  site?: string;
+  snippet?: string;
+  kind?: WebSource["kind"];
+}
+
+/** The structured web sources of an activity state, in the contract's order (pages read first, then search results). */
+export function webSourcesOfActivity(sources: readonly OneActivitySource[]): WebSource[] {
+  const out: WebSource[] = [];
+  for (const source of sources) {
+    if (!source.kind || !source.site) continue;
+    out.push({ url: source.url, title: source.title ?? source.label, site: source.site, ...(source.snippet ? { snippet: source.snippet } : {}), kind: source.kind });
+  }
+  return out;
 }
 
 export interface OneActivityPlan {
@@ -219,8 +235,24 @@ function sourceLabel(url: string): string {
 }
 
 function mergeSources(current: OneActivitySource[], event: McpInvocationEvent): OneActivitySource[] {
-  if (event.kind !== "tool-use" || !event.tool || event.tool.isError || !event.tool.sourceUrls?.length) return current;
+  if (event.kind !== "tool-use" || !event.tool || event.tool.isError) return current;
   const next = [...current];
+  // D2: structured web sources. A live event carries them from Main; a replayed row carries `toolSources`, and a row written before
+  // that field existed is read again from its stored result preview (best effort, same reader).
+  const structured: WebSource[] = event.tool.sources?.length
+    ? parseWebSources(event.tool.sources)
+    : event.tool.result !== undefined ? webSourcesFromTool({ toolName: event.tool.name, args: event.tool.args, result: event.tool.result }) : [];
+  for (const web of structured) {
+    const id = `source:${web.url}`;
+    const source: OneActivitySource = {
+      id, url: web.url, label: web.title, toolName: event.tool.name, status: "completed",
+      title: web.title, site: web.site, kind: web.kind, ...(web.snippet ? { snippet: web.snippet } : {}),
+    };
+    const index = next.findIndex((candidate) => candidate.id === id);
+    if (index >= 0) next[index] = { ...next[index], ...source, kind: next[index].kind === "page" ? "page" : source.kind };
+    else next.push(source);
+  }
+  if (!event.tool.sourceUrls?.length) return structured.length ? next : current;
   for (const url of event.tool.sourceUrls) {
     try {
       const parsed = new URL(url);
@@ -1339,6 +1371,7 @@ function replayLedger(
       const agentMessage = ledgerAgentMessage(payload);
       const toolIsError = ledgerBoolean(payload, "toolIsError") === true;
       const toolSourceUrls = ledgerHttpsUrls(payload, "toolSourceUrls");
+      const toolSources = parseWebSources(payload.toolSources);
       const oneArtifacts = ledgerOneArtifacts(payload);
       const topologyAgentId = ledgerString(payload, "agentNodeId") || row.nodeId || row.agentId;
       const done = ledgerBoolean(payload, "done");
@@ -1374,6 +1407,7 @@ function replayLedger(
             ...(toolIsError ? { isError: true } : {}),
             ...(toolFailureCode ? { failureCode: toolFailureCode } : {}),
             ...(toolSourceUrls ? { sourceUrls: toolSourceUrls } : {}),
+            ...(toolSources.length ? { sources: toolSources } : {}),
           },
           ...(topologyAgentId ? { agentId: topologyAgentId } : {}),
           ...(phase ? { phase } : {}),

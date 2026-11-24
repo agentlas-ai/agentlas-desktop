@@ -5,6 +5,7 @@ import type { HomeLine, HomeOpenMemberResult, HomeRowsByIdsResult, HomeTreeParti
  * route each row opens. No React in this file, so the rules can be checked without a DOM.
  */
 export type { HomeTreeRow, HomeTreeSnapshot, HomeTreeParticipant } from "@shared/home-tree";
+import { homeRowAgentNames } from "@shared/home-tree";
 
 export interface HomeBridge {
   tree: () => Promise<HomeTreeSnapshot>;
@@ -90,7 +91,8 @@ export function patchHomeRows(current: readonly HomeTreeRow[], result: HomeRowsB
 export function sameRow(a: HomeTreeRow, b: HomeTreeRow): boolean {
   return a.id === b.id && a.kind === b.kind && a.projectId === b.projectId && a.title === b.title && a.taskId === b.taskId
     && a.memberCount === b.memberCount && a.updatedAt === b.updatedAt
-    && a.agentNames.length === b.agentNames.length && a.agentNames.every((name, i) => name === b.agentNames[i]);
+    && a.agentNames.length === b.agentNames.length && a.agentNames.every((name, i) => name === b.agentNames[i])
+    && (a.agentNamesEn?.join("\u0000") ?? "") === (b.agentNamesEn?.join("\u0000") ?? "");
 }
 
 /** A fresh full read keeps every row object that did not change, so memoised rows below do not repaint. */
@@ -126,8 +128,8 @@ export function activeChatIdOf(pathname: string, search: URLSearchParams): strin
 }
 
 /** A group room with no title is named by who is in it (up to three), so a three-person room does not read like a one-to-one. */
-export function rowDisplayName(row: Pick<HomeTreeRow, "kind" | "agentNames">, fallback: string): string {
-  const names = row.agentNames.filter(Boolean);
+export function rowDisplayName(row: Pick<HomeTreeRow, "kind" | "agentNames" | "agentNamesEn">, fallback: string, locale: "ko" | "en" = "ko"): string {
+  const names = homeRowAgentNames(row, locale).filter(Boolean);
   if (row.kind === "group" && names.length) return names.slice(0, 3).join(", ");
   return names[0] || fallback;
 }

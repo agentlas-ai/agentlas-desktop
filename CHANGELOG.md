@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.13 — 2026-11-24
+
+- Web search: chats on API and local models can search the web and read pages through the bundled Agentlas browser (no window, no search key), and every answer that used the web gets a Sources button listing the pages and their sites.
+- Agents: the look you chose is drawn the same way everywhere an agent shows (sidebar rows, group rows, the Space room header, the agent page and its timeline) and fills its frame; the orange dino is the app logo's character again.
+- English: agent names and descriptions follow the English UI instead of showing in Korean.
+- Build: the editor after Create is reworked as one conversation page with a progress timeline and a quiet side sheet; the saved Build window has the same toolbar, and the Build and Create headers no longer swallow clicks meant for their buttons.
+- Phone: the computer decides each agent's picture and sends it with the agent's English name and tagline.
+- Engine: the app ships Agentlas OS 1.2.99.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.12 — 2026-11-24
 
 - Agents: every agent character is redrawn as a round, flat picture with a face, and an agent without a chosen look now gets a default character face instead of a grey initial circle.

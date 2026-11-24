@@ -4,6 +4,7 @@ import { noteTurnRuntime } from "../runtime/turn-runtime-note";
 import { bindRunnerTurnContext, carryRunnerTurnContext, renderRunnerTurnContext, replaceRunnerUserPrompt, runnerTurnContextSource } from "../runtime/runner-turn-context-binding";
 import { browserSignInNeeded, ownerAnswersSignIn } from "../../shared/browser-sign-in-needed";
 import { effectiveAcceptanceCriteria } from "../../shared/goal-scope";
+import { webSourcesFromTool, type WebSource } from "../../shared/web-search/web-sources";
 import { composeTracedPrompt } from "../runtime/prompt-composition-trace";
 import { CHANNEL_PRIVACY_RULE } from "../runtime/session-channel";
 import { workMainOwnsRouting, workSessionMainPolicy } from "../work/session-policy";
@@ -7232,6 +7233,7 @@ async function runMcpInvocationInContext(
     // by the empty-reply rule (H2) below.
     const modelToolOutcomes = createToolOutcomeTally();
     const oneToolFailureBlocksCompletion = () => Boolean(oneTeamExecutionPolicy && observedOneToolFailure);
+    const webSourceArgsById = new Map<string, string>();
     const collectObservedSourceUrls = (value?: string): string[] => {
       if (!value || !oneTeamExecutionPolicy || observedOneSourceUrls.size >= 32) return [];
       const added: string[] = [];
@@ -7342,6 +7344,14 @@ async function runMcpInvocationInContext(
         invocationToolEvents += 1;
         answerTracker.onTool(id);
         let sourceUrls: string[] | undefined;
+        // D2: the web pages this tool opened or listed, for EVERY runtime (the one door all runners report through). Some runners
+        // report the result in a second event that no longer carries the arguments (Claude Code tool_result), so the arguments of the
+        // call's own start event are kept by id and handed to the reader.
+        if (id && args !== undefined) webSourceArgsById.set(id, args);
+        const webSources: WebSource[] = result !== undefined && !isError
+          ? webSourcesFromTool({ toolName: name, args: args ?? (id ? webSourceArgsById.get(id) : undefined), result, runtimeKind: active.kind, ...(_toolKind ? { toolKind: _toolKind } : {}) })
+          : [];
+        if (id && result !== undefined) webSourceArgsById.delete(id);
         if (!isError && req.runId && !req.agentAppMode) {
           try {
             const slugs = pluginSlugsNamedInToolEvent({ name, args, result }, listInstalledPluginCandidates());
@@ -7435,6 +7445,7 @@ async function runMcpInvocationInContext(
             observationDigest: toolObservationDigest(artifactPaths, imageDataUrl),
             ...(isError ? { failureCode: classifyToolFailure({ result }) } : {}),
             ...(sourceUrls?.length ? { sourceUrls } : {}),
+            ...(webSources.length ? { sources: webSources } : {}),
           },
           ...(oneArtifacts?.length ? { oneArtifacts } : {}),
         });

@@ -1,10 +1,27 @@
-
-.choice details { margin-top:12px; font-size:11px; color:var(--ink-soft); }
+.choice details { margin-top:12px; font-size:11px; color:var(--rd-ink-3); }
 .choice summary { display:flex; align-items:center; gap:6px; cursor:pointer; }
 .choice details p { margin-top:9px; line-height:1.6; }
-.interview { border-radius:18px; box-shadow:inset 0 1px 0 #fff9,0 5px 16px #2631270d; }
-.interview :global(.build-mcp-interview-opt) { border-radius:13px; background:var(--paper-2); box-shadow:inset 0 1px 0 #fff9,0 3px 9px #26312708; }
-.interview :global(.build-mcp-interview-opt[data-recommended="true"]) { background:var(--popup-sage,var(--paper-2)); }
-.interview :global(.build-mcp-interview-question) { display:flex; align-items:center; gap:8px; }
-.interview details { font-size:11px; color:var(--ink-soft); }
+/* The connection question is one of the "needs you now" cards of the Build conversation: same hairline, radius and ink-based selection as the interview. */
+.interview { display:flex !important; flex-direction:column; gap:14px !important; padding:16px; border:1px solid var(--rd-hair-2) !important; border-radius:var(--rd-r-md); background:var(--rd-surface); box-shadow:none !important; word-break:keep-all; }
+.interview :global(.build-mcp-interview-head) { flex-wrap:wrap; }
+.interview :global(.build-mcp-interview-question) { display:flex; align-items:center; gap:8px; font-size:15px; font-weight:600; letter-spacing:-.2px; }
+.interview :global(.build-mcp-interview-step) { background:var(--rd-surface-2); color:var(--rd-ink-3); font-weight:500; }
+.interview :global(.build-mcp-hint) { margin:0; color:var(--rd-ink-2); font-size:13px; line-height:1.65; overflow-wrap:anywhere; }
+.interview :global(.build-mcp-list) { gap:6px; }
+.interview :global(.build-mcp-row) { border-color:var(--rd-hair); border-radius:var(--rd-r-sm); background:var(--rd-surface); }
+.interview :global(.build-mcp-row[data-selected="true"]) { border-color:var(--rd-ink); background:var(--rd-surface); }
+.interview :global(.build-mcp-row[data-selected="true"] .build-mcp-check) { border-color:var(--rd-ink); background:var(--rd-ink); color:var(--rd-bg); }
+.interview :global(.build-mcp-copy small) { font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
+.interview :global(.build-mcp-badge) { font-size:11px; }
+.interview :global(.build-mcp-interview-opt) { border-radius:var(--rd-r-sm); border-color:var(--rd-hair); background:var(--rd-surface); }
+.interview :global(.build-mcp-interview-opt:hover) { border-color:var(--rd-ink); }
+.interview :global(.build-mcp-interview-opt[data-recommended="true"]) { border-color:var(--rd-ink); box-shadow:inset 0 0 0 1px var(--rd-ink); }
+.interview :global(.build-mcp-interview-opt-body strong) { font-size:13px; font-weight:600; }
+.interview :global(.build-mcp-interview-opt-body span) { font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
+.interview :global(.build-mcp-interview-foot) { flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+.interview :global(.build-mcp-interview-hint) { flex-basis:100%; }
+.interview :global(.build-mcp-interview-skip) { border-color:transparent; background:transparent; color:var(--rd-ink-2); font-weight:500; }
+.interview :global(.build-mcp-interview-skip:hover) { color:var(--rd-ink); }
+.interview :global(.build-mcp-actions) { margin-top:0; }
+.interview details { font-size:12px; color:var(--rd-ink-3); }
 .interview details summary { cursor:pointer; margin:8px 0; }

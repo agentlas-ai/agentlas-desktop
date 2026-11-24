@@ -5331,6 +5331,11 @@ export interface McpInvocationEvent {
     failureCode?: ToolFailureCode;
     /** Verified public URLs observed in this tool's own input or result. */
     sourceUrls?: string[];
+    /**
+     * Web pages this tool opened or listed (D2, shared/web-search/web-sources.ts), any runtime. Optional and additive: `sourceUrls`
+     * keeps its One Team meaning; the phone projection does not carry this field.
+     */
+    sources?: import("./web-search/web-sources").WebSource[];
   };
   /** kind:"mcp-key-request" 전용 — 렌더러 McpKeyRequestSheet가 소비한다. 값 없음(키 이름만). */
   keyRequest?: McpRunKeyRequest;
@@ -6554,6 +6559,8 @@ export type OrchestrationTarget =
 export interface RecAgent {
   id: string;
   name: string;
+  /** English-UI name when the source row has one (a remote listing's `nameEn`); a local agent's is read from the installed row where the phone projection is built. */
+  nameEn?: string;
   source: RecSource;
   /** 점추정 크레딧(예상). 알 수 없으면 null. */
   estCredits: number | null;
@@ -7819,6 +7826,8 @@ export interface AgentlasIpc {
     cloudReconcile: (input: ExperienceCloudReconcileInput) => Promise<ExperienceCloudUploadRecord>;
     cloudWithdraw: (input: ExperienceCloudWithdrawInput) => Promise<ExperienceCloudUploadRecord>;
   };
+  /** A web source's site icon for the Sources button, read by Main (a data: address only for a 200 image; null = draw the letter). */
+  webSources?: { favicon: (host: string) => Promise<string | null> };
   /** 실행/실패 원장 — 긴 원문 없이 runId, 노드, 도구, 오류 메타데이터만 조회한다. */
   runLedger: {
     events: (runId: string, limit?: number) => Promise<RunEventUi[]>;

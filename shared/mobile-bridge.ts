@@ -4,6 +4,7 @@ import type {OneVaultErrorCode} from "./one-vault";
 import type {OneProviderRemoteErrorCode} from "./one-provider-remote";
 import type { MobileBridgeSpecificRefusalCode } from "./mobile-bridge-refusal";
 import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobileGoalControlMethod, validateMobileGoalControlParams } from "./mobile-goal-control";
+import type { AgentFace } from "./agent-face";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import { validateMobileBuildContinuation, validateMobileBuildV2Params } from "./mobile-build-v2";
 import { MOBILE_WORKSPACE_V2_COMMAND_OPERATIONS, MOBILE_WORKSPACE_V2_READ_OPERATIONS, validateMobileWorkspaceV2Args } from "./mobile-workspace-v2";
@@ -1367,6 +1368,11 @@ export interface MobileBridgeAgentDto {
   trustGrade: string;
   installedAt: string;
   tone: string;
+  /**
+   * The picture the Desktop draws for this agent (shared/agent-face.ts): the face the owner chose, else the default face of its own name.
+   * Optional and additive: a phone that does not know the key ignores it and falls back to its older rule. Absent when the agent has no name.
+   */
+  face?: AgentFace;
   runtimeLabel: string | null;
   assetSource: string | null;
   source: "local" | "agent-cloud" | "hub";
@@ -1441,6 +1447,8 @@ export interface MobileBridgeProjectDto {
     firmId: string | null;
     controllerAgentId: string | null;
     name: string;
+    /** What a phone in English shows for a member that is installed here, only when it differs from `name` (an older phone ignores it). */
+    nameEn?: string;
     source: "local" | "cloud" | "hub";
     releaseId: string | null;
     order: number;
@@ -1572,6 +1580,8 @@ export interface MobileBridgeChatDto {
     slot: number;
     agentId: string | null;
     displayName: string;
+    /** The name a phone in English shows, only when it differs from `displayName` (an older phone ignores it). */
+    displayNameEn?: string;
   }> | null;
   archivedAt: string | null;
   createdAt: string;

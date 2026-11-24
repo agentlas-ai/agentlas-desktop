@@ -20,6 +20,13 @@ export interface HomeTreeRow {
   taskId: string | null;
   /** Up to three agent display names (solo: the one agent; group: the first members). */
   agentNames: string[];
+  /**
+   * The same names for an English UI (the package's English name where it has one; the owner's own name wins in both). Present only when at least one
+   * differs from `agentNames`, same length and order; a screen in English reads it with `homeRowAgentNames`.
+   */
+  agentNamesEn?: string[];
+  /** The installed agents behind `agentNames` (same length and order; "" for an id whose agent is gone). Agent chats only. */
+  agentIds?: string[];
   /** Group rows: how many members the room has (>= agentIds.length). Solo / work: 1 or 0. */
   memberCount: number;
   /** When the last visible line appeared (Work: the task's update time) — NOT chats.updated_at, which quiet state changes also move. */
@@ -36,6 +43,20 @@ export interface HomeTreeParticipant {
   agentId: string;
   /** Null when the agent is no longer installed (the room keeps the id; the renderer shows a neutral label). */
   name: string | null;
+  /** English-UI name, only when it differs from `name` (see HomeTreeRow.agentNamesEn). */
+  nameEn?: string;
+}
+
+/** The agent names a row shows in this UI language. The Korean-UI names (and every default-face seed) stay `agentNames`. */
+export function homeRowAgentNames(row: { agentNames: string[]; agentNamesEn?: string[] }, locale: "ko" | "en"): string[] {
+  return locale === "en" && row.agentNamesEn && row.agentNamesEn.length === row.agentNames.length
+    ? row.agentNamesEn.map((name, index) => name || row.agentNames[index] || "")
+    : row.agentNames;
+}
+
+/** A room member's name in this UI language. */
+export function homeParticipantName(member: { name: string | null; nameEn?: string }, locale: "ko" | "en"): string | null {
+  return locale === "en" && member.nameEn ? member.nameEn : member.name;
 }
 
 export interface HomeRowsByIdsResult {
@@ -64,7 +85,7 @@ export const HOME_TREE_CHANNELS = {
 } as const;
 
 /** One face in a row's overlapped avatar: the agent and the tone `installed_agents.tone` gives it. */
-export interface HomeLineFace { agentId: string; name: string; tone: string }
+export interface HomeLineFace { agentId: string; name: string; tone: string; /** English-UI name, only when it differs from `name`. */ nameEn?: string }
 
 /**
  * What one visible row needs that `home:tree` rows do not carry (they stay light). Agent chats: `preview` (the last user or

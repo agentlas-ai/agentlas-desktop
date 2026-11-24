@@ -1,6 +1,7 @@
 "use client";
 import { useAgentAppearance } from "@/lib/agent-appearance";
 import { withoutEmptyCommentShells } from "@/lib/empty-comment-shell";
+import { agentDisplayName } from "@shared/agent-display-name";
 import type { AgentAppearance } from "@shared/agent-appearance";
 import { shortenLocalPaths } from "@/lib/local-path-redact";
 import { MessageActions } from "./MessageActions";
@@ -54,7 +55,9 @@ import { useSettledApprovals } from "@/lib/use-settled-approvals";
 import type { ChatFileItem } from "@/lib/chat-files";
 import { OneTurnWork } from "./one/OneTurnWork";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
-import type { OneActivityItem, OneActivityState } from "@/lib/one-activity";
+import { webSourcesOfActivity, type OneActivityItem, type OneActivityState } from "@/lib/one-activity";
+import { mergeWebSources, webSourcesFromTool, type WebSource } from "@shared/web-search/web-sources";
+import { WebSourcesButton } from "./WebSourcesButton";
 import { ChatContinuationProjector } from "@/lib/chat-continuations";
 import { inferOwnerLocale, ownerActivityText } from "@shared/owner-visible-activity-text";
 import { ownerFailureTitle } from "@shared/owner-failure-title";
@@ -202,6 +205,8 @@ export interface StreamStep {
   /** 이 도구 이벤트가 도착했을 때까지 스트리밍된 본문 길이 — 단일 실행에서 텍스트 사이에
    *  도구 그룹을 영상처럼 끼워 넣는(interleave) 분할 앵커. 없으면 본문 앞에 몰아서 렌더. */
   anchorTextLen?: number;
+  /** Web pages this tool opened or listed (D2); the answer's "Sources" button reads them. */
+  sources?: WebSource[];
 }
 
 /** 에이전트가 사용자에게 옵션을 묻는 질문. Markdown에서 fence를 파싱해 채워진다. */
@@ -1007,15 +1012,18 @@ export function ChatStream({
           background: var(--fill-1);
           color: var(--ink);
         }
-        /* 메시지 하단 액션(복사/읽어주기) — 영상처럼 호버/포커스 시에만 드러난다. */
-        .agentlas-msg-actions {
+        /* 메시지 하단 액션(복사/읽어주기) — 영상처럼 호버/포커스 시에만 드러난다. "소스"는 맨 앞에서 늘 보인다. */
+        .agentlas-msg-actions > * {
           opacity: 0;
           transition: opacity 130ms ease;
         }
-        .agentlas-chat-turn:hover .agentlas-msg-actions,
-        .agentlas-msg-actions:focus-within {
+        .agentlas-chat-turn:hover .agentlas-msg-actions > *,
+        .agentlas-msg-actions:focus-within > *,
+        .agentlas-msg-actions > .agentlas-msg-sources {
           opacity: 1;
         }
+        .agentlas-msg-sources { display: inline-flex; }
+        .agentlas-msg-sources:empty { display: none; }
         .agentlas-chat-copy-button:focus-visible {
           outline: 2px solid var(--accent);
           outline-offset: 2px;
@@ -1130,7 +1138,7 @@ function EmptyChatState({
         .slice(0, 2)
         .map((agent) => ({
           id: `agent-${agent.id}`,
-          token: `@${locale === "en" ? agent.nameEn || agent.name : agent.name}`,
+          token: `@${agentDisplayName(agent, locale)}`,
           label: t("chatstream.empty_mention_agent"),
         })),
       ...hubBookmarksWithoutLocalDuplicates(bookmarks, agents).slice(0, 2).map((bookmark) => ({
@@ -1257,6 +1265,18 @@ const Bubble = memo(function Bubble({
   const turnFiles = useMemo(() => (message.role === "agent" && !message.busy && !message.streaming
     ? (turnFilesOverride ?? turnFilesOfActivity(workActivities.map(({ state }) => state), locale === "ko" ? "ko" : "en", workspaceRootForRun)) : []),
   [message.role, message.busy, message.streaming, workActivities, locale, workspaceRootForRun, turnFilesOverride]);
+  // D2: the web pages this answer's tools opened or listed, whichever runtime answered: structured sources the activity state carries
+  // plus the ones on the message's own tool steps (a step the reader can still parse from its result when it has none), merged by the
+  // contract order (pages read first, then search results; one per address; 20 at most).
+  const answerSources = useMemo(() => {
+    if (message.role !== "agent") return [] as WebSource[];
+    const fromSteps: WebSource[] = [];
+    for (const step of message.steps ?? []) {
+      if (step.kind !== "tool" || step.resultIsError || step.result == null) continue;
+      fromSteps.push(...(step.sources?.length ? step.sources : webSourcesFromTool({ toolName: step.tool ?? step.text, args: step.args, result: step.result })));
+    }
+    return mergeWebSources(...workActivities.map(({ state }) => webSourcesOfActivity(state.sources)), fromSteps);
+  }, [message.role, message.steps, workActivities]);
   // Activity notices belong under the work heading. Keep a separate plain
   // row only for an actionable sign-in, a context boundary, or a notice that
   // is absent from the canonical activity projection.
@@ -1525,6 +1545,7 @@ const Bubble = memo(function Bubble({
         )}
         {displayText && !message.busy && (
           <div className="agentlas-msg-actions" style={{ display: "flex", gap: 4, marginTop: 6 }}>
+            <span className="agentlas-msg-sources"><WebSourcesButton sources={answerSources} locale={locale === "ko" ? "ko" : "en"} /></span>
             <CopyMessageButton text={withoutEmptyCommentShells(displayText)} />
             <SpeakMessageButton text={withoutEmptyCommentShells(displayText)} />
             <OpenAsDocumentButton text={withoutEmptyCommentShells(displayText)} />

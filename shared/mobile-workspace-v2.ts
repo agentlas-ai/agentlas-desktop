@@ -1,3 +1,4 @@
+import type { AgentFace } from "./agent-face";
 /**
  * Mobile bridge, workspace v2 (decision): what the redesigned phone reads for its Workspace list, Agents list and
  * agent profile, and the personal agent's "What I know" lines. Two methods, `workspace2.read` and `workspace2.command`, each with a
@@ -144,6 +145,13 @@ export interface MobileWorkspaceV2Row {
   title: string;
   taskId: string | null;
   agentNames: string[];
+  /** The same names for an English UI, same length and order. Only when at least one differs from `agentNames` (an older phone ignores it). */
+  agentNamesEn?: string[];
+  /**
+   * The picture the Desktop draws for each of `agentNames` (shared/agent-face.ts), same length and order; `null` for an agent this computer does not know.
+   * Only on agent chats, and only when at least one is known (an older phone ignores it and draws the initial).
+   */
+  agentFaces?: Array<AgentFace | null>;
   memberCount: number;
   updatedAt: string;
   /** The room runs under the lead model (its own mark, never read from a title). */

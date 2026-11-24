@@ -3,7 +3,10 @@
 import { useState } from "react";
 import type { OneOrgStatusKind } from "@shared/one-org";
 import { oneCharacterForTone } from "@/lib/one-characters";
+import { AgentAvatar } from "@/components/AgentAvatar";
 import styles from "./OneAgentPortrait.module.css";
+
+const PIXELS = { small: 40, medium: 52, large: 72 } as const;
 
 export function OneAgentPortrait({
   status,
@@ -11,12 +14,15 @@ export function OneAgentPortrait({
   size = "medium",
   tone = "character:orange-dino",
   revision,
+  agent,
 }: {
   status: OneOrgStatusKind;
   label: string;
   size?: "small" | "medium" | "large";
   tone?: string;
   revision?: number;
+  /** An installed agent whose face is drawn by the same rule as the library and the phone (chosen face > default face of its own name > initial) instead of the tone character. `seedName` is the language-free name. */
+  agent?: { id: string; seedName: string };
 }) {
   const character = oneCharacterForTone(tone);
   const customAvatarId = tone.startsWith("one-avatar:") ? tone.slice("one-avatar:".length) : "";
@@ -41,8 +47,10 @@ export function OneAgentPortrait({
 
   return (
     <span className={`${styles.root} ${styles[size]}`} data-state={status} data-tone={custom && useCustom ? "custom" : character.tone} aria-label={label}>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={src} alt="" className={styles.character} onError={() => { if (useCustom) setFailedSrc(customSrc); }} />
+      {agent
+        ? <span className={styles.agentFace}><AgentAvatar name={label} seedName={agent.seedName} agentId={agent.id} size={PIXELS[size]} /></span>
+        : /* eslint-disable-next-line @next/next/no-img-element */
+        <img src={src} alt="" className={styles.character} onError={() => { if (useCustom) setFailedSrc(customSrc); }} />}
       <span className={styles.dot} aria-hidden="true" />
     </span>
   );

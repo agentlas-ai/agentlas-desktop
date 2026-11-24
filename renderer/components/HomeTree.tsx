@@ -213,7 +213,7 @@ const Row = memo(function Row({ row, running, locale, active, pinned, open, drop
   const counts = useChatAttention(row.id);
   const ko = locale === "ko";
   const copy = spaceCopy(locale);
-  const fallback = rowDisplayName(row, listCopy(locale).newChat);
+  const fallback = rowDisplayName(row, listCopy(locale).newChat, locale);
   const raw = row.kind === "work" ? taskTitleForDisplay(row.title, ko) : row.title;
   // A Work session is its title and nothing in front of it: no runner name (workspace-v3-two).
   const title = !raw || raw === "New chat" ? fallback : raw;
@@ -257,8 +257,8 @@ const MenuChatRow = memo(function MenuChatRow({ treeRow, active, pinned, open, r
   const { locale, handlers, org } = ctx;
   const ko = locale === "ko";
   const line = useHomeLine(row.id);
-  const item = agentChatItem(row, line, listCopy(locale).newChat);
-  const faces = agentChatFaces(row, line, org);
+  const item = agentChatItem(row, line, listCopy(locale).newChat, locale);
+  const faces = agentChatFaces(row, line, org, locale);
   return (
     <ConversationListButton item={item} active={active} locale={locale} onOpen={() => handlers.onOpen(row)} onRemove={ctx.onRemove}
       running={running} member={faces.member} groupMembers={faces.groupMembers} showOne={false} plain hideDelete

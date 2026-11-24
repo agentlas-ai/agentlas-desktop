@@ -6,6 +6,7 @@ import { IconArrowLeft, IconArrowUp, IconClose, IconFileText, IconMail, IconPlus
 import { Select } from "@/components/Select";
 import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
 import { AgentAvatar } from "@/components/AgentAvatar";
+import { agentFaceSeedName } from "@shared/agent-face";
 import { visibleAgents } from "@/lib/agent-visibility";
 import { classifyHubEntity } from "@/lib/agent-entity-kind";
 import { onAgentRosterChange } from "@/lib/agent-roster-events";
@@ -256,7 +257,7 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
       <p className={styles.homeLead}>{ko ? "내 일을 맡길 에이전트를 만들고 관리하세요" : "Create and manage agents for your work"}</p>
       <section className={styles.hero} aria-labelledby="build-hero-title">
         <div className={styles.heroText}><h2 id="build-hero-title">{ko ? <>내 에이전트와<br />Hub에서 시작하기</> : <>Start with your agents<br />and the Hub</>}</h2><p>{ko ? "내 데스크탑과 Cloud, Hub에서 실제 에이전트를 살펴보세요." : "Explore real agents on this computer, in your Cloud, and in the Hub."}</p><button className={styles.primary} onClick={() => navigate("/marketplace")}>{ko ? "에이전트 둘러보기" : "Explore agents"}</button></div>
-        {featured.length ? <div className={styles.heroCards}>{featured.slice(visibleSlide * 4, visibleSlide * 4 + 4).map(item => <button key={item.key} onClick={() => openGallery(item.key)}><span className={styles.heroCardTop}><AgentAvatar name={displayName(item)} agentId={item.agentId} size={35} /><small className={styles.sourceTag}>{sourceLabel(item.source)}</small></span><strong>{displayName(item)}</strong><span className={styles.heroCardText}>{displayDescription(item)}</span></button>)}</div> : <p className={styles.heroEmpty}>{catalogLoading ? (ko ? "에이전트를 불러오는 중…" : "Loading agents…") : (ko ? "에이전트 목록을 확인해 주세요." : "Check your agent catalog.")}</p>}
+        {featured.length ? <div className={styles.heroCards}>{featured.slice(visibleSlide * 4, visibleSlide * 4 + 4).map(item => <button key={item.key} onClick={() => openGallery(item.key)}><span className={styles.heroCardTop}><AgentAvatar name={displayName(item)} seedName={item.name} agentId={item.agentId} size={35} /><small className={styles.sourceTag}>{sourceLabel(item.source)}</small></span><strong>{displayName(item)}</strong><span className={styles.heroCardText}>{displayDescription(item)}</span></button>)}</div> : <p className={styles.heroEmpty}>{catalogLoading ? (ko ? "에이전트를 불러오는 중…" : "Loading agents…") : (ko ? "에이전트 목록을 확인해 주세요." : "Check your agent catalog.")}</p>}
         {pages > 1 && <div className={styles.heroPages} aria-label={ko ? "추천 에이전트 페이지" : "Featured agent pages"}>{Array.from({ length: pages }, (_, index) => <button key={index} aria-label={ko ? `추천 ${index + 1} 보기` : `Show featured page ${index + 1}`} aria-pressed={visibleSlide === index} onClick={() => setHeroSlide(index)} />)}</div>}
       </section>
       <div className={styles.libraryHeading}>
@@ -270,7 +271,7 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
       {hasBuild && <button className={styles.resume} onClick={onResume}><IconWand size={19} /><span><strong>{ko ? "만들던 에이전트 이어서 보기" : "Return to your build"}</strong><span>{request || (ko ? "진행 상태와 결과 확인" : "View progress and results")}</span></span></button>}
       <div id="build-agent-list">{agentTab === "builds" && builds.status !== "unavailable" ? <BuildsList ko={ko} items={builds.items} status={builds.status} onOpen={(item) => onOpenBuild?.(item)} /> : localStatus === "loading" || (agentTab === "recent" && usageStatus === "loading") ? <p role="status">{ko ? "에이전트를 불러오는 중…" : "Loading agents…"}</p> : localStatus === "error" || (agentTab === "recent" && usageStatus === "error") ? <p role="status" className={styles.empty}>{ko ? "에이전트 목록을 불러오지 못했어요." : "Could not load your agents."}</p> : displayedAgents.length ? <div className={styles.agentGrid}>{displayedAgents.map(agent => {
         const name = agent.localDisplayName || (ko ? agent.name : agent.nameEn || agent.name);
-        return <button className={styles.agentCard} key={agent.id} onClick={() => navigate(`/library/agents?agentId=${encodeURIComponent(agent.id)}`)}><AgentAvatar name={name} agentId={agent.id} size={38} /><span><strong>{name}</strong><span>{usableDescription(ko ? agent.tagline : agent.taglineEn || agent.tagline)}</span></span></button>;
+        return <button className={styles.agentCard} key={agent.id} onClick={() => navigate(`/library/agents?agentId=${encodeURIComponent(agent.id)}`)}><AgentAvatar name={name} seedName={agentFaceSeedName(agent)} agentId={agent.id} size={38} /><span><strong>{name}</strong><span>{usableDescription(ko ? agent.tagline : agent.taglineEn || agent.tagline)}</span></span></button>;
       })}</div> : <div className={styles.empty}><strong>{query ? (ko ? "검색 결과가 없습니다" : "No matching agents") : agentTab === "recent" ? (ko ? "최근 사용한 에이전트가 없습니다" : "No recently used agents") : (ko ? "내 에이전트가 없습니다" : "No agents on this computer")}</strong>{!query && <><p>{ko ? "에이전트를 만들거나 허브에서 둘러보세요." : "Create an agent or browse the Hub."}</p><div className={styles.emptyActions}><button className={styles.primary} onClick={onNew}><IconPlus size={15} />{ko ? "에이전트 만들기" : "Create agent"}</button><button className={styles.secondary} onClick={() => navigate("/marketplace")}>{ko ? "허브 둘러보기" : "Browse the Hub"}</button></div></>}</div>}</div>
     </section> : <section className={styles.intro} aria-labelledby="build-intro-title">
       <header className={styles.introHeader}><button className={styles.quietButton} onClick={onHome}><IconArrowLeft size={16} />{ko ? "뒤로" : "Back"}</button><button className={styles.quietButton} onClick={onBlank}>{ko ? "빈 상태로 시작" : "Start from scratch"}</button></header>
@@ -291,7 +292,7 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
         <button type="button" className={styles.templateLabel} onClick={() => openGallery()}>{ko ? "내 에이전트와 Hub 둘러보기" : "Explore my agents and the Hub"}</button>
         {fan.length > 0 && <div className={styles.templateFan} role="group" aria-label={ko ? "내 에이전트와 Hub의 에이전트" : "Agents from your computer, Cloud and Hub"}>{fan.map((item, index) => {
           const offset = index - (fan.length - 1) / 2;
-          return <button key={item.key} type="button" data-outer={Math.abs(offset) > 1.75 ? "true" : undefined} style={{ "--fan-offset": offset } as CSSProperties} onClick={() => openGallery(item.key)}><AgentAvatar name={displayName(item)} agentId={item.agentId} size={44} /><strong>{displayName(item)}</strong><small className={styles.sourceTag}>{sourceLabel(item.source)}</small><span>{displayDescription(item)}</span></button>;
+          return <button key={item.key} type="button" data-outer={Math.abs(offset) > 1.75 ? "true" : undefined} style={{ "--fan-offset": offset } as CSSProperties} onClick={() => openGallery(item.key)}><AgentAvatar name={displayName(item)} seedName={item.name} agentId={item.agentId} size={44} /><strong>{displayName(item)}</strong><small className={styles.sourceTag}>{sourceLabel(item.source)}</small><span>{displayDescription(item)}</span></button>;
         })}</div>}
       </div>
     </section>}
@@ -306,10 +307,10 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
           </Select>
         </div>
         {showStrip && <p className={styles.galleryNotice} role="status">{issueText}{issueRetry && retryButton}</p>}
-        <div className={styles.templateList}>{options.map(item => <button key={item.key} data-gallery-item aria-pressed={active?.key === item.key} onClick={() => setSelected(item.key)}><AgentAvatar name={displayName(item)} agentId={item.agentId} size={26} /><span className={styles.listName}>{displayName(item)}</span>{gallerySource === "all" && <small>{sourceLabel(item.source)}</small>}</button>)}{!options.length && (issues.length > 0 && !showStrip ? <p className={styles.listEmpty} role="status">{issueText}{issueRetry && retryButton}</p> : <p className={styles.listEmpty}>{emptyListText}</p>)}</div></aside>
+        <div className={styles.templateList}>{options.map(item => <button key={item.key} data-gallery-item aria-pressed={active?.key === item.key} onClick={() => setSelected(item.key)}><AgentAvatar name={displayName(item)} seedName={item.name} agentId={item.agentId} size={26} /><span className={styles.listName}>{displayName(item)}</span>{gallerySource === "all" && <small>{sourceLabel(item.source)}</small>}</button>)}{!options.length && (issues.length > 0 && !showStrip ? <p className={styles.listEmpty} role="status">{issueText}{issueRetry && retryButton}</p> : <p className={styles.listEmpty}>{emptyListText}</p>)}</div></aside>
         <section>{active ? <>
           <div className={styles.galleryBody}>
-            <AgentAvatar name={displayName(active)} agentId={active.agentId} size={64} />
+            <AgentAvatar name={displayName(active)} seedName={active.name} agentId={active.agentId} size={64} />
             <h2 id="build-gallery-title">{displayName(active)}</h2>
             <p className={styles.galleryLead}>{displayDescription(active)}</p>
             {active.connections.length > 0 && <><h3>{ko ? "연결" : "Connections"}</h3><ul className={styles.chips}>{active.connections.map(name => <li key={name}>{name}</li>)}</ul></>}
@@ -398,19 +399,19 @@ export function BuildResources({ ko, canAttach, canConfigure = canAttach, onAtta
   };
   const select = (id: string) => { readGeneration.current += 1; setSelected(id); setSkillText(null); setReading(false); setReadFailed(false); };
 
+  // 만들기 전에는 연결·앱·스킬을 찾는 링크, 만든 뒤에는 그 에이전트를 다루는 링크 — 한 줄에 상태에 맞는 것만 둔다.
   return <section className={styles.resources} aria-label={ko ? "연결과 추가 설정" : "Connections and additional settings"}>
     <div className={styles.resourceActions}>
-      <ServiceConnectionsButton locale={ko ? "ko" : "en"} disabled={!canConfigure || Boolean(onStop)} embedded active={connectionsActive} portalTarget={connectionsTarget} onOpenChange={onConnectionsOpenChange} closeRequest={connectionsCloseRequest} />
-      <button type="button" onClick={event => { trigger.current = event.currentTarget; setCatalog("apps"); }}>{ko ? "앱 찾아보기" : "Browse apps"}</button>
-      <button type="button" onClick={event => { trigger.current = event.currentTarget; setCatalog("skills"); }}>{ko ? "스킬 찾아보기" : "Browse skills"}</button>
-      {library && <Link href={`${library}&tab=memory`}>{ko ? "메모리" : "Memory"}</Link>}
+      {library ? <>
+        <Link href={library}>{ko ? "이름·파일 설정" : "Name and file settings"}</Link>
+        <Link href="/automation/new">{ko ? "자동화 만들기" : "Create automation"}</Link>
+        <Link href={`${library}&tab=memory`}>{ko ? "메모리" : "Memory"}</Link>
+      </> : <>
+        <ServiceConnectionsButton className={styles.resourceLink} locale={ko ? "ko" : "en"} disabled={!canConfigure || Boolean(onStop)} embedded active={connectionsActive} portalTarget={connectionsTarget} onOpenChange={onConnectionsOpenChange} closeRequest={connectionsCloseRequest} />
+        <button type="button" onClick={event => { trigger.current = event.currentTarget; setCatalog("apps"); }}>{ko ? "앱 찾아보기" : "Browse apps"}</button>
+        <button type="button" onClick={event => { trigger.current = event.currentTarget; setCatalog("skills"); }}>{ko ? "스킬 찾아보기" : "Browse skills"}</button>
+      </>}
     </div>
-    <p>{ko ? "이 데스크탑의 연결과 엔진 스킬을 확인할 수 있어요." : "Browse this computer’s connections and engine skills."}</p>
-    {library ? <div className={styles.resourceAfterBuild}>
-      <Link href={library}>{ko ? "이름·파일 설정" : "Name and file settings"}</Link>
-      <Link href="/automation/new">{ko ? "자동화 만들기" : "Create automation"}</Link>
-      <span>{ko ? `자동화 화면에서 대상 에이전트 “${registered?.name}”와 실행 권한·일정을 선택하세요.` : `In Automation, select “${registered?.name}”, then review its authority and schedule.`}</span>
-    </div> : <p>{ko ? "생성·등록 후 이 에이전트의 이름, 파일, 메모리와 자동화를 관리할 수 있습니다." : "After creation and registration, manage this agent’s name, files, memory and automations."}</p>}
     <dialog ref={dialog} className={styles.resourceDialog} aria-label={catalog === "skills" ? (ko ? "엔진 스킬 카탈로그" : "Engine skill catalog") : (ko ? "앱 연결 카탈로그" : "App connection catalog")} onCancel={() => setCatalog(null)} onClose={() => setCatalog(null)}>
       <button type="button" className={styles.dialogClose} aria-label={ko ? "닫기" : "Close"} onClick={() => setCatalog(null)}><IconClose size={18} /></button>
       <header><h2>{catalog === "skills" ? (ko ? "엔진 스킬" : "Engine skills") : (ko ? "앱과 연결" : "Apps and connections")}</h2><p>{catalog === "skills" ? (ko ? "둘러보기만으로는 스킬이 추가되지 않아요." : "Browsing does not add a skill to an agent.") : (ko ? "연결돼 있어도 이 초안에서 사용하려면 승인이 필요해요." : "A configured connection is not approval for this draft.")}</p></header>

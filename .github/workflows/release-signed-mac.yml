@@ -300,7 +300,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '00926b9aa574b6c2325d291a29238eeefc18c5722caf371895a4795677c91f45') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ef89671e80fada7458ae19413bb0514608fa0cd6a414e938791c7c86f3ad89bc') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -332,7 +332,7 @@ jobs:
             "scripts/test-first-run-roles-from-onboarding.cjs": "cd8163ee7d10136de471e75fb318c4532b233fcde91e957db04a3bd94ca4cf78",
             "scripts/test-hub-bookmark-ux.cjs": "1229b69f1a104e8927333b2c1c234d591f6bad8594c3d7f1e8978e4fe658d7da",
             "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
-            "scripts/test-one-activity-contract.cjs": "d158c195da51fad2e81f97bd50d978a0e77f33e0b41fe6bad29a7949204b7567",
+            "scripts/test-one-activity-contract.cjs": "0a2ec08d59570e974f04d9b0c279175763a00b1507d0e7aac5d1d9b1db334a40",
             "scripts/test-one-sidebar-contract.cjs": "2e300246b0bd93d71c00ee8ed41560ba9115608a6257f2f3b8802d8ca79f23b4",
             "scripts/test-project-first-v84.cjs": "944e9dba50fbfbfcfe9578f4d7330e87245342ac09fe7074d0dc07b63f19b966",
             "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",
@@ -659,7 +659,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '00926b9aa574b6c2325d291a29238eeefc18c5722caf371895a4795677c91f45') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ef89671e80fada7458ae19413bb0514608fa0cd6a414e938791c7c86f3ad89bc') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -691,7 +691,7 @@ jobs:
             "scripts/test-first-run-roles-from-onboarding.cjs": "cd8163ee7d10136de471e75fb318c4532b233fcde91e957db04a3bd94ca4cf78",
             "scripts/test-hub-bookmark-ux.cjs": "1229b69f1a104e8927333b2c1c234d591f6bad8594c3d7f1e8978e4fe658d7da",
             "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
-            "scripts/test-one-activity-contract.cjs": "d158c195da51fad2e81f97bd50d978a0e77f33e0b41fe6bad29a7949204b7567",
+            "scripts/test-one-activity-contract.cjs": "0a2ec08d59570e974f04d9b0c279175763a00b1507d0e7aac5d1d9b1db334a40",
             "scripts/test-one-sidebar-contract.cjs": "2e300246b0bd93d71c00ee8ed41560ba9115608a6257f2f3b8802d8ca79f23b4",
             "scripts/test-project-first-v84.cjs": "944e9dba50fbfbfcfe9578f4d7330e87245342ac09fe7074d0dc07b63f19b966",
             "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",
@@ -1064,7 +1064,7 @@ jobs:
           const cp = require('node:child_process');
           const manifestBytes = cp.execFileSync('git', ['-C', '.release-private-verification', 'show', `${process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_REF}:release-verification/desktop/manifest.json`]);
           const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
-          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== '00926b9aa574b6c2325d291a29238eeefc18c5722caf371895a4795677c91f45') throw new Error('Private Mac verification manifest digest mismatch');
+          if (manifestDigest !== process.env.AGENTLAS_MAC_PRIVATE_VERIFICATION_MANIFEST_SHA256 || manifestDigest !== 'ef89671e80fada7458ae19413bb0514608fa0cd6a414e938791c7c86f3ad89bc') throw new Error('Private Mac verification manifest digest mismatch');
           const manifest = JSON.parse(manifestBytes);
           const approvedPins = new Map(Object.entries({
             "scripts/composer-event-sync-contract.mjs": "f13850e468e55431cb071b8f9ce83f707d5d00b05697e72bf9debdab00793857",
@@ -1096,7 +1096,7 @@ jobs:
             "scripts/test-first-run-roles-from-onboarding.cjs": "cd8163ee7d10136de471e75fb318c4532b233fcde91e957db04a3bd94ca4cf78",
             "scripts/test-hub-bookmark-ux.cjs": "1229b69f1a104e8927333b2c1c234d591f6bad8594c3d7f1e8978e4fe658d7da",
             "scripts/test-mobile-ontology-bridge.cjs": "76813731fcc4e656d5c9cfe4d087249b0dbc0c6a43203466b0a2c97d76c45fa5",
-            "scripts/test-one-activity-contract.cjs": "d158c195da51fad2e81f97bd50d978a0e77f33e0b41fe6bad29a7949204b7567",
+            "scripts/test-one-activity-contract.cjs": "0a2ec08d59570e974f04d9b0c279175763a00b1507d0e7aac5d1d9b1db334a40",
             "scripts/test-one-sidebar-contract.cjs": "2e300246b0bd93d71c00ee8ed41560ba9115608a6257f2f3b8802d8ca79f23b4",
             "scripts/test-project-first-v84.cjs": "944e9dba50fbfbfcfe9578f4d7330e87245342ac09fe7074d0dc07b63f19b966",
             "scripts/test-room-isolation-and-owner-turn.cjs": "d3e387bf61adb545d597d6295183e27d860932389db8733f591e1550f24e4e9a",

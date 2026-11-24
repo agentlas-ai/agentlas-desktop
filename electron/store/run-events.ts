@@ -1,4 +1,5 @@
 import {parseCanonicalGoalWaitRecord,type CanonicalGoalWaitRecord} from "../long-run/canonical-wait-record";
+import { parseWebSources } from "../../shared/web-search/web-sources";
 import { canonicalToolName } from "../runtime/tool-name-alias";
 import { parseInstructionDelta } from "../../shared/runtime-instructions";
 import { parseGoalWaitProposal, type ParsedGoalWait } from "../long-run/wait-emitter";
@@ -900,6 +901,15 @@ function safePayload(
       const ko = typeof notice.ko === "string" ? truncate(notice.ko, 800) : "";
       const en = typeof notice.en === "string" ? truncate(notice.en, 800) : "";
       if (ko && en) out[key] = { ko, en };
+      continue;
+    }
+    if (key === "toolSources") {
+      // D2 web sources: a closed list (url/title/site/snippet/kind), re-validated at the ledger boundary and masked like other text.
+      const sources = parseWebSources(value);
+      if (sources.length) out[key] = sources.map((source) => ({
+        url: source.url, title: truncate(source.title, 300), site: source.site,
+        ...(source.snippet ? { snippet: truncate(source.snippet, 500) } : {}), kind: source.kind,
+      }));
       continue;
     }
     if (key === "toolOrigin") {
@@ -2400,6 +2410,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     // Public HTTPS URLs are evidence references, not tool output content. Keep
     // them so the One Sources rail survives a route change or app restart.
     toolSourceUrls: ev.tool?.sourceUrls,
+    toolSources: ev.tool?.sources,
     noticeMessage: ev.notice?.message,
     noticeCode: ev.notice?.code,
     noticeDetails: ev.notice?.details,

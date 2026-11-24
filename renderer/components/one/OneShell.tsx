@@ -113,6 +113,7 @@ import {
 } from "@/components/Icon";
 import { confirmPopup, alertPopup } from "@/lib/popup";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
+import { AnswerWebSources } from "../AnswerWebSources";
 import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { fitImageUnder } from "@/lib/attachment-image-fit";
 import { currentLocale, tFor, useT } from "@/lib/i18n";
@@ -11249,6 +11250,9 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                               <IntellectUiActions.Provider value={oneUiActions}>
                                 <InlineUiInstances chatId={activeThreadChatId ?? undefined} instances={ownedUi} turnIds={stableTurnIds(uiTurnId)} locale={appLocale === "ko" ? "ko" : "en"}/>
                               </IntellectUiActions.Provider>
+                              {/* Sources under the answer's last part once it stopped streaming (web search, pages read): the same button as every chat. */}
+                              {message.role === "assistant" && !message.streaming && message.continuationTail !== false && uiTurnId
+                                && <AnswerWebSources runId={uiTurnId} done locale={appLocale === "ko" ? "ko" : "en"} />}
                             </div>
                             )}
                             {message.role === "user" && rejectedGoalDirection?.chatId === activeThreadChatId
@@ -12024,8 +12028,10 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
             </div>}
             {activeAgentDeleted && !activeDirectSessionUnavailable && <div className={styles.sessionUnavailableBanner} role="status" data-one-agent-deleted-banner="true">
               <IconAlertTriangle size={17} strokeWidth={2} />
-              <strong>{agentChatReadOnlyCopy(appLocale === "ko" ? "ko" : "en", activeReadOnlyReason).title}</strong>
-              <span>{agentChatReadOnlyCopy(appLocale === "ko" ? "ko" : "en", activeReadOnlyReason).body}</span>
+              <span className={styles.sessionUnavailableCopy}>
+                <strong>{agentChatReadOnlyCopy(appLocale === "ko" ? "ko" : "en", activeReadOnlyReason).title}</strong>
+                <span>{agentChatReadOnlyCopy(appLocale === "ko" ? "ko" : "en", activeReadOnlyReason).body}</span>
+              </span>
               <button type="button" data-one-agent-deleted-continue="true" onClick={() => setContinueAgentChatOpen(true)}>{agentChatReadOnlyCopy(appLocale === "ko" ? "ko" : "en", activeReadOnlyReason).action}</button>
             </div>}
             <NewAgentChatDialog open={continueAgentChatOpen} projectId={activeChatRecord?.projectId ?? null} projectName={null}

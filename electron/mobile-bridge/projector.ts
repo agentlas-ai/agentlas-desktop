@@ -49,7 +49,7 @@ import {
   getCanonicalTask,
   listPairingVerificationTasks,
 } from "../store/tasks";
-import { listFirms } from "../store/firms";
+import { getFirm, listFirms } from "../store/firms";
 import { listProjects } from "../store/projects";
 import { invocationPromptRunIdsForMessages, isOneInvocationChat } from "../store/run-events";
 import { listPendingConfirmations } from "../confirm";
@@ -179,6 +179,8 @@ import {
 } from "./sanitize";
 import { chatFileSourceText, cutChatFileText, rewriteChatFilePaths } from "./chat-file-links";
 import { agentDisplayName } from "../../shared/agent-display-name";
+import { agentFace, agentFaceSeedName } from "../../shared/agent-face";
+import { faceField, nameEnField, projectAgentFaces, projectAgentNamePairs, type NamePair } from "./agent-faces";
 
 const INITIAL_PROJECTION_BUDGET_MS = 2_500;
 const CHAT_ATTACHMENT_ID_PATTERN = "[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
@@ -675,7 +677,10 @@ function agentsDto(
     if (cloudId && !cloudListingByCloudId.has(cloudId)) cloudListingByCloudId.set(cloudId, listing);
   }
   // Archived agents (30 days unused) leave the phone list too, the same as the Desktop pickers.
-  const installed = withoutArchivedAgents(listInstalledAgents()).map<MobileBridgeAgentDto>((agent) => {
+  const installedRows = withoutArchivedAgents(listInstalledAgents());
+  // The picture the Desktop draws (shared/agent-face.ts), the chosen faces of every row read together once.
+  const faces = projectAgentFaces(installedRows);
+  const installed = installedRows.map<MobileBridgeAgentDto>((agent) => {
     const binding = bindingByAgentId.get(agent.id);
     const cloudListing = (agent.packageHash
       ? cloudListingByPackageHash.get(agent.packageHash.trim())
@@ -692,6 +697,7 @@ function agentsDto(
       trustGrade: agent.trustGrade,
       installedAt: agent.installedAt,
       tone: displayText(agent.tone, 256),
+      ...faceField(faces.get(agent.id)),
       runtimeLabel: optionalDisplayText(agent.runtimeLabel, 512),
       assetSource: optionalDisplayText(agent.assetSource, 1_024),
       source: binding?.source === "hub-install" || agent.assetSource === "hub"
@@ -744,6 +750,8 @@ function agentsDto(
       trustGrade: listing.trustGrade,
       installedAt: listing.publishedAt ?? new Date(0).toISOString(),
       tone: "",
+      // Not installed here: no chosen face exists, so the default face of its own name (the name the Cloud shelf holds, never the English one).
+      ...faceField(agentFace(null, agentFaceSeedName({ name: listing.name, slug }))),
       runtimeLabel: null,
       assetSource: "agent-cloud",
       source: "agent-cloud",
@@ -870,6 +878,10 @@ export function projectMobileBridgeProject(
     ? getProjectTimelineSnapshot(project.id, 24, { includeKnowledge: options.includeKnowledge })
     : null;
   const latest = timeline?.entries[0] ?? null;
+  const pairs = projectAgentNamePairs(project.agentPool.map((member) => (member.entityKind === "agent" ? member.agentId : member.controllerAgentId) ?? ""));
+  const firmNames = (firmId: string): NamePair | null => {
+    try { const firm = getFirm(firmId); return firm ? { name: firm.name, nameEn: firm.nameEn?.trim() || firm.name } : null; } catch { return null; }
+  };
   return {
     id: project.id,
     name: displayText(project.name, 512),
@@ -877,17 +889,26 @@ export function projectMobileBridgeProject(
     sourceType: project.sourceType,
     sourceLabel: projectSourceLabel(project),
     systemPrompt: optionalDisplayText(project.systemPrompt, 12_000),
-    agentPool: project.agentPool.map((member, order) => ({
-      entityKind: member.entityKind,
-      targetId: member.targetId,
-      agentId: member.agentId,
-      firmId: member.firmId,
-      controllerAgentId: member.controllerAgentId,
-      name: displayText(member.nameSnapshot, 512),
-      source: member.source,
-      releaseId: member.releaseId,
-      order,
-    })),
+    agentPool: project.agentPool.map((member, order) => {
+      // A member that is installed here is named by the Desktop's rule in both languages (the snapshot was made in whichever language was on screen when it was picked);
+      // a Cloud / Hub member not installed here keeps its snapshot. `nameEn` rides only when it differs.
+      const pair = pairs.get(member.entityKind === "agent" ? member.agentId ?? "" : member.controllerAgentId ?? "");
+      const firmPair = member.entityKind === "team" && member.firmId ? firmNames(member.firmId) : null;
+      const live = firmPair ?? pair ?? null;
+      const name = displayText(live?.name ?? member.nameSnapshot, 512);
+      return {
+        entityKind: member.entityKind,
+        targetId: member.targetId,
+        agentId: member.agentId,
+        firmId: member.firmId,
+        controllerAgentId: member.controllerAgentId,
+        name,
+        ...nameEnField(name, live ? displayText(live.nameEn, 512) : null),
+        source: member.source,
+        releaseId: member.releaseId,
+        order,
+      };
+    }),
     controllerAgentId: null,
     controllerName: null,
     agentCount: project.agentPool.length,
@@ -964,6 +985,7 @@ export function projectMobileBridgeChat(
   } catch {
     // Keep the chat visible during an additive upgrade or transient store read.
   }
+  const participantPairs = projectAgentNamePairs(Array.isArray(chat.participants) ? chat.participants.slice(0, 16).flatMap((participant) => participant.agentId ?? []) : []);
   return {
     id: chat.id,
     oneOrigin: isMobileBridgeOneChat(chat),
@@ -992,6 +1014,7 @@ export function projectMobileBridgeChat(
           slot: Math.max(0, Math.min(15, Math.floor(participant.slot))),
           agentId: optionalDisplayText(participant.agentId, 256),
           displayName: displayText(participant.displayName, 160),
+          ...(((en) => (en ? { displayNameEn: en } : {}))(nameEnField(displayText(participant.displayName, 160), (participant.agentId ? participantPairs.get(participant.agentId)?.nameEn : null) ?? null, 160).nameEn)),
         }))
       : null,
     archivedAt: chat.archivedAt,

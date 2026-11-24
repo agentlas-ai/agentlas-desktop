@@ -34,3 +34,27 @@ export function setAgentAppearance(db: Database.Database, principal: string, id:
     check(); return getAgentAppearance(db, principal, id);
   }).immediate();
 }
+
+const BATCH = 400;
+/**
+ * The chosen faces of many agents in two statements per 400 ids (the phone projection reads every agent of a list at once; it never
+ * reads one by one). An agent with no saved face, a stale installation, a hidden/private agent or a corrupt record has none: null, never a throw.
+ */
+export function readAgentAppearances(db: Database.Database, principal: string, ids: readonly string[]): Map<string, AgentAppearance | null> {
+  const out = new Map<string, AgentAppearance | null>();
+  const unique = [...new Set(ids.filter((id) => typeof id === "string" && id.length > 0 && id.length <= 256 && id.trim() === id))];
+  for (let from = 0; from < unique.length; from += BATCH) {
+    const chunk = unique.slice(from, from + BATCH);
+    const rows = db.prepare(`SELECT id, installed_at, visibility, entity_kind FROM installed_agents WHERE id IN (${chunk.map(() => "?").join(",")})`).all(...chunk) as Array<AgentRow & { id: string }>;
+    const usable = rows.filter((row) => row.installed_at && row.visibility !== "private" && row.visibility !== "background" && row.entity_kind !== "company-reference");
+    if (!usable.length) continue;
+    const keys = new Map(usable.map((row) => [key(principal, row.id), row] as const));
+    const saved = db.prepare(`SELECT key, value FROM meta WHERE key IN (${[...keys.keys()].map(() => "?").join(",")})`).all(...keys.keys()) as Array<{ key: string; value: string }>;
+    for (const record of saved) {
+      const row = keys.get(record.key);
+      if (!row) continue;
+      try { const stored = decode(record.value); out.set(row.id, stored.installation === row.installed_at ? stored.appearance : null); } catch { /* a corrupt record is no face */ }
+    }
+  }
+  return out;
+}

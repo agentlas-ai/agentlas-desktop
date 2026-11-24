@@ -19,7 +19,7 @@ import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { IconCheck, IconShield } from "@/components/Icon";
-import type { HomeLine, HomeTreeRow, HomeTreeSnapshot } from "@shared/home-tree";
+import { homeRowAgentNames, type HomeLine, type HomeTreeRow, type HomeTreeSnapshot } from "@shared/home-tree";
 import type { Project } from "@/lib/types";
 import { COPY, pick } from "./dashboard-copy";
 import s from "./Dashboard.module.css";
@@ -54,10 +54,11 @@ export function pickCards(rows: readonly HomeTreeRow[], waiting: ReadonlyMap<str
 
 const DEFAULT_TITLES = new Set(["", "new chat", "새 대화", "새 채팅"]);
 function cardTitle(row: HomeTreeRow, line: HomeLine | undefined, ko: boolean): string {
-  if (row.kind === "solo") return row.agentNames[0] || row.title || pick(ko, COPY.agentChat);
+  const agentNames = homeRowAgentNames(row, ko ? "ko" : "en");
+  if (row.kind === "solo") return agentNames[0] || row.title || pick(ko, COPY.agentChat);
   if (row.kind === "group") {
     const title = row.title.trim();
-    return DEFAULT_TITLES.has(title.toLowerCase()) ? row.agentNames.join(", ") || pick(ko, COPY.groupChat) : title;
+    return DEFAULT_TITLES.has(title.toLowerCase()) ? agentNames.join(", ") || pick(ko, COPY.groupChat) : title;
   }
   const base = row.title.trim() || pick(ko, COPY.newChat);
   return line?.runnerLabel ? `${line.runnerLabel} · ${base}` : base;

@@ -32,6 +32,8 @@ import { sanitizeMobileBridgeText } from "./sanitize";
 import type { AgentWorkspaceMemoryCandidate, AgentWorkspaceProposal, AgentWorkspaceRevision } from "../../shared/agent-workspace";
 import type { AgentFolderState } from "../../shared/agent-root";
 import { agentDisplayName } from "../../shared/agent-display-name";
+import type { AgentFace } from "../../shared/agent-face";
+import { faceField, projectAgentFaces } from "./agent-faces";
 import {
   MOBILE_WORKSPACE_V2_COMMAND_OPERATIONS, MOBILE_WORKSPACE_V2_LIMITS as LIMITS, MOBILE_WORKSPACE_V2_READ_OPERATIONS, MOBILE_WORKSPACE_V2_SCHEMA,
   validateMobileWorkspaceV2Args,
@@ -81,7 +83,7 @@ const num = (value: unknown): number | undefined => typeof value === "number" &&
 
 // ───────────────────────────────────────────── Workspace list
 
-interface HomeRow { id: string; kind: "solo" | "group" | "work"; projectId: string | null; title: string; taskId: string | null; agentNames: string[]; memberCount: number; updatedAt: string }
+interface HomeRow { id: string; kind: "solo" | "group" | "work"; projectId: string | null; title: string; taskId: string | null; agentNames: string[]; agentNamesEn?: string[]; agentIds?: string[]; memberCount: number; updatedAt: string }
 
 function leadRoomIds(ids: readonly string[]): Set<string> {
   const out = new Set<string>();
@@ -95,11 +97,28 @@ function leadRoomIds(ids: readonly string[]): Set<string> {
   return out;
 }
 
-function phoneRow(row: HomeRow, attention: ReadonlyMap<string, number>, leads: ReadonlySet<string>): MobileWorkspaceV2Row {
+/** The faces of the agents of these rows, the chosen faces of all of them read together once (a list of many rows reads the store once, not once per row). */
+function rowFaces(rows: readonly HomeRow[]): ReadonlyMap<string, AgentFace | null> {
+  const wanted = new Set(rows.flatMap((row) => row.kind === "work" ? [] : (row.agentIds ?? []).slice(0, 3)));
+  wanted.delete("");
+  if (!wanted.size) return new Map();
+  let installed: Installed[] = [];
+  try { installed = listInstalledAgentsReadOnly().filter((agent) => wanted.has(agent.id)); } catch { /* no faces then */ }
+  return projectAgentFaces(installed);
+}
+
+function phoneRow(row: HomeRow, attention: ReadonlyMap<string, number>, leads: ReadonlySet<string>, faces: ReadonlyMap<string, AgentFace | null>): MobileWorkspaceV2Row {
   const waiting = attention.get(row.id) ?? 0;
+  const names = row.agentNames.slice(0, 3);
+  const namesEn = row.agentNamesEn?.slice(0, 3);
+  const ids = row.kind === "work" ? [] : (row.agentIds ?? []).slice(0, 3);
+  const agentFaces = ids.length === names.length ? ids.map((id) => faces.get(id) ?? null) : [];
   return {
     id: row.id, kind: row.kind, title: text(row.title, 120), taskId: row.taskId,
-    agentNames: row.agentNames.slice(0, 3).map((name) => text(name, 80)), memberCount: row.memberCount, updatedAt: row.updatedAt,
+    agentNames: names.map((name) => text(name, 80)),
+    ...(namesEn && namesEn.length === names.length && namesEn.some((name, index) => name !== names[index]) ? { agentNamesEn: namesEn.map((name) => text(name, 80)) } : {}),
+    ...(agentFaces.some((face) => face !== null) ? { agentFaces } : {}),
+    memberCount: row.memberCount, updatedAt: row.updatedAt,
     ...(leads.has(row.id) ? { lead: true as const } : {}), ...(waiting > 0 ? { attention: waiting } : {}),
   };
 }
@@ -130,6 +149,7 @@ async function readTree(deps: WorkspaceV2Deps, args: Json): Promise<MobileWorksp
     return { ...entry, bucket, inline };
   });
   const leads = leadRoomIds(plan.flatMap((entry) => entry.inline ? [...entry.bucket.chats.slice(0, per), ...entry.bucket.work.slice(0, per)] : []).filter((row) => row.kind === "group").map((row) => row.id));
+  const faces = rowFaces(plan.flatMap((entry) => entry.inline ? [...entry.bucket.chats.slice(0, per), ...entry.bucket.work.slice(0, per)] : []));
   const groups = plan.map((entry): MobileWorkspaceV2Group => {
     const { bucket } = entry;
     let waiting = 0;
@@ -138,7 +158,7 @@ async function readTree(deps: WorkspaceV2Deps, args: Json): Promise<MobileWorksp
     return {
       id: entry.id, name: entry.name === null ? null : text(entry.name, 120), agentChats: bucket.chats.length, workSessions: bucket.work.length, attention: waiting, collapsed: !entry.inline,
       ...(entry.inline ? { rows: {
-        chats: bucket.chats.slice(0, per).map((row) => phoneRow(row, attention, leads)), work: bucket.work.slice(0, per).map((row) => phoneRow(row, attention, leads)),
+        chats: bucket.chats.slice(0, per).map((row) => phoneRow(row, attention, leads, faces)), work: bucket.work.slice(0, per).map((row) => phoneRow(row, attention, leads, faces)),
         chatsMore: bucket.chats.length > per, workMore: bucket.work.length > per,
       } } : {}),
     };
@@ -161,14 +181,14 @@ async function readProjectRows(deps: WorkspaceV2Deps, args: Json): Promise<Json>
   const wantWork = args.kind === "work";
   const rows = homeTree(db).rows.filter((row) => (row.kind === "work") === wantWork && (projectId === null ? !row.projectId || !known.has(row.projectId) : row.projectId === projectId));
   const page = pageOf(rows, args.cursor, num(args.limit) ?? LIMITS.rowsPerKindDefault);
-  const attention = await deps.attentionByChat(), leads = leadRoomIds(page.items.filter((row) => row.kind === "group").map((row) => row.id));
-  return { schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, projectId, kind: args.kind, total: rows.length, rows: page.items.map((row) => phoneRow(row, attention, leads)), next: page.next };
+  const attention = await deps.attentionByChat(), leads = leadRoomIds(page.items.filter((row) => row.kind === "group").map((row) => row.id)), pageFaces = rowFaces(page.items);
+  return { schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, projectId, kind: args.kind, total: rows.length, rows: page.items.map((row) => phoneRow(row, attention, leads, pageFaces)), next: page.next };
 }
 
 async function readSearch(deps: WorkspaceV2Deps, args: Json): Promise<Json> {
   const found = homeSearch(getDb(), String(args.text)).slice(0, LIMITS.searchRowsMax);
-  const attention = await deps.attentionByChat(), leads = leadRoomIds(found.filter((row) => row.kind === "group").map((row) => row.id));
-  return { schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, rows: found.map((row) => ({ ...phoneRow(row, attention, leads), projectId: row.projectId })) };
+  const attention = await deps.attentionByChat(), leads = leadRoomIds(found.filter((row) => row.kind === "group").map((row) => row.id)), searchFaces = rowFaces(found);
+  return { schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, rows: found.map((row) => ({ ...phoneRow(row, attention, leads, searchFaces), projectId: row.projectId })) };
 }
 
 // ───────────────────────────────────────────── Agents
@@ -186,10 +206,27 @@ function portraitOf(agentId: string): string | null {
 function folderOf(agentId: string): AgentFolderState | null {
   try { return agentFolderStatus(agentId)?.state ?? null; } catch { return null; }
 }
-function agentHead(agent: Installed): Json {
+/**
+ * `face` = the picture the Desktop draws for this agent, decided by shared/agent-face.ts from the owner's chosen face or the agent's own name
+ * (seed = the unfolded, uncut name, not the `name` text below). Optional: a phone that does not know it ignores the key (it reads a head field by field).
+ * `faces` is read once for the whole list by the caller.
+ */
+/**
+ * `nameEn` / `taglineEn` = what a phone in English shows, by the same rule as the Desktop library (shared/agent-display-name.ts): the owner's own
+ * name wins in both languages, then the agent's English name. They are sent only when they differ from `name` / `tagline`, so an agent written in
+ * Korean only stays Korean. Optional keys: a phone that does not know them reads `name` and `tagline` as before.
+ */
+function englishHead(agent: Installed): Json {
+  const name = text(agentDisplayName(agent), 80);
+  const nameEn = text(agentDisplayName(agent, "en"), 80);
+  const tagline = text(agent.tagline, 140);
+  const taglineEn = text(agent.taglineEn, 140);
+  return { ...(nameEn && nameEn !== name ? { nameEn } : {}), ...(taglineEn && taglineEn !== tagline ? { taglineEn } : {}) };
+}
+function agentHead(agent: Installed, faces: ReadonlyMap<string, AgentFace | null>): Json {
   return {
-    id: agent.id, handle: text(agent.slug, 80), name: text(agentDisplayName(agent), 80), tagline: text(agent.tagline, 140), tone: text(agent.tone, 40),
-    portrait: portraitOf(agent.id), kind: agent.kind === "team" ? "team" : "agent", source: sourceOf(agent), folder: folderOf(agent.id),
+    id: agent.id, handle: text(agent.slug, 80), name: text(agentDisplayName(agent), 80), ...englishHead(agent), tagline: text(agent.tagline, 140), tone: text(agent.tone, 40),
+    portrait: portraitOf(agent.id), ...faceField(faces.get(agent.id)), kind: agent.kind === "team" ? "team" : "agent", source: sourceOf(agent), folder: folderOf(agent.id),
   };
 }
 
@@ -198,7 +235,8 @@ function readAgents(args: Json): Json {
   const all = visibleAgents().filter((agent) => !filter || sourceOf(agent) === filter)
     .sort((a, b) => agentDisplayName(a).localeCompare(agentDisplayName(b), undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
   // The revision covers the whole list (faces and folder states included), never one page of it.
-  const heads = all.map(agentHead);
+  const faces = projectAgentFaces(all);
+  const heads = all.map((agent) => agentHead(agent, faces));
   const revision = digest(heads);
   const page = pageOf(heads, args.cursor, num(args.limit) ?? LIMITS.agentsPageDefault);
   const rows = page.items;
@@ -233,7 +271,7 @@ async function readAgentProfile(args: Json): Promise<Json> {
   const skills = workspace ? workspace.files.filter((file) => file.kind === "file" && /^skills\/[^/]+\/SKILL\.md$/i.test(file.path)).length : null;
   const folder = folderOf(agent.id);
   return {
-    schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, ...agentHead(agent), createdAt: agent.installedAt,
+    schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, ...agentHead(agent, projectAgentFaces([agent])), createdAt: agent.installedAt,
     folder: { state: folder, reconnectable: folder === "root-unavailable" || folder === "folder-missing" },
     activation: workspace?.activation ?? null,
     counts: { memories: memoryTotal(agent.id), skills, files: workspace ? workspace.files.filter((file) => file.kind === "file").length : null },
@@ -565,9 +603,11 @@ function readChatMembers(args: Json): Json {
   }
   let installed = new Map<string, Installed>();
   try { installed = new Map(listInstalledAgentsReadOnly().map((agent) => [agent.id, agent] as const)); } catch { /* names alone then */ }
-  const members = named.slice(0, MEMBERS_MAX).map(({ agentId, name }) => {
+  const shown = named.slice(0, MEMBERS_MAX);
+  const faces = projectAgentFaces(shown.flatMap(({ agentId }) => installed.get(agentId) ?? []));
+  const members = shown.map(({ agentId, name }) => {
     const agent = installed.get(agentId);
-    return agent ? agentHead(agent) : { id: agentId, name: text(name, 80), tone: "", portrait: null };
+    return agent ? agentHead(agent, faces) : { id: agentId, name: text(name, 80), tone: "", portrait: null };
   });
   return { schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, chatId, total: named.length, members };
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
-import { getAuthSession, onAuthSessionOwnershipChanged } from "../auth";
+import { onAuthSessionOwnershipChanged } from "../auth";
+import { appearancePrincipal } from "./appearance-principal";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import type { AgentAppearanceUpdate } from "../../shared/agent-appearance";
@@ -11,11 +12,7 @@ export function registerAgentAppearanceIpc(input: { ipc: Pick<IpcMain, "handle">
   let epoch = 0;
   const grants = new Map<string, { sender: number; frame: string; principal: string; epoch: number; agentId: string; installation: string; revision: number; expires: number }>();
   onAuthSessionOwnershipChanged(() => { epoch++; grants.clear(); emitDesktopStoreChange({ entity: "agent" }); });
-  function principal(): string {
-    const session = getAuthSession();
-    if (session.signedIn && !session.accountFingerprint) throw Error("appearance_owner_unknown");
-    return JSON.stringify(session.signedIn ? ["account", session.accountFingerprint, session.workspaceId ?? null] : ["local"]);
-  }
+  const principal = appearancePrincipal;
   function issue(event: IpcMainInvokeEvent, id: string) {
     input.assertTrustedSender(event);
     const owner = principal(), currentEpoch = epoch, frame = event.senderFrame?.url;

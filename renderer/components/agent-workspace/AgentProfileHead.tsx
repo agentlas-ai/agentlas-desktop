@@ -7,14 +7,23 @@ import { IconCamera, IconClock, IconCloud, IconEdit, IconChat, IconChevronDown, 
 import { AgentAppearanceImage } from "./AgentAppearancePicker";
 import { useAgentAppearance } from "@/lib/agent-appearance";
 import { ipc } from "@/lib/ipc";
+import { agentFace } from "@shared/agent-face";
+import { agentFaceLookSrc } from "@/lib/agent-default-look";
 import { oneCharacterBaseId, oneCharacterSrcForId } from "@/lib/one-characters";
 import { AGENT_APPEARANCE_CHARACTERS, type AgentAppearance, type AgentAppearanceView } from "@shared/agent-appearance";
 import styles from "./AgentManage.module.css";
 
-export function AgentFace({ agentId, name, size, className }: { agentId: string; name: string; size: number; className?: string }) {
+/** 외형 > 이름으로 정해지는 기본 얼굴(AgentAvatar·폰과 같은 shared/agent-face.ts) > (그림을 못 불러올 때만) 이니셜. seedName = UI 언어와 무관한 이름. */
+export function AgentFace({ agentId, name, seedName, size, className }: { agentId: string; name: string; seedName?: string; size: number; className?: string }) {
   const appearance = useAgentAppearance(agentId);
+  const lookSrc = agentFaceLookSrc(agentFace(appearance, seedName ?? name));
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  useEffect(() => { setFailedSrc(null); }, [lookSrc]);
+  const showLook = !!lookSrc && failedSrc !== lookSrc;
   return <span className={className} style={{ width: size, height: size, display: "inline-grid", placeItems: "center", flex: "none" }}>
-    {appearance ? <AgentAppearanceImage value={appearance} size={size} /> : <span style={{ width: size * 0.8, height: size * 0.8, borderRadius: "50%", background: "var(--paper-edge)", color: "var(--ink-soft)", display: "inline-grid", placeItems: "center", fontWeight: 650, fontSize: size * 0.34 }}>{(name.trim()[0] ?? "?").toUpperCase()}</span>}
+    {appearance ? <AgentAppearanceImage value={appearance} size={size} fill />
+      : showLook ? <img src={lookSrc} alt="" width={size} height={size} draggable={false} style={{ display: "block", width: size, height: size, borderRadius: "50%", objectFit: "cover" }} onError={() => setFailedSrc(lookSrc)} />
+      : <span style={{ width: size * 0.8, height: size * 0.8, borderRadius: "50%", background: "var(--paper-edge)", color: "var(--ink-soft)", display: "inline-grid", placeItems: "center", fontWeight: 650, fontSize: size * 0.34 }}>{(name.trim()[0] ?? "?").toUpperCase()}</span>}
   </span>;
 }
 
@@ -24,8 +33,8 @@ export type HeadFacts = {
   memories: number | null; skills: number | null; files: number | null;
 };
 
-export function AgentProfileHead({ agentId, name, slug, tagline, big, facts, ko, modelOpen, onModel, onFolder, onEdit, onChat, folderOpen, chatBusy, modelPopover, children }: {
-  agentId: string; name: string; slug: string; tagline: string; big: boolean; facts: HeadFacts; ko: boolean;
+export function AgentProfileHead({ agentId, name, seedName, slug, tagline, big, facts, ko, modelOpen, onModel, onFolder, onEdit, onChat, folderOpen, chatBusy, modelPopover, children }: {
+  agentId: string; name: string; seedName?: string; slug: string; tagline: string; big: boolean; facts: HeadFacts; ko: boolean;
   modelOpen: boolean; onModel: (() => void) | null; onFolder: () => void; onEdit: () => void; onChat: () => void; folderOpen: boolean; chatBusy: boolean; modelPopover?: ReactNode; children?: ReactNode;
 }) {
   const actions = <div className={styles.headActions}>
@@ -34,7 +43,7 @@ export function AgentProfileHead({ agentId, name, slug, tagline, big, facts, ko,
     <button type="button" className={`${styles.btn} ${styles.btnPri}`} disabled={chatBusy} onClick={onChat}><IconChat size={14} />{ko ? "채팅" : "Chat"}</button>
   </div>;
   if (!big) return <header className={`${styles.head} ${styles.headSmall}`}>
-    <AgentFace agentId={agentId} name={name} size={38} className={styles.faceSmall} />
+    <AgentFace agentId={agentId} name={name} seedName={seedName} size={38} className={styles.faceSmall} />
     <b className={styles.nameSmall}>{name}</b><span className={styles.slug} style={{ fontSize: 13 }}>@{slug}</span>
     {facts.working && <span className={styles.statusSmall}><i className={styles.dot} />{ko ? "작업 중" : "Working"}</span>}
     {actions}{children}
@@ -42,7 +51,7 @@ export function AgentProfileHead({ agentId, name, slug, tagline, big, facts, ko,
   return <header className={`${styles.head} ${styles.headBig}`}>
     <div className={styles.headBigTop} />
     <div className={styles.headBigRow}>
-      <div className={styles.faceBig}><AgentFace agentId={agentId} name={name} size={76} /></div>
+      <div className={styles.faceBig}><AgentFace agentId={agentId} name={name} seedName={seedName} size={76} /></div>
       {actions}
     </div>
     <div className={styles.nameRow}><h1 className={styles.nameBig}>{name}</h1><span className={styles.slug}>@{slug}</span></div>

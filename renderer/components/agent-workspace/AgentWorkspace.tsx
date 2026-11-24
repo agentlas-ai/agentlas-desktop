@@ -1,5 +1,6 @@
 "use client";
 
+import { agentFaceSeedName } from "@shared/agent-face";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   IconAlertTriangle, IconBrain, IconCheck, IconChevronDown, IconChevronRight, IconClose,
@@ -488,7 +489,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "timeline", 
   const body = () => {
     if (loading) return <div className={styles.empty}><span className={styles.loading} />{ko ? "에이전트 파일 읽는 중" : "Reading agent files"}</div>;
     if (!snapshot) return <div className={styles.empty}><IconFolder size={35} /><strong>{ko ? "파일을 확인할 수 없어요" : "Files could not be read"}</strong><button className={styles.button} onClick={() => void run("refresh", async () => { await refresh(); })}>{ko ? "다시 읽기" : "Retry"}</button></div>;
-    if (view === "timeline") return <AgentTimeline agentId={agent.id} name={name} slug={agent.slug} ko={ko} snapshot={snapshot} memory={memory.entries} memoryFailed={memory.failed} onRetryMemory={() => void memory.reload()} busy={Boolean(busy)} canWrite={snapshot.writable && snapshot.activation !== "recovery_required"} readDiff={readDiff}
+    if (view === "timeline") return <AgentTimeline agentId={agent.id} name={name} seedName={agentFaceSeedName(agent)} slug={agent.slug} ko={ko} snapshot={snapshot} memory={memory.entries} memoryFailed={memory.failed} onRetryMemory={() => void memory.reload()} busy={Boolean(busy)} canWrite={snapshot.writable && snapshot.activation !== "recovery_required"} readDiff={readDiff}
       onAddSkill={(proposal) => void addSkill(proposal)} onDismiss={(proposal) => void dismissProposal(proposal)} onReview={(proposal) => void openReview(proposal.id)} onOpenMemory={() => setView("memory")} onForget={(entries) => { setForgetFailed(false); setForgetEntries(entries); }} onUndo={(revisionId) => void undoChange(revisionId)} />;
     if (view === "memory") return <AgentMemoryTab ko={ko} result={memory.result} failed={memory.failed} skipped={memory.skipped} onForget={(entries, all) => { setForgetFailed(false); setForgetAll(Boolean(all)); setForgetEntries(entries); }} onRetry={() => void memory.reload()}
       onImport={() => void run("memory-import-preview", async () => { const bridge = ipc()?.agentMemory; if (!bridge) throw new Error(ko ? "기억을 사용할 수 없어요." : "Memory is unavailable."); setMemoryImportPreview(await bridge.importPreview(agent.id)); })} />;
@@ -514,7 +515,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "timeline", 
     </div>;
   };
   return <section ref={root} className={styles.workspace} aria-label={`${name} Agent Workspace`} data-testid="agent-workspace" style={{ "--workspace-tree-width": `${treeWidth}px` } as CSSProperties}>
-    <AgentProfileHead agentId={agent.id} name={name} slug={agent.slug} tagline={ko ? agent.tagline : (agent.taglineEn || agent.tagline)} big={view === "timeline"} facts={facts} ko={ko} modelOpen={modelOpen}
+    <AgentProfileHead agentId={agent.id} name={name} seedName={agentFaceSeedName(agent)} slug={agent.slug} tagline={ko ? agent.tagline : (agent.taglineEn || agent.tagline)} big={view === "timeline"} facts={facts} ko={ko} modelOpen={modelOpen}
       onModel={isScience || !order ? null : () => setModelOpen((value) => !value)} onFolder={() => setFolderOpen((value) => !value)} onEdit={() => setEditOpen(true)} onChat={() => void chat()} folderOpen={folderOpen} chatBusy={chatBusy}
       modelPopover={modelOpen && order ? <AgentModelPopover agentId={agent.id} locale={localeKey} runtimes={runtimes} order={order} onOrder={setOrder} onClose={() => setModelOpen(false)} /> : null}>
       {folderOpen && <AgentFolderPopover agentName={name} ko={ko} status={folder.status} working={snapshot?.activation === "run_active"} onClose={() => setFolderOpen(false)}

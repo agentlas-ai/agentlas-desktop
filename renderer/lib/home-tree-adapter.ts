@@ -1,4 +1,4 @@
-import type { HomeLine, HomeTreeParticipant, HomeTreeRow } from "@shared/home-tree";
+import { homeParticipantName, type HomeLine, type HomeTreeParticipant, type HomeTreeRow } from "@shared/home-tree";
 import type { ConversationListFace, ConversationListGroupFace, ConversationListItem } from "@/components/one/ConversationListButton";
 import { oneSessionChildStatus, type OneSessionTreeChild, type OneSessionTreeMember } from "./one-session-tree";
 import { rowDisplayName } from "./home-tree";
@@ -11,11 +11,11 @@ import { runtimeProviderLabel } from "./runtime-provider-label";
  */
 
 /** The row the Session list draws for an agent chat (1:1 or group). The title is the chat's, or who is in it when it has none. */
-export function agentChatItem(row: HomeTreeRow, line: HomeLine | null, fallbackTitle: string): ConversationListItem {
+export function agentChatItem(row: HomeTreeRow, line: HomeLine | null, fallbackTitle: string, locale: "ko" | "en" = "ko"): ConversationListItem {
   const raw = row.title.trim();
   return {
     id: row.id,
-    title: !raw || raw === "New chat" ? rowDisplayName(row, fallbackTitle) : raw,
+    title: !raw || raw === "New chat" ? rowDisplayName(row, fallbackTitle, locale) : raw,
     updatedAt: row.updatedAt,
     seatKind: row.kind === "group" ? "group" : "solo",
     ...(line?.preview ? { lastMessagePreview: line.preview } : {}),
@@ -29,7 +29,7 @@ type OrgFace = Pick<OneSessionTreeMember, "installedAgentId" | "statusKind" | "a
  * O5: the personal agent is the assistant, not a member). The state ring comes from the organisation when it is loaded; until
  * then the faces are quiet.
  */
-export function agentChatFaces(row: HomeTreeRow, line: HomeLine | null, org: ReadonlyMap<string, OrgFace> | null): {
+export function agentChatFaces(row: HomeTreeRow, line: HomeLine | null, org: ReadonlyMap<string, OrgFace> | null, locale: "ko" | "en" = "ko"): {
   member: ConversationListFace | null; groupMembers: ConversationListGroupFace[];
 } {
   const faces = line?.faces ?? [];
@@ -37,11 +37,11 @@ export function agentChatFaces(row: HomeTreeRow, line: HomeLine | null, org: Rea
   if (row.kind === "group") {
     return {
       member: null,
-      groupMembers: faces.map((face) => ({ installedAgentId: face.agentId, archivedAt: org?.get(face.agentId)?.archivedAt ?? null, statusKind: statusOf(face.agentId), displayName: face.name, icon: face.tone })),
+      groupMembers: faces.map((face) => ({ installedAgentId: face.agentId, archivedAt: org?.get(face.agentId)?.archivedAt ?? null, statusKind: statusOf(face.agentId), displayName: locale === "en" && face.nameEn ? face.nameEn : face.name, icon: face.tone, agent: { id: face.agentId, seedName: face.name } })),
     };
   }
   const face = faces[0];
-  return { member: face ? { statusKind: statusOf(face.agentId), icon: face.tone } : null, groupMembers: [] };
+  return { member: face ? { statusKind: statusOf(face.agentId), icon: face.tone, agent: { id: face.agentId, seedName: face.name } } : null, groupMembers: [] };
 }
 
 /** A Work row's title with the runner it started on in front ("Codex · Chart work"); no runner saved, no prefix. */
@@ -62,7 +62,7 @@ export function memberChildren(
 ): OneSessionTreeChild[] {
   return list.map((participant, index) => {
     const member = org?.get(participant.agentId);
-    const name = (member ? (locale === "en" ? member.nameEn || member.displayName : member.displayName) : participant.name)?.trim()
+    const name = (member ? (locale === "en" ? member.nameEn || member.displayName : member.displayName) : homeParticipantName(participant, locale))?.trim()
       || (locale === "ko" ? "삭제된 에이전트" : "Removed agent");
     return {
       key: `${roomChatId}:${participant.agentId}:${index}`,

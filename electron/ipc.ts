@@ -3755,6 +3755,9 @@ export function registerIpcHandlers(): void {
   );
   registerAppControlDomainIpc(ipcMain, "agentFiles:promptSource", (agentId: string) => readAgentPromptSource(agentId));
 
+  // A web source's site icon (electron/web-search/favicon.ts): Main reads the icon service's status, the renderer cannot.
+  ipcMain.handle("webSources:favicon", async (_event, host: unknown) => (await import("./web-search/favicon")).webSourceFavicon(host));
+
   // ── runLedger (실행/실패 원장 — 실패 메모리·자가진화 평가 입력) ──
   registerAppControlDomainIpc(ipcMain, "runLedger:events", (runId: string, limit?: number) =>
     listRunEvents(runId, limit),

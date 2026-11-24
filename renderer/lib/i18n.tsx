@@ -28,7 +28,7 @@ import {
   subscribeOnePersonaName,
 } from "./one-persona-name";
 import { credentialStoreName, uiPlatform, useUiPlatform } from "./platform-copy";
-import { agentDisplayName } from "@shared/agent-display-name";
+import { agentDisplayName, agentDisplayTagline } from "@shared/agent-display-name";
 
 export type Locale = "ko" | "en";
 export type LocalePref = Locale | "system";
@@ -5068,7 +5068,5 @@ export function pickLocalized<T extends { name: string; nameEn?: string; tagline
   // The name the owner gave an installed agent (Agent files > Edit) wins in both languages, so one rename reads the same on every
   // screen. Listings and firms carry no such field and are unchanged.
   const name = agentDisplayName(item, locale);
-  return locale === "en"
-    ? { name, tagline: item.taglineEn?.trim() || item.tagline || "" }
-    : { name, tagline: item.tagline ?? "" };
+  return { name, tagline: agentDisplayTagline(item, locale) };
 }

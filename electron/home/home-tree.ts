@@ -13,7 +13,7 @@ import {
   type HomeTreeRow,
   type HomeTreeSnapshot,
 } from "../../shared/home-tree";
-import { AGENT_DISPLAY_NAME_SQL } from "../../shared/agent-display-name";
+import { AGENT_DISPLAY_NAME_EN_SQL, AGENT_DISPLAY_NAME_SQL } from "../../shared/agent-display-name";
 
 /*
  * Home's left tree, read side. Every function here only SELECTs. The tree is a view over rows that
@@ -89,23 +89,24 @@ function memberIds(json: string | null): string[] {
  * name. Every other screen reads the same order (renderer pickLocalized), so a rename shows in the tree too. A store from before
  * that column simply has the package name.
  */
-function agentRows<T>(db: Database.Database, extra: string, chunk: string[]): T[] {
+function agentRows<T>(db: Database.Database, extra: string, chunk: string[]): Array<T & { nameEn: string }> {
   const marks = chunk.map(() => "?").join(",");
+  // `nameEn` is the English-UI name (owner's name > English name > package name); a store with no `name_en` column gives the package name in both.
   try {
-    return db.prepare(`SELECT id, ${AGENT_DISPLAY_NAME_SQL} AS name${extra} FROM installed_agents WHERE id IN (${marks})`).all(...chunk) as T[];
+    return db.prepare(`SELECT id, ${AGENT_DISPLAY_NAME_SQL} AS name, ${AGENT_DISPLAY_NAME_EN_SQL} AS nameEn${extra} FROM installed_agents WHERE id IN (${marks})`).all(...chunk) as Array<T & { nameEn: string }>;
   } catch {
-    return db.prepare(`SELECT id, name${extra} FROM installed_agents WHERE id IN (${marks})`).all(...chunk) as T[];
+    return (db.prepare(`SELECT id, name, name AS nameEn${extra} FROM installed_agents WHERE id IN (${marks})`).all(...chunk) as Array<T & { nameEn: string }>);
   }
 }
 
-function agentNames(db: Database.Database, s: Schema, ids: Iterable<string>): Map<string, string> {
-  const out = new Map<string, string>();
+function agentNames(db: Database.Database, s: Schema, ids: Iterable<string>): Map<string, { name: string; nameEn: string }> {
+  const out = new Map<string, { name: string; nameEn: string }>();
   if (!s.agents) return out;
   const list = [...new Set(ids)];
   for (let i = 0; i < list.length; i += 400) {
     const chunk = list.slice(i, i + 400);
     for (const row of agentRows<{ id: string; name: string }>(db, "", chunk)) {
-      out.set(row.id, row.name);
+      out.set(row.id, { name: row.name, nameEn: row.nameEn || row.name });
     }
   }
   return out;
@@ -121,13 +122,17 @@ function toRows(db: Database.Database, s: Schema, raw: RawRow[]): HomeTreeRow[] 
   const names = agentNames(db, s, shown.flatMap((x) => x.ids));
   return shown.map(({ row, isGroup, members, ids }) => {
     const work = row.origin_surface !== "one";
+    const agentNames = work ? [] : ids.map((id) => names.get(id)?.name ?? "");
+    const agentNamesEn = work ? [] : ids.map((id) => names.get(id)?.nameEn ?? "");
     return {
       id: row.id,
       kind: homeRowKind(row),
       projectId: row.project_id ?? null,
       title: work ? (row.task_title || row.title || "") : (row.title ?? ""),
       taskId: work ? row.task_id : null,
-      agentNames: work ? [] : ids.map((id) => names.get(id) ?? ""),
+      agentNames,
+      ...(work ? {} : { agentIds: ids }),
+      ...(agentNamesEn.some((name, index) => name !== agentNames[index]) ? { agentNamesEn } : {}),
       memberCount: work ? 0 : isGroup ? members.length : ids.length,
       updatedAt: row.activity_at,
     } satisfies HomeTreeRow;
@@ -182,7 +187,10 @@ export function homeParticipants(db: Database.Database, chatId: unknown, now = D
   if (!row) return [];
   const ids = memberIds(row.m).slice(0, 200);
   const names = agentNames(db, s, ids);
-  return ids.map((agentId) => ({ agentId, name: names.get(agentId) ?? null }));
+  return ids.map((agentId) => {
+    const found = names.get(agentId);
+    return { agentId, name: found?.name ?? null, ...(found && found.nameEn !== found.name ? { nameEn: found.nameEn } : {}) };
+  });
 }
 
 /** Most rows one search answers. */
@@ -248,13 +256,13 @@ export function homeLines(db: Database.Database, input: unknown, now = Date.now(
     const group = Boolean(row.tf_id) || row.seat_kind === "group";
     return (group ? memberIds(row.tf_members) : row.agent_id ? [row.agent_id] : []).slice(0, HOME_LINE_FACE_LIMIT);
   });
-  const agents = new Map<string, { name: string; tone: string }>();
+  const agents = new Map<string, { name: string; nameEn: string; tone: string }>();
   const wanted = [...new Set(faceIds.flat())];
   if (s.agents) {
     for (let i = 0; i < wanted.length; i += 400) {
       const chunk = wanted.slice(i, i + 400);
       for (const row of agentRows<{ id: string; name: string; tone: string | null }>(db, ", tone", chunk)) {
-        agents.set(row.id, { name: row.name, tone: row.tone || "one-puppy" });
+        agents.set(row.id, { name: row.name, nameEn: row.nameEn || row.name, tone: row.tone || "one-puppy" });
       }
     }
   }
@@ -274,7 +282,7 @@ export function homeLines(db: Database.Database, input: unknown, now = Date.now(
     const text = (row.preview ?? "").replace(/\s+/g, " ").trim().slice(0, HOME_LINE_PREVIEW_LIMIT);
     const faces = faceIds[index]!.flatMap((agentId): HomeLineFace[] => {
       const agent = agents.get(agentId);
-      return agent ? [{ agentId, name: agent.name, tone: agent.tone }] : [];
+      return agent ? [{ agentId, name: agent.name, tone: agent.tone, ...(agent.nameEn !== agent.name ? { nameEn: agent.nameEn } : {}) }] : [];
     });
     return { id: row.id, ...(text ? { preview: text } : {}), ...(faces.length ? { faces } : {}), ...(leads.has(row.id) ? { lead: true as const } : {}) } satisfies HomeLine;
   });

@@ -1983,6 +1983,6 @@ function TaskSidePanelContent({
 
 function SourceRow({ source }: { source: OneActivitySource }) {
   return <a className={styles.artifactRuntimeRow} href={source.url} target="_blank" rel="noreferrer" title={source.url}>
-    <IconFileUp size={13} /><span>{source.label}</span><small>{source.status === "completed" ? <IconCheck size={12} /> : null}</small>
+    <IconFileUp size={13} /><span>{source.title ?? source.label}</span><small>{source.status === "completed" ? <IconCheck size={12} /> : null}</small>
   </a>;
 }

@@ -52,6 +52,9 @@ export function effortDeviation(input: {
   const { picked, runtime } = input;
   if (!picked || !pickGoverns(picked, runtime)) return null;
   const ran = level(input.ran);
+  // "none" is the level a runtime without effort controls declares (local engines: detect.ts conservativeLocalRuntimeAllocation),
+  // and a run that sent no level (null) did exactly that: nothing was asked and nothing other was applied, so nothing is said.
+  if (picked.effort === "none" && ran === null) return null;
   return ran === picked.effort ? null : { requested: picked.effort, ran };
 }
 

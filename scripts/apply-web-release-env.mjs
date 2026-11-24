@@ -281,7 +281,9 @@ async function verifyReleaseDownloads(apiUrl, artifacts) {
       headers["x-agentlas-desktop-arch"] !== arch ||
       headers["x-agentlas-desktop-sha256"] !== expected.sha256 ||
       Number(headers["x-agentlas-desktop-size"]) !== expected.size ||
-      Number(headers["content-length"]) !== expected.size ||
+      // HEAD 응답은 내려받기를 GitHub 로 302 넘기게 된 뒤부터 content-length 를 싣지 않는다.
+      // 없으면 크기는 x-agentlas-desktop-size 와 아래 실제 바이트 해시가 묶고, 있으면 같아야 한다.
+      (headers["content-length"] !== undefined && Number(headers["content-length"]) !== expected.size) ||
       !disposition.includes(`filename="${expected.fileName}"`)
     ) {
       throw new Error(`Download headers do not bind ${arch} to the verified release artifact.`);

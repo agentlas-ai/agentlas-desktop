@@ -1696,13 +1696,29 @@ export function codexToolEventFromItem(item: any, completed: boolean): {
         isError: completed && failed,
       };
     }
-    case "webSearch":
+    case "webSearch": {
+      // The app-server item names what the search saw: `results` (opaque JSON, kept as the protocol hands it) and an `action`
+      // (openPage / findInPage {url}). Keep them in the result so the host's web-source reader (shared/web-search/web-sources.ts)
+      // sees the same pages the answer rests on; a bare item still reads "completed" for old readers.
+      // Opaque JSON from the protocol: keep each entry's short string fields only, so the text stays whole JSON under the 12k cut.
+      const rawResults: unknown[] = Array.isArray(item.results)
+        ? item.results.slice(0, 40).map((entry: unknown) => entry && typeof entry === "object" && !Array.isArray(entry)
+          ? Object.fromEntries(Object.entries(entry as Record<string, unknown>).filter(([, value]) => typeof value === "string").map(([key, value]) => [key, (value as string).slice(0, 300)]))
+          : entry)
+        : [];
+      const action = item.action && typeof item.action === "object" ? item.action : undefined;
+      const hasEvidence = rawResults.length > 0 || (action && (action.type === "openPage" || action.type === "findInPage") && typeof action.url === "string");
       return {
         name: "web_search",
         args: asText(item.query ?? item.action),
-        result: completed ? "completed" : undefined,
+        result: completed
+          ? (hasEvidence
+            ? asText({ query: typeof item.query === "string" ? item.query : undefined, ...(action ? { action } : {}), results: Array.isArray(item.results) ? rawResults : undefined })
+            : "completed")
+          : undefined,
         isError: false,
       };
+    }
     default:
       return null;
   }

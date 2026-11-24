@@ -216,7 +216,8 @@ export function BuildSavedWindow({ ko, buildKey, agentId, agentName, onBack, onC
   return (
     <div className={s.window} data-build-window={tab}>
       <header className={base.toolbar}>
-        <button type="button" className={base.quietButton} onClick={back}><IconArrowLeft size={16} />{opened.build.agentId && opened.build.kind === "edit" ? title : (ko ? "에이전트" : "Agents")}</button>
+        <button type="button" className={base.backButton} aria-label={ko ? "에이전트 목록으로" : "Back to agents"} onClick={back}><IconArrowLeft size={18} /></button>
+        <h1 className={base.toolbarTitle}>{title}</h1>
         <div className={base.toolbarActions}><span className={base.phase}>{stateText(opened, ko)}</span></div>
       </header>
       <div className={s.columns}>

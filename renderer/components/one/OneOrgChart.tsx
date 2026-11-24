@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { takeOrgSheetRequest } from "@/lib/one-org-sheet-request";
+import { agentDisplayName, agentDisplayTagline } from "@shared/agent-display-name";
 import type { InstalledAgent, InstalledMcpServer, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
 import { isCallOnlyHubAgent } from "@shared/call-only-agent";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
@@ -648,8 +649,8 @@ export function OneOrgChart({
               placeholder={editorCopy.chooseReplacement}
               searchPlaceholder={editorCopy.searchAgents}
               emptyLabel={editorCopy.noAgentMatch}
-              choices={replacementCandidates.map((agent) => ({ id: agent.id, name: agent.localDisplayName || agent.name, tone: agent.tone,
-                detail: (locale === "ko" ? agent.tagline : agent.taglineEn || agent.tagline) || undefined }))}
+              choices={replacementCandidates.map((agent) => ({ id: agent.id, name: agentDisplayName(agent, ko ? "ko" : "en"), tone: agent.tone,
+                detail: agentDisplayTagline(agent, ko ? "ko" : "en") || undefined }))}
               value={replaceId}
               onChange={setReplaceId}
               disabled={busy}
@@ -702,7 +703,7 @@ export function OneOrgChart({
           )}
 
           {inventoryLoading && candidates.length === 0 ? <AgentInventoryLoading locale={locale} />
-            : candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setAddError(null); }}><span><strong>{agent.localDisplayName || (ko ? agent.name : agent.nameEn) || agent.name}</strong><small>{ko ? "로컬" : "Local"}</small><em>{(ko ? agent.tagline : agent.taglineEn) || agent.tagline || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
+            : candidates.length > 0 ? <div className={styles.candidateGrid} role="list" aria-label={addCopy.installed}>{candidates.map((agent) => <button type="button" role="listitem" key={agent.id} data-active={selectedAgent === agent.id ? "true" : "false"} onClick={() => { setSelectedAgent(agent.id); setAddError(null); }}><span><strong>{agentDisplayName(agent, ko ? "ko" : "en")}</strong><small>{ko ? "로컬" : "Local"}</small><em>{agentDisplayTagline(agent, ko ? "ko" : "en") || agent.taglineEn}</em></span>{selectedAgent === agent.id && <IconCheck size={15} />}</button>)}</div>
             : <div className={styles.sheetEmpty}>{roleFilter ? addCopy.noMatch : (ko ? "사용 가능한 로컬 에이전트가 없습니다." : "No local agents are available.")}{roleFilter && <button type="button" className={styles.inlineLink} onClick={() => setRoleFilter(null)}>{addCopy.showAll}</button>}{onCreateAgent && <button type="button" className={styles.inlineLink} onClick={() => { setSelectedAgent(""); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onCreateAgent(); }}>{ko ? "새 에이전트 만들기" : "Create a new agent"}</button>}</div>}
           {onBrowseMoreAgents && <button type="button" className={styles.secondaryAction} onClick={() => { setSelectedAgent(""); setAddSearch(""); setAddError(null); setRoleFilter(null); setAddOpen(false); onBrowseMoreAgents(); }}>{addCopy.browseMore}</button>}
 

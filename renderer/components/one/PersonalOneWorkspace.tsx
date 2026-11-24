@@ -1,5 +1,6 @@
 "use client";
 import { MessageActions, MessageReplyPreview } from "../MessageActions";
+import { AnswerWebSources } from "../AnswerWebSources";
 import { composeMessageReply, displayMessageReply, type MessageReply } from "@/lib/message-reply";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -795,6 +796,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               </AnswerCardsForTurns>
               <InlineUiInstances chatId={snapshot?.conversationChatId} instances={ownedUi} turnIds={turn?[turn.runId]:[]} locale={ko?"ko":"en"}/>
             </article></MessageActions>}
+            {/* Sources under the turn's last answer once the run has ended (web search, pages read): the same button as every chat. */}
+            {message.role==="assistant"&&turn&&row.tail&&!row.continuation&&<AnswerWebSources runId={turn.runId} done={terminal(turn.state)} locale={ko?"ko":"en"}/>}
             {/* media-carousel pictures and videos as one swipeable strip, other files as cards (components/media). */}
             {(imageUrls.length>0||fileGroups.length>0)&&<MessageAttachments files={fileGroups.flatMap(group=>messageFiles[group] ?? [])} imageUrls={imageUrls} locale={ko?"ko":"en"} onOpenFile={requestChatFileOpen} align={message.role==="user"?"end":"start"}/>}
             {delegated.map(delegation)}

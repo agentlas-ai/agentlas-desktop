@@ -79,7 +79,8 @@ import {
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
 import { approvalToolAnnotations, type ApprovalToolAnnotations } from "./approval-rule";
-import type { ToolPermission } from "../../shared/builtin-tools";
+import type { BuiltinToolContext, ToolPermission } from "../../shared/builtin-tools";
+import { WEB_TOOL_NAMES, runtimeGetsWebTools } from "../../shared/web-tool-runtimes";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import type { ToolResultTrust } from "../../shared/types";
 import { EMPTY_NO_TOOL_RAN_CODE, normalEndToolEvidence, settleNormalEnd } from "../../shared/turn-settlement";
@@ -303,6 +304,8 @@ export async function loadMainToolInventory(
   browserOnly = false,
   canBrowserDownload = false,
   scienceCollectionCapability?: object,
+  /** List the host web tools (web_search, web_read): see runOffersWebTools. */
+  webTools = false,
 ): Promise<{ tools: OpenAiToolDef[]; byName: Map<string, ResolvedTool> }> {
   const collectionBinding = scienceCollectionCapability ? assertScienceCollectionCapability(scienceCollectionCapability, mcpConfigPath) : undefined;
   const tools: OpenAiToolDef[] = [];
@@ -323,14 +326,15 @@ export async function loadMainToolInventory(
   // nowhere; qwen3:1.7b called the named ask_user, Ollama dropped the unlisted call, the turn ended as an empty answer).
   // A browser-only run (Agentlas browser MCP only) and a history-work run keep their closed tool sets.
   const askUserListed = canAskUser && !browserOnly && !historyWorkTools.length;
-  if (!collectionBinding && ((workspaceRoot && !browserOnly) || canBrowserDownload || historyWorkTools.length || askUserListed)) {
+  if (!collectionBinding && ((workspaceRoot && !browserOnly) || canBrowserDownload || historyWorkTools.length || askUserListed || webTools)) {
     // A write run gets `bash` only inside the working-folder sandbox (confined-shell.ts); where none exists it has no shell.
     const canConfineShell = permission === "write" && !!workspaceRoot && !browserOnly
       && (await (await import("./confined-shell")).writeConfinedShell(workspaceRoot)) !== null;
-    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload, historyWorkTools, canConfineShell })) {
+    for (const def of builtinToolsAsOpenAi(permission, { canAskUser, canGenerateImage, canBrowserDownload, historyWorkTools, canConfineShell, canWebSearch: webTools })) {
       if(historyWorkTools.length&&!historyWorkTools.includes(def.function.name))continue;
       if ((browserOnly || !workspaceRoot) && def.function.name !== "browser_download"&&!historyWorkTools.includes(def.function.name)
-        && !(askUserListed && def.function.name === "ask_user")) continue;
+        && !(askUserListed && def.function.name === "ask_user")
+        && !(webTools && WEB_TOOL_NAMES.has(def.function.name))) continue;
       tools.push(def);
       byName.set(def.function.name, {
         kind: "builtin",
@@ -472,6 +476,8 @@ export interface LocalToolApprovalContext {
   /** 실행 중인 에이전트 — 에이전트 스코프 능력 규칙의 대상. */
   agentId?: string;
   unattended: boolean;
+  /** The person's UI language: the search region and language of web_search. */
+  locale?: string;
   /** 내장 bash 도구가 취소를 따르도록 — 실행 중단이 도구까지 닿아야 한다. */
   signal?: AbortSignal;
   /** Agentlas-resolved environment (saved tool keys, agent .env) — what a CLI runtime's shell already gets. */
@@ -534,6 +540,17 @@ export function mainToolSurface(eagerTools: OpenAiToolDef[], byName: Map<string,
     shape.runtimeKind === "agentlas-local", shape.runtimeKind === "byok" || shape.runtimeKind === "agentlas");
 }
 
+/**
+ * Whether this run lists the host web tools. API and local-model runtimes (shared/web-tool-runtimes.ts) get them on every
+ * ordinary turn, with or without a working folder or MCP config; a Science collection grant, a browser-only run and a host
+ * purpose call (judgment, structured output, effect observation) keep their closed tool sets.
+ */
+export function runOffersWebTools(req: Pick<RunnerRequest, "scienceCollectionCapability" | "untrustedNoTools" | "browserOnly"
+  | "mcpGrantCatalogOnly" | "mcpConfigPath" | "judgmentOnly" | "outputSchema" | "minimalObservation">, runtimeKind: string): boolean {
+  return runtimeGetsWebTools(runtimeKind) && !req.scienceCollectionCapability && req.untrustedNoTools !== true && req.browserOnly !== true
+    && !(req.mcpConfigPath && req.mcpGrantCatalogOnly === true) && req.judgmentOnly !== true && !req.outputSchema && !req.minimalObservation;
+}
+
 export async function prepareMainToolLoop(
   req: RunnerRequest,
   runtimeKind: string,
@@ -574,6 +591,8 @@ export async function prepareMainToolLoop(
           req.signal,
           req.browserOnly === true,
           catalogMcpOnly ? false : await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
+          undefined,
+          runOffersWebTools(req, runtimeKind),
         );
       })();
   // the inventory is built before the first request, so a throw from it (mcp_tool_inventory_duplicate_name, a
@@ -640,9 +659,27 @@ export async function prepareMainToolLoop(
       ...(req.approvalChatId ?? req.chatId ? { chatId: req.approvalChatId ?? req.chatId } : {}),
       ...(req.agentId ? { agentId: req.agentId } : {}),
       unattended: req.unattended === true,
+      ...(req.locale ? { locale: req.locale } : {}),
       ...(req.signal ? { signal: req.signal } : {}),
       ...(req.env ? { env: req.env } : {}),
     },
+  };
+}
+
+/** web_search / web_read bound to this run: its language and its Stop. A failed call throws the text that starts with its closed code. */
+async function webToolsFor(approval: LocalToolApprovalContext): Promise<NonNullable<BuiltinToolContext["webTools"]>> {
+  const [{ runWebSearchTool, runWebReadTool }, { BuiltinToolFailure }] = await Promise.all([
+    import("../web-search"),
+    import("../../shared/builtin-tools"),
+  ]);
+  const ctx = { ...(approval.locale ? { locale: approval.locale } : {}), ...(approval.signal ? { signal: approval.signal } : {}) };
+  const settle = (outcome: { ok: boolean; content: string }): string => {
+    if (!outcome.ok) throw new BuiltinToolFailure(outcome.content);
+    return outcome.content;
+  };
+  return {
+    search: async (input) => settle(await runWebSearchTool(input, ctx)),
+    read: async (input) => settle(await runWebReadTool(input, ctx)),
   };
 }
 
@@ -1182,6 +1219,7 @@ async function dispatchMainToolRawUnchecked(
       ...(shellEnv ? { env: shellEnv } : {}),
       ...(confineShell ? { confineShell } : {}),
       ...(downloadProof ? {browserDownload:downloadProof.download} : {}),
+      ...(WEB_TOOL_NAMES.has(resolved.builtinName) ? { webTools: await webToolsFor(approval) } : {}),
       ...(currentHistoryRuntimeFence()?{historyWork:async(name:string,value:Record<string,unknown>)=>{
         if(name==="history_work_draft")return withCurrentHistoryProducer("agent",p=>p.agent.draftFinite(value),()=>{throw new Error("history_work_original_scope_required")});
         if(name==="history_work_apply"&&Reflect.ownKeys(value).length===0)return withCurrentHistoryApplication();

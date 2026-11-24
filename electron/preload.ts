@@ -699,6 +699,9 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("agentFiles:write", agentId, absPath, content),
     promptSource: (agentId: string) => ipcRenderer.invoke("agentFiles:promptSource", agentId),
   },
+  webSources: {
+    favicon: (host: string) => ipcRenderer.invoke("webSources:favicon", host),
+  },
   runLedger: {
     events: (runId: string, limit?: number) => ipcRenderer.invoke("runLedger:events", runId, limit),
     chatTimeline: (chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) =>

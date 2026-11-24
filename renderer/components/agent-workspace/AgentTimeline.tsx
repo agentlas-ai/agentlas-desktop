@@ -32,9 +32,9 @@ export function HiddenItemsLine({ promotion, ko }: { promotion: NonNullable<Agen
   </>;
 }
 
-function Post({ agentId, name, slug, at, tag, tagIcon, flag, children }: { agentId: string; name: string; slug: string; at: string; tag: string; tagIcon: JSX.Element; flag?: string; children: React.ReactNode }) {
+function Post({ agentId, name, seedName, slug, at, tag, tagIcon, flag, children }: { agentId: string; name: string; seedName?: string; slug: string; at: string; tag: string; tagIcon: JSX.Element; flag?: string; children: React.ReactNode }) {
   return <article className={styles.tItem}>
-    <div className={styles.tFace} style={flag ? { paddingTop: 30 } : undefined}><AgentFace agentId={agentId} name={name} size={32} /></div>
+    <div className={styles.tFace} style={flag ? { paddingTop: 30 } : undefined}><AgentFace agentId={agentId} name={name} seedName={seedName} size={32} /></div>
     <div style={{ minWidth: 0 }}>
       {flag && <div className={styles.tFlag}><IconPin size={13} />{flag}</div>}
       <div className={styles.tHead}><b>{name}</b><span>@{slug} · {at}</span><span className={styles.tag}>{tagIcon}{tag}</span></div>
@@ -43,8 +43,8 @@ function Post({ agentId, name, slug, at, tag, tagIcon, flag, children }: { agent
   </article>;
 }
 
-export function AgentTimeline({ agentId, name, slug, ko, snapshot, memory, memoryFailed, onRetryMemory, busy, canWrite, readDiff, onAddSkill, onDismiss, onReview, onOpenMemory, onForget, onUndo }: {
-  agentId: string; name: string; slug: string; ko: boolean; snapshot: AgentWorkspaceSnapshot | null; memory: DesktopMemoryListEntry[] | null; memoryFailed: boolean; onRetryMemory: () => void; busy: boolean; canWrite: boolean;
+export function AgentTimeline({ agentId, name, seedName, slug, ko, snapshot, memory, memoryFailed, onRetryMemory, busy, canWrite, readDiff, onAddSkill, onDismiss, onReview, onOpenMemory, onForget, onUndo }: {
+  agentId: string; name: string; seedName?: string; slug: string; ko: boolean; snapshot: AgentWorkspaceSnapshot | null; memory: DesktopMemoryListEntry[] | null; memoryFailed: boolean; onRetryMemory: () => void; busy: boolean; canWrite: boolean;
   readDiff: (proposalId: string) => Promise<AgentWorkspaceDiff>;
   onAddSkill: (proposal: AgentWorkspaceProposal) => void; onDismiss: (proposal: AgentWorkspaceProposal) => void; onReview: (proposal: AgentWorkspaceProposal) => void;
   onOpenMemory: () => void; onForget: (entries: DesktopMemoryListEntry[]) => void; onUndo: (parentRevisionId: string) => void;
@@ -76,7 +76,7 @@ export function AgentTimeline({ agentId, name, slug, ko, snapshot, memory, memor
     const parent = item.revision.parentRevisionIds[0];
     if (skill && diff) {
       const file = diff.changes.find((change) => change.path.startsWith(`skills/${skill}/`))?.path ?? `skills/${skill}`;
-      return <Post key={item.id} agentId={agentId} name={name} slug={slug} at={whenLabel(item.at, ko, now)} tag={ko ? "진화" : "Evolved"} tagIcon={<IconTrendUp size={14} />}>
+      return <Post seedName={seedName} key={item.id} agentId={agentId} name={name} slug={slug} at={whenLabel(item.at, ko, now)} tag={ko ? "진화" : "Evolved"} tagIcon={<IconTrendUp size={14} />}>
         <p className={styles.tText}>{ko ? "새 스킬을 추가했어요: " : "New skill added: "}<b>{skill}</b>.</p>
         <div className={styles.fileRow}><span className={styles.chip}><IconFileText size={13} />{file}</span>
           {snapshot?.cloudId && <span className={styles.chip}><IconCloud size={13} />{ko ? "Cloud에 있음" : "In Cloud"}</span>}
@@ -88,7 +88,7 @@ export function AgentTimeline({ agentId, name, slug, ko, snapshot, memory, memor
     // "My rules changed" only when the change really modifies a file; otherwise the host's own one-line summary says what happened.
     const sentence = change ? (ko ? `${change.path}의 규칙이 변경됐어요.` : `My rules changed in ${change.path}.`) : item.revision.summary;
     if (!sentence) return null;
-    return <Post key={item.id} agentId={agentId} name={name} slug={slug} at={whenLabel(item.at, ko, now)} tag={ko ? "진화" : "Evolved"} tagIcon={<IconTrendUp size={14} />}>
+    return <Post seedName={seedName} key={item.id} agentId={agentId} name={name} slug={slug} at={whenLabel(item.at, ko, now)} tag={ko ? "진화" : "Evolved"} tagIcon={<IconTrendUp size={14} />}>
       <p className={styles.tText}>{sentence}</p>
       {rows.length > 0 && <div className={styles.mini}>{rows.map((row, index) => <div key={index} className={row.sign === "+" ? styles.miniAdd : styles.miniDel}>{row.sign} {row.text}</div>)}</div>}
     </Post>;
@@ -101,7 +101,7 @@ export function AgentTimeline({ agentId, name, slug, ko, snapshot, memory, memor
     {waiting.map((proposal) => {
       const skill = proposal.skillPromotion?.skills[0];
       const runs = learnedRuns(proposal);
-      return <Post key={proposal.id} agentId={agentId} name={name} slug={slug} at={whenLabel(proposal.createdAt, ko, now)} tag={ko ? "학습" : "Learned"} tagIcon={<IconSparkles size={14} />} flag={ko ? "확인 대기" : "Waiting for you"}>
+      return <Post seedName={seedName} key={proposal.id} agentId={agentId} name={name} slug={slug} at={whenLabel(proposal.createdAt, ko, now)} tag={ko ? "학습" : "Learned"} tagIcon={<IconSparkles size={14} />} flag={ko ? "확인 대기" : "Waiting for you"}>
         <p className={styles.tText}>{skill ? (ko ? "같은 방식으로 계속 해결하고 있어요. 스킬로 생성할까요?" : "I keep solving this the same way. Should it become a skill?") : proposal.summary}</p>
         <div className={`${styles.card} ${skill && proposal.skillPromotion && (proposal.skillPromotion.redactedCount > 0 || proposal.skillPromotion.mayLeaveThisComputer) ? styles.cardCol : ""}`}>
           {skill && proposal.skillPromotion && (proposal.skillPromotion.redactedCount > 0 || proposal.skillPromotion.mayLeaveThisComputer) ? <>
@@ -125,7 +125,7 @@ export function AgentTimeline({ agentId, name, slug, ko, snapshot, memory, memor
     {groups.map((group) => {
       const project = group.project;
       const shown = group.entries.slice(0, MAX_LINES_PER_POST);
-      return <Post key={group.key} agentId={agentId} name={name} slug={slug} at={whenLabel(group.at, ko, now)} tag={`${ko ? "기억" : "Memory"}${project ? ` · ${project}` : ""}`} tagIcon={<IconBrain size={14} />}>
+      return <Post seedName={seedName} key={group.key} agentId={agentId} name={name} slug={slug} at={whenLabel(group.at, ko, now)} tag={`${ko ? "기억" : "Memory"}${project ? ` · ${project}` : ""}`} tagIcon={<IconBrain size={14} />}>
         <p className={styles.tText}>{ko ? `${project ? `${project}에서 ` : ""}새로 저장된 기억 ${group.entries.length}개예요.` : `${group.entries.length} new thing${group.entries.length === 1 ? "" : "s"} I remember${project ? ` from ${project}` : ""}.`}</p>
         <ul className={styles.memCols}>{shown.map((entry) => <li key={entry.memoryId}>{plainMemoryTitle(entry.title || entry.content, ko, 90)}</li>)}</ul>
         <div className={styles.tFoot}><span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><IconLock size={14} />{ko ? "이 데스크탑에만 저장돼요" : "This computer only"}</span>

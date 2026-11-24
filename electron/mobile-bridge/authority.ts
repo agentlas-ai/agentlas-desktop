@@ -1,3 +1,4 @@
+import { nameEnField, projectAgentNamePairs } from "./agent-faces";
 import { createMobileBridgeFrontTransfer } from "./front-transfer";
 import { agentUsability, usabilityEnforced } from "../agents/usability";
 import { createMobileBridgeContinuity } from "./continuity";
@@ -943,11 +944,16 @@ function projectBorrowableHubAgents() {
 }
 
 function projectRouteRecommendation(recommendation: Recommendation) {
+  // A local agent's English-UI name is the installed row's (the owner's name wins in both languages); a remote one carries its listing's `nameEn`. Only when it differs.
+  const targetAgentId = (agent: Recommendation["agents"][number]): string => (agent.target && "agentId" in agent.target && typeof agent.target.agentId === "string" ? agent.target.agentId : agent.id);
+  const pairs = projectAgentNamePairs(recommendation.agents.slice(0, 8).map(targetAgentId));
+  const stagePairs = projectAgentNamePairs((recommendation.stages ?? []).slice(0, 12).flatMap((stage) => (typeof stage.agentId === "string" ? [stage.agentId] : [])));
   return {
     mode: recommendation.mode,
     agents: recommendation.agents.slice(0, 8).map((agent) => ({
       id: boundedRedactedText(agent.id, 512),
       name: boundedRedactedText(agent.name, 512),
+      ...nameEnField(boundedRedactedText(agent.name, 512), boundedRedactedText(agent.nameEn ?? pairs.get(targetAgentId(agent))?.nameEn ?? "", 512)),
       source: agent.source,
       estCredits: agent.estCredits,
       isFirm: agent.isFirm === true,
@@ -957,6 +963,9 @@ function projectRouteRecommendation(recommendation: Recommendation) {
       kind: boundedRedactedText(stage.kind, 256),
       agentId: typeof stage.agentId === "string" ? boundedRedactedText(stage.agentId, 512) : null,
       agentName: typeof stage.agentName === "string" ? boundedRedactedText(stage.agentName, 512) : null,
+      ...(typeof stage.agentId === "string" && typeof stage.agentName === "string"
+        ? ((en) => (en ? { agentNameEn: en } : {}))(nameEnField(boundedRedactedText(stage.agentName, 512), boundedRedactedText(stagePairs.get(stage.agentId)?.nameEn ?? "", 512)).nameEn)
+        : {}),
       produces: (stage.produces ?? []).slice(0, 20).map((value) => boundedRedactedText(value, 256)),
       consumes: (stage.consumes ?? []).slice(0, 20).map((value) => boundedRedactedText(value, 256)),
       estCredits: stage.estCredits ?? null,

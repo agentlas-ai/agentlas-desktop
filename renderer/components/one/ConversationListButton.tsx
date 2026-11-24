@@ -55,8 +55,9 @@ export function sessionListTime(iso: string, locale: "ko" | "en"): string {
 
 /** What the row reads from a conversation: a real Chat fits, and so does the light row the Workspace menu builds. */
 export type ConversationListItem = Pick<Chat, "id" | "title" | "updatedAt" | "seatKind"> & { lastMessagePreview?: string };
-export type ConversationListFace = Pick<OneOrgMember, "statusKind" | "icon">;
-export type ConversationListGroupFace = Pick<OneOrgMember, "installedAgentId" | "archivedAt" | "statusKind" | "displayName" | "icon">;
+/** `agent`: draw the agent's own face (shared/agent-face.ts) instead of the tone character `icon`; set by the Workspace menu, not by the One session list. */
+export type ConversationListFace = Pick<OneOrgMember, "statusKind" | "icon"> & { agent?: { id: string; seedName: string } };
+export type ConversationListGroupFace = Pick<OneOrgMember, "installedAgentId" | "archivedAt" | "statusKind" | "displayName" | "icon"> & { agent?: { id: string; seedName: string } };
 /** Extra attributes for the row's main button (drag, context menu, `data-*` marks). Never the click, class, type or title. */
 export type ConversationRowButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "type" | "className" | "onClick" | "title" | "children">
   & { [attribute: `data-${string}`]: string | undefined };
@@ -101,12 +102,13 @@ export function ConversationListButton({ item, active, locale, onOpen, onRemove,
         {isGroup ? <span className={styles.sessionGroupAvatar} data-faces={plain ? "group" : undefined} aria-label={roomTitle}>
           {showOne && <OneAgentPortrait status="quiet" label={oneName} tone={oneAvatarTone} size="small" />}
           {groupMembers.slice(0, showOne ? 2 : 3).map((groupMember) => (
-            <OneAgentPortrait key={groupMember.installedAgentId} status={groupMember.archivedAt ? "locked" : groupMember.statusKind} label={groupMember.displayName} tone={groupMember.icon} size="small" />
+            <OneAgentPortrait key={groupMember.installedAgentId} status={groupMember.archivedAt ? "locked" : groupMember.statusKind} label={groupMember.displayName} tone={groupMember.icon} agent={groupMember.agent} size="small" />
           ))}
         </span> : <OneAgentPortrait
           status={unavailable ? "locked" : member?.statusKind ?? "quiet"}
           label={roomTitle}
           tone={member?.icon ?? oneAvatarTone}
+          agent={member?.agent}
           size="small"
         />}
         <span className={styles.sessionCopy}>

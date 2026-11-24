@@ -1,0 +1,52 @@
+{
+  "schema": "agentlas.web-search.v1",
+  "version": "2026-11-24.1",
+  "notes": "One source for Agentlas web search on the desktop (bundled Agentlas browser, no window) and the phone (the app's own WebView, off screen). Copied byte for byte with web-search-serp.js into the phone app; tests on each side hold the copies equal. No search API and no key: a real browser engine opens the search site's own result page and web-search-serp.js reads it. The engine is never disguised beyond `userAgent` below, never clicks, types or solves a check: a blocked or off-topic page moves to the next engine, and when every engine is blocked the tool answers `search_blocked` so the person can search in the browser themself. Measured: DuckDuckGo and Bing answer the Agentlas browser; Google answers an automated browser with its check page.",
+  "engines": {
+    "duckduckgo-html": {
+      "url": "https://html.duckduckgo.com/html/?q={q}&kl={region}",
+      "ready": ".result, .no-results, .anomaly-modal__title, #challenge-form"
+    },
+    "duckduckgo": {
+      "url": "https://duckduckgo.com/?q={q}&kl={region}&ia=web",
+      "ready": "article[data-testid=\"result\"], .anomaly-modal__title, #challenge-form"
+    },
+    "bing": {
+      "url": "https://www.bing.com/search?q={q}&setlang={lang}",
+      "ready": "li.b_algo, #b_captcha, #b_results"
+    },
+    "google": {
+      "url": "https://www.google.com/search?q={q}&hl={lang}",
+      "ready": "#search, form#captcha-form, #recaptcha"
+    }
+  },
+  "order": {
+    "desktop": ["duckduckgo-html", "duckduckgo", "bing"],
+    "phone": ["duckduckgo-html", "duckduckgo", "bing", "google"]
+  },
+  "region": {
+    "ko": { "region": "kr-kr", "lang": "ko" },
+    "en": { "region": "us-en", "lang": "en" },
+    "default": { "region": "wt-wt", "lang": "en" }
+  },
+  "userAgent": "The engine's own user agent, with the token `HeadlessChrome` written `Chrome` where the engine runs without a window, and ` Agentlas/<app version>` appended. Nothing else is changed: the reader says it is the Agentlas app's browser, as a WebView or an Electron window does.",
+  "readyWaitMs": 8000,
+  "pageLoadTimeoutMs": 20000,
+  "results": {
+    "default": 8,
+    "max": 10
+  },
+  "favicon": "https://icons.duckduckgo.com/ip3/{host}.ico",
+  "source": {
+    "schema": "agentlas.web-source.v1",
+    "fields": {
+      "url": "https absolute address the tool itself opened or the search page listed (never an address a model wrote)",
+      "title": "the page or result title as the page gave it, 1-300 characters; the host when there is none",
+      "site": "the host without a leading `www.`",
+      "snippet": "optional, the search result's own description, at most 500 characters",
+      "kind": "`search` (a result listed by a search page) or `page` (a page the tool opened and read)"
+    },
+    "maxPerAnswer": 20,
+    "order": "pages that were opened and read first, in the order they were read; then search results in the order the searches listed them; one entry per address"
+  }
+}

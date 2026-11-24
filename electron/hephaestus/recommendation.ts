@@ -166,6 +166,7 @@ export function normalizeRecommendation(
       agents.push({
         id: slug,
         name: str(o.name) ?? str(o.nameEn) ?? slug,
+        ...(str(o.nameEn) ? { nameEn: str(o.nameEn) } : {}),
         source,
         estCredits: 0,
         target: { source, entityKind, slug },

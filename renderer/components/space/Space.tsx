@@ -4,6 +4,7 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } fro
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { homeBridge, rowDisplayName, type HomeTreeParticipant } from "@/lib/home-tree";
+import { homeParticipantName } from "@shared/home-tree";
 import { taskTitleForDisplay } from "@/lib/task-title";
 import { useRunningChats } from "@/lib/running-chats";
 import { subscribeStoreChanges } from "@/lib/store-change-bus";
@@ -43,7 +44,7 @@ import styles from "./Space.module.css";
  * existence are re-read when the store says that chat changed (coalesced), never on a clock.
  */
 
-type ChatInfo = { state: "ok"; title: string; kind: "room" | "work"; group: boolean; members: number; names: string[] } | { state: "failed" };
+type ChatInfo = { state: "ok"; title: string; kind: "room" | "work"; group: boolean; members: number; names: string[]; agentIds: string[] } | { state: "failed" };
 
 /** Existence, kind and display name of the chats in Space - read when a tab appears and when the store says one changed. */
 function useSpaceChatInfo(openKey: string, locale: SpaceLocale) {
@@ -75,9 +76,9 @@ function useSpaceChatInfo(openKey: string, locale: SpaceLocale) {
       const row = rowById.get(result.id);
       const fallback = localeRef.current ? "새 대화" : "New chat";
       const raw = row ? (row.kind === "work" ? taskTitleForDisplay(row.title, localeRef.current) : row.title) : (kind === "work" ? taskTitleForDisplay(chat.title, localeRef.current) : chat.title);
-      const title = !raw || raw === "New chat" ? (row ? rowDisplayName(row, fallback) : fallback) : raw;
+      const title = !raw || raw === "New chat" ? (row ? rowDisplayName(row, fallback, localeRef.current ? "ko" : "en") : fallback) : raw;
       kinds.set(result.id, kind);
-      next.set(result.id, { state: "ok", title, kind, group: row?.kind === "group", members: row?.kind === "group" ? Math.max(row.memberCount, row.agentNames.length) : 0, names: kind === "room" && row ? row.agentNames.slice(0, 3) : [] });
+      next.set(result.id, { state: "ok", title, kind, group: row?.kind === "group", members: row?.kind === "group" ? Math.max(row.memberCount, row.agentNames.length) : 0, names: kind === "room" && row ? row.agentNames.slice(0, 3) : [], agentIds: kind === "room" && row ? (row.agentIds ?? []).slice(0, 3) : [] });
     }
     setInfo((previous) => {
       if (previous.size === next.size && [...next].every(([id, value]) => { const before = previous.get(id); return before && JSON.stringify(before) === JSON.stringify(value); })) return previous;
@@ -94,6 +95,9 @@ function useSpaceChatInfo(openKey: string, locale: SpaceLocale) {
     if ([...infoRef.current.keys()].some((id) => !open.includes(id))) setInfo((previous) => new Map([...previous].filter(([id]) => open.includes(id))));
     if (missing.length) void check(missing);
   }, [openKey, check]);
+
+  // A pane title that was made from agent names reads in the UI language: switching the language re-reads the open tabs.
+  useEffect(() => { if (openKey) void check(openKey.split(",")); }, [ko]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A store change for an open chat (rename, delete, archive) re-reads that chat, at most once per 3 s; no clock involved.
   useEffect(() => {
@@ -128,10 +132,10 @@ function useSpaceChatInfo(openKey: string, locale: SpaceLocale) {
 /** The head's first mark (workspace-v3-two): a group or 1:1 room shows its member faces (24px, one overlapped line); a Work session shows the terminal mark.
  *  A room whose members are not known yet keeps the icon, so the head never jumps in width for long. */
 const TerminalMark = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="1.8" y="2.5" width="12.4" height="11" rx="2.2" stroke="currentColor" strokeWidth="1.3" /><path d="M4.6 6.2l2.2 1.8-2.2 1.8M8.6 10h2.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>;
-const KindIcon = ({ kind, group, names }: { kind: "room" | "work"; group: boolean; names: string[] }) => {
+const KindIcon = ({ kind, group, names, agentIds = [] }: { kind: "room" | "work"; group: boolean; names: string[]; agentIds?: string[] }) => {
   if (kind === "work") return <TerminalMark />;
   if (names.length === 0) return group ? <IconUsers size={14} /> : <IconChat size={14} />;
-  return <span className={styles.paneFaces} data-faces={group ? "group" : "solo"}>{names.map((name, index) => <AgentAvatar key={`${name}:${index}`} name={name} size={24} />)}</span>;
+  return <span className={styles.paneFaces} data-faces={group ? "group" : "solo"}>{names.map((name, index) => <AgentAvatar key={`${name}:${index}`} name={name} agentId={agentIds[index] || undefined} size={24} />)}</span>;
 };
 
 const PaneBody = memo(function PaneBody({ tab, paneId, entry, focused, locale, onRetry, onClose }: {
@@ -278,7 +282,7 @@ export function Space() {
     // Who leads: the first member of the room (the room's order is the one the lead router reads).
     if (menu.kind === "lead") {
       return members.slice(1).map((member) => ({
-        id: `lead-${member.agentId}`, label: member.name ?? (ko ? "삭제된 에이전트" : "Removed agent"), icon: <AgentAvatar name={member.name ?? "?"} size={20} />,
+        id: `lead-${member.agentId}`, label: homeParticipantName(member, locale) ?? (ko ? "삭제된 에이전트" : "Removed agent"), icon: <AgentAvatar name={member.name ?? "?"} size={20} />,
         onSelect: () => {
           void ipc()?.chats?.setAgentChatLead?.({ chatId, agentId: member.agentId })
             .then(() => setRoomMembers(null))
@@ -294,7 +298,7 @@ export function Space() {
       const addMembers = () => { const button = document.querySelector<HTMLElement>(`[data-space-body="${pane.id}"] [data-one-taskforce-badge]`)?.closest("button"); if (button) button.click(); else say(ko ? "멤버 관리를 열지 못했어요." : "Could not open the member list."); };
       return [
         ...members.map((member, index): SpaceMenuItem => ({
-          id: `member-${member.agentId}`, label: member.name ?? (ko ? "삭제된 에이전트" : "Removed agent"), icon: <AgentAvatar name={member.name ?? "?"} size={20} />,
+          id: `member-${member.agentId}`, label: homeParticipantName(member, locale) ?? (ko ? "삭제된 에이전트" : "Removed agent"), icon: <AgentAvatar name={member.name ?? "?"} size={20} />,
           badge: index === 0 ? (ko ? "팀장" : "lead") : undefined, onSelect: () => undefined,
         })),
         { id: "add-member", label: ko ? "멤버 추가" : "Add member", dividerBefore: true, onSelect: addMembers },
@@ -500,7 +504,7 @@ const PaneView = memo(function PaneView({ pane, index, across, canOpenNew, focus
       onPointerDownCapture={() => { if (!focused) updateSpaceLayout((source) => setFocus(source, pane.id)); }}
       onFocusCapture={() => { if (!focused) updateSpaceLayout((source) => setFocus(source, pane.id)); }}>
       <header className={styles.paneHead} data-space-pane-head={pane.id} inert={cover ? true : undefined}>
-        <span className={styles.paneKind} aria-hidden="true">{running.has(active.chatId) ? <span className={styles.running} role="img" aria-label={copy.running} /> : <KindIcon kind={active.kind} group={ok?.group ?? false} names={ok?.names ?? []} />}</span>
+        <span className={styles.paneKind} aria-hidden="true">{running.has(active.chatId) ? <span className={styles.running} role="img" aria-label={copy.running} /> : <KindIcon kind={active.kind} group={ok?.group ?? false} names={ok?.names ?? []} agentIds={ok?.agentIds ?? []} />}</span>
         <button type="button" className={styles.paneTitle} aria-haspopup="menu" title={title} data-space-pane-title={pane.id} onClick={open("title")}>
           <span className={styles.paneTitleText}>{title}</span>
           {pinned.has(active.chatId) ? <span className={styles.pinMark} aria-label={copy.pinned}><PinIcon size={11} /></span> : null}

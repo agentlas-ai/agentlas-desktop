@@ -7,8 +7,9 @@ import { oneCharacterSrcForId } from "@/lib/one-characters";
 import styles from "./AgentWorkspace.module.css";
 const colors: Record<typeof AGENT_APPEARANCE_COLORS[number], string> = { red:"#c74444", slate:"#495566", amber:"#b18119", green:"#278348", blue:"#316fba", purple:"#8054b5", pink:"#bf438a", gray:"#6b7280" };
 const glyphs = { wand: IconWand, folder: IconFolder, bolt: IconBolt };
-export function AgentAppearanceImage({ value, size = 32 }: { value: AgentAppearance; size?: number }) {
-  if (value.kind === "character") return <img src={oneCharacterSrcForId(value.id) ?? ""} alt="" width={size} height={size} style={{ borderRadius: "50%" }} />;
+/** fill: 그림이 칸(size)을 가장자리까지 채운다(기본 얼굴과 같은 지름). 화면 CSS 가 안쪽 img 를 줄이는 곳에서도 인라인 크기가 이긴다. 기호(glyph)는 아이콘이라 그대로. */
+export function AgentAppearanceImage({ value, size = 32, fill = false }: { value: AgentAppearance; size?: number; fill?: boolean }) {
+  if (value.kind === "character") return <img src={oneCharacterSrcForId(value.id) ?? ""} alt="" width={size} height={size} draggable={fill ? false : undefined} style={fill ? { display: "block", width: size, height: size, borderRadius: "50%", objectFit: "cover" } : { borderRadius: "50%" }} />;
   const Glyph = glyphs[value.id]; return <span style={{ color: colors[value.color], display: "inline-flex" }}><Glyph size={Math.max(12, size - 6)} /></span>;
 }
 export function AgentAppearanceEditor({ agentId, ko }: { agentId: string; ko: boolean }) {

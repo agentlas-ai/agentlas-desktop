@@ -11,8 +11,15 @@ export interface AgentNameFields {
   localDisplayName?: string | null;
   slug?: string | null;
 }
+export interface AgentTaglineFields {
+  tagline?: string | null;
+  taglineEn?: string | null;
+}
 
 export type AgentNameLocale = "ko" | "en";
+
+/** The English-UI form of AGENT_DISPLAY_NAME_SQL: the owner's name, else the package's English name when it has one, else the package name. */
+export const AGENT_DISPLAY_NAME_EN_SQL = "COALESCE(NULLIF(TRIM(local_display_name), ''), NULLIF(TRIM(name_en), ''), name)";
 
 /** The same order in SQL, for readers that join installed_agents (home tree). Needs the plain `name` and `local_display_name` columns. */
 export const AGENT_DISPLAY_NAME_SQL = "COALESCE(NULLIF(TRIM(local_display_name), ''), name)";
@@ -26,4 +33,14 @@ export function agentDisplayName(agent: AgentNameFields | null | undefined, loca
     if (english) return english;
   }
   return agent.name?.trim() || agent.slug?.trim() || "";
+}
+
+/** The one reader of the description every screen shows: English UI shows `taglineEn` when the package has one, otherwise the description as written. */
+export function agentDisplayTagline(agent: AgentTaglineFields | null | undefined, locale?: AgentNameLocale): string {
+  if (!agent) return "";
+  if (locale === "en") {
+    const english = agent.taglineEn?.trim();
+    if (english) return english;
+  }
+  return agent.tagline ?? "";
 }

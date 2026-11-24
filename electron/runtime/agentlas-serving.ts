@@ -51,7 +51,7 @@ import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult }
 import { schemaFallbackPromptPart, observationSystemWithSchema } from "../../shared/runtime-capabilities";
 import { cumulativeSurfaceGateText, httpRetryAfterHint, markRefusedBeforeDispatch, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { createToolLoopProgress, createToolLoopUsage, prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
+import { createToolLoopProgress, createToolLoopUsage, prepareMainToolLoop, runMainToolDispatch, runOffersWebTools } from "./local-tool-loop";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { fetchWithReconnect } from "./reconnecting-fetch";
 import { apiSilenceError } from "./api-silence-fetch";
@@ -748,8 +748,8 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
       : "The request exceeds the conservative Agentlas context budget. Current request and instructions were not clipped." } });
   const { turns, system } = context;
   // Same admission as every host-loop runtime: tools whenever the run is not a
-  // Main-authored no-tools boundary and has either an MCP config or a workspace.
-  if (!req.untrustedNoTools && (req.mcpConfigPath || req.cwd)) {
+  // Main-authored no-tools boundary and has an MCP config, a workspace, or the host web tools (runOffersWebTools).
+  if (!req.untrustedNoTools && (req.mcpConfigPath || req.cwd || runOffersWebTools(req, "agentlas"))) {
     const withTools = await runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie, generations);
     if (withTools) return withTools;
   }

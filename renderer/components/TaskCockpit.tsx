@@ -11,6 +11,7 @@ import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { useWorkStartHandoff, useWorkStartRecovery, type WorkStartRecoveryTarget } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { chatBelongsToOne } from "@shared/chat-surface";
+import { parseWebSources } from "@shared/web-search/web-sources";
 import { selectionForRuntime } from "@shared/runtime-selection";
 import { chipRuntimeFor, observedRunDiffersFromRequest, type ObservedComposerRun } from "@/lib/one-runtime-chip";
 import { chatSelectionSendBlocked, sendWhenChatSelectionSettles } from "@/lib/chat-selection-send-guard";
@@ -1438,6 +1439,7 @@ function toolStepFromEvent(tool: ToolEvent, meta?: Partial<StreamStep>): StreamS
     toolUseId: tool.id,
     result: tool.result,
     resultIsError: tool.isError,
+    ...(tool.sources?.length ? { sources: tool.sources } : {}),
     activity: "tool",
     createdAt: Date.now(),
     ...meta,
@@ -1473,6 +1475,7 @@ function mergeToolStep(steps: StreamStep[], tool: ToolEvent, meta?: Partial<Stre
           toolUseId: s.toolUseId ?? tool.id,
           result,
           resultIsError: tool.isError,
+          ...(tool.sources?.length ? { sources: tool.sources } : {}),
           activity: meta?.activity ?? s.activity ?? "tool",
           // 인터리브 분할 앵커는 호출 시점 값이 진실 — 결과 병합이 뒤늦은 앵커로 덮지 않는다.
           anchorTextLen: s.anchorTextLen ?? meta?.anchorTextLen,
@@ -1964,6 +1967,7 @@ function mcpStepsFromLedger(events: RunEventUi[], limit = 32): StreamStep[] {
       ...(toolId ? { toolUseId: toolId } : {}),
       ...(result !== undefined ? { result } : {}),
       ...(payload.toolIsError === true ? { resultIsError: true } : {}),
+      ...(parseWebSources(payload.toolSources).length ? { sources: parseWebSources(payload.toolSources) } : {}),
       ...(typeof payload.agentName === "string" ? { agentName: payload.agentName } : {}),
       ...(typeof payload.role === "string" ? { role: payload.role } : {}),
       activity: "tool",
@@ -1978,6 +1982,7 @@ function mcpStepsFromLedger(events: RunEventUi[], limit = 32): StreamStep[] {
         ...(args ? { args } : {}),
         ...(result !== undefined ? { result } : {}),
         ...(payload.toolIsError === true ? { resultIsError: true } : {}),
+        ...(parseWebSources(payload.toolSources).length ? { sources: parseWebSources(payload.toolSources) } : {}),
         ...(Number.isFinite(createdAt) ? { createdAt } : {}),
       };
     }
