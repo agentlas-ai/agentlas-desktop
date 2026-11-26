@@ -1397,7 +1397,7 @@ const Bubble = memo(function Bubble({
     || (message.steps ?? []).some((step) => step.reasoning === true || step.kind === "tool")
   )));
   return (
-    <div className="agentlas-chat-turn" data-work-run-unbound={message.unboundRun ? "true" : undefined} style={{ display: "flex", gap: 0, alignSelf: "stretch", width: "100%", maxWidth: 740, minWidth: 0 }}>
+    <div className="agentlas-chat-turn" data-work-run-unbound={message.unboundRun ? "true" : undefined} style={{ display: "flex", gap: 0, alignSelf: "stretch", width: "100%", maxWidth: "var(--chat-turn-max-width, 740px)", minWidth: 0 }}>
       <div className="agentlas-chat-avatar" style={{ position: "relative", flexShrink: 0 }}>
         <AgentAvatar name={agentName} appearance={agentAppearance} tone={agentTone} size={28} />
       </div>

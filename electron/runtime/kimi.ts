@@ -318,6 +318,7 @@ function buildPrompt(req: RunnerRequest): string {
     req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
   );
   const turnContext = req.turnContext?.trim();
   const parts = [`[SYSTEM]\n${system}${turnContext ? `\n\n${turnContext}` : ""}`, ""];

@@ -1809,6 +1809,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
             undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
           ),
           (bootstrap?.history ?? req.history).length > 0 ? renderConversationContext([...(bootstrap?.history ?? req.history)], locale, cliHistoryContextTokens(spec.id, req.model)).block : "",
           context.text,

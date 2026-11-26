@@ -112,8 +112,8 @@
 .bubble:is(:has(pre,table,h1,h2,h3,ul,ol,blockquote),:has(>[data-design-surface]:nth-of-type(4))){max-width:min(100%,720px)}
 .bubble:is(:has(pre,table,h1,h2,h3,ul,ol,blockquote),:has(>[data-design-surface]:nth-of-type(4))) [data-design-surface]{line-height:1.55!important}
 /* An interactive surface answers on the page, not in a bubble. */
-.bubble[data-role=assistant]:has([data-intellect-ui]){width:100%;max-width:100%;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
-.bubble[data-role=assistant]:has([data-intellect-ui])::before,.bubble[data-role=assistant]:has([data-intellect-ui])::after{display:none}
+.bubble[data-role=assistant]:has([data-intellect-ui],[data-visual-kind],[data-ui-instance]){width:100%;max-width:100%;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
+.bubble[data-role=assistant]:has([data-intellect-ui],[data-visual-kind],[data-ui-instance])::before,.bubble[data-role=assistant]:has([data-intellect-ui],[data-visual-kind],[data-ui-instance])::after{display:none}
 
 /* Outputs (pictures, video, audio, slide and document tiles) keep their frameless shadow look and have no bubble around them. A
    :has() cannot hold another :has(), so a "words" block is one whose child is not the output group itself. */

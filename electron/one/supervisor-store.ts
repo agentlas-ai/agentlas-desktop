@@ -22,6 +22,12 @@ export function personalSupervisorConversationInDb(db: Database.Database, oneId:
   return !!db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE one_id=? AND chat_id=?").get(oneId,chatId);
 }
 
+/** True when [chatId] is the owner's personal-agent conversation of any One on this machine (the table holds only those). */
+export function personalSupervisorChatInDb(db: Database.Database, chatId: string): boolean {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get()) return false;
+  return !!db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE chat_id=?").get(chatId);
+}
+
 /** Exact host-sealed ingress boundary. Later queued user inputs must not enter an earlier reply. */
 export function supervisorExcludedHistoryMessages(db: Database.Database, chatId: string, runId: string | undefined): Set<string> {
   if (!runId || !db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_requests'").get()) return new Set();

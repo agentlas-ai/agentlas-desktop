@@ -159,7 +159,8 @@ import {
   setActiveRuntime,
 } from "../runtime/detect";
 import { listModelRoleMembers, pickModelRoleFromPool, setModelRoleMembers } from "../store/model-roles";
-import { oneFrontRuntimeSelection } from "../one/front";
+import { getOneFrontView, oneFrontRuntimeSelection, setOneFront } from "../one/front";
+import type { OneFrontView } from "../../shared/one-front";
 import { listRuntimeCommands } from "../runtime/commands";
 import { releaseIdleAgentResidencyForChat } from "../runtime/agent-residency";
 import { installPublicHubRelease, listInstalledAgents } from "../mcp/registry";
@@ -298,6 +299,10 @@ import {
   ONE_SUPERVISOR_PARAM_KEYS,
   MOBILE_SCIENCE_CHAT_PARAM_KEYS,
   MOBILE_CLIENT_CAPABILITIES,
+  MOBILE_ONE_FRONT_CAPABILITY,
+  MOBILE_ONE_FRONT_PARAM_KEYS,
+  MOBILE_ONE_FRONT_SETTABLE,
+  mobileOneModelSource,
   type MobileClientCapability,
 } from "../../shared/mobile-bridge";
 import { boundInvocationPlan } from "../../shared/invocation-plan";
@@ -638,6 +643,14 @@ function claimedChatOfAnswer(params: Record<string, unknown>): string | null {
 function phoneScopeDto(stamp: ScopeStamp | null | undefined): MobileBridgeScopeDto | undefined {
   if (!stamp) return undefined;
   return { account: stamp.account, project: stamp.project, chat: stamp.chat, run: stamp.run ?? null };
+}
+
+/**
+ * The front as the phone reads it: a closed projection of OneFrontView (no fallback cause, no timestamps). `effective` is the fact
+ * the model row needs (the light model answers the next turn); `version` is the compare-and-set value one.front.set takes.
+ */
+function mobileOneFrontView(view: OneFrontView): { schemaVersion: 1; version: number; front: string; notice: string; effective: boolean; ownLaneAvailable: boolean } {
+  return { schemaVersion: 1, version: view.version, front: view.front, notice: view.notice, effective: view.effective, ownLaneAvailable: view.ownLaneAvailable };
 }
 
 function noParams(request: MobileBridgeRpcRequest): void {
@@ -2718,7 +2731,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly terminalLeaseTimers = new Map<string, NodeJS.Timeout>();
   private readonly buildRuns = new Map<string, {
     status: InternalMobileBuildStatus;
-    /** Only the initiating paired device may rediscover a build after restart. */
+    /** The initiating paired device owns the live run and its question set. */
     deviceId: string;
     /** True until the builder promise settles, even after a terminal event. */
     active: boolean;
@@ -2906,6 +2919,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       workspaceV2: asJsonValue(workspaceV2Capability({ build: buildWorkbenchAvailable() }), "workspaceV2 capability"),
       ...(this.options.mobilePush ? { mobilePush: true } : {}),
       visualSessionV2: this.visualSessions.capability(),
+      // The personal agent's front from the phone (one.front.get / one.front.set). A new key; a phone that does not know it ignores it.
+      oneFrontV1: { schemaVersion: MOBILE_ONE_FRONT_CAPABILITY.schemaVersion, methods: [...MOBILE_ONE_FRONT_CAPABILITY.methods], settable: [...MOBILE_ONE_FRONT_CAPABILITY.settable] },
       // O-M3a: the personal agent's home (contracts/one-home-desktop.md §1). A new key beside the others; a phone that does not know it ignores it.
       oneHomeV1: { schemaVersion: 1, methods: ["status", "check", "deviceKey", ONE_HOME_POSSESSION_HOST_CAPABILITY] },
       ...(this.goalControl ? { goalControlV1: MOBILE_GOAL_CONTROL_CAPABILITY } : {}),
@@ -3546,10 +3561,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         // orchestrator default read from the same ordered role configuration as runtime detection, without
         // launching probes in a frequently polled snapshot. Not a claim about an old/current run's fallback.
         // The owner's opt-in front (shared/one-front.ts) runs Hope's turns on the light model whatever the chip says, so it is the
-        // model the phone shows; the field keeps its shape (provider, model).
-        const selected = oneFrontRuntimeSelection() ?? getChat(snapshot.conversationChatId)?.runtimeSelection ?? pickModelRoleFromPool("orchestrator")?.selection;
+        // model the phone shows; the field keeps its shape (provider, model). `orchestratorModelSource` (additive, older apps ignore it)
+        // says which of the three chose it, so the phone knows a pin it sends is ignored while the front is on.
+        const frontSelection = oneFrontRuntimeSelection();
+        const chatSelection = frontSelection ? null : getChat(snapshot.conversationChatId)?.runtimeSelection ?? null;
+        const poolSelection = frontSelection || chatSelection ? null : pickModelRoleFromPool("orchestrator")?.selection ?? null;
+        const selected = frontSelection ?? chatSelection ?? poolSelection;
         const orchestratorModel = selected ? { provider: selected.kind, model: selected.model ?? null } : null;
-        return asJsonValue({...snapshot, orchestratorModel,
+        const orchestratorModelSource = mobileOneModelSource({ front: frontSelection, chat: chatSelection, pool: poolSelection });
+        return asJsonValue({...snapshot, orchestratorModel, orchestratorModelSource,
           displayName:boundedRedactedText(snapshot.displayName,240),
           scienceError:snapshot.scienceError ? "science_observation_unavailable" : null,
           scienceProjects:snapshot.scienceProjects.map(project=>({...project,title:boundedRedactedText(project.title,1_000)})),
@@ -3875,6 +3895,31 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           if ((error as { code?: unknown })?.code === "one_profile_version_conflict") return { ok: false, code: "one_profile_version_conflict" };
           throw error;
         }
+      }
+      case "one.front.get": {
+        guardedParams(request, MOBILE_ONE_FRONT_PARAM_KEYS["one.front.get"]);
+        return mobileOneFrontView(getOneFrontView());
+      }
+      case "one.front.set": {
+        // The same function the desktop's settings switch calls (electron/one/front.ts setOneFront), with the same version check.
+        // The owner's tap on the phone is the confirmation; the phone may only turn the front off (MOBILE_ONE_FRONT_SETTABLE).
+        const params = guardedParams(request, MOBILE_ONE_FRONT_PARAM_KEYS["one.front.set"]);
+        const expectedVersion = params.expectedVersion;
+        if (!Number.isSafeInteger(expectedVersion) || Number(expectedVersion) <= 0) throw new TypeError("expectedVersion must be a positive safe integer");
+        const front = MOBILE_ONE_FRONT_SETTABLE.find(value => value === params.front);
+        if (!front) throw new TypeError(`front must be ${MOBILE_ONE_FRONT_SETTABLE.join(" or ")}`);
+        { const homeRefusal = personalWriteRefusal(); if (homeRefusal) return { ok: false, code: homeRefusal }; }
+        if (getOneFrontView().version !== expectedVersion) return { ok: false, code: "one_front_version_conflict" };
+        let view: OneFrontView;
+        try {
+          view = setOneFront({ expectedVersion: Number(expectedVersion), front, confirmedByUser: true });
+        } catch (error) {
+          // A change that landed between the read above and the write: the phone reads the state again and the owner decides again.
+          if (getOneFrontView().version !== expectedVersion) return { ok: false, code: "one_front_version_conflict" };
+          throw error;
+        }
+        this.scheduleSnapshotUpdated();
+        return mobileOneFrontView(view);
       }
       case "one.avatar.get": {
         const params = guardedParams(request, ["icon"]);
@@ -6179,7 +6224,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "build.cancel": {
         const params = guardedParams(request, ["runId"]);
         const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
-        const run = this.buildRuns.get(runId);
+        const run = this.buildRunForDevice(runId, context.deviceId);
         // The builder lives in this process. A run it does not hold is over (Desktop restarted); cancelling it succeeds.
         if (!run) return asJsonValue({ runId, stopRequested: true, alreadyTerminal: true }, request.method);
         const alreadyTerminal = run.status === "done" || run.status === "failed";
@@ -6200,7 +6245,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.consumeWriteIdempotencyKey(request, params);
         const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
         const questionSetId = requiredIdentifier(params, "questionSetId", RUN_ID_RE);
-        const run = this.buildRuns.get(runId);
+        const run = this.buildRunForDevice(runId, context.deviceId);
         if (!run) {
           return asJsonValue({ refusal: this.buildAnswerRefusal("build_answer_stale") }, request.method);
         }
@@ -6283,7 +6328,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "build.status": {
         const params = guardedParams(request, ["runId", "questionSetRevision"]);
         const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
-        const run = this.buildRuns.get(runId);
+        const run = this.buildRunForDevice(runId, context.deviceId);
         // A restart ends every in-flight build; report the fact so the phone leaves "running".
         if (!run) {
           return asJsonValue({
@@ -7032,8 +7077,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     });
   }
 
+  private buildRunForDevice(runId: string, deviceId: string) {
+    const run = this.buildRuns.get(runId);
+    return run?.deviceId === deviceId ? run : undefined;
+  }
+
   private emitBuildEvent(payload: MobileBridgeBuildEventDto): void {
-    this.emit({ event: "build.event", payload: asJsonValue(payload, "build.event") });
+    const run = this.buildRuns.get(payload.runId);
+    if (!run) return;
+    this.emit({ event: "build.event", payload: asJsonValue(payload, "build.event"), targetDeviceId: run.deviceId });
   }
 
   /**

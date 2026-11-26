@@ -17,7 +17,7 @@ import { withoutArchivedAgents } from "../archive/auto-archive";
 import { agentFolderStatus } from "../agents/relocate";
 import { resolveOneTeamAvatarProtocolPath } from "../one/avatar";
 import { AgentWorkspaceError } from "../agents/workspace-snapshot";
-import { getAgentWorkspace, listAgentWorkspaceSkillSummaries, rejectAgentWorkspaceProposal, getAgentWorkspaceDiff, withWorkspaceLockPatience } from "../agents/workspace-service";
+import { getAgentWorkspace, listAgentWorkspaceSkillSummaries, readAgentWorkspaceListedSkillText, rejectAgentWorkspaceProposal, getAgentWorkspaceDiff, withWorkspaceLockPatience } from "../agents/workspace-service";
 import { approveReviewedAgentWorkspaceProposal } from "../agents/workspace-approve";
 import { hasDeferredApproval } from "../agents/deferred-apply";
 import { queryOwnedMemory } from "../one/memory-inspector";
@@ -36,6 +36,7 @@ import type { AgentFace } from "../../shared/agent-face";
 import { faceField, projectAgentFaces } from "./agent-faces";
 import {
   MOBILE_WORKSPACE_V2_COMMAND_OPERATIONS, MOBILE_WORKSPACE_V2_LIMITS as LIMITS, MOBILE_WORKSPACE_V2_READ_OPERATIONS, MOBILE_WORKSPACE_V2_SCHEMA,
+  MOBILE_WORKSPACE_V2_SKILL_BODY_BYTES, MOBILE_WORKSPACE_V2_SKILL_PATH_RE,
   validateMobileWorkspaceV2Args,
   type MobileWorkspaceV2Group, type MobileWorkspaceV2Refusal, type MobileWorkspaceV2Row, type MobileWorkspaceV2Tree,
 } from "../../shared/mobile-workspace-v2";
@@ -395,6 +396,34 @@ async function readSkills(args: Json): Promise<Json> {
   };
 }
 
+/** Leading YAML front matter (`---` ... `---`) of a skill file, with the blank lines after it. */
+const SKILL_FRONT_MATTER_RE = /^\uFEFF?---[ \t]*\r?\n(?:[\s\S]*?\r?\n)?---[ \t]*(?:\r?\n|$)(?:[ \t]*\r?\n)*/;
+
+/**
+ * The text of ONE skill of one agent, for the phone's skill sheet. Only a path that is in that agent's own skill list (the list `skills` returns) and has the
+ * `skills/<folder>/SKILL.md` shape is read; anything else is `skill_not_found`, so this is no way to read another file. The body is the markdown without its
+ * front matter, passed through the bridge's own text redaction (sanitizeMobileBridgeText keeps line structure; `text()` would fold the lines), then cut at
+ * the one safety cap. No model, no write.
+ */
+async function readSkill(args: Json): Promise<Json> {
+  const agent = findAgent(String(args.agentId));
+  if (!agent) return refuse("agent_not_found");
+  const path = String(args.path);
+  if (!MOBILE_WORKSPACE_V2_SKILL_PATH_RE.test(path)) return refuse("skill_not_found");
+  if (folderOf(agent.id) !== "ok") return { schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, agentId: agent.id, folderAvailable: false, path: text(path, 160), name: "", body: "", truncated: false };
+  let read: ReturnType<typeof readAgentWorkspaceListedSkillText>;
+  try { read = readAgentWorkspaceListedSkillText(agent.id, path, LIMITS.skillsMax); } catch { return refuse("unavailable"); }
+  if (!read) return refuse("skill_not_found");
+  const markdown = read.text.replace(SKILL_FRONT_MATTER_RE, "");
+  // Redact first with room to spare (a mask can be longer than what it hides), then cut: the cap is the only place a body is shortened.
+  const redacted = sanitizeMobileBridgeText(markdown, Buffer.byteLength(markdown, "utf8") * 4 + 256);
+  const bytes = Buffer.from(redacted, "utf8"), cap = MOBILE_WORKSPACE_V2_SKILL_BODY_BYTES;
+  const truncated = bytes.byteLength > cap;
+  // A cut inside a multi-byte character leaves a replacement character at the end: drop it.
+  const body = truncated ? bytes.subarray(0, cap).toString("utf8").replace(/\uFFFD+$/, "") : redacted;
+  return { schemaVersion: MOBILE_WORKSPACE_V2_SCHEMA, ok: true, agentId: agent.id, path: text(read.path, 160), name: text(read.name, 80), body, truncated };
+}
+
 // ───────────────────────────────────────────── What I know
 
 const PERSONAL_SCOPE = "user_identity";
@@ -682,6 +711,7 @@ export function createWorkspaceV2(deps: WorkspaceV2Deps): {
         case "timeline": return readTimeline(args);
         case "memory": return readMemory(args);
         case "skills": return readSkills(args);
+        case "skill": return readSkill(args);
         case "projectAllowed": return readProjectAllowed(args);
         case "automationRun": return readAutomationRun(args);
         case "chatMembers": return readChatMembers(args);

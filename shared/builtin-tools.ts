@@ -38,6 +38,8 @@ export interface BuiltinToolContext {
   /** 작업 폴더. 모든 경로 인자는 이 안으로 봉쇄된다. */
   cwd: string;
   permission: ToolPermission;
+  /** The owner's personal-agent conversation: read_file and list_dir read an absolute path outside cwd at any permission. */
+  readOutsideWorkingFolder?: true;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   /**
@@ -227,6 +229,21 @@ function resolveExistingIn(cwd: string, input: unknown): string {
   }
   if (!contained(root, real)) pathDenied("symbolic link leaves the working folder");
   return real;
+}
+
+/**
+ * The read tools list_dir and read_file (read_image keeps the working folder: its result is a file proof made only there). At 'full' permission an absolute path of this host's dialect is read where it is,
+ * also outside the working folder: the same run's `bash` already reaches it, and the codex/claude lanes read the disk at that level.
+ * The owner's personal agent (full, on the API lane) was told "~/Documents is outside the working folder" and could do
+ * nothing. Below full, and for relative paths, the working-folder containment is unchanged; writes and edits never take this path.
+ */
+function resolveReadableIn(ctx: Pick<BuiltinToolContext, "cwd" | "permission" | "readOutsideWorkingFolder">, input: unknown): string {
+  if ((ctx.permission === "full" || ctx.readOutsideWorkingFolder === true) && typeof input === "string" && input.length > 0 && !input.includes("\0")
+    && path.isAbsolute(input) && !input.split(/[\\/]+/u).some((segment) => segment === "..")) {
+    const lexical = path.resolve(input);
+    if (!contained(getWorkspaceRoot(ctx.cwd), realPrefixPath(lexical))) return fs.realpathSync(lexical);
+  }
+  return resolveExistingIn(ctx.cwd, input);
 }
 
 function resolveWritableIn(cwd: string, input: unknown): string {
@@ -579,7 +596,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
       properties: { path: { type: "string", description: "Directory path (default: working folder)" } },
     },
     run(args, ctx) {
-      const dir = resolveExistingIn(ctx.cwd, str(args.path) || ".");
+      const dir = resolveReadableIn(ctx, str(args.path) || ".");
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       const lines = entries
         .slice(0, 400)
@@ -602,7 +619,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
       required: ["path"],
     },
     run(args, ctx) {
-      const file = resolveExistingIn(ctx.cwd, args.path);
+      const file = resolveReadableIn(ctx, args.path);
       const stat = fs.statSync(file);
       if (!stat.isFile()) pathDenied("only regular files may be read");
       // Same result, read off the host thread (readLargeTextFile). Files at or

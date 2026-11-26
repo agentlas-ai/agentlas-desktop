@@ -161,7 +161,7 @@ import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLon
 import { getDb } from "../store/db";
 import { summarizeRunToolDetail } from "../storage/run-detail-summary";
 import { desktopStoreTransaction } from "../store/change-bus";
-import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
+import { personalSupervisorChatInDb, supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
 import { carriedFollowupMessageIds } from "../invocation/carried-owner-followups";
 import { runtimeCostClass } from "../runtime/model-pricing";
 import { EARLIER_ATTEMPT_LINE, EARLIER_ATTEMPT_VERIFY_LINE, hasEarlierAttempt, hasEarlierAttemptVerify } from "../invocation/earlier-attempt";
@@ -252,6 +252,7 @@ import { forgetTurnMemoryExclusion, ownerGroundedEvents, turnRoomContent } from 
 import { isRoomMemberCwd } from "../runtime/room-member-cwd";
 import { buildMemoryContext, ownerProfilePiece } from "../memory/context";
 import { ownerSpokeOfTurn, ownerWordsOfTurn } from "../invocation/owner-spoke";
+import { decideUiPresentationOnce, hasUiPresentationDecider, presentationSurfaceFor, presentationTurnKey, renderUiPresentation } from "../ui-presentation";
 import { orderPromptParts, registerDeclaredPromptModule, type DeclaredPromptPart, type PromptChangeTrigger, type PromptOrderingMetadata, type PromptStability } from "../runtime/prompt-order";
 import { renderControllerSurfaceMemory, bindSurfaceMemoryRequest, bindAssignedTargetMemoryRequest } from "../memory/surface-recall";
 import { scienceAliveMemory, scienceAliveMemoryGuard } from "../memory/science-alive-memory";
@@ -6823,6 +6824,28 @@ async function runMcpInvocationInContext(
       }
     }
     if (checkinTurn) { turnContextParts.push(checkinTurn.contextBlock); declareLastTurnContext("checkin.context", "turn-context", ["task"]); }
+    // How this answer is shown (electron/ui-presentation/, contract shared/ui-presentation/ui-presentation.json): one decision per person
+    // message from the registered decider, pushed LAST so it ends the turn context (only a final boundary follows it). Production registers
+    // no decider, and a missing decider, a failure, a timeout, an invalid answer or low confidence is `model-self`: nothing below changes
+    // and the prompt and tools are byte for byte what they were (system `ui:` line + read_ui_schema).
+    // Only the ordinary attended chat turn is asked: a host-written prompt, an automation, a Goal, an observation, a check-in and the
+    // restricted/Science profiles keep the system line. The agentlas-ui server (read_ui_schema) stays bound: it also serves
+    // read_automation_protocol and others, and narrowing one tool of a bound server is not a small change at its binding point.
+    const uiPresentation = hasUiPresentationDecider() && !req.agentAppMode && !executionContext && req.promptOrigin !== "system"
+      && !effectObservationRun && !isAliveControllerRun && !scienceCollectionCurrent && !scienceReview && !checkinTurn && !activeGoalId
+      && !restrictedReadBoundary && !unattendedNoAsk && !autoRoute && !routerAgent && typeof req.userPrompt === "string"
+      ? await (async () => {
+        const surface = presentationSurfaceFor({ financeDomain: projectDomainBinding?.domain === "finance", oneMode: req.oneMode === true,
+          builtinOne: agent.id === BUILTIN_ONE_AGENT_ID, workspaceSource: workspaceBinding?.source ?? null });
+        if (!surface) return null;
+        const conversation = [...history, { role: "user" as const, text: req.userPrompt }];
+        return decideUiPresentationOnce(presentationTurnKey(chat.id, conversation), { history: conversation, surface, signal });
+      })()
+      : null;
+    if (uiPresentation?.source === "decider") {
+      const presentationLine = renderUiPresentation(uiPresentation.choice, uiPresentation.renderer);
+      if (presentationLine) { turnContextParts.push(presentationLine); declareLastTurnContext("ui.presentation", "turn-context", ["owner-input"]); }
+    }
     // 세션 지원 러너(claude-code/codex/kimi)는 턴 컨텍스트를 분리 전달해 러너가
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
     // Composition order (docs/PROMPT-COMPOSITION-POLICY.md, ledger desktop.main.turn-context.collector): every block carries
@@ -6901,8 +6924,11 @@ async function runMcpInvocationInContext(
       // runtime's own desktop-control plugins (codex-desktop-surface.ts).
       ...(req.toolMode === "computer-use" ? { desktopControlGrant: true as const } : {}),
       ...(restrictedReadBoundary ? { restrictedReadBoundary: true as const } : {}),
+      ...(!restrictedReadBoundary && !scienceReview && personalSupervisorChatInDb(getDb(), chat.id) ? { readOutsideWorkingFolder: true as const } : {}),
       ...(isUnattendedExecution(executionContext) ? { unattended: true as const } : {}),
       ...(unattendedNoAsk ? { unattendedNoAsk: true as const } : {}),
+      // The decider chose for this message: the system `ui:` line is left out, the choice rides in the `ui.presentation` turn line above.
+      ...(uiPresentation?.source === "decider" ? { uiPresentationDecided: true as const } : {}),
       ...(usesMobileDurableDecision(executionContext) || !ownerQuestionEligible ? { noSynchronousAsk: true as const } : {}),
       // 세션 지문 시드 — 인터랙티브 채팅은 모델·effort·권한·턴별 주입이 바뀌어도
       // 같은 CLI 세션을 이어간다. 단, 명시적으로 바꾼 UI 언어는 시스템 프롬프트를

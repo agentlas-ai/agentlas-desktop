@@ -21,6 +21,7 @@ import {
   type OneDecisionViewV1,
 } from "./one-decision";
 import type { OneMobileEcosystemSuggestionV1 } from "./one-mobile-suggestion";
+import type { PersonalAgentFront } from "./one-front";
 import { PROJECT_AGENT_POOL_MAX } from "./project-agent-pool";
 import {
   ONE_BRIEFING_CONTRACT_VERSION,
@@ -313,6 +314,10 @@ export const MOBILE_BRIDGE_METHODS = [
   "build2.preview.read",
   // a question card closed with X on the phone is the conversation's state on this computer (chat/phone-question-close.ts). Appended: older apps never call it.
   "chat.question.close",
+  // The personal agent's front (shared/one-front.ts) from the phone's profile page: read it, and turn it off before picking a model.
+  // Params live in MOBILE_ONE_FRONT_PARAM_KEYS; advertised as `oneFrontV1` in bridge.ready. Appended: older apps never call them.
+  "one.front.get",
+  "one.front.set",
 ] as const;
 
 /**
@@ -409,6 +414,41 @@ export const ONE_SUPERVISOR_PARAM_KEYS = {
   "one.supervisor.stopReply": ["commandId", "runId", "oneId"],
   "one.supervisor.appearance": ["commandId", "oneId", "expectedVersion", "displayName", "bubbleColor"],
 } as const satisfies Record<string, readonly string[]>;
+
+/**
+ * The fields of the personal agent's front methods. ONE table: the request validator here and the Desktop authority both read
+ * it (see ONE_SUPERVISOR_PARAM_KEYS for the incident two hand-kept lists caused).
+ */
+export const MOBILE_ONE_FRONT_PARAM_KEYS = {
+  "one.front.get": [],
+  "one.front.set": ["expectedVersion", "front"],
+} as const satisfies Record<string, readonly string[]>;
+export type MobileOneFrontMethod = keyof typeof MOBILE_ONE_FRONT_PARAM_KEYS;
+
+/**
+ * What the phone may set the front to. Only the owner's own lane: turning the front ON sends the personal conversation to the
+ * Agentlas server, and the one-time notice that makes that an informed choice is shown on the computer, not on the phone.
+ */
+export const MOBILE_ONE_FRONT_SETTABLE = ["own-lane"] as const satisfies readonly PersonalAgentFront[];
+
+/** bridge.ready `oneFrontV1`: a phone that does not know the key ignores it and keeps the read-only model row. */
+export const MOBILE_ONE_FRONT_CAPABILITY = {
+  schemaVersion: 1,
+  methods: ["get", "set"],
+  settable: [...MOBILE_ONE_FRONT_SETTABLE],
+} as const;
+
+/**
+ * one.supervisor.snapshot `orchestratorModelSource`: which rule chose `orchestratorModel`, in the order Hope's next turn reads them.
+ * "front": the light-model front (a conversation pin is ignored while it is on); "chat": the conversation's own pin; "pool": the
+ * configured orchestrator default; "none": nothing is configured. A phone that does not know the key ignores it.
+ */
+export const MOBILE_ONE_MODEL_SOURCES = ["front", "chat", "pool", "none"] as const;
+export type MobileOneModelSource = (typeof MOBILE_ONE_MODEL_SOURCES)[number];
+
+export function mobileOneModelSource(selections: { front: unknown; chat: unknown; pool: unknown }): MobileOneModelSource {
+  return selections.front ? "front" : selections.chat ? "chat" : selections.pool ? "pool" : "none";
+}
 
 /** Existing Science author conversations only; the phone cannot create a runtime or change its grants. */
 export const MOBILE_SCIENCE_CHAT_PARAM_KEYS = {
@@ -556,6 +596,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "chat.attachments.begin", "chat.attachments.chunk", "chat.attachments.finish",
   "one.supervisor.send", "one.supervisor.startWork", "one.supervisor.startScience",
   "one.supervisor.control", "one.supervisor.stopReply", "one.supervisor.appearance", "one.avatar.set",
+  "one.front.set",
   "one.phoneTool.answer",
   "one.companion.work.admit", "one.companion.continuity.request", "one.companion.continuity.cancel", "one.companion.frontTransfer.request", "one.companion.frontTransfer.cancel",
   "science.chat.send", "science.chat.cancel",
@@ -3763,6 +3804,13 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         && typeof params.dataUrl === "string" && params.dataUrl.length <= 2796230
         && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(params.dataUrl)
         ? null : "one.avatar.set has invalid parameters";
+    case "one.front.get":
+      return hasOnlyKeys(params, MOBILE_ONE_FRONT_PARAM_KEYS[method]) ? null : `${method} does not accept parameters`;
+    case "one.front.set":
+      return hasOnlyKeys(params, MOBILE_ONE_FRONT_PARAM_KEYS[method])
+        && Number.isSafeInteger(params.expectedVersion) && Number(params.expectedVersion) > 0
+        && (MOBILE_ONE_FRONT_SETTABLE as readonly unknown[]).includes(params.front)
+        ? null : `${method} accepts only a positive expectedVersion and front ${MOBILE_ONE_FRONT_SETTABLE.join(" or ")}`;
     case "one.avatar.get":
       return hasOnlyKeys(params, ["icon"])
         ? (typeof params.icon === "string" && /^one-avatar:(?:self|[a-f0-9-]{16,80})$/i.test(params.icon)

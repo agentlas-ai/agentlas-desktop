@@ -137,6 +137,12 @@ export interface RunnerRequest {
    * 블록은 지운다. 진짜 무도구 실행은 untrustedNoTools 이고 그쪽이 우선한다(wrapSystemPrompt).
    */
   restrictedReadBoundary?: true;
+  /**
+   * Main-only: the owner's personal-agent conversation. Its built-in read tools (read_file, list_dir) read an absolute path outside
+   * the working folder at every permission (the personal agent oversees the owner's folders). Writes keep
+   * the working folder; a restricted-read boundary turns it off.
+   */
+  readOutsideWorkingFolder?: true;
   /** Main-authored marker for scheduled/background execution. Resume failure must fail closed
    * instead of silently creating a fresh CLI conversation. */
   unattended?: true;
@@ -148,6 +154,9 @@ export interface RunnerRequest {
    * a worker's questions belong to its orchestrator (owner 2026-10-16), and withholdTurnAskForRun takes ask_form away.
    * wrapSystemPrompt then omits the system `ask:` module, so no channel offers an ask the run cannot use. */
   unattendedNoAsk?: true;
+  /** Main-authored: the presentation decider (ui-presentation/decider.ts) chose how this message is shown. The system `ui:` line is then
+   * left out and the choice rides in the turn context line `ui.presentation`. Never set without a decider: no decider = today's prompt. */
+  uiPresentationDecided?: true;
   /** Stable configuration identity for durable unattended sessions. Mutable routing/tool
    * overlays stay in the prompt but do not force a new CLI conversation every run. */
   sessionFingerprintSeed?: string;
@@ -1690,6 +1699,8 @@ export function wrapSystemPrompt(
   systemPromptComposition?: PromptCompositionTrace,
   /** RunnerRequest.unattendedNoAsk, forwarded unchanged by each adapter: the run has no question channel. */
   unattendedNoAsk?: boolean,
+  /** RunnerRequest.uiPresentationDecided, forwarded unchanged by each adapter: the presentation decider chose for this message. */
+  uiPresentationDecided?: boolean,
 ): string {
   if (systemPromptComposition?.kind === "company-work") {
     return composeDeclaredPrompt([...restoreTracedPrompt(agentSystemPrompt, systemPromptComposition), ...(supplements ?? [])], "\n\n");
@@ -1773,5 +1784,6 @@ export function wrapSystemPrompt(
     connectors,
     installedReach,
     managedLocal: contextProfile === "managed-local",
+    ...(uiPresentationDecided === true ? { uiPresentationDecided: true } : {}),
   }).text;
 }

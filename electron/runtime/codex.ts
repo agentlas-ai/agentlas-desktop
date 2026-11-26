@@ -359,6 +359,7 @@ function buildPrompt(req: RunnerRequest): string {
     codexSchemaFallbackBlock(req) ? [{ id: "transport.codex.output-schema", revision: 1, stability: "task-context", changeTriggers: ["release", "task", "plan-revision"], order: 90, text: codexSchemaFallbackBlock(req) }] : undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
@@ -400,6 +401,7 @@ function buildDeveloperInstructions(req: RunnerRequest): string {
     ],
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
   );
 }
 

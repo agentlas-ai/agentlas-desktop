@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.14 — 2026-11-26
+
+- Personal agent: when you ask, it can read folders and files elsewhere on your computer (for example Documents), not only its working folder. Reading only; writes and edits stay in the working folder.
+- Agentlas and API models: the built-in shell starts again on signed Mac installs.
+- Phone: the phone app can show and change your personal agent's model (needs phone app 2.0.4 or later), and it can open an agent's skill documents.
+- Phone: a Build started from a phone is followed and answered only on that phone.
+- Build: the gallery's detail pane shows an agent's real skills, files and memories, the same as its agent page.
+- Chat: answers with generated UI (cards, charts, diagrams) use the wide column on every chat screen.
+
+This release binds Agentlas OS v1.2.99 at 6108604d8487519b820cac916c5061cd6e619688; public runtime asset `agentlas-os-runtime-v1.2.99.tar.gz` is pinned at SHA-256 `7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.13 — 2026-11-24
 
 - Web search: chats on API and local models can search the web and read pages through the bundled Agentlas browser (no window, no search key), and every answer that used the web gets a Sources button listing the pages and their sites.

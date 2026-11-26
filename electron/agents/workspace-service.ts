@@ -1194,13 +1194,29 @@ export function listAgentWorkspaceSkillSummaries(agentId: string, limit = 300): 
   const { root } = rootFor(agentId);
   const tree = snapshotAgentWorkspace(root);
   const out: Array<{ path: string; name: string; description: string }> = [];
-  for (const file of tree.files.filter(item => item.kind === "file" && /^skills\/[^/]+\/SKILL\.md$/i.test(item.path)).sort((a, b) => a.path.localeCompare(b.path))) {
-    if (out.length >= limit) break;
+  for (const file of listedSkillFiles(tree, limit)) {
     const folder = file.path.split("/")[1] ?? file.path;
     const declared = file.binary ? null : skillFrontmatter(decodeWorkspaceText(Buffer.from(file.contentBase64, "base64")) ?? "");
     out.push({ path: file.path, name: declared?.name || folder, description: declared?.description ?? "" });
   }
   return out;
+}
+/** The skill files [listAgentWorkspaceSkillSummaries] lists, in its order and up to its `limit`: one rule for the list and for reading one of its files. */
+function listedSkillFiles(tree: WorkspaceTree, limit: number): WorkspaceAsset[] {
+  return tree.files.filter(item => item.kind === "file" && /^skills\/[^/]+\/SKILL\.md$/i.test(item.path)).sort((a, b) => a.path.localeCompare(b.path)).slice(0, Math.max(0, limit));
+}
+/**
+ * The text of ONE file of that list (`skills/<name>/SKILL.md`), for the phone's skill sheet: the same folder read as the list (one snapshot, so a path is "listed"
+ * by the very rule that lists it), and nothing else. A pure read: unlike readAgentWorkspaceFile it records no package-source observation in the memory store.
+ * Null when the path is not in the first `limit` skills of this agent, or the file is not text.
+ */
+export function readAgentWorkspaceListedSkillText(agentId: string, skillPath: string, limit = 300): { path: string; name: string; text: string } | null {
+  const { root } = rootFor(agentId);
+  const file = listedSkillFiles(snapshotAgentWorkspace(root), limit).find(item => item.path === skillPath);
+  if (!file || file.binary) return null;
+  const text = decodeWorkspaceText(Buffer.from(file.contentBase64, "base64"));
+  if (text === null) return null;
+  return { path: file.path, name: skillFrontmatter(text)?.name || (file.path.split("/")[1] ?? file.path), text };
 }
 function treeText(tree: WorkspaceTree, relative: string | null): string {
   const file = relative ? tree.files.find(item => item.path === relative) : undefined;

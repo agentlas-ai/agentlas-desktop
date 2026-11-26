@@ -171,6 +171,7 @@ function promptFor(req: RunnerRequest): string {
       req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
     )}${turnContext ? `\n\n${turnContext}` : ""}`,
     "",
   ];

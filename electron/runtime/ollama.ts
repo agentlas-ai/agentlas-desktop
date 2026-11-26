@@ -84,6 +84,7 @@ const runOllamaCall = async (
       withSchema && req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
     );
   const messages: ChatMessage[] = [{
     role: "system",

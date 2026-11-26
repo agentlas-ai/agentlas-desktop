@@ -455,6 +455,7 @@ function buildSystemText(req: RunnerRequest): string {
       undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
   );
   const turnContext = req.turnContext?.trim();
   return `${sys}${turnContext ? `\n\n${turnContext}` : ""}`;

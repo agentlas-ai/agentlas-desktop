@@ -52,8 +52,10 @@ export function validateBuiltinPythonRoot(root: string, platform = process.platf
     // The official macOS bundle seal verifies the whole app before runtime admission.
     // Re-signing changes Mach-O bytes; require the same pinned release signer here too.
     const requirement = MAC_RELEASE_NODE_REQUIREMENT.replace('identifier "node" and ', "");
+    // `-R=<text>` is a requirement; a bare `-R <text>` makes codesign read <text> as a FILE path ("No such file or directory"), so
+    // every signed install failed here and the API lane's shell never started. managed-node.ts uses the same form.
     if (!(signedMac && platform === "darwin" && spawnSync("/usr/bin/codesign",
-      ["--verify", "--strict", "-R", requirement, executable], { stdio: "ignore", timeout: 30_000 }).status === 0)) {
+      ["--verify", "--strict", `-R=${requirement}`, executable], { stdio: "ignore", timeout: 30_000 }).status === 0)) {
       throw new Error("builtin_python_checksum_mismatch");
     }
   }

@@ -5808,6 +5808,14 @@ button[data-toggle-state="on"] {
   width: min(var(--chat-column-width), 100%);
   margin-inline: auto;
 }
+/* An answer that holds generated UI (Intellect UI blocks, charts, HTML visuals, ui.canvas cards) takes the wide column on every Work chat surface, as Finance does
+   (FinanceWorkChat.module.css, 1280px). The answer, its blocks and the turn share one left/right line; the plain 740px column is unchanged for text answers.
+   --chat-turn-max-width feeds the inline max-width of .agentlas-chat-turn (ChatStream) so no !important is needed. */
+:root { --chat-wide-column-width: 1280px; }
+.agentlas-chat-message-anchor:has([data-intellect-ui], [data-visual-kind], [data-ui-instance], .fpc) {
+  --chat-turn-max-width: var(--chat-wide-column-width);
+  width: min(var(--chat-wide-column-width), 100%);
+}
 
 .agentlas-chat-avatar {
   display: none;

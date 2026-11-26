@@ -181,6 +181,8 @@ export interface MobileBridgeAuthorityEvent {
   event: MobileBridgeEventName;
   payload: MobileBridgeJsonValue;
   occurredAt?: string;
+  /** Host-only delivery scope. Never included in the client event envelope. */
+  targetDeviceId?: string;
   /** Delivered only to connections whose device reported this decoder capability (device.capabilities). */
   requiresClientCapability?: MobileClientCapability;
   /** Delivered only to connections whose device reported every one of these. */
@@ -1872,6 +1874,7 @@ export class AgentlasMobileBridgeServer {
     const queuedBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
     for (const state of this.clients) {
       if (state.revoked || state.revocationPending) continue;
+      if (event.targetDeviceId !== undefined && event.targetDeviceId !== state.context.deviceId) continue;
       const has = (capability: MobileClientCapability) =>
         this.authority.clientHasCapability?.(state.context.deviceId, capability) === true;
       if (event.requiresClientCapability && !has(event.requiresClientCapability)) continue;

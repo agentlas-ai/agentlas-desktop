@@ -128,6 +128,7 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
       req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
     );
   // The server enforces req.outputSchema by constrained decoding when it can; the
   // instruction is the honest floor for a server that cannot (status line says which).

@@ -30,6 +30,8 @@ export interface PromptModuleContext {
   managedLocal?: boolean;
   /** Main-authored RunnerRequest.unattendedNoAsk: nobody can answer, so no ask channel is offered. */
   unattendedNoAsk?: boolean;
+  /** A presentation decision exists for this turn (RunnerRequest.uiPresentationDecided): its spec rides in the turn context line `ui.presentation`, so the system `ui:` line is not rendered. */
+  uiPresentationDecided?: boolean;
   /** Untrusted stateless completion: the exact read-only MCP tools, empty for none. */
   untrustedTools?: readonly string[];
   /** Native abilities line, already rendered by native-capabilities.ts. */
@@ -194,7 +196,7 @@ registerPromptModule({
   stability: "fixed-policy", changeTriggers: ["release", "profile"], order: 0,
   render: (ctx) => ctx.profile === "restricted"
     ? "ui: prose only in this mode"
-    : UI_LINE,
+    : ctx.uiPresentationDecided ? null : UI_LINE,
 });
 
 registerPromptModule({

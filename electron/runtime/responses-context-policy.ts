@@ -42,6 +42,7 @@ export function retainedResponsesPromptPacket(req: RunnerRequest): Readonly<Reta
       undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
   );
   // Preserve the existing early-return isolation profiles. A dynamic packet
   // must not reintroduce ordinary tools/plugins/Surface into those boundaries.

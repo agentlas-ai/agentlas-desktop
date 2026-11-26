@@ -1414,6 +1414,7 @@ const runClaudeTurn = async (
       undefined,
       runReq.systemPromptComposition,
       runReq.unattendedNoAsk,
+      runReq.uiPresentationDecided,
   );
   const sessionFingerprint = (executableFingerprint: string) => !runReq.untrustedNoTools && runReq.chatId
     ? systemFingerprint(runReq, executableFingerprint) : null;
@@ -1598,7 +1599,11 @@ const runClaudeTurn = async (
   // A full run bypasses permissions anyway; browser-only and untrusted runs get no file tools at all.
   const packageReadRules = req.permission === "full" || runReq.browserOnly || runReq.untrustedNoTools ? [] : claudeAgentPackageReadRules(runReq.agentId);
   const pluginReadRules = req.permission === "full" || runReq.browserOnly || runReq.untrustedNoTools ? [] : claudeInstalledPluginReadRules();
-  const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed, ...packageReadRules, ...pluginReadRules];
+  // The owner's personal-agent conversation reads the owner's home folder (read only; the API lanes' read tools do the same through
+  // RunnerRequest.readOutsideWorkingFolder). Full already bypasses permissions.
+  const personalReadRules = req.permission === "full" || runReq.browserOnly || runReq.untrustedNoTools || !runReq.readOutsideWorkingFolder
+    ? [] : [claudeAgentPackageReadRule(os.homedir())].filter((rule): rule is string => !!rule);
+  const preAllowedTools = [...builtinPreAllowed, ...mcpPreAllowed, ...packageReadRules, ...pluginReadRules, ...personalReadRules];
   recordClaudeCapabilityRequest({ permission: req.permission, browserOnly: Boolean(runReq.browserOnly),
     untrustedNoTools: Boolean(runReq.untrustedNoTools), allowedBuiltins: builtinPreAllowed });
   const allowedToolArgs = preAllowedTools.length > 0 ? ["--allowedTools", preAllowedTools.join(",")] : [];

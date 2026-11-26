@@ -309,6 +309,7 @@ function prepareContext(
       schemaInPrompt && req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
     ),
   };
 }

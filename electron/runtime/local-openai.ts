@@ -143,6 +143,7 @@ export function makeLocalOpenAiRunner(
       withSchema && req.outputSchema ? [schemaFallbackPromptPart(req.outputSchema.schema)] : undefined,
       req.systemPromptComposition,
       req.unattendedNoAsk,
+      req.uiPresentationDecided,
     );
     const systemContent = req.minimalObservation ? req.systemPrompt : wrapped();
     // Managed local only: when the keyword-gated Surface protocol is what pushes the

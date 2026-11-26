@@ -11219,7 +11219,7 @@ function OneSessionsShell({ embed }: { embed?: OneEmbed } = {}) {
                             </>)}
                             {(hasVisibleContent || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
                             <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && !hasIntellectUiFence(markdownText) && isDocumentLikeText(markdownText) ? "true" : undefined}
-                              data-one-visual-answer={message.role === "assistant" && (hasInlineVisualBlock(markdownText) || hasIntellectUiFence(markdownText)) ? "true" : undefined}>
+                              data-one-visual-answer={message.role === "assistant" && (hasInlineVisualBlock(markdownText) || hasIntellectUiFence(markdownText) || ownedUi.length > 0) ? "true" : undefined}>
                               {message.files && message.files.filter((f) => f.kind !== "image").length > 0 && (
                                 <div className={styles.messageFiles}>
                                   {message.files.filter((f) => f.kind !== "image").map((f, i) => (

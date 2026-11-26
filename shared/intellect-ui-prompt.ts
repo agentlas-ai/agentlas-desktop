@@ -72,8 +72,10 @@ Save large tabular data as .xlsx/.csv and mention its path — it opens in the r
  * Which visual fits, first in what `read_ui_schema` returns (the tool is read before any visual is shown, so the choice is made here, not in the
  * system prompt). The result card is the default for anything the owner only looks at; agentlas-ui is for what the owner changes.
  */
+/** The ui.canvas paragraph of UI_CHOICE_INSTRUCTIONS; also the whole spec when the presentation decider picks the canvas renderer. */
+export const UI_CANVAS_INSTRUCTIONS = `Something the owner only looks at (a flowchart, org chart or other diagram, a chart or table of numbers you hold, a document page, a slide, a file thumbnail, a motion-graphic still): call the harness operation ui.canvas and the host draws a card under your answer. ui.asset.catalog lists its block types with a sample; these blocks need no sources. A diagram, chart or table that is only to look at is a ui.canvas card, not an agentlas-ui or chart block.`;
 export const UI_CHOICE_INSTRUCTIONS = `## Which visual
-Something the owner only looks at (a flowchart, org chart or other diagram, a chart or table of numbers you hold, a document page, a slide, a file thumbnail, a motion-graphic still): call the harness operation ui.canvas and the host draws a card under your answer. ui.asset.catalog lists its block types with a sample; these blocks need no sources. A diagram, chart or table that is only to look at is a ui.canvas card, not an agentlas-ui or chart block.
+${UI_CANVAS_INSTRUCTIONS}
 Something the owner changes or acts on (inputs, sliders, a calculator, choices, buttons): an agentlas-ui block, below.
 A short list or a small table inside prose: plain markdown. A large data series or a custom drawing a card cannot hold: the chart and visual blocks, last.`;
 

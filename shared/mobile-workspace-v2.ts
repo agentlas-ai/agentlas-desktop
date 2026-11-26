@@ -17,6 +17,8 @@ export const MOBILE_WORKSPACE_V2_READ_OPERATIONS = [
   // XS-1 (appended, so a phone that does not know them never asks and never reads them out of the advertised list):
   // the tools a project is always allowed to use, when an automation's run started, the members of a group conversation.
   "projectAllowed", "automationRun", "chatMembers",
+  // The text of ONE listed skill of one agent (its SKILL.md), for the phone's skill sheet. Appended: an older Desktop does not advertise it, so the phone never asks.
+  "skill",
 ] as const;
 export const MOBILE_WORKSPACE_V2_COMMAND_OPERATIONS = [
   "skill.decide", "knowledge.forget",
@@ -51,6 +53,16 @@ export const MOBILE_WORKSPACE_V2_LIMITS = {
   memoryReachMax: 1000,
   skillsMax: 300,
 } as const;
+
+/**
+ * The one safety cap of a `skill` answer: UTF-8 bytes of the body after redaction (`truncated: true` says it was cut). The folder itself admits a file of at most
+ * 512 KiB (MAX_WORKSPACE_FILE_BYTES); half of that is far above a real SKILL.md and, even with every character escaped as a six-byte JSON `\uXXXX`, stays near
+ * 1.5 MiB: inside the Cloud Relay's 8 MiB message cap (shared/mobile-bridge.ts MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES comment; relay.ts MAX_PENDING_BYTES) and the
+ * bridge's 30 MiB one (MOBILE_BRIDGE_MAX_MESSAGE_BYTES). Not part of `limits`: that object is what a phone reads key by key, and no existing reply gains a key.
+ */
+export const MOBILE_WORKSPACE_V2_SKILL_BODY_BYTES = 256 * 1024;
+/** The only path a `skill` read may name: one agent's `skills/<folder>/SKILL.md` (the Desktop also requires it to be in that agent's skill list). */
+export const MOBILE_WORKSPACE_V2_SKILL_PATH_RE = /^skills\/[^/]+\/SKILL\.md$/;
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/;
 const CURSOR_RE = /^o[0-9]{1,6}$/;
@@ -95,6 +107,9 @@ export function validateMobileWorkspaceV2Args(operation: string, rawArgs: unknow
     case "agentProfile":
     case "skills":
       return first(keys("agentId"), id(args, "agentId"));
+    case "skill":
+      return first(keys("agentId", "path"), id(args, "agentId"),
+        typeof args.path === "string" && args.path.length <= 260 && MOBILE_WORKSPACE_V2_SKILL_PATH_RE.test(args.path) ? null : "path must be a skill file the agent's skill list carried");
     case "timeline":
       return first(keys("agentId", "cursor", "limit"), id(args, "agentId"), cursor(args), int(args, "limit", 1, L.timelinePageMax));
     case "memory":
@@ -129,7 +144,7 @@ export function validateMobileWorkspaceV2Args(operation: string, rawArgs: unknow
 /** Machine codes of an answer that is not `ok`. The phone words them; the Desktop never sends a sentence. */
 export type MobileWorkspaceV2Refusal =
   | "account_mismatch" | "sign_in_required"
-  | "agent_not_found" | "folder_unavailable" | "workspace_busy"
+  | "agent_not_found" | "skill_not_found" | "folder_unavailable" | "workspace_busy"
   | "proposal_not_found" | "proposal_changed" | "proposal_stale" | "already_dismissed" | "already_added"
   | "needs_computer_review" | "recovery_required" | "run_active_deferred"
   | "line_not_found" | "line_changed" | "line_not_personal"

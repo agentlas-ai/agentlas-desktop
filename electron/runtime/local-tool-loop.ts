@@ -456,6 +456,8 @@ export function mainToolBrokerInventory(
  * (acp.ts answerPermission 과 같은 규칙).
  */
 export interface LocalToolApprovalContext {
+  /** RunnerRequest.readOutsideWorkingFolder: the personal-agent conversation's read tools read outside the working folder. */
+  readOutsideWorkingFolder?: true;
   /** Main's journal context, or (agentlas-local in the daemon) the relay port answered by it: its answers may be promises. */
   canonicalWorkRecovery?: MainWorkRecoveryPort;
   /** Science bridge only: project the exact response envelope after this approved dispatch. */
@@ -655,6 +657,7 @@ export async function prepareMainToolLoop(
       runtimeKind,
       sessionKey,
       permission: req.permission,
+      ...(req.readOutsideWorkingFolder && !req.restrictedReadBoundary ? { readOutsideWorkingFolder: true as const } : {}),
       ...(req.cwd ? { cwd: req.cwd } : {}),
       ...(req.approvalChatId ?? req.chatId ? { chatId: req.approvalChatId ?? req.chatId } : {}),
       ...(req.agentId ? { agentId: req.agentId } : {}),
@@ -1215,6 +1218,7 @@ async function dispatchMainToolRawUnchecked(
     const outcome = await runBuiltinTool(resolved.builtinName, args, {
       cwd: builtinCwd,
       permission: (approval.permission ?? "read") as ToolPermission,
+      ...(approval.readOutsideWorkingFolder ? { readOutsideWorkingFolder: true as const } : {}),
       signal: approval.signal,
       ...(shellEnv ? { env: shellEnv } : {}),
       ...(confineShell ? { confineShell } : {}),

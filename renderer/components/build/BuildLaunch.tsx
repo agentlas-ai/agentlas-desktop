@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
-import { IconArrowLeft, IconArrowUp, IconClose, IconFileText, IconMail, IconPlus, IconSearch, IconSun, IconWand } from "@/components/Icon";
+import { IconArrowLeft, IconArrowUp, IconCheck, IconClose, IconFileText, IconMail, IconPlus, IconSearch, IconSun, IconWand } from "@/components/Icon";
 import { Select } from "@/components/Select";
 import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
 import { AgentAvatar } from "@/components/AgentAvatar";
@@ -16,6 +16,7 @@ import { navigate } from "@/lib/navigation";
 import type { AgentUsageSummaryRow, HubAgentBookmark, InstalledAgent, MarketplaceListing, McpToolCatalogEntry, SkillCatalogEntry } from "@/lib/types";
 import type { BuildListItem } from "@shared/build-workbench";
 import { BuildsList, useBuildList } from "./BuildsList";
+import { readLocalAgentFacts, type LocalAgentFacts } from "./local-agent-facts";
 import styles from "./BuildWorkbench.module.css";
 
 interface Props {
@@ -199,6 +200,20 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
   const options = gallery.filter(item => (gallerySource === "all" || item.source === gallerySource)
     && (!normalizedQuery || [item.name, item.nameEn, item.description, item.descriptionEn, item.slug].some(value => value.toLocaleLowerCase().includes(normalizedQuery))));
   const active = options.find(item => item.key === selected) ?? options[0];
+  // A local agent's real skills / files / memories, read once per selection (cached for the life of this component; a late answer for another item is ignored).
+  const [localFacts, setLocalFacts] = useState<Record<string, LocalAgentFacts>>({});
+  const factsCache = useRef(new Map<string, LocalAgentFacts>());
+  const activeLocalId = active?.source === "local" ? active.agentId ?? "" : "";
+  useEffect(() => {
+    if (!activeLocalId || factsCache.current.has(activeLocalId)) return;
+    let alive = true;
+    void readLocalAgentFacts(activeLocalId).then(value => {
+      factsCache.current.set(activeLocalId, value);
+      if (alive) setLocalFacts(current => ({ ...current, [activeLocalId]: value }));
+    }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [activeLocalId]);
+  const activeFacts = activeLocalId ? localFacts[activeLocalId] ?? factsCache.current.get(activeLocalId) : undefined;
   useEffect(() => {
     if (galleryOpen) dialog.current?.querySelector('[aria-pressed="true"][data-gallery-item]')?.scrollIntoView({ block: "nearest" });
   }, [galleryOpen, active?.key]);
@@ -228,6 +243,11 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
     const rows: { label: string; value: string }[] = [{ label: ko ? "출처" : "Source", value: sourceLabel(item.source) + (item.saved ? (ko ? " · 저장한 에이전트" : " · Saved agent") : "") }];
     if (item.category) rows.push({ label: ko ? "분류" : "Category", value: item.category });
     if (item.skills > 0) rows.push({ label: ko ? "스킬" : "Skills", value: ko ? `${item.skills}개` : String(item.skills) });
+    if (item.source === "local" && activeFacts && item.agentId === activeLocalId) {
+      if (activeFacts.skills.length > 0) rows.push({ label: ko ? "스킬" : "Skills", value: ko ? `${activeFacts.skills.length}개` : String(activeFacts.skills.length) });
+      if (activeFacts.files > 0) rows.push({ label: ko ? "파일" : "Files", value: ko ? `${activeFacts.files}개` : String(activeFacts.files) });
+      if (activeFacts.memories > 0) rows.push({ label: ko ? "기억" : "Memories", value: ko ? `${activeFacts.memories}개` : String(activeFacts.memories) });
+    }
     if (item.connectionCount > 0) rows.push({ label: ko ? "연결" : "Connections", value: ko ? `${item.connectionCount}개` : String(item.connectionCount) });
     if (item.verified > 0) rows.push({ label: ko ? "검증된 호출" : "Verified calls", value: ko ? `${item.verified}회` : String(item.verified) });
     if (item.installs > 0) rows.push({ label: ko ? "설치" : "Installs", value: ko ? `${item.installs}회` : String(item.installs) });
@@ -314,6 +334,9 @@ export function BuildLaunch({ ko, screen, request, hasBuild, onRequest, onResume
             <h2 id="build-gallery-title">{displayName(active)}</h2>
             <p className={styles.galleryLead}>{displayDescription(active)}</p>
             {active.connections.length > 0 && <><h3>{ko ? "연결" : "Connections"}</h3><ul className={styles.chips}>{active.connections.map(name => <li key={name}>{name}</li>)}</ul></>}
+            {activeFacts && activeFacts.skills.length > 0 && <><h3>{ko ? "스킬" : "Skills"}</h3>
+              <ul className={styles.skillRows}>{activeFacts.skills.slice(0, 6).map(skill => <li key={skill.name}><IconCheck size={14} /><strong>{skill.name}</strong>{skill.description && <span>{skill.description}</span>}</li>)}
+                {activeFacts.skills.length > 6 && <li className={styles.skillMore}>{ko ? `외 ${activeFacts.skills.length - 6}개` : `+${activeFacts.skills.length - 6} more`}</li>}</ul></>}
             <h3>{ko ? "정보" : "Details"}</h3>
             <dl className={styles.facts}>{facts(active).map(row => <div key={row.label}><dt>{row.label}</dt><dd>{row.value}</dd></div>)}</dl>
           </div>
