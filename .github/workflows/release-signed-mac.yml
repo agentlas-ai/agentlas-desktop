@@ -96,10 +96,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: os-v1.2.99
-      HEPHAESTUS_COMMIT: 6108604d8487519b820cac916c5061cd6e619688
-      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.99.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf
+      HEPHAESTUS_REF: os-v1.2.100
+      HEPHAESTUS_COMMIT: d35501658a1d0a6388a4ad6ac598c432d7080901
+      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.100.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 2b05ea65514251b7c39b6e2e94ab5acd8077ad20f8f9ccbdf4ca37b91369892f
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -508,10 +508,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: os-v1.2.99
-      HEPHAESTUS_COMMIT: 6108604d8487519b820cac916c5061cd6e619688
-      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.99.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf
+      HEPHAESTUS_REF: os-v1.2.100
+      HEPHAESTUS_COMMIT: d35501658a1d0a6388a4ad6ac598c432d7080901
+      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.100.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 2b05ea65514251b7c39b6e2e94ab5acd8077ad20f8f9ccbdf4ca37b91369892f
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -951,10 +951,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: os-v1.2.99
-      HEPHAESTUS_COMMIT: 6108604d8487519b820cac916c5061cd6e619688
-      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.99.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 7464559be92cc50d8b6a060a29badd315842356ce50c86f78eea6bf0d42c50cf
+      HEPHAESTUS_REF: os-v1.2.100
+      HEPHAESTUS_COMMIT: d35501658a1d0a6388a4ad6ac598c432d7080901
+      HEPHAESTUS_ASSET_NAME: agentlas-os-runtime-v1.2.100.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 2b05ea65514251b7c39b6e2e94ab5acd8077ad20f8f9ccbdf4ca37b91369892f
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

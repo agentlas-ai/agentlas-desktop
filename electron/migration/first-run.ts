@@ -128,8 +128,9 @@ export interface NoticeInput { code: NoticeCode; accountKey: string; /** O61: ho
 export function noticeText(input: NoticeInput, locale: "ko" | "en"): string {
   const ko = locale === "ko";
   switch (input.code) {
-    case "host_plugin_restart": return ko ? "Claude Code·Codex를 닫으면 Agentlas 2.0 기억 정리가 이어집니다." : "Close Claude Code and Codex to let the Agentlas 2.0 memory cleanup continue.";
-    case "host_plugin_manual": return ko ? "Claude Code·Codex의 Agentlas 플러그인을 직접 업데이트하면 기억 정리가 이어집니다." : "Update the Agentlas plugin in Claude Code and Codex to let the memory cleanup continue.";
+    // What an old plugin copy means for the person (it steps aside and uses no memory until it is new) and the one thing that ends it.
+    case "host_plugin_restart": return ko ? "Claude Code·Codex를 닫았다 다시 열어 주세요. 그 전까지 그 창에서는 Agentlas 기억을 쓰지 않아요." : "Close and reopen Claude Code and Codex. Until then, Agentlas memory is not used there.";
+    case "host_plugin_manual": return ko ? "Claude Code·Codex의 Agentlas 플러그인이 옛 버전이에요. agentlas.cloud/docs/agentlas-os/install 의 설치 명령으로 업데이트하면 그 창에서도 기억을 써요." : "The Agentlas plugin in Claude Code or Codex is out of date. Update it with the install command at agentlas.cloud/docs/agentlas-os/install to use memory there.";
     case "disk_low": return ko ? "디스크 여유가 부족해 기억 정리를 미뤘습니다." : "Memory cleanup is waiting for free disk space.";
     // No counts: this run only knows what it did itself, and a number that leaves out an earlier run (a restart, the wait for Claude Code) would be wrong.
     case "done": {

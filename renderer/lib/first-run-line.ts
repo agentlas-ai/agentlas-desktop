@@ -56,10 +56,16 @@ export function planFirstRunLine(input: FirstRunLineInput | null | undefined, ma
     if (open.length === 0) return { kind: "moving", icon: "spinner", title: pick(lang, "Agentlas 2.0 데이터 이전 중", "Moving your data to Agentlas 2.0"), sub: pick(lang, "앱은 계속 사용할 수 있어요", "You can keep using the app"), step, canOpen: false, canClose: false, canRetry: false };
     const code = KNOWN_PAUSE.find((c) => open.includes(c));
     const title = pick(lang, "이전 일시 중지", "Move paused");
+    // Every pause says why and what happens next: a line with the title alone left the person guessing whether anything would ever move again.
+    const has = (pattern: RegExp): boolean => open.some((c) => pattern.test(c));
     const sub = code === "first_run:disk_low" ? pick(lang, "디스크 공간 부족", "Not enough disk space")
-      : code === "first_run:host_plugin_restart" ? pick(lang, "Claude Code·Codex 종료 후 자동 재개", "Resumes when Claude Code and Codex are closed")
+      : code === "first_run:host_plugin_restart" ? pick(lang, "Claude Code·Codex를 다시 열면 이어져요", "Resumes after Claude Code and Codex are reopened")
       : code === "first_run:host_plugin_manual" ? pick(lang, "Claude Code·Codex의 Agentlas 플러그인 업데이트 필요", "Update the Agentlas plugin in Claude Code and Codex")
-      : "";   // a reason this file does not know: the title alone
+      : has(/^first_run:engine_wait$/) ? pick(lang, "앱을 다시 열면 엔진 업데이트를 다시 시도해요", "The engine update is tried again when the app reopens")
+      : has(/engines_not_confirmed/) ? pick(lang, "Claude Code·Codex의 Agentlas 업데이트를 기다리는 중", "Waiting for the Agentlas update in Claude Code and Codex")
+      : has(/^first_run:copies\/[a-z]+\/engine_offline$/) ? pick(lang, "인터넷에 연결되면 이어져요", "Resumes when you are online")
+      : has(/^first_run:copies\//) ? pick(lang, "앱을 다시 열면 이어져요", "Resumes the next time the app opens")
+      : pick(lang, "기존 데이터는 그대로예요", "Your existing data is kept");   // a reason this file does not know: what is always true
     return { kind: "paused", icon: "pause", title, sub, step: null, canOpen: false, canClose: false, canRetry: retry && code === "first_run:disk_low" };   // only the disk-space pause is cleared by asking again; the other two wait for the person
   }
   // Finished. Only a move this renderer saw open (mark "seen") has a finished line; "closed" (or never seen) draws nothing, so an install that never had a move to show says nothing.

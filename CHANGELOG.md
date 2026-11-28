@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.15 — 2026-11-28
+
+- Agentlas 2.0 move: when the move to 2.0 pauses, the status line now always says why and what ends the pause (for example waiting for the Agentlas update in Claude Code and Codex, being offline, or the next app start), instead of showing "Move paused" alone.
+- Plugin notices: an old Agentlas plugin in Claude Code or Codex now says plainly that Agentlas memory is not used in that window until you reopen it or update the plugin, and where the install command is.
+- Engine: the app ships Agentlas OS 1.2.100, which recognises a Codex plugin installed on its own at the version Codex actually loads, so the app no longer keeps asking to update a plugin that is already up to date.
+
+This release binds Agentlas OS v1.2.100 at d35501658a1d0a6388a4ad6ac598c432d7080901; public runtime asset `agentlas-os-runtime-v1.2.100.tar.gz` is pinned at SHA-256 `2b05ea65514251b7c39b6e2e94ab5acd8077ad20f8f9ccbdf4ca37b91369892f`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 2.0.14 — 2026-11-26
 
 - Personal agent: when you ask, it can read folders and files elsewhere on your computer (for example Documents), not only its working folder. Reading only; writes and edits stay in the working folder.
